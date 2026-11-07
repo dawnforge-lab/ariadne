@@ -77,9 +77,16 @@ function padding(bytes: number): string {
  * are asserted to be empty — a resource is not a page, and the control page's
  * silence is about its markup.
  */
+/**
+ * The fixture site's shared image: the one `article()` puts on every healthy
+ * page, and the default `og:image` `renderDocument` emits (Phase 26b), so a
+ * page's share image is a real, cached, correctly typed file.
+ */
+export const SHARED_IMAGE_PATH = "/img/placeholder.svg";
+
 const ASSETS = new Map<string, Asset>([
   [
-    "/img/placeholder.svg",
+    SHARED_IMAGE_PATH,
     { contentType: "image/svg+xml", body: svg("Placeholder"), cacheControl: "public, max-age=3600" },
   ],
   [

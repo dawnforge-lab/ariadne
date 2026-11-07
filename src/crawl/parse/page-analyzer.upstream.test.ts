@@ -97,6 +97,46 @@
  *    never could. The oracle's copy is written from the field's contract, not
  *    from the port's code.
  *
+ * Phase 26b (P26b-T2) put its head facts ON the parity surface, each computed
+ * here by the selector that defines it: `htmlLang` (`html[lang]`),
+ * `titleCount` (`title` not under `svg`), `metaDescriptionCount`,
+ * `robotsMetas`, `metaRefresh` (through the shared `parseRefresh`, on the
+ * `simhash64` precedent: arithmetic over an attribute, not a tree read),
+ * `h2Text` (`$("h2").first()`, as `h1s` is read) and the whole `social` set,
+ * which rides the outside-head walk because tree order is document order and
+ * that walk already knows which side of the head each element is on. The
+ * oracle moved once more: `robotsMeta` is now every `meta[name=robots]`
+ * content joined with ", " (deviation 4), as the port now reads it.
+ * `socialImageRefs` is stripped, on `resourceRefs`' reasoning. Ruling R6 moved
+ * the oracle twice more, in step with the port: a robots content identical (after
+ * trim) to one already joined is dropped, and one meta naming two social tags
+ * (`name=twitter:title property=og:title`) is recorded as both.
+ *
+ * Phase 26b (P26b-T3) put the body facts on the parity surface, each by the
+ * selector that defines it: `anchorCounts` over `$("a")` (every anchor element,
+ * href or not; owner call O2 moved `unsafeBlank` to cross-origin hrefs only,
+ * by exact `URL.origin`, on both sides), `relNextCount` / `relPrevCount` as `link[rel~=next|prev]`
+ * counts, `insecureRefs` by a document-order walk over the closed list of
+ * frame, media and form sites (a `<source>` only under a `<video>`/`<audio>`),
+ * and the three image alt facts in the same `img` walk as the alt counter. The
+ * oracle moved once more: an anchor's text is now its text nodes with each
+ * `img`'s trimmed, non-empty `alt` folded in where the image sits, as the port
+ * now reads it; the final review (I2) spaced each alt off as a word of its own.
+ * The same review (I1) added `social.imageRefs` to the compared social set.
+ * Owner call O1 (2026-11-07) added each link's `ariaLabel`, read off the same
+ * `a[href]` element the anchor text is (the first to a target), on both sides.
+ *
+ * Phase 26b (P26b-T4) added `htmlStructure` and stripped it, on `headClosedBy`'s
+ * reasoning (see `EXTENSION_FIELDS`): explicit html/head/body start-tag counts,
+ * their order and the early-close candidate are token-stream facts that parse5's
+ * normalised tree cannot show. The oracle did not move.
+ *
+ * The Phase 26b string facts are made storable (`storableCap`: U+0000 to U+2400,
+ * lone surrogates to U+FFFD, caps cut on a code-point boundary) on both sides,
+ * with the one shared helper: storability is a property of the write, not of
+ * the tree, so it is shared rather than re-derived, on `parseRefresh`'s
+ * precedent.
+ *
  * Cheerio is a devDependency and appears here only: it is the parity oracle,
  * never a crawl-path parser.
  */
@@ -110,7 +150,27 @@ import {
   type RawPageAnalysis,
 } from "./page-analyzer.js";
 import { simhash64 } from "./simhash.js";
+import { storableCap } from "../storable-text.js";
 import { normalizeUrl, isSameOrigin } from "./url-utils.js";
+import {
+  ALT_TEXT_LONG_CHARS,
+  ARIA_LABEL_MAX,
+  H2_TEXT_MAX,
+  HTML_LANG_MAX,
+  IMAGE_SAMPLE_MAX,
+  IMAGE_SAMPLE_SRC_MAX,
+  INSECURE_SAMPLE_MAX,
+  INSECURE_SAMPLE_URL_MAX,
+  parseRefresh,
+  ROBOTS_META_BOTS,
+  ROBOTS_META_CONTENT_MAX,
+  ROBOTS_METAS_MAX,
+  SOCIAL_TEXT_MAX,
+  SOCIAL_URL_MAX,
+  type InsecureRefKind,
+  type InsecureRefs,
+  type SocialTag,
+} from "./page-facts.js";
 
 /** The Task 6 additions, which the oracle does not model. */
 const EXTENSION_FIELDS = [
@@ -151,7 +211,28 @@ const EXTENSION_FIELDS = [
   // modelled below; the closer is held to the oracle where the oracle can see
   // it (the first node of the body) in test/crawl/page-analyzer.test.ts.
   "headClosedBy",
+  // Phase 26b's social image refs, stripped on `resourceRefs`' reasoning: the
+  // field's specification is the port's own (resolution by `normalizeUrl`, the
+  // resource skip rules, the port's cap of four), not a DOM read. The SOCIAL
+  // SET they come from is on the parity surface below. Covered in
+  // test/crawl/analyzer-extensions.test.ts.
+  "socialImageRefs",
+  // Phase 26b T4's structure facts. NOT a DOM read, and the DOM cannot see
+  // them: parse5 normalises the tree to one html, one head and one body
+  // whatever the markup said, so explicit start-tag counts and their order
+  // leave no trace in it, and `closedEarly` is `headClosedBy`'s case again (the
+  // tree records where nodes are, not what ended the head or what came after).
+  // Owner call O3's `closedEarly.lost` is the same case: which head tags came
+  // after the candidate in the TOKEN stream, which the normalised tree erases.
+  // Covered by value, cheerio-free, in test/crawl/page-analyzer.test.ts.
+  "htmlStructure",
 ] as const;
+
+/** The ten social tags `PageAnalysis.social` reads, as the oracle lists them. */
+const SOCIAL_TAG_NAMES: readonly string[] = [
+  "og:title", "og:description", "og:image", "og:url", "og:type", "og:site_name",
+  "twitter:card", "twitter:title", "twitter:description", "twitter:image",
+] satisfies SocialTag[];
 
 type UpstreamShape = Omit<RawPageAnalysis, (typeof EXTENSION_FIELDS)[number]>;
 
@@ -344,20 +425,71 @@ function analyzeHtmlWithCheerio(html: string, pageUrl: string): UpstreamShape {
     ? (canonicalEls.first().attr("href") ?? null)
     : null;
 
+  // Phase 26b, deviation 4: EVERY robots meta's content, joined — Google
+  // combines them. An element with no `content` contributes nothing, so a
+  // page whose only robots meta has none still reads null, as before. Ruling
+  // R6: a content identical after trim to an earlier one adds nothing; the
+  // first spelling is the one kept.
+  const robotsContents = byAttr("meta", "name", "robots")
+    .toArray()
+    .flatMap((el) => {
+      const content = $(el).attr("content");
+      return content === undefined ? [] : [content];
+    })
+    .filter((content, i, all) => all.findIndex((c) => c.trim() === content.trim()) === i);
   const robotsMeta =
-    byAttr("meta", "name", "robots").first().attr("content") ?? null;
-  const ogTitle =
-    byAttr("meta", "property", "og:title").first().attr("content") ?? null;
-  const ogDescription =
-    byAttr("meta", "property", "og:description").first().attr("content") ??
-    null;
-  const ogImage =
-    byAttr("meta", "property", "og:image").first().attr("content") ?? null;
+    robotsContents.length === 0 ? null : storableCap(robotsContents.join(", "));
+  // The legacy og columns (PR #23 review): the first `meta` whose folded
+  // `property` OR `name` is the tag, its content untrimmed, null without one.
+  const ogFirst = (tag: string): string | null =>
+    $("meta")
+      .filter(
+        (_, el) =>
+          fold($(el).attr("property")) === tag || fold($(el).attr("name")) === tag,
+      )
+      .first()
+      .attr("content") ?? null;
+  const ogTitle = ogFirst("og:title");
+  const ogDescription = ogFirst("og:description");
+  const ogImage = ogFirst("og:image");
 
   const h1s: string[] = [];
   $("h1").each((_, el) => {
     h1s.push($(el).text().trim());
   });
+
+  // ---- Phase 26b head facts, each the selector its field is defined by ----
+  const langAttr = $("html").attr("lang")?.trim();
+  const htmlLang =
+    langAttr === undefined || langAttr === "" ? null : storableCap(langAttr, HTML_LANG_MAX);
+  // A `<title>` under an `<svg>` is the svg's, never the document's.
+  const titleCount = $("title").filter((_, el) => $(el).parents("svg").length === 0).length;
+  const metaDescriptionCount = byAttr("meta", "name", "description").length;
+  const botNames: readonly string[] = ROBOTS_META_BOTS;
+  const robotsMetas = $("meta[name]")
+    .toArray()
+    .flatMap((el) => {
+      const name = fold($(el).attr("name"));
+      if (name === undefined || !botNames.includes(name)) return [];
+      return [{ name, content: storableCap($(el).attr("content") ?? "", ROBOTS_META_CONTENT_MAX) }];
+    })
+    .slice(0, ROBOTS_METAS_MAX);
+  // `parseRefresh` is shared rather than re-derived, on the `simhash64`
+  // precedent: it is arithmetic over the attribute, not a reading of the tree.
+  // The HTML Standard's choice of element: empty contents are skipped, the first
+  // that parses wins, and with none parsing the first refused value is kept.
+  const refreshes = $("meta[http-equiv][content]")
+    .filter((_, el) => fold($(el).attr("http-equiv")) === "refresh")
+    .toArray()
+    .map((el) => $(el).attr("content")!)
+    .filter((content) => content !== "")
+    .map((content) => parseRefresh(content, pageUrl));
+  const metaRefresh =
+    refreshes.find((r) => r.delaySeconds !== null) ?? refreshes[0] ?? null;
+  const h2El = $("h2").first();
+  const h2Text = h2El.length
+    ? storableCap(h2El.text().replace(/\s+/g, " ").trim(), H2_TEXT_MAX)
+    : null;
 
   const headingOrder: number[] = [];
   $("h1, h2, h3, h4, h5, h6").each((_, el) => {
@@ -403,13 +535,112 @@ function analyzeHtmlWithCheerio(html: string, pageUrl: string): UpstreamShape {
   let imagesTotal = 0;
   let imagesMissingAlt = 0;
   let imagesMissingDimensions = 0;
+  // Phase 26b's alt facts ride the same walk, written from their contracts.
+  let imagesEmptyAlt = 0;
+  let imagesAltTooLong = 0;
+  const imagesMissingAltSample: string[] = [];
   $("img").each((_, el) => {
     imagesTotal += 1;
-    if ($(el).attr("alt") === undefined) imagesMissingAlt += 1;
+    const alt = $(el).attr("alt");
+    if (alt === undefined) {
+      imagesMissingAlt += 1;
+      imagesMissingAltSample.push(storableCap($(el).attr("src") ?? "", IMAGE_SAMPLE_SRC_MAX));
+    } else if (alt.trim() === "") {
+      imagesEmptyAlt += 1;
+    } else if (alt.trim().length > ALT_TEXT_LONG_CHARS) {
+      imagesAltTooLong += 1;
+    }
     if ($(el).attr("width") === undefined || $(el).attr("height") === undefined) {
       imagesMissingDimensions += 1;
     }
   });
+
+  // Every anchor ELEMENT, href or not — the port counts `<a>` start tags, and
+  // the two agree wherever the tree builder adds no anchor (the pinned
+  // divergence at the end of this file is the case where it does).
+  const anchorCounts = { noHref: 0, javascript: 0, hashOnly: 0, emptyHref: 0, unsafeBlank: 0 };
+  $("a").each((_, el) => {
+    const href = $(el).attr("href");
+    if (href === undefined) {
+      const role = fold($(el).attr("role"));
+      if ($(el).attr("onclick") !== undefined || role === "link" || role === "button") {
+        anchorCounts.noHref += 1;
+      }
+      return;
+    }
+    const isJavascript = /^\s*javascript:/i.test(href);
+    if (href.trim() === "") anchorCounts.emptyHref += 1;
+    else if (isJavascript) anchorCounts.javascript += 1;
+    else if (["#", "#!"].includes(href.trim())) anchorCounts.hashOnly += 1;
+    const rel = relTokens($(el).attr("rel"));
+    // Owner call O2: only an href resolving to ANOTHER origin (exact
+    // `URL.origin`) can tabnab its opener.
+    const resolved = normalizeUrl(href, pageUrl);
+    if (
+      fold($(el).attr("target")) === "_blank" &&
+      !isJavascript &&
+      !rel.includes("noopener") &&
+      !rel.includes("noreferrer") &&
+      resolved !== null &&
+      new URL(resolved).origin !== new URL(pageUrl).origin
+    ) {
+      anchorCounts.unsafeBlank += 1;
+    }
+  });
+
+  // The insecure references: a tree walk, so the sample is in document order,
+  // with an in-media flag for `<source>`.
+  const insecureRefs: InsecureRefs = { iframe: 0, media: 0, formAction: 0, forms: 0, sample: [] };
+  const insecure = (kind: InsecureRefKind, value: string | undefined) => {
+    if (value === undefined) return;
+    const resolved = normalizeUrl(value, pageUrl);
+    if (resolved === null || !resolved.startsWith("http:")) return;
+    if (kind === "iframe") insecureRefs.iframe += 1;
+    else if (kind === "media") insecureRefs.media += 1;
+    else insecureRefs.formAction += 1;
+    insecureRefs.sample.push({ kind, url: storableCap(resolved, INSECURE_SAMPLE_URL_MAX) });
+  };
+  const walkInsecure = (node: DomNode, inMedia: boolean) => {
+    const name = node.type === "tag" ? node.name?.toLowerCase() : undefined;
+    const attribs = node.attribs ?? {};
+    if (name === "iframe") insecure("iframe", attribs["src"]);
+    if (name === "video") {
+      insecure("media", attribs["src"]);
+      insecure("media", attribs["poster"]);
+    }
+    if (name === "audio" || name === "track" || name === "embed") insecure("media", attribs["src"]);
+    if (name === "source" && inMedia) insecure("media", attribs["src"]);
+    if (name === "object") insecure("media", attribs["data"]);
+    if (name === "form") {
+      insecureRefs.forms += 1;
+      insecure("form", attribs["action"]);
+    }
+    for (const child of node.children ?? []) {
+      walkInsecure(child, inMedia || name === "video" || name === "audio");
+    }
+  };
+  walkInsecure($.root()[0] as unknown as DomNode, false);
+  // At most INSECURE_SAMPLE_MAX per kind, in document order.
+  const sampledPerKind = new Map<InsecureRefKind, number>();
+  insecureRefs.sample = insecureRefs.sample.filter((s) => {
+    const n = (sampledPerKind.get(s.kind) ?? 0) + 1;
+    sampledPerKind.set(s.kind, n);
+    return n <= INSECURE_SAMPLE_MAX;
+  });
+  const imagesMissingAltSampleCapped = imagesMissingAltSample.slice(0, IMAGE_SAMPLE_MAX);
+
+  // `.text()` with every image's trimmed, non-empty `alt` read where the image
+  // sits: an image link's alt is its anchor text (Phase 26b). Every other node
+  // contributes what `.text()` gives it, so the anchors with no image agree
+  // with the oracle's earlier reading exactly.
+  const anchorText = (node: DomNode): string => {
+    if (node.type === "text") return node.data ?? "";
+    const alt = node.type === "tag" && node.name === "img" ? node.attribs?.["alt"]?.trim() : undefined;
+    // A non-empty alt is a word of its own, spaced off from the text around it
+    // (final review I2); the whitespace collapse below folds the spaces.
+    const altWords = alt === undefined || alt === "" ? "" : ` ${alt} `;
+    return altWords + (node.children ?? []).map(anchorText).join("");
+  };
 
   const linksByTarget = new Map<string, RawPageAnalysis["links"][number]>();
   $("a[href]").each((_, el) => {
@@ -420,11 +651,18 @@ function analyzeHtmlWithCheerio(html: string, pageUrl: string): UpstreamShape {
     if (!resolved) return;
     if (linksByTarget.has(resolved)) return;
     if (linksByTarget.size >= 2_000) return;
-    const anchor = $(el).text().replace(/\s+/g, " ").trim().slice(0, 200);
+    const anchor = anchorText(el as unknown as DomNode)
+      .replace(/\s+/g, " ")
+      .trim()
+      .slice(0, 200);
     const rel = fold($(el).attr("rel")) ?? null;
+    // Owner call O1: the `aria-label` of the same element the anchor is read
+    // from, trimmed, storable and capped, null when absent or blank.
+    const ariaRaw = $(el).attr("aria-label")?.trim() ?? "";
     linksByTarget.set(resolved, {
       href: resolved,
       anchor,
+      ariaLabel: ariaRaw === "" ? null : storableCap(ariaRaw, ARIA_LABEL_MAX),
       rel,
       nofollow: (rel ?? "").split(/\s+/).includes("nofollow"),
       isInternal: isSameOrigin(resolved, pageUrl),
@@ -474,6 +712,17 @@ function analyzeHtmlWithCheerio(html: string, pageUrl: string): UpstreamShape {
   let robotsOutsideHead: boolean | undefined;
   let canonicalOutsideHead: boolean | undefined;
   let hreflangOutsideHeadCount = 0;
+  // Phase 26b: the social set rides the same walk, because tree order is
+  // document order and the walk already knows which side of the head each
+  // element is on. Written from `PageAnalysis.social`'s contract: Open Graph
+  // from `property=` then `name=`, X from `name=` then `property=` (the latter
+  // flagged), first trimmed value per tag, every element counted, a tag with
+  // two distinct trimmed values conflicting.
+  const socialValues = new Map<string, string[]>();
+  let socialOutsideHead = false;
+  let xViaProperty = false;
+  const isSocial = (value: string | undefined): value is string =>
+    value !== undefined && SOCIAL_TAG_NAMES.includes(value);
   const walkOutsideHead = (node: DomNode, inHead: boolean, inSvg: boolean) => {
     const isElement =
       node.type === "tag" || node.type === "script" || node.type === "style";
@@ -482,6 +731,20 @@ function analyzeHtmlWithCheerio(html: string, pageUrl: string): UpstreamShape {
       const attribs = node.attribs ?? {};
       const rel = relTokens(attribs["rel"]);
       const outside = !inHead;
+      if (name === "meta") {
+        const metaName = fold(attribs["name"]);
+        const property = fold(attribs["property"]);
+        // Ruling R6: every DISTINCT social tag the element names, by either
+        // attribute; a twitter tag named only by `property=` is flagged.
+        const tags = new Set([property, metaName].filter(isSocial));
+        for (const tag of tags) {
+          if (tag !== metaName && tag.startsWith("twitter:")) xViaProperty = true;
+          if (outside) socialOutsideHead = true;
+          const values = socialValues.get(tag) ?? [];
+          values.push(attribs["content"]?.trim() ?? "");
+          socialValues.set(tag, values);
+        }
+      }
       if (name === "title" && !inSvg) titleOutsideHead ??= outside;
       if (name === "meta" && fold(attribs["name"]) === "description") {
         metaDescriptionOutsideHead ??= outside;
@@ -497,6 +760,42 @@ function analyzeHtmlWithCheerio(html: string, pageUrl: string): UpstreamShape {
     }
   };
   walkOutsideHead($.root()[0] as unknown as DomNode, false, false);
+
+  let social: RawPageAnalysis["social"] = null;
+  if (socialValues.size > 0) {
+    const og: Record<string, string> = {};
+    const x: Record<string, string> = {};
+    const counts: Record<string, number> = {};
+    const conflicting: string[] = [];
+    for (const [tag, values] of socialValues) {
+      const [group, key] = tag.split(":") as [string, string];
+      const isUrl = tag === "og:url" || tag === "og:image" || tag === "twitter:image";
+      const first = storableCap(values[0]!, isUrl ? SOCIAL_URL_MAX : SOCIAL_TEXT_MAX);
+      (group === "og" ? og : x)[key] = first;
+      counts[tag] = values.length;
+      if (new Set(values).size > 1) conflicting.push(tag);
+    }
+    // The judged share images' `resources` keys, from each tag's first value
+    // WHOLE (never the capped one): `normalizeUrl` against the page, and only
+    // for a value that starts with `http:` or `https:` (any case); a relative
+    // value, another scheme or an empty one has none. Written from
+    // `SocialFacts.imageRefs`' contract, not by calling the port's
+    // `shareImageRef`.
+    const imageRef = (tag: string): string | null => {
+      const first = socialValues.get(tag)?.[0];
+      if (first === undefined || !/^https?:/i.test(first)) return null;
+      return normalizeUrl(first, pageUrl);
+    };
+    social = {
+      og,
+      x,
+      counts,
+      conflicting: conflicting.sort(),
+      outsideHead: socialOutsideHead,
+      xViaProperty,
+      imageRefs: { og: imageRef("og:image"), x: imageRef("twitter:image") },
+    } as RawPageAnalysis["social"];
+  }
 
   const hasAmp =
     byRel("link", "amphtml").length > 0 ||
@@ -535,6 +834,20 @@ function analyzeHtmlWithCheerio(html: string, pageUrl: string): UpstreamShape {
     robotsOutsideHead: robotsOutsideHead ?? false,
     canonicalOutsideHead: canonicalOutsideHead ?? false,
     hreflangOutsideHeadCount,
+    htmlLang,
+    social,
+    h2Text,
+    titleCount,
+    metaDescriptionCount,
+    robotsMetas,
+    metaRefresh,
+    anchorCounts,
+    relNextCount: byRel("link", "next").length,
+    relPrevCount: byRel("link", "prev").length,
+    insecureRefs,
+    imagesEmptyAlt,
+    imagesAltTooLong,
+    imagesMissingAltSample: imagesMissingAltSampleCapped,
     links: Array.from(linksByTarget.values()),
     bodyText,
     h1s,
@@ -562,6 +875,8 @@ function expectParity(html: string) {
     resourceRefs: _resourceRefs,
     resourceRefsCapped: _resourceRefsCapped,
     headClosedBy: _headClosedBy,
+    socialImageRefs: _socialImageRefs,
+    htmlStructure: _htmlStructure,
     ...streamed
   } = analyzeHtml(html, PAGE_URL);
   const reference = analyzeHtmlWithCheerio(html, PAGE_URL);
@@ -1107,5 +1422,173 @@ describe("the main-content stream, against the DOM", () => {
 
   it("agrees on a short page whose whole text is the quotation", () => {
     expectParity(`<html><body><p>Lorem ipsum dolor.</p></body></html>`);
+  });
+});
+
+/**
+ * Phase 26b's head facts and social set against the selectors they are
+ * defined by. `socialImageRefs` is stripped (see EXTENSION_FIELDS); the social
+ * set it comes from is compared whole, `imageRefs` (its source) included.
+ */
+describe("the Phase 26b head facts and social set, against the DOM", () => {
+  it("agrees on a complete, consistent social set", () => {
+    expectParity(`<!doctype html><html lang="en"><head><title>T</title>
+      <meta property="og:title" content="T"><meta property="og:type" content="website">
+      <meta property="og:url" content="https://example.com/blog/post">
+      <meta property="og:image" content="https://example.com/i.png">
+      <meta property="og:site_name" content="Site"><meta property="og:description" content="D">
+      <meta name="twitter:card" content="summary_large_image"><meta name="twitter:title" content="T">
+      <meta name="twitter:description" content="D"><meta name="twitter:image" content="/x.png">
+      </head><body><h2>Sub</h2><p>x</p></body></html>`);
+  });
+
+  it("agrees on repeated, conflicting, name= and property= social tags", () => {
+    expectParity(`<html><head>
+      <meta property="og:title" content=" a "><meta name="og:title" content="a">
+      <meta property="og:title" content="b"><meta property="twitter:card" content="summary">
+      <meta name="twitter:title" property="og:title" content="c">
+      <meta property="og:image"><meta property="OG:IMAGE" content="/i.png">
+      </head><body><p>x</p></body></html>`);
+  });
+
+  it("agrees on social tags after the head ends, in a template and in a noscript", () => {
+    expectParity(`<html><head><meta property="og:title" content="t">
+      <template><meta property="og:type" content="article"></template>
+      <noscript><meta property="og:url" content="/ns"></noscript>
+      </head><body><div>x</div><meta name="twitter:card" content="summary"></body></html>`);
+    expectParity(`<html><head><img src="/pixel.gif"><meta property="og:title" content="t"></head><body></body></html>`);
+  });
+
+  it("agrees on the judged share images' refs: first values only, whole, past the cap", () => {
+    expectParity(`<html><head>
+      <meta property="og:image" content="/1.png"><meta property="og:image" content="/2.png">
+      <meta property="og:image" content="/3.png"><meta property="og:image" content="/4.png">
+      <meta name="twitter:image" content="https://example.com/${"u".repeat(1_500)}.png">
+      </head><body><p>x</p></body></html>`);
+    expectParity(`<html><head>
+      <meta property="og:image" content="data:image/png;base64,AAAA">
+      <meta name="twitter:image" content=""><meta name="twitter:image" content="/later.png">
+      </head><body><p>x</p></body></html>`);
+  });
+
+  it("agrees on a page with no social tag at all", () => {
+    expectParity(`<html><head><title>t</title></head><body><p>x</p></body></html>`);
+  });
+
+  it("agrees on robots metas: every robots content joined, the bot-specific ones listed", () => {
+    expectParity(`<html><head>
+      <meta name="robots" content="index"><meta name="Robots" content="noarchive">
+      <meta name="robots"><meta name="GoogleBot" content="noindex">
+      <meta name="bingbot"><meta name="robotsx" content="noindex">
+      </head><body><p>x</p><meta name="robots" content="nofollow"></body></html>`);
+  });
+
+  it("agrees on the meta refresh, the first one only", () => {
+    expectParity(`<html><head><meta http-equiv="REFRESH">
+      <meta http-equiv="Refresh" content="3; URL='/next'"><meta http-equiv="refresh" content="0">
+      </head><body><p>x</p></body></html>`);
+  });
+
+  it("agrees on a refused or empty first refresh giving way to a later valid one", () => {
+    expectParity(`<html><head><meta http-equiv="refresh" content="">
+      <meta http-equiv="refresh" content="5abc"><meta http-equiv="refresh" content="1; url=/b">
+      <meta http-equiv="refresh" content="0; url=/c"></head><body><p>x</p></body></html>`);
+    expectParity(`<html><head><meta http-equiv="refresh" content="abc">
+      <meta http-equiv="refresh" content="x1"></head><body><p>x</p></body></html>`);
+  });
+
+  it("agrees on lang, counts and the first h2", () => {
+    expectParity(`<html lang=" de-AT "><head><title>a</title><title>b</title>
+      <meta name="description" content="1"><meta name="DESCRIPTION" content="2">
+      </head><body><svg><title>icon</title></svg><h2>  First  <em>sub</em> </h2><h2>second</h2></body></html>`);
+    expectParity(`<html lang=""><body><h2></h2></body></html>`);
+    expectParity(`<p>a fragment with no html tag</p>`);
+  });
+
+  it("agrees on ruling R6: repeated robots contents collapse, one meta naming two tags is both", () => {
+    expectParity(`<html><head>
+      <meta name="robots" content="index"><meta name="robots" content=" index ">
+      <meta name="robots" content="noarchive"><meta name="robots" content="index">
+      <meta name="twitter:title" property="og:title" content="both">
+      <meta name="og:description" property="twitter:description" content="crossed">
+      <meta name="twitter:card" property="twitter:card" content="summary">
+      </head><body><p>x</p><meta name="robots" content="noindex"></body></html>`);
+  });
+});
+
+/**
+ * Phase 26b's body facts (Task 3) against the selectors they are defined by:
+ * `a` start tags for the anchor counts, `img` for the alt facts,
+ * `link[rel~=next|prev]` for the counts, the closed media/frame/form list for
+ * the insecure references, and anchor text with `img[alt]` folded in.
+ */
+describe("the Phase 26b body facts, against the DOM", () => {
+  it("agrees on anchors that are not links", () => {
+    expectParity(`<html><body>
+      <a name="top"></a><a id="x">y</a><a onclick="go()">a</a><a role="LINK">b</a><a role="tab">t</a>
+      <a href="#section">s</a><a href="#">h</a><a href=" #! ">b</a>
+      <a href=" JavaScript:void(0)">j</a><a href="">e</a><a href="   ">e2</a>
+      <a target="_BLANK" rel="noopener" href="/x">x</a><a target="_blank" href="/y">y</a>
+      <a target="_blank" href="https://other.test/y">oy</a><a target="_blank" href="https://www.example.com/y">wy</a>
+      <a target="_blank" href="https://shop.example.com/y">sy</a><a target="_blank" href="https://[bad/y">by</a>
+      <a target="_blank" rel="NoReferrer nofollow" href="/z">z</a>
+      <a target="_blank" href="javascript:void(0)">jb</a><a target="_blank">nb</a>
+      <noscript><a href="#">ns</a></noscript>
+      </body></html>`);
+  });
+
+  it("agrees on a link's aria-label, read off the element the anchor comes from (O1)", () => {
+    expectParity(`<html><body>
+      <a href="/cart" aria-label=" Cart "><svg><path d="M0"></path></svg></a>
+      <a href="/blank" aria-label="   ">Blank</a><a href="/none">None</a>
+      <a href="/both" aria-label="Account">Sign in</a>
+      <a href="/first">First</a><a href="/first" aria-label="Later">Later</a>
+      <a href="/long" aria-label="${"x".repeat(250)}"></a>
+      </body></html>`);
+  });
+
+  it("agrees on image alt folded into anchor text", () => {
+    expectParity(`<html><body>
+      <a href="/logo"><img src="a.png" alt="Logo"></a>
+      <a href="/none"><img src="b.png"></a>
+      <a href="/mixed">Visit <img src="c.png" alt="  our shop "> now</a>
+      <a href="/blank"><img src="d.png" alt="  "></a>
+      <img src="loose.png" alt="Loose"><a href="/after">After</a>
+      <a href="/glued">Home<img src="e.png" alt="Logo"></a>
+      <a href="/pair"><img src="f.png" alt="A"><img src="g.png" alt="B">Tail</a>
+      </body></html>`);
+  });
+
+  it("agrees on rel next/prev counts", () => {
+    expectParity(`<html><head><link rel="next" href="/2"><link rel="NEXT" href="/3">
+      <link rel="prev"><link rel="prev prefetch" href="/0"><link rel="nextx" href="/n">
+      </head><body><p>x</p></body></html>`);
+  });
+
+  it("agrees on insecure references, their order and the sample cap", () => {
+    expectParity(`<html><body>
+      <iframe src="http://x.test/${"long".repeat(400)}"></iframe>
+      <iframe src="http://x.test/a"></iframe><iframe src="https://x.test/s"></iframe>
+      <video src="http://m.test/1" poster="http://m.test/2"><source src="http://m.test/3">
+        <track src="http://m.test/4"></video>
+      <audio><source src="/rel.mp3"><source src="http://m.test/5"></audio>
+      <picture><source src="http://m.test/pic"></picture><source src="http://m.test/loose">
+      <embed src="http://m.test/6"><object data="http://m.test/7"></object>
+      <form action="http://x.test/post"></form><form action="/ok"></form><form></form>
+      <form action="javascript:void(0)"></form>
+      <iframe src="http://x.test/8"></iframe><iframe src="http://x.test/9"></iframe>
+      <iframe src="http://x.test/10"></iframe><iframe src="http://x.test/11"></iframe>
+      <noscript><iframe src="http://gtm.test/ns"></iframe></noscript>
+      </body></html>`);
+  });
+
+  it("agrees on the image alt facts and the missing-alt sample", () => {
+    const imgs = Array.from({ length: 12 }, (_, i) => `<img src="/i${i}.png">`).join("");
+    expectParity(`<html><body>
+      <img src="/e.png" alt=""><img src="/e2.png" alt="  "><img data-src="/lazy.png">
+      <img src="/long.png" alt="${"a".repeat(101)}"><img src="/ok.png" alt="${"b".repeat(100)}">
+      <img src="/${"s".repeat(600)}">${imgs}
+      <noscript><img src="/ns.png"></noscript>
+      </body></html>`);
   });
 });

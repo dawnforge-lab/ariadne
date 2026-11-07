@@ -23,12 +23,16 @@
  *     (never half a surrogate pair), with `cut: true` — a cut value is never
  *     mistaken for a whole one.
  *
+ * The three steps are `storableText` (src/crawl/storable-text.ts), shared with
+ * the page analyzer since Phase 26b.
+ *
  * Nothing of the engine's enters here (Talos obligation 6): no stack of ours,
  * no local path, no internal hostname. The one engine-shaped string is a failed
  * request's `reason`, which is either `http <status>` or Chromium's own net
  * error name (`net::ERR_CONNECTION_REFUSED`) — a classification, never the
  * resolver's or the transport's text.
  */
+import { storableText } from "../storable-text.js";
 
 export const RENDER_CONSOLE_MAX_ENTRIES = 20;
 export const RENDER_CONSOLE_MAX_CHARS = 500;
@@ -111,22 +115,8 @@ export class RenderConsoleCollector {
   }
 }
 
-/** What a U+0000 is stored as: U+2400 SYMBOL FOR NULL — see the module header. */
-const NUL_MARK = "\u2400";
 
 /** One site string, made storable in `jsonb` and capped — see the module header. */
 function storable(raw: string): { text: string; cut: boolean } {
-  const visible = wellFormed(raw).replaceAll("\u0000", NUL_MARK);
-  if (visible.length <= RENDER_CONSOLE_MAX_CHARS) return { text: visible, cut: false };
-  let end = RENDER_CONSOLE_MAX_CHARS;
-  // Well-formed, so a high surrogate at the edge is the first half of a pair
-  // whose second half is past the cap: the whole pair goes.
-  const last = visible.charCodeAt(end - 1);
-  if (last >= 0xd800 && last <= 0xdbff) end -= 1;
-  return { text: visible.slice(0, end), cut: true };
-}
-
-/** ES2024's `String.prototype.toWellFormed` (Node 22); the project's ES2023 lib does not declare it. */
-function wellFormed(s: string): string {
-  return (s as string & { toWellFormed(): string }).toWellFormed();
+  return storableText(raw, RENDER_CONSOLE_MAX_CHARS);
 }

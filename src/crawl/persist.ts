@@ -108,6 +108,7 @@ import { isSameOrigin, normalizeUrl } from "./parse/url-utils.js";
 import { completeUrls } from "./frontier.js";
 import { derivePageType, type PageTypePattern } from "./page-type.js";
 import { EXTRACTION_VERSION } from "./versions.js";
+import { storableDeep } from "./storable-text.js";
 
 const DEFAULT_BATCH_SIZE = 100;
 
@@ -299,6 +300,7 @@ export class PageWriter {
           targetUrl: link.href,
           targetPageId: null,
           anchor: link.anchor,
+          ariaLabel: link.ariaLabel,
           rel: link.rel,
           isInternal: isSameOrigin(link.href, item.url),
           isNofollow: link.nofollow,
@@ -350,6 +352,22 @@ export class PageWriter {
           resourceUrl: ref.url,
         })),
         () => this.flushPageResources(),
+      );
+
+      // DEVIATION 3 (Phase 26b): og:image / twitter:image URLs become
+      // `resources` rows — kind `image`, so the fetch pass asks for their
+      // status and bytes — and NEVER `page_resources` edges. A browser does not
+      // load a share image, so it is no part of page weight, mixed content or
+      // `resources.broken`; every rule in that family judges only URLs with an
+      // edge. A URL the page also loads through a resource ref already has its
+      // row from the push above (with that ref's kind) and is not repeated.
+      const pageRefs = new Set(analysis.resourceRefs.map((ref) => ref.url));
+      await this.push(
+        this.resourceBuffer,
+        analysis.socialImageRefs
+          .filter((url) => !pageRefs.has(url))
+          .map((url) => ({ crawlId: this.crawlId, url, kind: "image" as const })),
+        () => this.flushResources(),
       );
     }
 
@@ -412,6 +430,25 @@ export class PageWriter {
    * Append rows one at a time, draining the moment the buffer is full. Row by
    * row rather than "append all, then drain" precisely so that a page with
    * more rows than `batchSize` never puts them all in the buffer at once.
+   *
+   * THE STORABILITY BOUNDARY (ruling R10). Every row this writer buffers passes
+   * through here, so every page-derived string in it is made storable at this
+   * one place: titles, anchors, rels, JSON-LD values and keys, URLs, header
+   * values, reasons. `storableDeep` maps U+0000 to U+2400 and a lone surrogate
+   * to U+FFFD, and returns a clean value unchanged.
+   *
+   * WHAT THIS GUARANTEES, exactly (ruling R11):
+   *  - No string in a buffered row holds U+0000 or a lone surrogate, the two
+   *    things Postgres `text`/`jsonb` refuse in a string. Such a page therefore
+   *    cannot make a batch insert throw on its text. Before this, it lost the
+   *    batch, failed the crawl, and failed again on resume.
+   *  - Nesting is bounded. A row nested deeper than `STORABLE_MAX_DEPTH` makes
+   *    `storableDeep` THROW here, at `addPage`, because a producer has lost its
+   *    cap. That is a defect to fix, never a value to trim. The analyzer refuses
+   *    JSON-LD deeper than `MAX_LD_JSON_NESTING` (64) as a parse error, so a
+   *    hostile page cannot reach it.
+   *  - Nothing else. Column constraints (NOT NULL, integer ranges, the
+   *    `(crawl_id, url)` conflict) are each value's producer's business.
    */
   private async push<T>(
     buffer: T[],
@@ -419,7 +456,7 @@ export class PageWriter {
     flush: () => Promise<void>,
   ): Promise<void> {
     for (const row of rows) {
-      buffer.push(row);
+      buffer.push(storableDeep(row));
       if (buffer.length >= this.batchSize) await flush();
     }
   }
@@ -529,7 +566,9 @@ export class PageWriter {
     blocked: ReadonlyArray<{ item: PageWriterItem; reason: string }>,
   ): Promise<number> {
     if (blocked.length === 0) return 0;
-    const rows = blocked.map(({ item, reason }) => ({
+    // Through the storability boundary like every buffered row (see `push`):
+    // the reason quotes the site's robots.txt line.
+    const rows = blocked.map(({ item, reason }) => storableDeep({
       ...this.pageRow(
         `page_${randomUUID()}`,
         item,
@@ -754,6 +793,26 @@ export class PageWriter {
       responseHeaders: fetch.responseHeaders,
       // Stamped on every row the writer shapes, robots-blocked rows included.
       extractionVersion: EXTRACTION_VERSION,
+      // Phase 26b facts (migration 0026). Null exactly when no analysis ran
+      // (no HTML: nothing measured). With one, `social` is null only for a
+      // page with no social tag and `meta_refresh` only for a page with no
+      // refresh; the counts, the anchor/insecure/structure objects and the
+      // image sample are never null.
+      htmlLang: analysis === null ? null : analysis.htmlLang,
+      social: analysis === null ? null : analysis.social,
+      h2Text: analysis === null ? null : analysis.h2Text,
+      titleCount: analysis === null ? null : analysis.titleCount,
+      metaDescriptionCount: analysis === null ? null : analysis.metaDescriptionCount,
+      robotsMetas: analysis === null ? null : analysis.robotsMetas,
+      metaRefresh: analysis === null ? null : analysis.metaRefresh,
+      anchorCounts: analysis === null ? null : analysis.anchorCounts,
+      insecureRefs: analysis === null ? null : analysis.insecureRefs,
+      imagesEmptyAlt: analysis === null ? null : analysis.imagesEmptyAlt,
+      imagesAltTooLong: analysis === null ? null : analysis.imagesAltTooLong,
+      imagesMissingAltSample: analysis === null ? null : analysis.imagesMissingAltSample,
+      relNextCount: analysis === null ? null : analysis.relNextCount,
+      relPrevCount: analysis === null ? null : analysis.relPrevCount,
+      htmlStructure: analysis === null ? null : analysis.htmlStructure,
       htmlBytes: fetch.htmlBytes,
       domSize: analysis?.domSize ?? null,
       imagesTotal: analysis?.imagesTotal ?? 0,

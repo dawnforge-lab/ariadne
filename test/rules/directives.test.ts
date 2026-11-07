@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { directiveRules } from "../../src/rules/page/directives.js";
 import { RESTRICTIVE_DIRECTIVES, UNAVAILABLE_AFTER_WARN_DAYS } from "../../src/rules/thresholds.js";
-import { expectSilentOnNonOkFetches, mkPage, ruleLookup } from "./mk-page.js";
+import { expectSilentOnNonOkFetches, mkPage, mkV1Page, ruleLookup } from "./mk-page.js";
 
 const rule = ruleLookup(directiveRules, "directiveRules");
 const DAY_MS = 86_400_000;
@@ -19,11 +19,13 @@ const BROKEN = [
   { robotsMeta: "nofollow" },
   { robotsMeta: "nosnippet" },
   { robotsMeta: "unavailable_after: 25 Jun 2010 15:00:00 PST" },
+  { robotsMetas: [{ name: "googlebot", content: "noindex" }] },
 ];
 
 describe("directiveRules metadata", () => {
-  it("defines exactly the three directive rules", () => {
+  it("defines exactly the four directive rules", () => {
     expect(directiveRules.map((r) => r.id).sort()).toEqual([
+      "directives.bot-conflict",
       "directives.restrictive",
       "directives.unavailable-after",
       "indexability.nofollow",
@@ -233,5 +235,124 @@ describe("directives.unavailable-after", () => {
     expect(
       r.run(mkPage({ fetchedAt: null, robotsMeta: "unavailable_after: 25 Jun 2010 15:00:00 PST" })),
     ).toHaveLength(0);
+  });
+});
+
+describe("directives.bot-conflict", () => {
+  const r = rule("directives.bot-conflict");
+  const metas = (...entries: [string, string][]) =>
+    entries.map(([name, content]) => ({ name, content }));
+
+  it("fires stricter when googlebot says noindex and robots says index (the spec example)", () => {
+    const out = r.run(
+      mkPage({ robotsMeta: "index", robotsMetas: metas(["googlebot", "noindex"]) }),
+    );
+    expect(out).toHaveLength(1);
+    expect(out[0]!.evidence).toEqual({
+      conflicts: [
+        {
+          bot: "googlebot",
+          differs: [{ directive: "noindex", direction: "stricter" }],
+          botDirectives: "noindex",
+          robotsDirectives: "index",
+        },
+      ],
+    });
+  });
+
+  it("with no robots meta, a bot nofollow is stricter than the index, follow default", () => {
+    const out = r.run(mkPage({ robotsMeta: null, robotsMetas: metas(["bingbot", "nofollow"]) }));
+    expect(out).toHaveLength(1);
+    expect(out[0]!.evidence).toMatchObject({
+      conflicts: [
+        {
+          bot: "bingbot",
+          differs: [{ directive: "nofollow", direction: "stricter" }],
+          robotsDirectives: null,
+        },
+      ],
+    });
+  });
+
+  it("is silent when the bot meta is merely silent on a directive robots carries", () => {
+    // Google combines the bot meta with the generic one: googlebot still gets
+    // noindex here, and nofollow below, from the generic meta.
+    expect(
+      r.run(
+        mkPage({ robotsMeta: "noindex, follow", robotsMetas: metas(["googlebot", "noarchive"]) }),
+      ),
+    ).toHaveLength(0);
+    expect(
+      r.run(
+        mkPage({ robotsMeta: "noindex, nofollow", robotsMetas: metas(["googlebot", "noindex"]) }),
+      ),
+    ).toHaveLength(0);
+  });
+
+  it("fires overridden when the bot meta permits what robots restricts", () => {
+    const out = r.run(
+      mkPage({ robotsMeta: "noindex", robotsMetas: metas(["googlebot", "index"]) }),
+    );
+    expect(out).toHaveLength(1);
+    expect(out[0]!.evidence).toMatchObject({
+      conflicts: [
+        { bot: "googlebot", differs: [{ directive: "noindex", direction: "overridden" }] },
+      ],
+    });
+  });
+
+  it("all overrides follow only where robots restricts it", () => {
+    const out = r.run(mkPage({ robotsMeta: "nofollow", robotsMetas: metas(["bingbot", "all"]) }));
+    expect(out).toHaveLength(1);
+    expect(out[0]!.evidence).toMatchObject({
+      conflicts: [
+        { bot: "bingbot", differs: [{ directive: "nofollow", direction: "overridden" }] },
+      ],
+    });
+  });
+
+  it("a bot meta that permits and restricts the same directive is not an override", () => {
+    expect(
+      r.run(mkPage({ robotsMeta: "noindex", robotsMetas: metas(["googlebot", "index, noindex"]) })),
+    ).toHaveLength(0);
+  });
+
+  it("counts none as noindex and nofollow, and is one finding per page", () => {
+    const out = r.run(
+      mkPage({
+        robotsMeta: "index, follow",
+        robotsMetas: metas(["googlebot", "none"], ["bingbot", "noindex"]),
+      }),
+    );
+    expect(out).toHaveLength(1);
+    expect(out[0]!.evidence).toMatchObject({
+      conflicts: [
+        {
+          bot: "googlebot",
+          differs: [
+            { directive: "noindex", direction: "stricter" },
+            { directive: "nofollow", direction: "stricter" },
+          ],
+        },
+        { bot: "bingbot", differs: [{ directive: "noindex", direction: "stricter" }] },
+      ],
+    });
+    expect(
+      r.run(mkPage({ robotsMeta: "none", robotsMetas: metas(["googlebot", "noindex, nofollow"]) })),
+    ).toHaveLength(0);
+  });
+
+  it("is silent when the bot meta repeats robots, or there is no bot meta", () => {
+    expect(
+      r.run(mkPage({ robotsMeta: "noindex", robotsMetas: metas(["googlebot", "noindex"]) })),
+    ).toHaveLength(0);
+    expect(
+      r.run(mkPage({ robotsMeta: null, robotsMetas: metas(["googlebot", "index, follow"]) })),
+    ).toHaveLength(0);
+    expect(r.run(mkPage({ robotsMeta: "noindex", robotsMetas: [] }))).toHaveLength(0);
+  });
+
+  it("is silent on a v1 row", () => {
+    expect(r.run(mkV1Page({ robotsMeta: "noindex" }))).toHaveLength(0);
   });
 });

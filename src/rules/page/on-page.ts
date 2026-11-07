@@ -6,6 +6,7 @@ import {
   META_MIN,
   META_MAX,
   H1_MAX,
+  H2_MAX,
   URL_MAX,
   HEADING_MAX_STEP,
 } from "../thresholds.js";
@@ -17,11 +18,18 @@ export {
   META_MIN,
   META_MAX,
   H1_MAX,
+  H2_MAX,
   URL_MAX,
   HEADING_MAX_STEP,
 } from "../thresholds.js";
 
 const CATEGORY = "on-page";
+
+/** Equal after whitespace collapse and trim, ignoring case. */
+function sameText(a: string, b: string): boolean {
+  const norm = (v: string): string => v.replace(/\s+/g, " ").trim().toLowerCase();
+  return norm(a) === norm(b);
+}
 
 /**
  * EVERY RULE IN THIS FILE IS GATED ON `isJudged` (Phase 22 §1), not on
@@ -216,6 +224,77 @@ export const onPageRules: PageRule[] = [
     (p, self) =>
       isJudged(p) && present(p.h1Text) && p.h1Text.length > H1_MAX
         ? [finding(self, p, { h1Text: p.h1Text, length: p.h1Text.length, max: H1_MAX })]
+        : [],
+  ),
+
+  pageRule(
+    "h2.missing",
+    ["CHECK-37"],
+    CATEGORY,
+    "info",
+    [{ key: "h2Count", label: "H2 Count" }],
+    // `h2_count` predates extraction 2, so this judges every crawl (deviation 1).
+    (p, self) =>
+      isJudged(p) && p.h2Count === 0 ? [finding(self, p, { h2Count: p.h2Count })] : [],
+  ),
+
+  pageRule(
+    "h2.too-long",
+    ["CHECK-37"],
+    CATEGORY,
+    "info",
+    [
+      { key: "h2Text", label: "H2-1" },
+      { key: "length", label: "H2-1 Length" },
+      { key: "max", label: "Maximum Length" },
+    ],
+    // `h2Text` is the first H2's collapsed, capped text; null (no H2, or a v1
+    // row) is silent.
+    (p, self) =>
+      isJudged(p) && present(p.h2Text) && p.h2Text.length > H2_MAX
+        ? [finding(self, p, { h2Text: p.h2Text, length: p.h2Text.length, max: H2_MAX })]
+        : [],
+  ),
+
+  pageRule(
+    "title.multiple",
+    ["CHECK-35"],
+    CATEGORY,
+    "warning",
+    [{ key: "titleCount", label: "Title Elements" }],
+    // Null is a row extraction 1 wrote: not measured, and silent.
+    (p, self) =>
+      isJudged(p) && p.titleCount !== null && p.titleCount > 1
+        ? [finding(self, p, { titleCount: p.titleCount })]
+        : [],
+  ),
+
+  pageRule(
+    "meta-description.multiple",
+    ["CHECK-36"],
+    CATEGORY,
+    "warning",
+    [{ key: "metaDescriptionCount", label: "Meta Description Elements" }],
+    (p, self) =>
+      isJudged(p) && p.metaDescriptionCount !== null && p.metaDescriptionCount > 1
+        ? [finding(self, p, { metaDescriptionCount: p.metaDescriptionCount })]
+        : [],
+  ),
+
+  pageRule(
+    "title.same-as-h1",
+    ["CHECK-35"],
+    CATEGORY,
+    "info",
+    [
+      { key: "title", label: "Title 1" },
+      { key: "h1Text", label: "H1-1" },
+    ],
+    // Whitespace collapsed, trimmed, case-insensitive. Both columns predate
+    // extraction 2, so every crawl is judged (deviation 1).
+    (p, self) =>
+      isJudged(p) && present(p.title) && present(p.h1Text) && sameText(p.title, p.h1Text)
+        ? [finding(self, p, { title: p.title, h1Text: p.h1Text })]
         : [],
   ),
 

@@ -17,6 +17,7 @@ import { authoredP11Fixtures } from "./pages/authored-p11.js";
 import { authoredP23Fixtures } from "./pages/authored-p23.js";
 import { authoredP25Fixtures } from "./pages/authored-p25.js";
 import { authoredP26Fixtures } from "./pages/authored-p26.js";
+import { authoredP26bFixtures } from "./pages/authored-p26b.js";
 import { controlFixture } from "./pages/control.js";
 import { renderFixtures } from "./pages/render-p5.js";
 
@@ -157,6 +158,8 @@ export function allFixtures(): Fixture[] {
     // P26: the 26a rules' fixture pages, added task by task. Plain HTTP on
     // 127.0.0.1, so the HTTPS-only rules have none (SKIP_HARNESS_CLAIMS).
     ...authoredP26Fixtures,
+    // P26b: the parser-wave rules' fixture pages, added task by task.
+    ...authoredP26bFixtures,
     controlFixture,
   ];
 }

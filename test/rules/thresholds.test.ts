@@ -60,6 +60,10 @@ describe("thresholds", () => {
       TITLE_PX_MIN: 200,
       META_PX_MAX: 985,
       META_PX_MIN: 400,
+      H2_MAX: 70,
+      IMAGE_ALT_MAX: 100,
+      SOCIAL_IMAGE_MAX_BYTES: 5 * 1024 * 1024,
+      OG_REQUIRED: ["title", "type", "image", "url"],
     });
   });
 

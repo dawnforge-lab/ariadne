@@ -119,6 +119,7 @@ import {
 import { isSameOrigin } from "../parse/url-utils.js";
 import type { HostGate } from "../politeness.js";
 import { isUrlAllowed } from "../url-policy.js";
+import { storableDeep } from "../storable-text.js";
 
 /**
  * How a resource fetch ended, stored in `resources.fetch_class`. The page
@@ -978,7 +979,10 @@ async function writeVerdict(
 ): Promise<void> {
   await db
     .update(resources)
-    .set({
+    // The storability boundary (ruling R10): the reason and the header values
+    // are the site's. Clean values pass through unchanged; `fetchedAt` is a
+    // `Date` and is left as it is.
+    .set(storableDeep({
       fetchClass: verdict.fetchClass,
       fetchReason: verdict.fetchReason,
       statusCode: verdict.statusCode,
@@ -991,7 +995,7 @@ async function writeVerdict(
       // `fetch_class` move together, both null or neither.
       fetchedAt: verdict.fetchClass === null ? null : new Date(),
       fetchMs: verdict.fetchMs,
-    })
+    }))
     .where(and(eq(resources.crawlId, crawlId), eq(resources.url, url)));
 }
 

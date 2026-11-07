@@ -13,8 +13,8 @@
  *                                 headers (see below)
  *  - `security.http-url`          an HTTPS page linking to an `http:` URL on the site's own
  *                                 host, on a site crawled over `https:`
- *  - `security.mixed-content`     an HTTPS page referencing an image, script or stylesheet
- *                                 over `http:`
+ *  - `security.mixed-content`     an HTTPS page referencing an image, script, stylesheet,
+ *                                 iframe or media element over `http:`
  *
  * **THE COHORT** for the header rules and mixed content is the HTTPS pages the
  * crawl fetched OK with a 200 (`FETCHED_OK`, URL starting `https:`). A plain-HTTP
@@ -357,6 +357,19 @@ async function httpUrlFindings(
   return noteTruncation(findings, result.rows[0]?.total_matches ?? 0);
 }
 
+/**
+ * `security.mixed-content`, one statement. Two sources add up per HTTPS page:
+ * the `http:` rows of `page_resources` (images, scripts, stylesheets) and, for a
+ * page written by extraction 2, the `http:` iframes and media counted in
+ * `pages.insecure_refs`. A v1 page has a null `insecure_refs`, contributes
+ * nothing from it and carries no `byKind`, so its finding is exactly the 0.20.0
+ * one. The two samples are built differently: the resource sample is sorted
+ * and capped at the limit here, while the ref sample is the stored one, the
+ * first `INSECURE_SAMPLE_MAX` iframes and the first media references in
+ * document order, each kind capped on its own. The merged sample is re-sorted
+ * and capped, so it is a sorted sample of the page's insecure references, not
+ * necessarily their alphabetically first entries; the counts stay exact.
+ */
 async function mixedContentFindings(
   self: RuleIdentity,
   db: Db,
@@ -369,23 +382,62 @@ async function mixedContentFindings(
     insecure_count: number;
     sample: string[];
     total_matches: number;
+    has_refs: boolean;
+    n_resources: number;
+    n_iframe: number;
+    n_media: number;
   }>(sql`
-    select p.id, p.url,
-           count(*)::int as insecure_count,
-           (array_agg(pr.resource_url order by pr.resource_url))[1:${BROKEN_SAMPLE_RESOURCES}] as sample,
+    with res as (
+      -- Only the HTTPS cohort's edges are grouped: an http page's http edges
+      -- are not mixed content, and grouping them would aggregate the whole
+      -- crawl's http edges before the join below threw them away.
+      select p.id as page_id,
+             count(*)::int as n,
+             (array_agg(pr.resource_url order by pr.resource_url))[1:${BROKEN_SAMPLE_RESOURCES}] as sample
+      from pages p
+      join page_resources pr on pr.crawl_id = p.crawl_id and pr.page_id = p.id
+      where p.crawl_id = ${crawlId} and ${HTTPS_COHORT}
+        and starts_with(pr.resource_url, 'http:')
+      group by p.id
+    ),
+    counted as (
+      select p.id, p.url,
+             (p.insecure_refs is not null) as has_refs,
+             coalesce(res.n, 0) as n_resources,
+             coalesce((p.insecure_refs->>'iframe')::int, 0) as n_iframe,
+             coalesce((p.insecure_refs->>'media')::int, 0) as n_media,
+             coalesce(res.sample, '{}'::text[]) as res_sample,
+             array(
+               select e->>'url'
+               from jsonb_array_elements(coalesce(p.insecure_refs->'sample', '[]'::jsonb)) e
+               where e->>'kind' in ('iframe', 'media')
+             ) as ref_sample
+      from pages p
+      left join res on res.page_id = p.id
+      where p.crawl_id = ${crawlId} and ${HTTPS_COHORT}
+    )
+    select c.id, c.url, c.has_refs, c.n_resources, c.n_iframe, c.n_media,
+           (c.n_resources + c.n_iframe + c.n_media)::int as insecure_count,
+           array(
+             select u from unnest(c.res_sample || c.ref_sample) as u
+             order by u limit ${BROKEN_SAMPLE_RESOURCES}
+           ) as sample,
            count(*) over ()::int as total_matches
-    from pages p
-    join page_resources pr on pr.crawl_id = p.crawl_id and pr.page_id = p.id
-    where p.crawl_id = ${crawlId} and ${HTTPS_COHORT}
-      and starts_with(pr.resource_url, 'http:')
-    group by p.id, p.url
-    order by p.url
+    from counted c
+    where c.n_resources + c.n_iframe + c.n_media > 0
+    order by c.url
     ${limitTo(caps.listing)}`);
   const findings = result.rows.map((row) =>
     queryFinding(self, {
       pageId: row.id,
       pageUrl: row.url,
-      evidence: { insecureCount: row.insecure_count, sample: row.sample },
+      evidence: {
+        insecureCount: row.insecure_count,
+        sample: row.sample,
+        ...(row.has_refs
+          ? { byKind: { resources: row.n_resources, iframe: row.n_iframe, media: row.n_media } }
+          : {}),
+      },
       dedupeKey: row.url,
     }),
   );
@@ -465,6 +517,7 @@ export const securityRules: QueryRule[] = [
     columns: [
       { key: "insecureCount", label: "Insecure Resources" },
       { key: "sample", label: "Insecure Resource URLs" },
+      { key: "byKind", label: "Insecure References By Kind", optional: true },
     ],
     ...copyFor(MIXED_CONTENT.id),
     rulesetVersion: RULESET_VERSION,

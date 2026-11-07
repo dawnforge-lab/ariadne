@@ -507,7 +507,208 @@ const KINDS = ["page", "query", "metric"] as const satisfies readonly AnyRule["k
 //     `pagination.loop` gives the same findings for less work: series that
 //     end are peeled off first, and each loop is walked once, from its
 //     member with the smallest `md5(url)`, then fanned out to its members.
-export const RULESET_VERSION = "0.20.0";
+// 0.21.0: Phase 26b, one parser wave (extraction version 2). ONE BUMP FOR THE
+// PHASE; later tasks append here. The version moves for the 26 new rules, which
+// read page facts the crawler did not extract before.
+//
+//  1. (T1) Migration 0026 adds fifteen nullable `pages` columns, none with a
+//     default (null means "not measured"): `html_lang`, `social`, `h2_text`,
+//     `title_count`, `meta_description_count`, `robots_metas`, `meta_refresh`,
+//     `anchor_counts`, `insecure_refs`, `images_empty_alt`,
+//     `images_alt_too_long`, `images_missing_alt_sample`, `rel_next_count`,
+//     `rel_prev_count` and `html_structure`, plus three duplicate-group indexes
+//     (`pages_dupe_h2_text`, `pages_dupe_og_title`, `pages_dupe_og_description`).
+//     `EXTRACTION_VERSION` moves 1 to 2 and the `refresh` response header joins
+//     the allowlist. CHECK-87 (social sharing tags) and CHECK-88 (HTML document
+//     structure) are new checklist ids; CHECK-85 widens to "Mixed content and
+//     insecure forms". No rule is registered yet.
+//  2. (T2) The analyzer fills `html_lang`, `social`, `h2_text`, `title_count`,
+//     `meta_description_count`, `robots_metas` and `meta_refresh`. Two existing
+//     behaviours move. `robots_meta` now holds EVERY `<meta name=robots>`
+//     content joined with ", " (deviation 4), so `is_indexable` and every rule
+//     reading the column see a `noindex` in a second robots meta.
+//     `og:image` / `twitter:image` URLs become `resources` rows (kind `image`)
+//     with no `page_resources` edge (deviation 3). Every resource rule and
+//     marker that read `resources` without the edge table
+//     (`resources.bad-content-type`, `images.oversized`,
+//     `images.legacy-format`, `resources.uncached` and the four census markers)
+//     now counts only rows a page loads; `resources.broken`, `page.weight` and
+//     `security.mixed-content` already joined through `page_resources`.
+//  3. (T3) The analyzer fills `anchor_counts`, `insecure_refs`,
+//     `images_empty_alt`, `images_alt_too_long`, `images_missing_alt_sample`,
+//     `rel_next_count` and `rel_prev_count`. `links.anchor` now includes the
+//     trimmed alt of an image inside the link. Ruling R6: identical robots
+//     contents collapse before the `robots_meta` join, and one meta naming a
+//     twitter and an og tag counts as both. Migration 0027 (Ruling R7) widens
+//     `title_count`, `meta_description_count`, `rel_next_count` and
+//     `rel_prev_count` from smallint to integer, unclamped.
+//  4. (T4) The analyzer fills `html_structure` (`htmlTags`, `headTags`,
+//     `bodyTags`, `headBeforeBody`, `closedEarly`) in the streaming tokenizer.
+//     `closedEarly` is the first element or text that ends the head while the
+//     parser is still in it, kept only when the document later shows the head
+//     was meant to continue (deviation 6, narrowed by ruling R8): an explicit
+//     `</head>` or `<body>`, a `<base>`, a `<title>` outside `<svg>`, a `<meta>`
+//     without `itemprop`, or a `<link>` with a rel that is not body-ok. An
+//     explicit `<body>` is never a candidate, and inside a head `<noscript>`
+//     only a start tag outside `HEAD_ALLOWED` is one (R12, R12b). Every
+//     page-derived string is made storable at the writer boundary
+//     (`src/crawl/storable-text.ts`: no U+0000 or lone surrogate reaches
+//     Postgres, caps cut on code points; rulings R9, R10), and so is crawl-level
+//     site text such as robots.txt in `crawls.discovery` (R11). A JSON-LD block
+//     nested deeper than `MAX_LD_JSON_NESTING` (64) is a parse error, not a
+//     stored block, and `storableDeep` throws past `STORABLE_MAX_DEPTH` (R11).
+//  5. (T5) The v2 gate and its marker, `src/rules/query/page-facts.ts`:
+//     `v2Gate` (a thin wrapper over `extractionCoverage(db, crawlId, 2)`) opens
+//     every later query rule on a v2 fact, and `extraction.not-recorded` (info,
+//     `marker`, category `crawl`) is the one NOT MEASURED marker for them all. It
+//     fires once (`dedupeKey` "site") when any page is below version 2 and the
+//     crawl has a FETCHED_OK page, and claims CHECK-04, 10, 18, 22, 24, 25, 34,
+//     35, 36, 37, 49, 85, 86, 87 and 88. 155 rules.
+//  6. (T6) The six social rules, all CHECK-87, category `on-page`, judged
+//     pages only. Page rules (`src/rules/page/social.ts`, info):
+//     `social.og-incomplete` and `social.x-incomplete` fire on a v2 row whose
+//     `social` is null or incomplete (ruling R2); `social.og-multiple` and
+//     `social.og-url-mismatch` need a non-null `social`. Query rules
+//     (`src/rules/query/social.ts`): `social.og-duplicate` (info) groups
+//     `og_title` then `og_description` through field-duplicates.ts'
+//     `duplicateGroups` under one cap and one note, judging every crawl
+//     (deviation 1); `social.image-broken` (warning) opens with `v2Gate` and
+//     reports each og/X image that is relative, invalid, non-200, over
+//     `SOCIAL_IMAGE_MAX_BYTES`, or `not-fetched` (no status recorded on a
+//     crawl whose file check ran; ruling R13: when the check asked about
+//     nothing, no image is listed for that and the marker speaks once).
+//     `head.tags-outside-head` names `social` and claims CHECK-87;
+//     `resources.not-recorded` and `resources.not-fetched` claim CHECK-87, and
+//     `resources.not-fetched` also fires on a crawl whose only rows are
+//     unasked share images and whose pages count no image (R13). 161 rules.
+//  7. (T7) Heading and title rules, category `on-page`: `h2.missing`,
+//     `h2.too-long`, `h2.duplicate`, `title.multiple`,
+//     `meta-description.multiple` and `title.same-as-h1` (commit 06cf98e).
+//     `title.same-as-h1`, `h2.missing` and `social.og-duplicate` judge every
+//     crawl (deviation 1).
+//  8. (T8) `directives.bot-conflict` (page, warning, CHECK-04: a bot-specific
+//     robots meta whose noindex/nofollow state differs from the combined
+//     `robots` meta; `none` counts as both), `redirect.meta-refresh` (page,
+//     warning, CHECK-10: a meta refresh or `Refresh` header naming a URL, in
+//     `src/rules/page/refresh.ts`) and `hreflang.html-lang-mismatch` (query,
+//     info, CHECK-25: `v2Gate`, primary language subtag of `html_lang` against
+//     the page's self hreflang codes). `parseRefresh` follows the HTML refresh
+//     algorithm strictly (ruling R5). 170 rules.
+//  9. (T9) Link rules. Page rules in `src/rules/page/anchors.ts` over
+//     `pages.anchorCounts` (null on a v1 row, so silent): `links.uncrawlable`
+//     (warning, CHECK-34: `<a>` with no href but onclick/role, a `javascript:`
+//     href, or a `#` / `#!` href), `links.empty-href` and
+//     `links.unsafe-target-blank` (info, CHECK-86). Query rule
+//     `links.no-anchor-text` (info, CHECK-86) opens with `v2Gate` and counts
+//     internal links whose stored anchor, image alt included, is empty. 174 rules.
+// 10. (T10) Four page rules: `security.form-insecure` (warning, CHECK-85,
+//     `isAuditable`: an `http:` page with a form, or an `https:` page with a form
+//     whose action is `http:`), `images.empty-alt` and `images.alt-too-long`
+//     (info, CHECK-49, `isJudged`; the 100-character limit is `IMAGE_ALT_MAX`,
+//     applied at extraction) in `src/rules/page/technical.ts`, and
+//     `pagination.multiple` (info, CHECK-22, `isAuditable`: more than one
+//     rel=next or rel=prev) in the new `src/rules/page/pagination.ts`. Two
+//     revisions: `security.mixed-content` also counts `http:` iframes and media
+//     from `pages.insecure_refs` (one statement; a v1 page's finding is the
+//     0.20.0 one, and a v2 page's gains the optional `byKind` evidence), and
+//     `images.missing-alt` gains an optional `sample` of image addresses on a
+//     v2 row. 178 rules.
+// 11. (T11) Two page rules in the new `src/rules/page/html-structure.ts`, both
+//     `isAuditable` and silent on a v1 row: `html.head-closed-early` (warning,
+//     CHECK-18 / CHECK-04 / CHECK-24: the analyzer's `closedEarly`, which needs a
+//     later head-only element or `</head>` as evidence the head was meant to
+//     continue) and `html.structure-invalid` (info, CHECK-88: not exactly one
+//     head or one body, or a head after the body). `head.directives-outside-head`
+//     and `head.tags-outside-head` gain the optional `headClosedEarly` evidence
+//     naming the closing element on a v2 row. 180 rules.
+// 12. (T12) Ruling R14: `html.structure-invalid` still reports a page that
+//     leaves out the optional `<head>` / `<body>` start tags (info), and its copy
+//     now says those tags are optional in HTML, that without them nothing marks
+//     where the head ends, and to write them explicitly. Title: "HTML: Head or
+//     body tag missing, repeated or out of order". No verdict moved.
+// 13. Final review, before release (no bump; 0.21.0 never shipped without it):
+//     the analyzer resolves only the two judged share images (first og:image,
+//     first twitter:image; `MAX_SOCIAL_IMAGE_REFS` 2) and stores each WHOLE
+//     resolved URL as `social.imageRefs`, which `social.image-broken` reads
+//     instead of re-resolving the 1024-capped value (I1); an image alt in anchor
+//     text is spaced off as a word ("Home Logo", I2); `social.og-multiple`
+//     never lists `og:image`, an Open Graph array (R15); `metaRefresh.target`
+//     is cut at `REFRESH_TARGET_MAX` (R16); CHECK-87's Evaluate keeps relative
+//     and invalid share images FAIL when the file-check markers fire (I3).
+// 14. PR #23 review (no bump; 0.21.0 is still unreleased):
+//     PR #23 review: `directives.bot-conflict` reports only a real
+//     contradiction (ruling R17). Engines combine a bot meta with the generic
+//     one, so a bot meta is `stricter` (it restricts what the generic one does
+//     not) or `overridden` (it permits what the generic one restricts, to no
+//     effect); one that is silent on or repeats a generic directive is not
+//     reported. `differs` entries become `{directive, direction}`.
+//     PR #23 review: `RENDER_CAPTURE_VERSION` moves 1 to 2, because
+//     `rendered_robots_meta` now joins every robots meta, and
+//     `render.noindex-changed` compares a row only when its extraction and
+//     render stamps are both at least 2 or both below (nulls as 0), so a
+//     re-rendered version-1 crawl no longer reports a second robots meta as a
+//     JavaScript noindex (ruling R18).
+//     PR #23 review: `insecure_refs.sample` keeps `INSECURE_SAMPLE_MAX` per
+//     kind (iframe, media, form; at most 30 in all), so ten `http:` iframes
+//     no longer leave a counted `http:` form action with no sample.
+//     PR #23 review: `hreflang.html-lang-mismatch` takes the primary subtag
+//     before the first `-` OR `_` on both sides, so `lang="en_US"` agrees
+//     with a self hreflang `en-us`.
+//     PR #23 review: `parseRefresh` follows the HTML Standard's shared
+//     declarative refresh steps exactly (ruling R19, replacing R5's URL rule):
+//     the delay is the integer part (`1.5.3` is 1, `.5` is 0), `5abc` is no
+//     refresh at all, and a `url` prefix without `=` is part of the URL
+//     (`0; urlredirect.html` names `urlredirect.html`). Only ASCII whitespace
+//     is skipped.
+//     PR #23 review: `storableDeep` is copy-on-write: a clean string, array or
+//     plain object comes back as the same reference, and a dirty leaf rebuilds
+//     only its path. No stored value changes.
+//     PR #23 review: `shareImageRef` gives a ref only to a value starting
+//     `http:` or `https:` (any case), so a relative or non-http(s) share image
+//     is no longer written as a `resources` row and fetched for nothing;
+//     `social.image-broken` still reports it `relative` / `invalid` from the
+//     stored value.
+//     PR #23 review: `security.mixed-content` groups only the HTTPS cohort's
+//     `http:` edges (the 0.20.0 join, inside the CTE), not every `http:`
+//     edge of the crawl; findings are identical.
+//     PR #23 review: on an extraction-2 row `og_title`, `og_description` and
+//     `og_image` hold the first `meta` whose `property` OR `name` is the tag,
+//     as the `social` set reads it, so `social.og-duplicate` groups
+//     `<meta name="og:title">` pages and a `name=description
+//     property=og:description` element fills both columns.
+// 15. Owner calls 2026-11-07 (no bump; 0.21.0 is still unreleased, ruling R20):
+//     `anchorCounts.unsafeBlank`, and so
+//     `links.unsafe-target-blank`, counts only a link whose href resolves to an
+//     origin other than the page's (exact `URL.origin`, so a subdomain or a
+//     `www.` variant counts); a same-origin new-tab link, and an href that does
+//     not resolve, is not counted (O2).
+//     Each link's trimmed `aria-label` is recorded in
+//     `links.aria_label` (migration 0028; `ARIA_LABEL_MAX` 200, null when absent
+//     or blank), off the element that supplies the anchor. `links.no-anchor-text`
+//     moves info to WARNING and fires only when the anchor is empty and the
+//     aria-label absent or blank: a link nothing names. New query rule
+//     `links.aria-label-only` (info, CHECK-86, `v2Gate`): an internal link with
+//     an empty anchor and a non-blank aria-label, with `labels` in its evidence.
+//     Search engines document visible text and image alt as anchor text, not
+//     aria-label (O1).
+//     `htmlStructure.closedEarly` gains `lost`, the
+//     head-only tags (`base`, a non-svg `title`, `meta` without `itemprop`,
+//     `link rel=<first head-only token>`) after the closer and before the first
+//     explicit `<body>`, deduped, capped at `HEAD_LOST_MAX` (10); `<body>` and
+//     `</head>` still confirm the close and are never lost.
+//     `html.head-closed-early` (warning) fires only when `lost` is non-empty
+//     and carries it; new page rule `html.head-closed-early-harmless` (info,
+//     CHECK-18 / CHECK-04 / CHECK-24, category `technical`) fires when nothing
+//     is lost, such as a tracking pixel's `<noscript><img>` last in the head;
+//     tags inside a `<template>` are neither evidence nor lost.
+//     `head.directives-outside-head` and `head.tags-outside-head` carry
+//     `headClosedEarly` only when `lost` is non-empty. A version-2 row with an
+//     early close and no `lost` key makes all four throw "re-crawl" (O3).
+//     182 rules.
+//     `html.structure-invalid` is kept as it is, and
+//     an `http:` share image on an `https:` page waits for Phase 26c, which
+//     must record `og:image:secure_url` first.
+export const RULESET_VERSION = "0.21.0";
 
 /**
  * The 47 crawl-derived checks (sf-audit checklist, Pre-Crawl + sections 1–11):

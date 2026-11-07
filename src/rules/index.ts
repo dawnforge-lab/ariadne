@@ -14,6 +14,11 @@ import { urlShapeRules } from "./page/url-shape.js";
 import { pixelWidthRules } from "./page/pixel-width.js";
 import { indexabilityRules } from "./page/indexability.js";
 import { headRules } from "./page/head.js";
+import { htmlStructureRules } from "./page/html-structure.js";
+import { anchorRules } from "./page/anchors.js";
+import { paginationPageRules } from "./page/pagination.js";
+import { refreshRules } from "./page/refresh.js";
+import { socialRules } from "./page/social.js";
 import { technicalRules } from "./page/technical.js";
 import { resourceMetrics } from "./metric/resource-metrics.js";
 import { canonicalGraphRules } from "./query/canonical-graph.js";
@@ -25,6 +30,7 @@ import { hreflangIntegrityRules } from "./query/hreflang-integrity.js";
 import { linkGraphRules } from "./query/link-graph.js";
 import { linkHygieneRules } from "./query/link-hygiene.js";
 import { linkTargetRules } from "./query/link-targets.js";
+import { pageFactsRules } from "./query/page-facts.js";
 import { paginationRules } from "./query/pagination.js";
 import { redirectRules } from "./query/redirects.js";
 import { renderDiffRules } from "./query/render-diff.js";
@@ -34,6 +40,7 @@ import { robotsRules } from "./query/robots.js";
 import { securityRules } from "./query/security.js";
 import { sitemapRules } from "./query/sitemap.js";
 import { sitemapEntryRules } from "./query/sitemap-entries.js";
+import { socialQueryRules } from "./query/social.js";
 import { structuredDataRules } from "./query/structured-data.js";
 import { urlHygieneRules } from "./query/url-hygiene.js";
 
@@ -56,6 +63,16 @@ export function buildRegistry(): Registry {
     ...pixelWidthRules,
     // Where the head ended, and which head elements came after it (P23-T5).
     ...headRules,
+    // An early head close and an invalid html/head/body structure (26b, CHECK-88).
+    ...htmlStructureRules,
+    // The meta refresh and Refresh header redirect (26b, CHECK-10).
+    ...refreshRules,
+    // Uncrawlable, empty and unsafe anchors (26b, CHECK-34 / CHECK-86).
+    ...anchorRules,
+    // The Open Graph and X tags (26b, CHECK-87).
+    ...socialRules,
+    // More than one rel=next or rel=prev on a page (26b, CHECK-22).
+    ...paginationPageRules,
     ...technicalRules,
     ...hreflangRules,
     ...hreflangIntegrityRules,
@@ -77,6 +94,9 @@ export function buildRegistry(): Registry {
     // and for the same reason — "is this value unique on this site" is a
     // question about the crawl, which no page rule is handed.
     ...fieldDuplicateRules,
+    // The social duplicates and share images (26b): one og title or description
+    // across pages, and an og/X image a platform cannot use.
+    ...socialQueryRules,
     ...structuredDataRules,
     // The render pass's query rules: the three diffs between the raw HTML and
     // the rendered DOM, and the JavaScript redirect. Registered here with the
@@ -93,6 +113,8 @@ export function buildRegistry(): Registry {
     // The security rules (26a): response headers, HTTP URLs and mixed content,
     // all read from what the crawl stored.
     ...securityRules,
+    // The v2 page-fact marker (26b): speaks for every rule gated on `v2Gate`.
+    ...pageFactsRules,
     // The metric kind. Registered in the same list because a rule is a rule to
     // the registry — the runner is what tells the kinds apart, driving these
     // last, after everything that writes evidence.

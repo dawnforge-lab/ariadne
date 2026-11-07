@@ -30,6 +30,7 @@ export const RESPONSE_HEADER_ALLOWLIST: readonly string[] = [
   // directives
   "x-robots-tag",
   "link",
+  "refresh",
   // platform hints
   "server",
   "x-powered-by",

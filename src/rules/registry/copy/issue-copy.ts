@@ -318,6 +318,57 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
       "Re-run the crawl with host checks on. Meanwhile, request each host variant by hand and follow the redirects to confirm they end on the canonical HTTPS host.",
   },
 
+  // ------------------------------------------------------------- extraction
+  "extraction.not-recorded": {
+    title: "Crawl: Page facts not recorded on this crawl",
+    explanation:
+      "Some or all pages in this crawl were extracted before the page facts the social, structure, link-hygiene and image checks read were recorded, so those checks were left unrun rather than reported clean. The Pages Without Version 2 Facts column counts the pages affected.",
+    howToFix:
+      "Re-crawl the site. These page facts are recorded for every page on crawls from this version onwards.",
+  },
+  // ----------------------------------------------------------------- social
+  "social.og-incomplete": {
+    title: "Social: Open Graph tags missing",
+    explanation:
+      "Indexable, self-canonical pages missing one or more of og:title, og:type, og:image and og:url, or carrying one with empty content; the Missing OG Tags column names them and No OG Tags marks pages with no Open Graph tag at all. Without them a link shared on Facebook, LinkedIn and messaging apps is shown with whatever title and image the platform guesses, or none.",
+    howToFix:
+      "Add og:title, og:type, og:image and og:url to the page template's <head>, filled per page from the page's own title, URL and lead image.",
+  },
+  "social.og-multiple": {
+    title: "Social: Open Graph tag repeated with different values",
+    explanation:
+      "Indexable, self-canonical pages that carry the same Open Graph tag more than once with different content; the Conflicting Tags column names them. Each platform picks one of the values by its own rule, so the preview a link gets can differ from one platform to the next. og:image is not counted: Open Graph allows several images on a page, and platforms prefer the first.",
+    howToFix:
+      "Remove the duplicate tags so each Open Graph tag appears once. This usually means a theme and a plugin both write them: turn one off.",
+  },
+  "social.og-url-mismatch": {
+    title: "Social: og:url is not the canonical URL",
+    explanation:
+      "Indexable, self-canonical pages whose og:url names a different address from the page's canonical (or, with no canonical, the page's own URL); the row shows both. Shares and likes are counted against the og:url, so they are credited to another address than the one you want indexed.",
+    howToFix:
+      "Set og:url to the page's canonical URL, written exactly as the canonical tag writes it.",
+  },
+  "social.x-incomplete": {
+    title: "Social: X card tags missing or written as property",
+    explanation:
+      "Indexable, self-canonical pages with no twitter:card, with a card but no title (neither twitter:title nor og:title), or with X tags written as property= instead of name=; the Missing X Tags column names what is missing and Given as property= marks the last. X reads its tags from name=, so a link shared there falls back to a plain or missing preview.",
+    howToFix:
+      "Add <meta name=\"twitter:card\" content=\"summary_large_image\"> and a title to the template, and write every twitter: tag with name= rather than property=.",
+  },
+  "social.og-duplicate": {
+    title: "Social: Open Graph title or description duplicate",
+    explanation:
+      "Groups of indexable, self-canonical pages with an identical og:title or og:description, counted like duplicate titles: hreflang alternates are one page and pages 2 onwards of a paginated series are left out. Each row names the tag, the shared value, the number of distinct pages and up to 20 of their URLs; shared links from those pages all look the same.",
+    howToFix:
+      "Fill og:title and og:description in the template from fields that differ per page, such as the page title and meta description.",
+  },
+  "social.image-broken": {
+    title: "Social: Share image relative, broken, over 5 MB or not checked",
+    explanation:
+      "Indexable, self-canonical pages whose og:image or twitter:image is a relative or malformed address, answered with a status other than 200, or is larger than 5 MB, so platforms show the shared link with no image. The Image Problems column lists each tag, its address and the problem. An image listed as not fetched was skipped by the file check or got no answer: whether it loads is unknown, which is not the same as broken (when the file check was off for the whole crawl, no image is listed for that and the crawl-level notice says so once).",
+    howToFix:
+      "Use an absolute https address for og:image and twitter:image, serve the file with a 200 and keep it under 5 MB. Re-run or resume the crawl to check an image listed as not fetched.",
+  },
   // --------------------------------------------------------------- security
   "security.headers-missing": {
     title: "Security: Protective response headers missing or unsafe",
@@ -350,9 +401,16 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
   "security.mixed-content": {
     title: "Security: HTTPS page loading HTTP resources",
     explanation:
-      "HTTPS pages that reference images, scripts or stylesheets with an http:// address; the row shows how many and lists up to 10 of them. Browsers block or warn about these files, so a page can lose its scripts or styles or show a not-secure warning even though it was served securely. Only img src, stylesheet and script references in the HTML response are checked.",
+      "HTTPS pages that reference images, scripts, stylesheets, iframes, video, audio or embedded media with an http:// address; the row shows how many and lists up to 10 of them. Browsers block or warn about these files, so a page can lose its scripts or styles or show a not-secure warning even though it was served securely. Only references in the HTML response are checked.",
     howToFix:
       "Change each listed address to https://, or to a path on your own host, and check that the file is served over HTTPS. Where a template or CMS field produces the address, fix it there.",
+  },
+  "security.form-insecure": {
+    title: "Security: Insecure form",
+    explanation:
+      "Pages with a form served over http://, or an HTTPS page whose form posts to an http:// address; the row shows the page's scheme, how many forms it has and up to 10 of the insecure actions. Whatever a visitor types into the form travels unencrypted, and browsers warn before sending it.",
+    howToFix:
+      "Serve the page over HTTPS and point every form action at an https:// address or a path on your own host.",
   },
 
   // --------------------------------------------------------------- hreflang
@@ -405,6 +463,13 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
     howToFix:
       "Keep one URL per code and remove the stale or duplicate entry. Generate the block from one mapping so a code cannot be added twice.",
   },
+  "hreflang.html-lang-mismatch": {
+    title: "Hreflang: HTML lang differs from own hreflang",
+    explanation:
+      "Pages whose html lang attribute names a different language from the hreflang code the page gives itself; only the language part is compared, so en-US against en-gb agrees, and the columns show both. Browsers and assistive technology read the lang attribute while search engines read hreflang, so one of them is wrong. Pages with no lang attribute are not reported.",
+    howToFix:
+      "Set the html lang attribute to the language of the page content and make the page's own hreflang code match it. Check that the template does not hard-code one language for every locale.",
+  },
   "hreflang.self-only": {
     title: "Hreflang: Block names only the page itself",
     explanation:
@@ -455,6 +520,13 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
       "Pages with nofollow (or none) in the robots meta tag or the X-Robots-Tag header; the Directive Source column says which. Search engines are told to ignore every link on the page, so the pages it links to get no internal equity from it and may not be discovered through it.",
     howToFix:
       "Remove nofollow from the robots meta tag and the header so the page's links are followed. Leave it only if the page is deliberately closed off, such as a login or user-generated page.",
+  },
+  "directives.bot-conflict": {
+    title: "Directives: Bot meta contradicts robots meta",
+    explanation:
+      "Pages with a bot-specific robots meta tag (googlebot, bingbot and so on) that contradicts the generic robots meta tag, which counts as index, follow when absent; the Bot Conflicts column names the bot, the directive and the case. A search engine combines the tag that names it with the generic tag and obeys the most restrictive of the two: a stricter bot tag (noindex or nofollow, none being both, where the generic tag has neither) keeps that engine out while the others index or follow the page, and an overridden one (index, follow or all where the generic tag restricts) has no effect, because the generic restriction still applies. A bot tag that leaves out or repeats a directive of the generic tag is not reported.",
+    howToFix:
+      "Stricter: remove the bot-specific noindex or nofollow unless keeping that one engine out is deliberate. Overridden: the bot tag cannot lift a generic restriction; if that engine should index or follow the page, remove the restriction from the generic tag and restrict the other engines by name instead.",
   },
   "directives.restrictive": {
     title: "Directives: Snippet or image preview restricted",
@@ -545,11 +617,74 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
       "Move the tags into the <head> above any other markup, and remove or move the element named in Closed By out of the head; it is usually a tracking pixel, an injected banner or a stray text node from a plugin.",
   },
   "head.tags-outside-head": {
-    title: "Page titles: Title or meta description outside <head>",
+    title: "Page titles: Title, meta description or social tags outside <head>",
     explanation:
-      "Indexable, self-canonical pages whose title or meta description appears after the <head> has ended, either at </head> or where an element that is not allowed in the head closed it early; the Closed By column names that element. Search engines may ignore a title or description outside the head and write their own.",
+      "Indexable, self-canonical pages whose title, meta description or Open Graph and X tags appear after the <head> has ended, either at </head> or where an element that is not allowed in the head closed it early; the Elements Outside Head column names which and Closed By names that element. Search engines may ignore a title or description outside the head and write their own, and social platforms may not read share tags there.",
     howToFix:
-      "Move the title and meta description into the <head> above any other markup, and remove or move the element named in Closed By out of the head.",
+      "Move the title, meta description and social tags into the <head> above any other markup, and remove or move the element named in Closed By out of the head.",
+  },
+  "html.head-closed-early": {
+    title: "HTML: Head closed early",
+    explanation:
+      "Pages where the browser ends the <head> at an element it does not allow there (an iframe, an image, a div or visible text), while the document goes on to write head tags such as the title, meta tags or links after it. The row names the closing element, quotes it, says whether it sat inside a noscript and lists the head tags written after it. Those tags are read as body content, so a canonical, robots, hreflang, title or description among them may be ignored.",
+    howToFix:
+      "Remove or move the element named in the row out of the <head>; a tracking noscript iframe belongs at the top of the <body>. Keep only title, meta, link, base, style, script and noscript with those elements in the head.",
+  },
+  "html.head-closed-early-harmless": {
+    title: "HTML: Head closed early, nothing lost yet",
+    explanation:
+      "Pages where an element or text the <head> does not allow, named and quoted in the row (often a tracking pixel's <noscript><img>), ends the head under the HTML parsing rules, but no head tag comes after it, so nothing is lost today. Anything added after it later, such as a canonical, hreflang or robots tag, would be ignored by a parser that closes the head there.",
+    howToFix:
+      "Move the element into the <body>, or remove stray text; a tracking pixel's <noscript><img> belongs at the top of the body, so head tags added later stay in the head.",
+  },
+  "html.structure-invalid": {
+    title: "HTML: Head or body tag missing, repeated or out of order",
+    explanation:
+      "Pages that do not have exactly one <head> and one <body> tag, or whose <head> tag comes after the <body>; the Problems column lists which of head-missing, head-repeated, body-missing, body-repeated and head-after-body apply. The <head> and <body> tags are optional in HTML, because browsers infer both, but without them nothing in the markup marks where the head ends, so one stray element before the title or meta tags moves them into the body. A repeated or misplaced tag is ignored, so head tags written after it may not be read as intended.",
+    howToFix:
+      "Write explicit <head> and <body> tags, once each and in that order, even though HTML lets them be left out. Check for a layout or plugin that writes a second <head> or <body>, or that drops the <head> tag.",
+  },
+  "h2.missing": {
+    title: "Headings: No H2",
+    explanation:
+      "Indexable, self-canonical pages with no H2. Without subheadings a page has no outline for readers, assistive technology or search engines to scan.",
+    howToFix:
+      "Add a descriptive H2 for each section of the content, under the page's H1.",
+  },
+  "h2.too-long": {
+    title: "Headings: H2 over 70 characters",
+    explanation:
+      "Indexable, self-canonical pages whose first H2 is longer than 70 characters. A long H2 is usually body copy marked up as a heading, which weakens the section outline.",
+    howToFix:
+      "Shorten the H2 to the section's subject in 70 characters or fewer and move the rest into the paragraph below it.",
+  },
+  "h2.duplicate": {
+    title: "Headings: Duplicate H2",
+    explanation:
+      "Groups of indexable, self-canonical pages whose first H2 is identical. Pages that declare each other as hreflang alternates count as one page, and pages 2 onwards of a paginated series are left out; each row names the H2, the number of distinct pages, up to 20 of their URLs, how many alternates were folded in and how many paginated pages were set aside. A shared first H2 is usually a template heading rather than a section about the page's own subject.",
+    howToFix:
+      "Make the first H2 describe what is specific to the page, and keep template headings such as related links further down the page.",
+  },
+  "title.multiple": {
+    title: "Page titles: Multiple title elements",
+    explanation:
+      "Indexable, self-canonical pages with more than one title element in the HTML. Browsers and search engines pick one, and which one wins is not under your control.",
+    howToFix:
+      "Remove the extra title elements so the page has exactly one, usually a plugin or a template adding its own.",
+  },
+  "meta-description.multiple": {
+    title: "Meta description: Multiple meta description elements",
+    explanation:
+      "Indexable, self-canonical pages with more than one meta description element in the HTML. Search engines use one of them, and the page may show one you did not choose.",
+    howToFix:
+      "Remove the extra meta description elements so the page has exactly one, usually a plugin or a template adding its own.",
+  },
+  "title.same-as-h1": {
+    title: "Page titles: Same as H1",
+    explanation:
+      "Indexable, self-canonical pages whose title and first H1 are identical after ignoring case and spacing. It is not an error, but it wastes the chance to give search results and the page two different phrasings of the topic.",
+    howToFix:
+      "Rewrite the title for the search result, with the topic first and the site name last, and keep the H1 for the reader on the page.",
   },
   "headings.h1-missing": {
     title: "H1: Missing",
@@ -686,6 +821,13 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
     howToFix:
       "Trace the rules behind each hop, decide the destination URL, and make every other URL redirect to it directly. Test the entry URL with redirects followed until it ends on a 200.",
   },
+  "redirect.meta-refresh": {
+    title: "Redirects: Meta refresh redirect",
+    explanation:
+      "Pages that send the browser to another URL with a meta refresh tag or a Refresh response header; the row shows the source, the target, the delay and whether the target is the page itself. A refresh is not a redirect status, so it passes link signals unreliably and delays visitors. A refresh with no URL, which only reloads the page, is not reported.",
+    howToFix:
+      "Replace the refresh with a server-side 301 (permanent) or 302 (temporary) redirect to the target. Remove a refresh that points at the page itself.",
+  },
   "redirect.volume": {
     title: "Redirects: Redirect volume",
     explanation:
@@ -821,9 +963,23 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
   "images.missing-alt": {
     title: "Images: Missing alt text",
     explanation:
-      "Indexable, self-canonical pages with images that have no alt attribute; each row shows how many of the page's images. Alt text is what screen readers announce and the main way search engines understand an image. Only img elements in the HTML response are counted.",
+      "Indexable, self-canonical pages with images that have no alt attribute; each row shows how many of the page's images and, on pages crawled with the current extraction, the addresses of up to 10 of them. Alt text is what screen readers announce and the main way search engines understand an image. Only img elements in the HTML response are counted.",
     howToFix:
       "Give every meaningful image alt text describing what it conveys, and an empty alt (alt=\"\") to purely decorative images.",
+  },
+  "images.empty-alt": {
+    title: "Images: Empty alt text",
+    explanation:
+      "Indexable, self-canonical pages with images whose alt attribute is empty or only whitespace; each row shows how many of the page's images. An empty alt is correct for a purely decorative image and wrong for one that carries meaning, which a crawl cannot tell apart. Only img elements in the HTML response are counted.",
+    howToFix:
+      "Review each listed page and give any image that conveys information a short description. Leave alt=\"\" on images that are purely decorative.",
+  },
+  "images.alt-too-long": {
+    title: "Images: Alt text over 100 characters",
+    explanation:
+      "Indexable, self-canonical pages with images whose alt text, trimmed, is longer than 100 characters; each row shows how many. Long alt text is read out in full by screen readers and often reads as keyword stuffing. Only img elements in the HTML response are counted.",
+    howToFix:
+      "Shorten each alt text to a brief description of what the image shows, and move longer explanations into the surrounding text or a caption.",
   },
   "images.missing-dimensions": {
     title: "Images: Missing size attributes",
@@ -990,6 +1146,13 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
     howToFix:
       "If the items on deeper pages should be findable, canonicalise each page to itself. If the series only browses one collection, keep the canonical on page 1 and make sure the items have indexable pages of their own.",
   },
+  "pagination.multiple": {
+    title: "Pagination: Multiple rel=next or rel=prev links",
+    explanation:
+      "Pages that declare more than one link with rel=next, or more than one with rel=prev; the row gives both counts. A series has one neighbour in each direction, so a second declaration usually means two templates or plugins wrote the same tag and a crawler cannot tell which one is meant.",
+    howToFix:
+      "Keep a single rel=next and a single rel=prev per page, and remove the duplicate from the template or plugin that adds it.",
+  },
   "pagination.next-not-linked": {
     title: "Pagination: Next page linked only by rel=next",
     explanation:
@@ -1136,6 +1299,41 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
       "Pages with internal links whose whole anchor text is a generic English phrase such as click here, read more or learn more. The anchor is what tells visitors and search engines what the target is about, and these phrases tell them nothing. Each row gives the number of such links and up to 10 of the phrases; anchors in other languages are not judged.",
     howToFix:
       "Replace each generic anchor with words that describe the page it points at, such as the name of the product or the question the page answers.",
+  },
+  "links.uncrawlable": {
+    title: "Links: Links crawlers cannot follow",
+    explanation:
+      "Pages with link elements that have no href (an onclick handler or a link role only), a javascript: href, or a bare # href. Search engines follow real URLs in href attributes, so a target reached only through these is not discovered through them. Each row counts the three kinds.",
+    howToFix:
+      "Give each link a real URL in its href attribute and attach any script behaviour on top of it. Use a button element for actions that do not navigate.",
+  },
+  "links.empty-href": {
+    title: "Links: Links with an empty href",
+    explanation:
+      "Pages with links whose href attribute is present but empty. An empty href points back at the current page, which is rarely intended and wastes a link a visitor could use.",
+    howToFix:
+      "Set each href to the intended URL, or remove the href and use a button element if the element is not meant to navigate.",
+  },
+  "links.unsafe-target-blank": {
+    title: "Links: New-tab links to other origins without noopener",
+    explanation:
+      "Pages with links to another origin (another site, a subdomain or the www variant of this host) that open in a new tab through target=_blank without rel=noopener or noreferrer; links to the page's own origin are not counted. The opened page can reach the opener window, and the link leaks the referrer. Modern browsers reduce the risk, so this is a hygiene issue.",
+    howToFix:
+      "Add rel=\"noopener\" (or rel=\"noopener noreferrer\") to every link to another site that uses target=\"_blank\".",
+  },
+  "links.no-anchor-text": {
+    title: "Links: Internal links with no anchor text",
+    explanation:
+      "Pages with internal links that nothing names: no text, no image alt text and no aria-label on the link itself (a label on an element inside the link, aria-labelledby, a title attribute or an svg <title> is not read). The anchor is what tells visitors, screen readers and search engines what the target is about. Only the first anchor seen for each target is stored, so a target first linked without text and later with text is listed too.",
+    howToFix:
+      "Add descriptive text to each link, or an alt attribute that describes the target to each image that is the only content of a link.",
+  },
+  "links.aria-label-only": {
+    title: "Links: Internal links named only by aria-label",
+    explanation:
+      "Pages with internal links that have no visible text and no image alt text, only an aria-label, which the row lists. The label names the link for screen readers, but search engines document visible text and image alt as anchor text, not aria-label, so the link passes no anchor relevance to its target. This is often fine for icon links such as cart, wishlist or account.",
+    howToFix:
+      "Where the target matters for search, give the link visible text or an image with alt text that describes the target; icon links to pages such as the cart, wishlist or account can stay as they are.",
   },
   "links.high-outlinks": {
     title: "Links: Over 1,000 internal or 10 external links",

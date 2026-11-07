@@ -36,7 +36,7 @@ function rule(id: string): QueryRule {
 }
 
 describe("linkHygieneRules metadata", () => {
-  it("defines the five rules of the plan's table, with its checks, severities and category", () => {
+  it("defines the seven rules, with their checks, severities and category", () => {
     expect(
       Object.fromEntries(linkHygieneRules.map((r) => [r.id, [r.checkIds, r.severity, r.category]])),
     ).toEqual({
@@ -44,6 +44,10 @@ describe("linkHygieneRules metadata", () => {
       "links.only-from-non-indexable": [["CHECK-32"], "warning", "links"],
       "links.localhost": [["CHECK-86"], "warning", "links"],
       "links.non-descriptive-anchor": [["CHECK-86"], "info", "links"],
+      // Owner call O1: a link nothing names is a warning; one named only by
+      // aria-label is an info note of its own.
+      "links.no-anchor-text": [["CHECK-86"], "warning", "links"],
+      "links.aria-label-only": [["CHECK-86"], "info", "links"],
       "links.high-outlinks": [["CHECK-33"], "info", "links"],
     });
   });
@@ -64,6 +68,7 @@ describe("the link-hygiene rules against the database", () => {
   interface PageSpec extends IndexabilitySpec {
     path: string;
     canonical?: string | null;
+    extractionVersion?: number | null;
   }
 
   async function newCrawl(): Promise<string> {
@@ -95,6 +100,7 @@ describe("the link-hygiene rules against the database", () => {
         xRobotsTag: s.xRobotsTag ?? null,
         canonicalHtml: s.canonical === undefined ? full : s.canonical,
         canonicalCount: s.canonical === null ? 0 : 1,
+        extractionVersion: s.extractionVersion === undefined ? null : s.extractionVersion,
         depth: 1,
         discoveredVia: "link",
       };
@@ -106,6 +112,7 @@ describe("the link-hygiene rules against the database", () => {
   interface LinkSpec {
     target: string;
     anchor?: string | null;
+    ariaLabel?: string | null;
     nofollow?: boolean;
     internal?: boolean;
   }
@@ -121,6 +128,7 @@ describe("the link-hygiene rules against the database", () => {
         targetUrl: absolute ? s.target : url(s.target),
         targetPageId: null,
         anchor: s.anchor === undefined ? "a descriptive anchor" : s.anchor,
+        ariaLabel: s.ariaLabel ?? null,
         rel: s.nofollow === true ? "nofollow" : null,
         isInternal: s.internal ?? !absolute,
         isNofollow: s.nofollow ?? false,
@@ -528,6 +536,174 @@ describe("the link-hygiene rules against the database", () => {
       const found = await run(ID, crawlId);
       expect(found[0]!.evidence["count"]).toBe(12);
       expect((found[0]!.evidence["anchors"] as string[]).length).toBe(10);
+    });
+  });
+
+  describe("links.no-anchor-text", () => {
+    const ID = "links.no-anchor-text";
+    const V2 = { extractionVersion: 2 };
+
+    it("fires on empty, whitespace-only and no-break-space anchors, one finding per page", async () => {
+      const crawlId = await newCrawl();
+      const ids = await addPages(crawlId, [{ path: "/", ...V2 }, { path: "/b", ...V2 }]);
+      await addLinks(crawlId, ids.get("/")!, [
+        { target: "/z", anchor: "" },
+        { target: "/a", anchor: "  \t " },
+        { target: "/c", anchor: "\u00a0\u00a0" },
+        { target: "/d", anchor: "Pricing" },
+        { target: "https://elsewhere.example/x", anchor: "" },
+      ]);
+      await addLinks(crawlId, ids.get("/b")!, [{ target: "/d", anchor: "Pricing" }]);
+      const found = await run(ID, crawlId);
+      expect(found).toHaveLength(1);
+      expect(found[0]).toMatchObject({ ruleId: ID, severity: "warning", pageUrl: url("/") });
+      expect(found[0]!.evidence).toEqual({
+        count: 3,
+        targets: [url("/a"), url("/c"), url("/z")],
+      });
+    });
+
+    it("a link with no text, no alt and no aria-label is a warning; an aria-label-only link is not this rule's (O1)", async () => {
+      const crawlId = await newCrawl();
+      const ids = await addPages(crawlId, [{ path: "/", ...V2 }]);
+      await addLinks(crawlId, ids.get("/")!, [
+        { target: "/nothing", anchor: "" },
+        { target: "/blank-label", anchor: "", ariaLabel: "   " },
+        { target: "/nbsp-label", anchor: "", ariaLabel: "\u00a0" },
+        { target: "/cart", anchor: "", ariaLabel: "Cart" },
+        { target: "/both", anchor: "Sign in", ariaLabel: "Account" },
+        { target: "/logo", anchor: "Company logo" },
+      ]);
+      const found = await run(ID, crawlId);
+      expect(found).toHaveLength(1);
+      expect(found[0]).toMatchObject({ severity: "warning" });
+      expect(found[0]!.evidence).toEqual({
+        count: 3,
+        targets: [url("/blank-label"), url("/nbsp-label"), url("/nothing")],
+      });
+    });
+
+    it("an image link with alt (stored as the anchor) is not textless, one without alt is", async () => {
+      const crawlId = await newCrawl();
+      const ids = await addPages(crawlId, [{ path: "/", ...V2 }]);
+      await addLinks(crawlId, ids.get("/")!, [
+        { target: "/with-alt", anchor: "Company logo" },
+        { target: "/no-alt", anchor: "" },
+      ]);
+      const found = await run(ID, crawlId);
+      expect(found).toHaveLength(1);
+      expect(found[0]!.evidence).toEqual({ count: 1, targets: [url("/no-alt")] });
+    });
+
+    it("refuses a crawl with any page below extraction 2: the marker speaks, this is silent", async () => {
+      const crawlId = await newCrawl();
+      const ids = await addPages(crawlId, [{ path: "/", ...V2 }, { path: "/old", extractionVersion: 1 }]);
+      await addLinks(crawlId, ids.get("/")!, [{ target: "/z", anchor: "" }]);
+      expect(await run(ID, crawlId)).toHaveLength(0);
+    });
+
+    it("lists at most SAMPLE_SOURCES targets, counts every link, and caps the listing", async () => {
+      const crawlId = await newCrawl();
+      const specs = Array.from({ length: 3 }, (_, i) => ({ path: `/p${i}`, ...V2 }));
+      const ids = await addPages(crawlId, specs);
+      const n = SAMPLE_SOURCES + 4;
+      await addLinks(
+        crawlId,
+        ids.get("/p0")!,
+        Array.from({ length: n }, (_, i) => ({ target: `/t${String(i).padStart(3, "0")}`, anchor: "" })),
+      );
+      for (const s of specs.slice(1)) await addLinks(crawlId, ids.get(s.path)!, [{ target: "/x", anchor: "" }]);
+      const all = await run(ID, crawlId, { listing: null });
+      expect(all).toHaveLength(3);
+      expect(all[0]!.evidence["count"]).toBe(n);
+      expect((all[0]!.evidence["targets"] as string[]).length).toBe(SAMPLE_SOURCES);
+      const capped = await run(ID, crawlId, { listing: 2 });
+      expect(capped).toHaveLength(2);
+      expect(capped[1]!.evidence["truncated"]).toEqual({ reported: 2, total: 3 });
+    });
+  });
+
+  describe("links.aria-label-only", () => {
+    const ID = "links.aria-label-only";
+    const V2 = { extractionVersion: 2 };
+
+    it("fires on an internal link named only by aria-label, with its label (O1)", async () => {
+      const crawlId = await newCrawl();
+      const ids = await addPages(crawlId, [{ path: "/", ...V2 }, { path: "/b", ...V2 }]);
+      await addLinks(crawlId, ids.get("/")!, [
+        { target: "/cart", anchor: "", ariaLabel: "Cart" },
+        { target: "/wishlist", anchor: "  ", ariaLabel: "Wishlist" },
+        { target: "/basket", anchor: "\u00a0", ariaLabel: "Cart" },
+        { target: "/nothing", anchor: "" },
+        { target: "/blank-label", anchor: "", ariaLabel: "   " },
+        { target: "/both", anchor: "Sign in", ariaLabel: "Account" },
+        { target: "/logo", anchor: "Company logo" },
+        { target: "https://elsewhere.example/x", anchor: "", ariaLabel: "Partner" },
+      ]);
+      await addLinks(crawlId, ids.get("/b")!, [{ target: "/both", anchor: "Sign in", ariaLabel: "Account" }]);
+      const found = await run(ID, crawlId);
+      expect(found).toHaveLength(1);
+      expect(found[0]).toMatchObject({ ruleId: ID, severity: "info", pageUrl: url("/") });
+      expect(found[0]!.evidence).toEqual({
+        count: 3,
+        targets: [url("/basket"), url("/cart"), url("/wishlist")],
+        labels: ["Cart", "Wishlist"],
+      });
+      // The same rows: the link nothing names is no-anchor-text's, and only it.
+      const unnamed = await run("links.no-anchor-text", crawlId);
+      expect(unnamed[0]!.evidence).toEqual({
+        count: 2,
+        targets: [url("/blank-label"), url("/nothing")],
+      });
+    });
+
+    it("an image alt with no text, and text with an aria-label, fire neither rule", async () => {
+      const crawlId = await newCrawl();
+      const ids = await addPages(crawlId, [{ path: "/", ...V2 }]);
+      await addLinks(crawlId, ids.get("/")!, [
+        { target: "/logo", anchor: "Company logo", ariaLabel: "Home" },
+        { target: "/both", anchor: "Sign in", ariaLabel: "Account" },
+      ]);
+      expect(await run(ID, crawlId)).toEqual([]);
+      expect(await run("links.no-anchor-text", crawlId)).toEqual([]);
+    });
+
+    it("refuses a crawl with any page below extraction 2: the marker speaks, this is silent", async () => {
+      const crawlId = await newCrawl();
+      const ids = await addPages(crawlId, [{ path: "/", ...V2 }, { path: "/old", extractionVersion: 1 }]);
+      await addLinks(crawlId, ids.get("/")!, [{ target: "/cart", anchor: "", ariaLabel: "Cart" }]);
+      expect(await run(ID, crawlId)).toHaveLength(0);
+    });
+
+    it("samples targets and their labels to SAMPLE_SOURCES, counts every link, and caps the listing", async () => {
+      const crawlId = await newCrawl();
+      const specs = Array.from({ length: 3 }, (_, i) => ({ path: `/p${i}`, ...V2 }));
+      const ids = await addPages(crawlId, specs);
+      const n = SAMPLE_SOURCES + 4;
+      await addLinks(
+        crawlId,
+        ids.get("/p0")!,
+        Array.from({ length: n }, (_, i) => {
+          const k = String(i).padStart(3, "0");
+          return { target: `/t${k}`, anchor: "", ariaLabel: `Label ${k}` };
+        }),
+      );
+      for (const s of specs.slice(1)) {
+        await addLinks(crawlId, ids.get(s.path)!, [{ target: "/x", anchor: "", ariaLabel: "X" }]);
+      }
+      const all = await run(ID, crawlId, { listing: null });
+      expect(all).toHaveLength(3);
+      expect(all[0]!.evidence["count"]).toBe(n);
+      const targets = all[0]!.evidence["targets"] as string[];
+      const labels = all[0]!.evidence["labels"] as string[];
+      expect(targets.length).toBe(SAMPLE_SOURCES);
+      // The labels of the LISTED targets, and only those.
+      expect(labels).toEqual(
+        Array.from({ length: SAMPLE_SOURCES }, (_, i) => `Label ${String(i).padStart(3, "0")}`),
+      );
+      const capped = await run(ID, crawlId, { listing: 2 });
+      expect(capped).toHaveLength(2);
+      expect(capped[1]!.evidence["truncated"]).toEqual({ reported: 2, total: 3 });
     });
   });
 

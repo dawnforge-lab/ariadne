@@ -514,7 +514,7 @@ describe("check universe", () => {
     // (http.no-response pair, page.html-too-large, the crawl.unreadable-encoding
     // marker); the recheck pass also re-asks the no-response rows; registry.ts
     // carries the grounds.
-    expect(RULESET_VERSION).toBe("0.20.0");
+    expect(RULESET_VERSION).toBe("0.21.0");
   });
   it("every listed check id is a well-formed CHECK-NN and unique", () => {
     expect(new Set(CRAWL_CHECK_IDS).size).toBe(CRAWL_CHECK_IDS.length);
@@ -588,17 +588,25 @@ describe("check annotations", () => {
  * `render.meta-description-changed` and `render.h1-changed`. Two classes are fixed by
  * construction rather than by judgement and can never appear in the critical
  * list: metric rules (`metricRule` takes no severity and hard-codes `info`) and
- * the fourteen markers (26a added `security.headers-not-recorded`), which report a hole in OUR evidence and never a fault of
+ * the fifteen markers (26a added `security.headers-not-recorded`, 26b `extraction.not-recorded`), which report a hole in OUR evidence and never a fault of
  * the site.
+ *
+ * Owner calls 2026-11-07 (0.21.0, unreleased, so no bump under ruling R20; the
+ * rationale is in the registry's 0.21.0 note): `links.no-anchor-text` moves
+ * info to warning, since it now fires only on a link nothing names (no text, no
+ * alt, no aria-label), and `links.aria-label-only` (info) takes the links named
+ * only by aria-label. `html.head-closed-early-harmless` (info) takes the early
+ * head close that loses no head tag, and `html.head-closed-early` stays a
+ * warning for the one that does. The critical list does not move.
  */
 describe("severity shape of the ruleset", () => {
   const all = buildRegistry().all();
 
-  it("holds 33 critical, 54 warning and 67 info rules", () => {
+  it("holds 33 critical, 63 warning and 86 info rules", () => {
     const counts = { critical: 0, warning: 0, info: 0 };
     for (const r of all) counts[r.severity] += 1;
-    expect(counts).toEqual({ critical: 33, warning: 54, info: 67 });
-    expect(all).toHaveLength(154);
+    expect(counts).toEqual({ critical: 33, warning: 63, info: 86 });
+    expect(all).toHaveLength(182);
   });
 
   it("names exactly the rules that are critical", () => {

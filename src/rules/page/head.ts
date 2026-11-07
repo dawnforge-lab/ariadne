@@ -1,5 +1,6 @@
 import { finding, isAuditable, isJudged, pageRule } from "../helpers.js";
 import type { PageRecord, PageRule } from "../registry/types.js";
+import { closedEarlyLost } from "./html-structure.js";
 
 /**
  * The outside-head family (Phase 23 T5, study §4.1): head elements that appear
@@ -60,13 +61,37 @@ function tagsOutside(p: PageRecord): string[] {
   const out: string[] = [];
   if (p.titleOutsideHead === true) out.push("title");
   if (p.metaDescriptionOutsideHead === true) out.push("meta description");
+  // Phase 26b: ANY Open Graph or X tag met after the head ended. Null `social`
+  // (a v1 row, or a v2 page with no social tag) adds nothing.
+  if (p.social?.outsideHead === true) out.push("social");
   return out;
 }
 
 const COLUMNS = [
   { key: "elements", label: "Elements Outside Head" },
   { key: "headClosedBy", label: "Closed By" },
+  // Phase 26b: the element the analyzer recorded as ending the head early, on a
+  // v2 row that has one. Absent on a v1 row and where nothing closed it early.
+  { key: "headClosedEarly", label: "Head Closed By (element)", optional: true },
 ] as const;
+
+/**
+ * The optional `headClosedEarly` evidence: present only when the analyzer named
+ * a closer AND that early close lost head tags (owner call O3). An early close
+ * that lost nothing is not why anything is outside the head (a tag after the
+ * explicit `<body>` is in the body whatever closed the head), so it is not
+ * offered as the explanation; `html.head-closed-early-harmless` reports it. A
+ * pre-O3 version-2 row with no `lost` key throws "re-crawl" (`closedEarlyLost`).
+ */
+function closedEarlyEvidence(
+  ruleId: string,
+  p: PageRecord,
+): { headClosedEarly?: { tag: string; snippet: string } } {
+  const closed = p.htmlStructure?.closedEarly;
+  if (closed === null || closed === undefined) return {};
+  if (closedEarlyLost(ruleId, p, closed).length === 0) return {};
+  return { headClosedEarly: { tag: closed.tag, snippet: closed.snippet } };
+}
 
 export const headRules: PageRule[] = [
   // THE FETCHED-OK COHORT (`isAuditable`), like `canonical.*` and
@@ -84,16 +109,18 @@ export const headRules: PageRule[] = [
       if (!isAuditable(p)) return [];
       const elements = directivesOutside(p);
       return elements.length > 0
-        ? [finding(self, p, { elements: elements.join(", "), headClosedBy: closedBy(p) })]
+        ? [finding(self, p, { elements: elements.join(", "), headClosedBy: closedBy(p), ...closedEarlyEvidence(self.id, p) })]
         : [];
     },
   ),
 
   // THE JUDGED COHORT (`isJudged`), with the other title and description rules:
   // where a title sits matters on a page that is meant to be in the index.
+  // CHECK-87 since Phase 26b: social tags outside the head are this rule's
+  // finding, and "tags placed in the head" is part of that check.
   pageRule(
     "head.tags-outside-head",
-    ["CHECK-35", "CHECK-36"],
+    ["CHECK-35", "CHECK-36", "CHECK-87"],
     "on-page",
     "warning",
     COLUMNS,
@@ -101,7 +128,7 @@ export const headRules: PageRule[] = [
       if (!isJudged(p)) return [];
       const elements = tagsOutside(p);
       return elements.length > 0
-        ? [finding(self, p, { elements: elements.join(", "), headClosedBy: closedBy(p) })]
+        ? [finding(self, p, { elements: elements.join(", "), headClosedBy: closedBy(p), ...closedEarlyEvidence(self.id, p) })]
         : [];
     },
   ),

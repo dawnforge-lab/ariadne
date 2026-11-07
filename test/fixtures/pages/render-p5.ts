@@ -227,7 +227,7 @@ const csrContent: Fixture = {
   // counts the 40 words this page's markup hides (the docblock above works the
   // arithmetic and says what that trade buys). `content.csr-dependent` is the
   // finding that matters here and it is unaffected.
-  expectedIssues: ["content.csr-dependent"],
+  expectedIssues: ["content.csr-dependent", "h2.missing"],
   exact: true,
   handler: (req, res) =>
     serve(req, res, () => ({

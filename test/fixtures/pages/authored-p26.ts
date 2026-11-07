@@ -431,6 +431,10 @@ function hreflangPage(
       serve(req, res, (self) => ({
         title: copy.title,
         metaDescription: copy.description,
+        // The page's `<html lang>` is the code it gives itself, so
+        // `hreflang.html-lang-mismatch` stays quiet (26b); `en` when the block
+        // names no self code.
+        htmlLang: block.find(([code, target]) => target === path && code !== "x-default")?.[0],
         headExtra: block.map(([code, target]) => alternate(code, target, self)).join("\n"),
         bodyHtml: article({
           h1: copy.h1,
@@ -1285,7 +1289,7 @@ const badLastmod: Fixture = {
   sitemapLastmod: "2026-13-01",
   category: "sitemap",
   name: "Page whose sitemap entry carries an impossible lastmod",
-  expectedIssues: ["sitemap.lastmod-invalid"],
+  expectedIssues: ["h2.duplicate", "sitemap.lastmod-invalid"],
   exact: true,
   handler: (req, res) =>
     serve(req, res, () => ({

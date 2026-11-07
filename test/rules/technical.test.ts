@@ -1,10 +1,12 @@
 import { describe, expect, it } from "vitest";
 import { buildRegistry } from "../../src/rules/index.js";
+import { IMAGE_ALT_MAX } from "../../src/rules/thresholds.js";
 import { SLOW_MS, technicalRules } from "../../src/rules/page/technical.js";
 import {
   expectSilentOnNonOkFetches,
   expectSilentOnNotJudged,
   mkPage,
+  mkV1Page,
   ruleLookup,
 } from "./mk-page.js";
 
@@ -19,6 +21,10 @@ const BROKEN_TECHNICALS = [
     hasViewport: false,
     imagesMissingDimensions: 2,
     imagesMissingAlt: 1,
+    imagesEmptyAlt: 1,
+    imagesAltTooLong: 1,
+    insecureRefs: { iframe: 0, media: 0, formAction: 0, forms: 1, sample: [] },
+    url: "http://example.com/page",
     responseTimeMs: 4000,
   },
 ];
@@ -31,12 +37,15 @@ const BROKEN_TECHNICALS = [
  * — or null, and pass, on a crawl's first judgement.
  */
 describe("technicalRules metadata", () => {
-  it("defines exactly the four technical page rules", () => {
+  it("defines exactly the seven technical page rules", () => {
     expect(technicalRules.map((r) => r.id).sort()).toEqual(
       [
         "mobile.viewport-missing",
         "images.missing-dimensions",
         "images.missing-alt",
+        "images.empty-alt",
+        "images.alt-too-long",
+        "security.form-insecure",
         "performance.slow-response",
       ].sort(),
     );
@@ -47,6 +56,9 @@ describe("technicalRules metadata", () => {
       "mobile.viewport-missing": ["CHECK-52"],
       "images.missing-dimensions": ["CHECK-49"],
       "images.missing-alt": ["CHECK-49"],
+      "images.empty-alt": ["CHECK-49"],
+      "images.alt-too-long": ["CHECK-49"],
+      "security.form-insecure": ["CHECK-85"],
       "performance.slow-response": ["CHECK-50"],
     });
   });
@@ -56,6 +68,9 @@ describe("technicalRules metadata", () => {
       "mobile.viewport-missing": "critical",
       "images.missing-dimensions": "info",
       "images.missing-alt": "warning",
+      "images.empty-alt": "info",
+      "images.alt-too-long": "info",
+      "security.form-insecure": "warning",
       "performance.slow-response": "warning",
     });
   });
@@ -77,10 +92,19 @@ describe("technicalRules metadata", () => {
     expectSilentOnNonOkFetches(technicalRules, BROKEN_TECHNICALS);
   });
 
+  it("no rule fires on a v1 row (every 26b column null)", () => {
+    for (const r of technicalRules) expect(r.run(mkV1Page()), r.id).toHaveLength(0);
+  });
+
   // PHASE 22 §1: the judged cohort's other two exclusions. A missing viewport
   // on a page nothing indexes is a fact about a URL nobody is served.
-  it("no rule fires on a 200 that is noindexed or canonicalised elsewhere", () => {
-    expectSilentOnNotJudged(technicalRules, BROKEN_TECHNICALS);
+  // `security.form-insecure` is `isAuditable`, not `isJudged`: a form is a fault
+  // of any auditable page, so it is outside this sweep and has its own test.
+  it("no judged rule fires on a 200 that is noindexed or canonicalised elsewhere", () => {
+    expectSilentOnNotJudged(
+      technicalRules.filter((r) => r.id !== "security.form-insecure"),
+      BROKEN_TECHNICALS,
+    );
   });
 });
 
@@ -134,7 +158,7 @@ describe("images.missing-alt", () => {
     const f = rule("images.missing-alt").run(mkPage({ imagesTotal: 4, imagesMissingAlt: 2 }));
     expect(f).toHaveLength(1);
     expect(f[0]!.severity).toBe(rule("images.missing-alt").severity);
-    expect(f[0]!.evidence).toEqual({ imagesMissingAlt: 2, imagesTotal: 4 });
+    expect(f[0]!.evidence).toEqual({ imagesMissingAlt: 2, imagesTotal: 4, sample: [] });
   });
 
   it("boundary: 1 fires, 0 does not", () => {
@@ -146,6 +170,112 @@ describe("images.missing-alt", () => {
     const page = mkPage({ imagesMissingAlt: 2, imagesMissingDimensions: 0 });
     expect(rule("images.missing-alt").run(page)).toHaveLength(1);
     expect(rule("images.missing-dimensions").run(page)).toHaveLength(0);
+  });
+});
+
+describe("images.missing-alt sample (26b)", () => {
+  it("carries the stored sample as an optional column when it is recorded", () => {
+    const r = rule("images.missing-alt");
+    const f = r.run(mkPage({ imagesMissingAlt: 2, imagesMissingAltSample: ["/a.png", "/b.png"] }));
+    expect(f[0]!.evidence).toEqual({
+      imagesMissingAlt: 2,
+      imagesTotal: 5,
+      sample: ["/a.png", "/b.png"],
+    });
+    expect(r.columns.find((c) => c.key === "sample")).toEqual({
+      key: "sample",
+      label: "Images Missing Alt (sample)",
+      optional: true,
+    });
+  });
+
+  it("a v1 row has no sample key at all", () => {
+    const f = rule("images.missing-alt").run(mkV1Page({ imagesMissingAlt: 2 }));
+    expect(f).toHaveLength(1);
+    expect(Object.keys(f[0]!.evidence)).toEqual(["imagesMissingAlt", "imagesTotal"]);
+  });
+});
+
+describe("images.empty-alt", () => {
+  const r = rule("images.empty-alt");
+  it("fires on a positive count and carries the total", () => {
+    const f = r.run(mkPage({ imagesEmptyAlt: 3, imagesTotal: 7 }));
+    expect(f).toHaveLength(1);
+    expect(f[0]!.evidence).toEqual({ imagesEmptyAlt: 3, imagesTotal: 7 });
+  });
+  it("is silent at zero, on a v1 row, and on a page nothing indexes", () => {
+    expect(r.run(mkPage({ imagesEmptyAlt: 0 }))).toEqual([]);
+    expect(r.run(mkV1Page())).toEqual([]);
+    expect(r.run(mkPage({ imagesEmptyAlt: 3, robotsMeta: "noindex", isIndexable: false }))).toEqual([]);
+  });
+});
+
+describe("images.alt-too-long", () => {
+  const r = rule("images.alt-too-long");
+  it("fires on a positive count and carries the limit", () => {
+    const f = r.run(mkPage({ imagesAltTooLong: 2 }));
+    expect(f).toHaveLength(1);
+    expect(f[0]!.evidence).toEqual({ imagesAltTooLong: 2, max: IMAGE_ALT_MAX });
+    expect(IMAGE_ALT_MAX).toBe(100);
+  });
+  it("is silent at zero, on a v1 row, and on a page nothing indexes", () => {
+    expect(r.run(mkPage({ imagesAltTooLong: 0 }))).toEqual([]);
+    expect(r.run(mkV1Page())).toEqual([]);
+    expect(r.run(mkPage({ imagesAltTooLong: 2, robotsMeta: "noindex", isIndexable: false }))).toEqual([]);
+  });
+});
+
+describe("security.form-insecure", () => {
+  const r = rule("security.form-insecure");
+  const refs = (o: Partial<{ formAction: number; forms: number }>) => ({
+    iframe: 0, media: 0, formAction: 0, forms: 0, sample: [] as { kind: "form"; url: string }[], ...o,
+  });
+
+  it("fires on an http page with a form, with no formAction or sample keys when there are none", () => {
+    const f = r.run(mkPage({ url: "http://example.com/contact", insecureRefs: refs({ forms: 2 }) }));
+    expect(f).toHaveLength(1);
+    expect(f[0]!.evidence).toEqual({ pageScheme: "http", forms: 2 });
+  });
+
+  it("fires on an https page whose form posts to http, listing only form entries", () => {
+    const f = r.run(
+      mkPage({
+        insecureRefs: {
+          iframe: 1, media: 0, formAction: 1, forms: 3,
+          sample: [
+            { kind: "iframe", url: "http://x.example/frame" },
+            { kind: "form", url: "http://x.example/post" },
+          ],
+        },
+      }),
+    );
+    expect(f[0]!.evidence).toEqual({
+      pageScheme: "https",
+      formAction: 1,
+      forms: 3,
+      sample: ["http://x.example/post"],
+    });
+  });
+
+  it("is silent on an https page with forms but no http action", () => {
+    expect(r.run(mkPage({ insecureRefs: refs({ forms: 2 }) }))).toEqual([]);
+  });
+
+  it("is silent on an http page with no form, and on a v1 row", () => {
+    expect(r.run(mkPage({ url: "http://example.com/a", insecureRefs: refs({}) }))).toEqual([]);
+    expect(r.run(mkV1Page({ url: "http://example.com/a" }))).toEqual([]);
+  });
+
+  it("still fires on an auditable page nothing indexes (isAuditable, not isJudged)", () => {
+    const f = r.run(
+      mkPage({
+        url: "http://example.com/a",
+        robotsMeta: "noindex",
+        isIndexable: false,
+        insecureRefs: refs({ forms: 1 }),
+      }),
+    );
+    expect(f).toHaveLength(1);
   });
 });
 

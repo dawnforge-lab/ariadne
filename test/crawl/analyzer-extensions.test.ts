@@ -1,14 +1,33 @@
 import { describe, expect, it } from "vitest";
 import {
   analyzePage,
+  MAX_LD_JSON_NESTING,
+  MAX_SOCIAL_IMAGE_REFS,
+  shareImageRef,
   SOFT_404_PHRASES,
 } from "../../src/crawl/parse/page-analyzer.js";
 import { simhash64, hammingDistance } from "../../src/crawl/parse/simhash.js";
+import {
+  ALT_TEXT_LONG_CHARS,
+  ARIA_LABEL_MAX,
+  H2_TEXT_MAX,
+  HTML_LANG_MAX,
+  IMAGE_SAMPLE_MAX,
+  IMAGE_SAMPLE_SRC_MAX,
+  INSECURE_SAMPLE_MAX,
+  INSECURE_SAMPLE_URL_MAX,
+  ROBOTS_META_CONTENT_MAX,
+  ROBOTS_METAS_MAX,
+  SOCIAL_TEXT_MAX,
+  SOCIAL_URL_MAX,
+} from "../../src/crawl/parse/page-facts.js";
 import {
   P7_HIDDEN_CHROME_BODY,
   P7_RENDERABLE_WORD_COUNT,
   P7_WORD_COUNT,
 } from "../fixtures/pages/authored-p7.js";
+import { SHARED_IMAGE_PATH } from "../fixtures/assets.js";
+import { renderDocument } from "../fixtures/render.js";
 
 const HTML = `<!doctype html><html><head>
 <title>P2</title>
@@ -205,6 +224,35 @@ describe("JSON-LD capture", () => {
     );
     expect(a.structuredData.map((b) => b.type)).toEqual(["Article"]);
     expect(a.structuredDataParseErrors).toBe(1);
+  });
+  it("refuses a block nested deeper than MAX_LD_JSON_NESTING as a parse error (R11)", () => {
+    const nested = (depth: number) =>
+      `{"@type":"X","a":${"[".repeat(depth - 1)}${"]".repeat(depth - 1)}}`;
+    // The object is level 1, so `depth - 1` arrays put the deepest at `depth`.
+    const atCap = analyzePage(
+      `<script type="application/ld+json">${nested(MAX_LD_JSON_NESTING)}</script>`,
+      "https://ex.com/",
+    );
+    expect(atCap.structuredData.map((b) => b.type)).toEqual(["X"]);
+    expect(atCap.structuredDataParseErrors).toBe(0);
+    for (const depth of [MAX_LD_JSON_NESTING + 1, 5_000]) {
+      const a = analyzePage(
+        `<script type="application/ld+json">${nested(depth)}</script>` +
+          `<script type="application/ld+json">{"@type":"Article"}</script>`,
+        "https://ex.com/",
+      );
+      expect(a.structuredData.map((b) => b.type), String(depth)).toEqual(["Article"]);
+      expect(a.structuredDataParseErrors, String(depth)).toBe(1);
+    }
+  });
+  it("counts nesting outside string literals only, escapes included", () => {
+    const deepInString = `{"@type":"X","s":"${"[".repeat(200)}\\"${"{".repeat(200)}"}`;
+    const a = analyzePage(
+      `<script type="application/ld+json">${deepInString}</script>`,
+      "https://ex.com/",
+    );
+    expect(a.structuredData.map((b) => b.type)).toEqual(["X"]);
+    expect(a.structuredDataParseErrors).toBe(0);
   });
   it("does not treat JSON-LD text as visible content", () => {
     const a = analyzePage(
@@ -1000,5 +1048,808 @@ describe("placeholderSnippet: the evidence for hasLoremIpsum", () => {
       const a = page(html);
       expect(a.placeholderSnippet === null, html).toBe(!a.hasLoremIpsum);
     }
+  });
+});
+
+/**
+ * Phase 26b (extraction version 2): the head facts and the social set. Each
+ * `describe` is one fact; the shapes and caps are src/crawl/parse/page-facts.ts.
+ */
+const P26B_URL = "https://ex.com/blog/post";
+function headPage(head: string, bodyHtml = "<p>body text</p>", htmlTag = "<html>") {
+  return analyzePage(
+    `<!doctype html>${htmlTag}<head>${head}</head><body>${bodyHtml}</body></html>`,
+    P26B_URL,
+  );
+}
+
+describe("htmlLang: the first <html> start tag's lang", () => {
+  it("is trimmed", () => {
+    expect(headPage("<title>t</title>", "<p>x</p>", `<html lang=" en-GB ">`).htmlLang).toBe("en-GB");
+  });
+
+  it("is null when the attribute is absent or blank", () => {
+    expect(headPage("<title>t</title>").htmlLang).toBeNull();
+    expect(headPage("<title>t</title>", "<p>x</p>", `<html lang="  ">`).htmlLang).toBeNull();
+  });
+
+  it("reads the first <html> tag only", () => {
+    const a = analyzePage(`<html lang="de"><html lang="fr"><body>x</body></html>`, P26B_URL);
+    expect(a.htmlLang).toBe("de");
+  });
+
+  it("is capped at HTML_LANG_MAX", () => {
+    const a = headPage("", "<p>x</p>", `<html lang="${"x".repeat(HTML_LANG_MAX + 40)}">`);
+    expect(a.htmlLang).toHaveLength(HTML_LANG_MAX);
+  });
+});
+
+describe("social: the Open Graph and X set", () => {
+  it("records first values, per-tag counts and a conflicting tag", () => {
+    const a = headPage(
+      `<meta property="og:title" content=" First ">` +
+        `<meta property="og:title" content="Second">` +
+        `<meta property="og:title" content="First">` +
+        `<meta property="og:type" content="website">` +
+        `<meta name="twitter:card" content="summary">`,
+    );
+    expect(a.social).toEqual({
+      og: { title: "First", type: "website" },
+      x: { card: "summary" },
+      counts: { "og:title": 3, "og:type": 1, "twitter:card": 1 },
+      conflicting: ["og:title"],
+      outsideHead: false,
+      xViaProperty: false,
+      imageRefs: { og: null, x: null },
+    });
+  });
+
+  it("fills the legacy og columns from the element the social set reads (PR #23 P9)", () => {
+    // `name=` as well as `property=`, the FIRST element naming the tag, the
+    // value untrimmed as the column always stored it, null with no content.
+    const a = headPage(
+      `<meta name="og:title" content=" Named title ">` +
+        `<meta property="og:title" content="Second title">` +
+        `<meta name="description" property="og:description" content=" Both ">` +
+        `<meta name="og:image">` +
+        `<meta property="og:image" content="https://ex.com/later.png">`,
+    );
+    expect(a.ogTitle).toBe(" Named title ");
+    expect(a.metaDescription).toBe("Both");
+    expect(a.ogDescription).toBe(" Both ");
+    expect(a.ogImage).toBeNull();
+    expect(a.social?.og).toMatchObject({ title: "Named title", description: "Both", image: "" });
+    // The property= form is unchanged.
+    const b = headPage(`<meta property="og:title" content="T"><meta property="og:image" content="/i.png">`);
+    expect([b.ogTitle, b.ogDescription, b.ogImage]).toEqual(["T", null, "/i.png"]);
+  });
+
+  it("does not call a repeated tag with one trimmed value conflicting", () => {
+    const a = headPage(
+      `<meta property="og:url" content="https://ex.com/a">` +
+        `<meta property="og:url" content=" https://ex.com/a ">`,
+    );
+    expect(a.social?.counts["og:url"]).toBe(2);
+    expect(a.social?.conflicting).toEqual([]);
+  });
+
+  it("sorts the conflicting list", () => {
+    const a = headPage(
+      `<meta name="twitter:title" content="a"><meta name="twitter:title" content="b">` +
+        `<meta property="og:description" content="a"><meta property="og:description" content="b">`,
+    );
+    expect(a.social?.conflicting).toEqual(["og:description", "twitter:title"]);
+  });
+
+  it("reads twitter:* given as property=, and says so", () => {
+    const a = headPage(`<meta property="twitter:card" content="summary_large_image">`);
+    expect(a.social?.x.card).toBe("summary_large_image");
+    expect(a.social?.xViaProperty).toBe(true);
+  });
+
+  it("does not raise xViaProperty for twitter:* given as name=", () => {
+    expect(headPage(`<meta name="twitter:card" content="summary">`).social?.xViaProperty).toBe(false);
+  });
+
+  it("reads og:* given as name=", () => {
+    const a = headPage(`<meta name="og:title" content="By name">`);
+    expect(a.social?.og.title).toBe("By name");
+    expect(a.social?.counts["og:title"]).toBe(1);
+  });
+
+  it("folds the case of the tag name", () => {
+    const a = headPage(`<meta property="OG:Title" content="Folded">`);
+    expect(a.social?.og.title).toBe("Folded");
+  });
+
+  it("records a tag with no content attribute as present and empty", () => {
+    const a = headPage(`<meta property="og:title"><meta property="og:title" content="Later">`);
+    expect(a.social?.og.title).toBe("");
+    expect(a.social?.counts["og:title"]).toBe(2);
+    expect(a.social?.conflicting).toEqual(["og:title"]);
+  });
+
+  it("raises outsideHead for a social tag in the body", () => {
+    const a = headPage(
+      `<meta property="og:title" content="In head">`,
+      `<div>x</div><meta property="og:image" content="https://ex.com/i.png">`,
+    );
+    expect(a.social?.outsideHead).toBe(true);
+    expect(a.social?.og.image).toBe("https://ex.com/i.png");
+  });
+
+  it("keeps outsideHead false when every tag is in the head", () => {
+    expect(headPage(`<meta property="og:title" content="t">`).social?.outsideHead).toBe(false);
+  });
+
+  it("resolves an absolute http(s) og:image into socialImageRefs", () => {
+    const a = headPage(`<meta property="og:image" content=" HTTPS://Ex.com/img/share.png ">`);
+    expect(a.social?.og.image).toBe("HTTPS://Ex.com/img/share.png");
+    expect(a.socialImageRefs).toEqual(["https://ex.com/img/share.png"]);
+  });
+
+  it("refs no relative or non-http(s) share image, keeping the raw value in social", () => {
+    // `social.image-broken` reports these as relative / invalid from the stored
+    // value and never reads a fetch, so no `resources` row is spent on them.
+    const a = headPage(
+      `<meta property="og:image" content="/og.png">` +
+        `<meta name="twitter:image" content="ftp://x/a.png">`,
+    );
+    expect(a.social?.og.image).toBe("/og.png");
+    expect(a.social?.x.image).toBe("ftp://x/a.png");
+    expect(a.social?.imageRefs).toEqual({ og: null, x: null });
+    expect(a.socialImageRefs).toEqual([]);
+    for (const value of ["//cdn.ex.com/a.png", "og.png", "mailto:a@b.c", "httpx://a/b.png"]) {
+      expect(shareImageRef(value, "https://ex.com/"), value).toBeNull();
+    }
+    expect(shareImageRef("Http://ex.com/a.png", "https://ex.com/")).toBe("http://ex.com/a.png");
+  });
+
+  it("refs only the two judged images: the FIRST og:image and the FIRST twitter:image", () => {
+    // Final review I1: an og:image array (a product gallery) must not crowd out
+    // the twitter:image `social.image-broken` judges, nor spend fetches on
+    // alternates no rule reads.
+    const a = headPage(
+      `<meta property="og:image" content="https://ex.com/1.png">` +
+        `<meta property="og:image" content="https://ex.com/2.png">` +
+        `<meta property="og:image" content="https://ex.com/3.png">` +
+        `<meta property="og:image" content="https://ex.com/4.png">` +
+        `<meta name="twitter:image" content="https://ex.com/x.png">`,
+    );
+    expect(a.socialImageRefs).toEqual(["https://ex.com/1.png", "https://ex.com/x.png"]);
+    expect(a.social?.imageRefs).toEqual({ og: "https://ex.com/1.png", x: "https://ex.com/x.png" });
+    expect(MAX_SOCIAL_IMAGE_REFS).toBe(2);
+    expect(a.resourceRefs).toEqual([]);
+  });
+
+  it("dedupes the two refs when both tags name one file", () => {
+    const a = headPage(
+      `<meta property="og:image" content="https://ex.com/1.png">` +
+        `<meta name="twitter:image" content="https://ex.com/1.png#frag">`,
+    );
+    expect(a.socialImageRefs).toEqual(["https://ex.com/1.png"]);
+    expect(a.social?.imageRefs).toEqual({ og: "https://ex.com/1.png", x: "https://ex.com/1.png" });
+  });
+
+  it("refs nothing for a tag whose FIRST value is empty, even if a later one is not", () => {
+    const a = headPage(
+      `<meta property="og:image" content=""><meta property="og:image" content="https://ex.com/later.png">`,
+    );
+    expect(a.social?.og.image).toBe("");
+    expect(a.social?.imageRefs).toEqual({ og: null, x: null });
+    expect(a.socialImageRefs).toEqual([]);
+  });
+
+  it("resolves a share image over SOCIAL_URL_MAX from its whole value, not the capped one", () => {
+    const long = `https://ex.com/og/${"u".repeat(1_500)}.png`;
+    const a = headPage(`<meta property="og:image" content="${long}">`);
+    expect(a.social?.og.image).toHaveLength(SOCIAL_URL_MAX);
+    expect(a.social?.imageRefs.og).toBe(long);
+    expect(a.socialImageRefs).toEqual([long]);
+  });
+
+  it("skips an image value that names no fetchable file, keeping it in social", () => {
+    const a = headPage(
+      `<meta property="og:image" content="data:image/png;base64,AAAA">` +
+        `<meta name="twitter:image" content="  ">` +
+        `<meta name="twitter:image" content="#top">`,
+    );
+    expect(a.socialImageRefs).toEqual([]);
+    expect(a.social?.imageRefs).toEqual({ og: null, x: null });
+    expect(a.social?.og.image).toBe("data:image/png;base64,AAAA");
+    expect(a.social?.x.image).toBe("");
+  });
+
+  it("caps text values at SOCIAL_TEXT_MAX and URL values at SOCIAL_URL_MAX", () => {
+    const longText = "t".repeat(SOCIAL_TEXT_MAX + 50);
+    const longUrl = `https://ex.com/${"u".repeat(SOCIAL_URL_MAX + 50)}`;
+    const a = headPage(
+      `<meta property="og:title" content="${longText}">` +
+        `<meta property="og:url" content="${longUrl}">`,
+    );
+    expect(a.social?.og.title).toHaveLength(SOCIAL_TEXT_MAX);
+    expect(a.social?.og.url).toHaveLength(SOCIAL_URL_MAX);
+  });
+
+  it("is null when the page carries no social tag", () => {
+    expect(headPage(`<title>t</title><meta name="description" content="d">`).social).toBeNull();
+    expect(headPage(`<title>t</title>`).socialImageRefs).toEqual([]);
+  });
+
+  it("ignores social tags inside <noscript>, as every meta is", () => {
+    expect(headPage(`<noscript><meta property="og:title" content="x"></noscript>`).social).toBeNull();
+  });
+
+  it("reads ogTitle / ogDescription / ogImage from the first element naming the tag, raw", () => {
+    // PR #23 review: `name=` counts as `property=` does, as in the social set.
+    const a = headPage(
+      `<meta name="og:title" content="by name">` +
+        `<meta property="og:title" content=" raw ">` +
+        `<meta property="og:image" content="/i.png">`,
+    );
+    expect(a.ogTitle).toBe("by name");
+    expect(a.ogImage).toBe("/i.png");
+    expect(a.ogDescription).toBeNull();
+  });
+});
+
+describe("h2Text: the first <h2>'s words", () => {
+  it("collapses whitespace and reads through inline markup", () => {
+    expect(headPage("", `<h2> A <b>b</b> </h2><h2>second</h2>`).h2Text).toBe("A b");
+  });
+
+  it("is null without an h2 and empty for an empty one", () => {
+    expect(headPage("", `<p>x</p>`).h2Text).toBeNull();
+    expect(headPage("", `<h2></h2>`).h2Text).toBe("");
+  });
+
+  it("caps at H2_TEXT_MAX", () => {
+    expect(headPage("", `<h2>${"w".repeat(H2_TEXT_MAX + 100)}</h2>`).h2Text).toHaveLength(H2_TEXT_MAX);
+  });
+
+  it("does not disturb h1Text", () => {
+    const a = headPage("", `<h1>One</h1><h2>Two</h2>`);
+    expect(a.h1Text).toBe("One");
+    expect(a.h2Text).toBe("Two");
+  });
+});
+
+describe("titleCount / metaDescriptionCount", () => {
+  it("counts every element", () => {
+    const a = headPage(
+      `<title>a</title><title>b</title>` +
+        `<meta name="description" content="a"><meta name="Description" content="b">`,
+    );
+    expect(a.titleCount).toBe(2);
+    expect(a.metaDescriptionCount).toBe(2);
+  });
+
+  it("is zero, not null, when there are none", () => {
+    const a = headPage("");
+    expect(a.titleCount).toBe(0);
+    expect(a.metaDescriptionCount).toBe(0);
+  });
+
+  it("does not count an <svg> title", () => {
+    const a = headPage(`<title>a</title>`, `<svg><title>icon</title></svg>`);
+    expect(a.titleCount).toBe(1);
+  });
+});
+
+describe("robots metas", () => {
+  it("joins every robots meta and records the bot-specific ones apart", () => {
+    const a = headPage(
+      `<meta name="robots" content="index">` +
+        `<meta name="robots" content="noarchive">` +
+        `<meta name="googlebot" content="noindex">`,
+    );
+    expect(a.robotsMeta).toBe("index, noarchive");
+    expect(a.robotsMetas).toEqual([{ name: "googlebot", content: "noindex" }]);
+  });
+
+  it("keeps robotsMeta null with no robots meta, and robotsMetas empty", () => {
+    const a = headPage(`<title>t</title>`);
+    expect(a.robotsMeta).toBeNull();
+    expect(a.robotsMetas).toEqual([]);
+  });
+
+  it("keeps robotsOutsideHead about the FIRST robots meta", () => {
+    const a = headPage(
+      `<meta name="robots" content="index">`,
+      `<div>x</div><meta name="robots" content="noindex">`,
+    );
+    expect(a.robotsMeta).toBe("index, noindex");
+    expect(a.robotsOutsideHead).toBe(false);
+  });
+
+  it("lower-cases the bot name, keeps document order and caps count and content", () => {
+    const metas = Array.from(
+      { length: ROBOTS_METAS_MAX + 3 },
+      (_, i) => `<meta name="${i % 2 === 0 ? "Bingbot" : "googlebot-news"}" content="c${i}">`,
+    ).join("");
+    const a = headPage(metas);
+    expect(a.robotsMetas).toHaveLength(ROBOTS_METAS_MAX);
+    expect(a.robotsMetas[0]).toEqual({ name: "bingbot", content: "c0" });
+    expect(a.robotsMetas[1]).toEqual({ name: "googlebot-news", content: "c1" });
+    const long = headPage(
+      `<meta name="googlebot" content="${"n".repeat(ROBOTS_META_CONTENT_MAX + 9)}">`,
+    );
+    expect(long.robotsMetas[0]?.content).toHaveLength(ROBOTS_META_CONTENT_MAX);
+  });
+
+  it("ignores names that are not robots-class", () => {
+    expect(headPage(`<meta name="robotsx" content="noindex">`).robotsMetas).toEqual([]);
+  });
+
+  it("ignores robots metas inside <noscript>", () => {
+    const a = headPage(
+      `<noscript><meta name="robots" content="noindex"><meta name="googlebot" content="noindex"></noscript>`,
+    );
+    expect(a.robotsMeta).toBeNull();
+    expect(a.robotsMetas).toEqual([]);
+  });
+});
+
+describe("the fixture site's default social set reads as complete and consistent", () => {
+  it("carries every tag the social rules ask for, once, in the head", () => {
+    const self = "http://127.0.0.1:4000/authored/control";
+    const a = analyzePage(
+      renderDocument({ title: "Control page", canonical: self, bodyHtml: "<p>x</p>" }, self),
+      self,
+    );
+    expect(a.htmlLang).toBe("en");
+    expect(a.social).toEqual({
+      og: {
+        title: "Control page",
+        type: "website",
+        url: self,
+        image: `http://127.0.0.1:4000${SHARED_IMAGE_PATH}`,
+      },
+      x: { card: "summary_large_image", title: "Control page" },
+      counts: {
+        "og:title": 1, "og:type": 1, "og:url": 1, "og:image": 1,
+        "twitter:card": 1, "twitter:title": 1,
+      },
+      conflicting: [],
+      outsideHead: false,
+      xViaProperty: false,
+      imageRefs: { og: `http://127.0.0.1:4000${SHARED_IMAGE_PATH}`, x: null },
+    });
+    expect(a.socialImageRefs).toEqual([`http://127.0.0.1:4000${SHARED_IMAGE_PATH}`]);
+  });
+
+  it("renders none with social: false", () => {
+    const self = "http://127.0.0.1:4000/x";
+    const a = analyzePage(renderDocument({ title: "t", social: false, bodyHtml: "" }, self), self);
+    expect(a.social).toBeNull();
+  });
+});
+
+describe("metaRefresh: the <meta http-equiv=refresh> a browser acts on", () => {
+  it("parses the delay and resolves the target", () => {
+    const a = headPage(`<meta http-equiv="Refresh" content="0;url=/x">`);
+    expect(a.metaRefresh).toEqual({ raw: "0;url=/x", delaySeconds: 0, target: "https://ex.com/x" });
+  });
+
+  it("takes the first of two", () => {
+    const a = headPage(
+      `<meta http-equiv="refresh" content="5"><meta http-equiv="refresh" content="0;url=/y">`,
+    );
+    expect(a.metaRefresh).toEqual({ raw: "5", delaySeconds: 5, target: null });
+  });
+
+  it("is null when there is none", () => {
+    expect(headPage(`<meta http-equiv="content-type" content="text/html">`).metaRefresh).toBeNull();
+  });
+
+  // HTML Standard: an empty content returns before the refresh steps, and a
+  // value the steps refuse leaves "will declaratively refresh" false, so the
+  // browser acts on a LATER valid refresh (PR #23 re-review, minor 1).
+  it("skips a first refresh that is not a refresh and takes the later valid one", () => {
+    const a = headPage(
+      `<meta http-equiv="refresh" content="5abc"><meta http-equiv="refresh" content="0;url=/next">`,
+    );
+    expect(a.metaRefresh).toEqual({ raw: "0;url=/next", delaySeconds: 0, target: "https://ex.com/next" });
+  });
+
+  it("skips an empty content", () => {
+    const a = headPage(
+      `<meta http-equiv="refresh" content=""><meta http-equiv="refresh" content="0;url=/next">`,
+    );
+    expect(a.metaRefresh).toEqual({ raw: "0;url=/next", delaySeconds: 0, target: "https://ex.com/next" });
+    expect(headPage(`<meta http-equiv="refresh" content="">`).metaRefresh).toBeNull();
+  });
+
+  it("keeps the first refused value as evidence when no refresh parses", () => {
+    const a = headPage(
+      `<meta http-equiv="refresh" content="abc"><meta http-equiv="refresh" content="5xyz">`,
+    );
+    expect(a.metaRefresh).toEqual({ raw: "abc", delaySeconds: null, target: null });
+  });
+});
+
+/**
+ * Ruling R6 (Task 2 review): repeated identical robots metas collapse, and one
+ * meta naming a twitter: tag by name= and an og: tag by property= is both.
+ */
+describe("ruling R6: robots dedupe and one element naming two social tags", () => {
+  it("drops identical robots contents (after trim), keeping first-seen order and every directive", () => {
+    const a = headPage(
+      `<meta name="robots" content="index, follow">` +
+        `<meta name="robots" content=" index, follow ">` +
+        `<meta name="robots" content="noarchive">` +
+        `<meta name="robots" content="index, follow">`,
+      `<div>x</div><meta name="robots" content="noindex">`,
+    );
+    expect(a.robotsMeta).toBe("index, follow, noarchive, noindex");
+  });
+
+  it("keeps a single robots content raw, as before", () => {
+    expect(headPage(`<meta name="robots" content=" noindex ">`).robotsMeta).toBe(" noindex ");
+  });
+
+  it("records <meta name=twitter:title property=og:title> as both tags", () => {
+    const a = headPage(`<meta name="twitter:title" property="og:title" content="x">`);
+    expect(a.social?.og.title).toBe("x");
+    expect(a.social?.x.title).toBe("x");
+    expect(a.social?.counts).toEqual({ "og:title": 1, "twitter:title": 1 });
+    expect(a.social?.xViaProperty).toBe(false);
+  });
+
+  it("still counts an element naming one tag twice once", () => {
+    const a = headPage(`<meta name="og:title" property="og:title" content="x">`);
+    expect(a.social?.counts).toEqual({ "og:title": 1 });
+    const b = headPage(`<meta name="twitter:card" property="twitter:card" content="summary">`);
+    expect(b.social?.counts).toEqual({ "twitter:card": 1 });
+    expect(b.social?.xViaProperty).toBe(false);
+  });
+});
+
+/**
+ * Phase 26b, Task 3: the body facts — anchor counts, image alt in anchor text,
+ * rel next/prev counts, insecure references and the image alt facts.
+ */
+function bodyPage(bodyHtml: string, url = P26B_URL) {
+  return analyzePage(
+    `<!doctype html><html><head><title>t</title></head><body>${bodyHtml}</body></html>`,
+    url,
+  );
+}
+const NO_ANCHORS = { noHref: 0, javascript: 0, hashOnly: 0, emptyHref: 0, unsafeBlank: 0 };
+const NO_INSECURE = { iframe: 0, media: 0, formAction: 0, forms: 0, sample: [] };
+
+describe("anchorCounts: anchors that are not links (review focus 4)", () => {
+  it("does not count a bookmark: <a name> and <a id> carry no href and no link role", () => {
+    expect(bodyPage(`<a name="top"></a><a id="x">y</a>`).anchorCounts).toEqual(NO_ANCHORS);
+  });
+
+  it("counts an href-less anchor with onclick, role=link or role=button", () => {
+    const a = bodyPage(
+      `<a onclick="go()">a</a><a role="LINK">b</a><a role=" button ">c</a><a role="tab">d</a>`,
+    );
+    expect(a.anchorCounts).toEqual({ ...NO_ANCHORS, noHref: 3 });
+  });
+
+  it("does not call #section hash-only; # and #! are", () => {
+    const a = bodyPage(`<a href="#section">s</a><a href="#">h</a><a href=" #! ">b</a>`);
+    expect(a.anchorCounts).toEqual({ ...NO_ANCHORS, hashOnly: 2 });
+  });
+
+  it("counts ' JavaScript:void(0)' as javascript", () => {
+    const a = bodyPage(`<a href=" JavaScript:void(0)">x</a><a href="javascript:go()">y</a>`);
+    expect(a.anchorCounts).toEqual({ ...NO_ANCHORS, javascript: 2 });
+  });
+
+  it("counts href=\"\" as emptyHref, not noHref", () => {
+    const a = bodyPage(`<a href="">x</a><a href="   ">y</a>`);
+    expect(a.anchorCounts).toEqual({ ...NO_ANCHORS, emptyHref: 2 });
+  });
+
+  it("does not call target=_BLANK with rel=noopener unsafe", () => {
+    expect(bodyPage(`<a target="_BLANK" rel="noopener" href="/x">x</a>`).anchorCounts).toEqual(
+      NO_ANCHORS,
+    );
+  });
+
+  it("counts target=_blank without noopener/noreferrer as unsafe, never on a javascript: or missing href", () => {
+    const a = bodyPage(
+      `<a target="_blank" href="https://o.test/">a</a>` +
+        `<a target="_blank" rel="nofollow NoReferrer" href="https://o.test/b">b</a>` +
+        `<a target="_blank" rel="nofollow" href="https://o.test/c">c</a>` +
+        `<a target="_blank" href="javascript:void(0)">d</a>` +
+        `<a target="_blank">e</a>` +
+        `<a target="_self" href="https://o.test/f">f</a>`,
+    );
+    expect(a.anchorCounts).toEqual({ ...NO_ANCHORS, javascript: 1, unsafeBlank: 2 });
+  });
+
+  // Owner call O2 (2026-11-07): reverse tabnabbing needs the opened page on
+  // another origin, so only a cross-origin target counts (exact `origin`).
+  it("does not count a same-origin target=_blank without noopener (O2)", () => {
+    const a = bodyPage(
+      `<a target="_blank" href="/same">a</a>` +
+        `<a target="_blank" href="https://ex.com/other">b</a>` +
+        `<a target="_blank" href="?q=1">c</a>`,
+    );
+    expect(a.anchorCounts).toEqual(NO_ANCHORS);
+  });
+
+  it("counts a cross-origin target=_blank, a subdomain and a www. variant included (O2)", () => {
+    const a = bodyPage(
+      `<a target="_blank" href="https://other.test/x">a</a>` +
+        `<a target="_blank" href="https://returns.ex.com/x">b</a>` +
+        `<a target="_blank" href="https://www.ex.com/x">c</a>` +
+        `<a target="_blank" href="http://ex.com/x">d</a>` +
+        `<a target="_blank" href="https://ex.com:8443/x">e</a>`,
+    );
+    expect(a.anchorCounts).toEqual({ ...NO_ANCHORS, unsafeBlank: 5 });
+  });
+
+  it("does not count a cross-origin target=_blank with rel=noopener, nor an href that does not resolve (O2)", () => {
+    const a = bodyPage(
+      `<a target="_blank" rel="noopener" href="https://other.test/x">a</a>` +
+        `<a target="_blank" href="https://[bad/x">b</a>` +
+        `<a target="_blank" href="mailto:a@other.test">c</a>`,
+    );
+    expect(a.anchorCounts).toEqual(NO_ANCHORS);
+  });
+
+  it("ignores anchors inside <noscript>", () => {
+    expect(
+      bodyPage(`<noscript><a href="#">x</a><a onclick="y">y</a></noscript>`).anchorCounts,
+    ).toEqual(NO_ANCHORS);
+  });
+});
+
+describe("anchor text takes an image's alt", () => {
+  it("gives the alt as the anchor of an image link", () => {
+    const a = bodyPage(`<a href="/x"><img src="a.png" alt="Logo"></a>`);
+    expect(a.links).toHaveLength(1);
+    expect(a.links[0]?.anchor).toBe("Logo");
+  });
+
+  it("gives an empty anchor when the image has no alt", () => {
+    expect(bodyPage(`<a href="/x"><img src="a.png"></a>`).links[0]?.anchor).toBe("");
+  });
+
+  it("trims the alt and ignores a blank one", () => {
+    expect(bodyPage(`<a href="/x"><img src="a.png" alt="  Home  "></a>`).links[0]?.anchor).toBe(
+      "Home",
+    );
+    expect(bodyPage(`<a href="/x"><img src="a.png" alt="   "></a>`).links[0]?.anchor).toBe("");
+  });
+
+  it("separates an alt from the anchor's text around it (final review I2)", () => {
+    expect(bodyPage(`<a href="/x">Home<img alt="Logo"></a>`).links[0]?.anchor).toBe("Home Logo");
+    expect(bodyPage(`<a href="/x"><img alt="Logo">Home</a>`).links[0]?.anchor).toBe("Logo Home");
+    expect(bodyPage(`<a href="/x"><img alt="A"><img alt="B"></a>`).links[0]?.anchor).toBe("A B");
+    expect(bodyPage(`<a href="/x"><img alt="Logo"></a>`).links[0]?.anchor).toBe("Logo");
+    expect(bodyPage(`<a href="/x">Home</a>`).links[0]?.anchor).toBe("Home");
+  });
+
+  it("does not take the alt of an image outside any anchor", () => {
+    const a = bodyPage(`<img src="a.png" alt="Loose"><a href="/x">Text</a>`);
+    expect(a.links[0]?.anchor).toBe("Text");
+  });
+});
+
+describe("a link's aria-label (owner call O1)", () => {
+  it("records the trimmed aria-label beside the anchor", () => {
+    const [link] = bodyPage(`<a href="/cart" aria-label="  Shopping cart "><svg></svg></a>`).links;
+    expect(link?.anchor).toBe("");
+    expect(link?.ariaLabel).toBe("Shopping cart");
+  });
+
+  it("is null when the attribute is absent or blank", () => {
+    const a = bodyPage(`<a href="/a">A</a><a href="/b" aria-label="   ">B</a><a href="/c" aria-label="">C</a>`);
+    expect(a.links.map((l) => l.ariaLabel)).toEqual([null, null, null]);
+  });
+
+  it("keeps text and aria-label apart: the label never enters the anchor", () => {
+    const [link] = bodyPage(`<a href="/x" aria-label="Account">Sign in</a>`).links;
+    expect(link?.anchor).toBe("Sign in");
+    expect(link?.ariaLabel).toBe("Account");
+  });
+
+  it("takes the label from the element that supplies the anchor: the first link to a target", () => {
+    const a = bodyPage(`<a href="/x">First</a><a href="/x" aria-label="Second">Second</a>`);
+    expect(a.links).toHaveLength(1);
+    expect(a.links[0]).toMatchObject({ anchor: "First", ariaLabel: null });
+    const b = bodyPage(`<a href="/y" aria-label="First"></a><a href="/y">Second</a>`);
+    expect(b.links[0]).toMatchObject({ anchor: "", ariaLabel: "First" });
+  });
+
+  it("cuts the label at ARIA_LABEL_MAX on a code point", () => {
+    const long = "l".repeat(ARIA_LABEL_MAX - 1) + "\u{1F600}" + "tail";
+    const [link] = bodyPage(`<a href="/x" aria-label="${long}"></a>`).links;
+    expect(link?.ariaLabel).toBe("l".repeat(ARIA_LABEL_MAX - 1));
+    const exact = "m".repeat(ARIA_LABEL_MAX + 50);
+    expect(bodyPage(`<a href="/x" aria-label="${exact}"></a>`).links[0]?.ariaLabel).toBe(
+      "m".repeat(ARIA_LABEL_MAX),
+    );
+  });
+
+  it("makes the label storable: no U+0000 reaches the row", () => {
+    expect(bodyPage(`<a href="/x" aria-label="a\u0000b"></a>`).links[0]?.ariaLabel).toBe("a\u2400b");
+  });
+});
+
+describe("relNextCount / relPrevCount: every rel next/prev link", () => {
+  it("counts each, with or without href, and keeps the first-only relNext", () => {
+    const a = headPage(
+      `<link rel="next" href="/2"><link rel="next" href="/3"><link rel="prev">` +
+        `<link rel="Prev prefetch" href="/0">`,
+    );
+    expect(a.relNextCount).toBe(2);
+    expect(a.relNext).toBe("/2");
+    expect(a.relPrevCount).toBe(2);
+    expect(a.relPrev).toBeNull();
+  });
+
+  it("is zero, not null, without any", () => {
+    const a = headPage(`<title>t</title>`);
+    expect(a.relNextCount).toBe(0);
+    expect(a.relPrevCount).toBe(0);
+  });
+});
+
+describe("insecureRefs: http: references from iframes, media and forms", () => {
+  it("counts the brief's page on https", () => {
+    const a = bodyPage(
+      `<iframe src="http://x.test/a"></iframe>` +
+        `<video><source src="http://x.test/v.mp4"></video>` +
+        `<form action="http://x.test/post"></form><form action="/ok"></form>`,
+      "https://s.test/",
+    );
+    expect(a.insecureRefs).toEqual({
+      iframe: 1,
+      media: 1,
+      formAction: 1,
+      forms: 2,
+      sample: [
+        { kind: "iframe", url: "http://x.test/a" },
+        { kind: "media", url: "http://x.test/v.mp4" },
+        { kind: "form", url: "http://x.test/post" },
+      ],
+    });
+  });
+
+  it("reads every media site and none outside the closed list", () => {
+    const a = bodyPage(
+      `<video src="http://m.test/1" poster="http://m.test/2"></video>` +
+        `<audio src="http://m.test/3"><source src="http://m.test/4"></audio>` +
+        `<track src="http://m.test/5"><embed src="http://m.test/6">` +
+        `<object data="http://m.test/7"></object>` +
+        `<picture><source srcset="http://m.test/p.png" src="http://m.test/p2.png"></picture>` +
+        `<img src="http://m.test/i.png"><script src="http://m.test/s.js"></script>`,
+      "https://s.test/",
+    );
+    expect(a.insecureRefs?.media).toBe(7);
+    expect(a.insecureRefs?.sample.map((s) => s.url)).toEqual(
+      [1, 2, 3, 4, 5, 6, 7].map((n) => `http://m.test/${n}`),
+    );
+  });
+
+  it("does not count https:, protocol-relative on https, data: or javascript: references", () => {
+    const a = bodyPage(
+      `<iframe src="https://x.test/"></iframe><iframe src="//x.test/rel"></iframe>` +
+        `<embed src="data:video/mp4;base64,AAAA"><form action="javascript:void(0)"></form><form></form>`,
+      "https://s.test/",
+    );
+    expect(a.insecureRefs).toEqual({ ...NO_INSECURE, forms: 2 });
+  });
+
+  it("records relative references on an http page — the rules decide by the page's scheme", () => {
+    const a = bodyPage(`<iframe src="/frame"></iframe><form action="/post"></form>`, "http://s.test/");
+    expect(a.insecureRefs).toEqual({
+      iframe: 1,
+      media: 0,
+      formAction: 1,
+      forms: 1,
+      sample: [
+        { kind: "iframe", url: "http://s.test/frame" },
+        { kind: "form", url: "http://s.test/post" },
+      ],
+    });
+  });
+
+  it("caps the sample at INSECURE_SAMPLE_MAX per kind while the counters stay exact", () => {
+    const n = INSECURE_SAMPLE_MAX + 3;
+    const frames = Array.from({ length: n }, (_, i) => `<iframe src="http://x.test/f${i}"></iframe>`);
+    const media = Array.from({ length: n }, (_, i) => `<embed src="http://x.test/m${i}">`);
+    const forms = Array.from({ length: n }, (_, i) => `<form action="http://x.test/a${i}"></form>`);
+    const a = bodyPage([...frames, ...media, ...forms].join(""), "https://s.test/");
+    expect(a.insecureRefs?.iframe).toBe(n);
+    expect(a.insecureRefs?.media).toBe(n);
+    expect(a.insecureRefs?.formAction).toBe(n);
+    expect(a.insecureRefs?.forms).toBe(n);
+    const sample = a.insecureRefs?.sample ?? [];
+    expect(sample).toHaveLength(3 * INSECURE_SAMPLE_MAX);
+    for (const [kind, prefix] of [["iframe", "f"], ["media", "m"], ["form", "a"]] as const) {
+      expect(sample.filter((s) => s.kind === kind).map((s) => s.url)).toEqual(
+        Array.from({ length: INSECURE_SAMPLE_MAX }, (_, i) => `http://x.test/${prefix}${i}`),
+      );
+    }
+  });
+
+  it("one kind filling its sample never crowds out another kind", () => {
+    const frames = Array.from(
+      { length: INSECURE_SAMPLE_MAX },
+      (_, i) => `<iframe src="http://x.test/${i}"></iframe>`,
+    );
+    const a = bodyPage(
+      frames.join("") + `<form action="http://x.test/post"></form>`,
+      "https://s.test/",
+    );
+    expect(a.insecureRefs?.sample).toHaveLength(INSECURE_SAMPLE_MAX + 1);
+    expect(a.insecureRefs?.sample.at(-1)).toEqual({ kind: "form", url: "http://x.test/post" });
+  });
+
+  it("caps each sampled URL at INSECURE_SAMPLE_URL_MAX; the counters see it whole", () => {
+    expect(INSECURE_SAMPLE_URL_MAX).toBe(1024);
+    const frames = Array.from(
+      { length: 10 },
+      (_, i) => `<iframe src="http://x.test/${i}${"p".repeat(5_000)}"></iframe>`,
+    );
+    const a = bodyPage(frames.join(""), "https://s.test/");
+    expect(a.insecureRefs?.iframe).toBe(10);
+    expect(a.insecureRefs?.sample).toHaveLength(10);
+    for (const [i, s] of (a.insecureRefs?.sample ?? []).entries()) {
+      expect(s.url).toHaveLength(INSECURE_SAMPLE_URL_MAX);
+      expect(s.url.startsWith(`http://x.test/${i}p`)).toBe(true);
+    }
+  });
+
+  it("ignores references inside <noscript>", () => {
+    const a = bodyPage(
+      `<noscript><iframe src="http://gtm.test/ns"></iframe></noscript>`,
+      "https://s.test/",
+    );
+    expect(a.insecureRefs).toEqual(NO_INSECURE);
+  });
+});
+
+describe("image alt facts", () => {
+  it("samples the first IMAGE_SAMPLE_MAX images with no alt, in document order", () => {
+    const imgs = Array.from({ length: 12 }, (_, i) => `<img src="/i${i}.png">`).join("");
+    const a = bodyPage(`<img src="/has.png" alt="x">${imgs}`);
+    expect(a.imagesMissingAlt).toBe(12);
+    expect(IMAGE_SAMPLE_MAX).toBe(10);
+    expect(a.imagesMissingAltSample).toEqual(Array.from({ length: 10 }, (_, i) => `/i${i}.png`));
+  });
+
+  it("samples the raw src, capped at IMAGE_SAMPLE_SRC_MAX, and '' for an image with no src", () => {
+    const long = `/${"s".repeat(IMAGE_SAMPLE_SRC_MAX + 20)}`;
+    const a = bodyPage(`<img src=" ./a.png "><img src="${long}"><img data-src="/lazy.png">`);
+    expect(a.imagesMissingAltSample).toEqual([
+      " ./a.png ",
+      long.slice(0, IMAGE_SAMPLE_SRC_MAX),
+      "",
+    ]);
+  });
+
+  it("counts alt=\"\" (after trim) as empty", () => {
+    const a = bodyPage(
+      `<img src="/a.png" alt=""><img src="/b.png" alt="   "><img src="/c.png" alt="c">`,
+    );
+    expect(a.imagesEmptyAlt).toBe(2);
+    expect(a.imagesMissingAlt).toBe(0);
+    expect(a.imagesMissingAltSample).toEqual([]);
+  });
+
+  it("counts an alt over ALT_TEXT_LONG_CHARS (after trim) as too long", () => {
+    expect(ALT_TEXT_LONG_CHARS).toBe(100);
+    const a = bodyPage(
+      `<img src="/a.png" alt="${"a".repeat(101)}">` +
+        `<img src="/b.png" alt="${"b".repeat(100)}">` +
+        `<img src="/c.png" alt="  ${"c".repeat(100)}  ">`,
+    );
+    expect(a.imagesAltTooLong).toBe(1);
+  });
+
+  it("ignores images inside <noscript>", () => {
+    const a = bodyPage(`<noscript><img src="/ns.png"><img src="/e.png" alt=""></noscript>`);
+    expect(a.imagesMissingAltSample).toEqual([]);
+    expect(a.imagesEmptyAlt).toBe(0);
   });
 });

@@ -185,6 +185,24 @@ describe("page.weight against the database", () => {
     });
   });
 
+  it("never weighs a social-only image: it has no page_resources edge (deviation 3)", async () => {
+    // A browser does not load an og:image; the crawl records it as a resources
+    // row with no edge, and the page's weight is what the page loads.
+    const crawlId = await seed(
+      [{ path: "/p1" }],
+      [
+        { url: "/img/inline.png", bytes: 5_000, on: ["/p1"] },
+        { url: "/og/share.png", bytes: 900_000, on: [] },
+      ],
+    );
+    const rows = await metricRowsByScope(db, rule("page.weight"), crawlId);
+    expect(rows["site|"]).toMatchObject({
+      pageWeight: { count: 1, min: 15_000, max: 15_000 },
+      resourcesReferenced: 1,
+      resourcesWeighed: 1,
+    });
+  });
+
   it("counts a broken resource as unmeasured rather than as weight", async () => {
     const crawlId = await seed(
       [{ path: "/p1" }],

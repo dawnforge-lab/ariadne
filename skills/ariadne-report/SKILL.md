@@ -240,6 +240,47 @@ of them. They are grouped here by the problem a client reads:
   file does: a stylesheet or script refused by the browser breaks the page, and an
   image sent with a wrong type usually does not.
 
+**Ruleset 0.21.0 added twenty-eight rule ids, and twenty-four of them need a
+re-crawl.** They read page facts recorded only on crawls since Phase 26b. A findings
+file from an older crawl judged at 0.21.0 carries `extraction.not-recorded` instead of
+those findings. That is a marker: the checks it claims were not run on this crawl, so
+they go under "Not audited" with a re-crawl as the next step, never under findings and
+never as clean. Grouped by the problem a client reads:
+
+- **Head and document structure** (CHECK-04, CHECK-18, CHECK-24, CHECK-88):
+  `html.head-closed-early` explains `head.directives-outside-head` and
+  `head.tags-outside-head` on the same page. Report one problem, the element that
+  closed the head, and cite all three. `html.head-closed-early-harmless` loses no tag
+  today: write it as a hardening recommendation (move the pixel into the body), not
+  as a fault. `html.structure-invalid` whose only problems are
+  head-missing and body-missing describes a page that leaves out optional tags. It is
+  valid HTML: write it as a hardening recommendation (P4), never as a broken page.
+- **Directives and refresh** (CHECK-04, CHECK-10): `directives.bot-conflict` means one
+  search engine is told something the others are not (`stricter`), or a bot tag
+  tries to lift a generic restriction it cannot lift (`overridden`). Rank it with the indexability
+  findings. `redirect.meta-refresh` is a redirect done the slow way. Rank it with the
+  redirect findings.
+- **Social sharing** (CHECK-87): `social.og-incomplete`, `social.x-incomplete`,
+  `social.og-multiple`, `social.og-url-mismatch`, `social.og-duplicate` and
+  `social.image-broken`. None of them is a ranking factor. Rank them by how much of
+  the site's traffic arrives through shared links, and say so.
+- **Headings and titles** (CHECK-35, CHECK-36, CHECK-37): `title.multiple` and
+  `meta-description.multiple` are template defects, so fix them once. `title.same-as-h1`,
+  `h2.missing`, `h2.too-long` and `h2.duplicate` are content hygiene. A title equal to
+  the H1 is a missed chance to vary the wording, not a fault.
+- **Links and images** (CHECK-34, CHECK-49, CHECK-86): `links.uncrawlable` hides
+  targets from discovery, so it ranks with the orphan findings. `links.no-anchor-text`
+  is a link nothing names, for visitors, screen readers or search engines.
+  `links.empty-href`, `links.unsafe-target-blank`, `links.aria-label-only`,
+  `images.empty-alt` and `images.alt-too-long` are hygiene; an `aria-label` names an
+  icon link for screen readers, so `links.aria-label-only` matters only where the
+  target matters for search. An empty alt on a decorative image is correct, so
+  weigh `images.empty-alt` by which images it names.
+- **Forms, hreflang and pagination** (CHECK-85, CHECK-25, CHECK-22):
+  `security.form-insecure` exposes what visitors type. Report it with the mixed-content
+  findings. `hreflang.html-lang-mismatch` and `pagination.multiple` compound with the
+  older hreflang and pagination findings.
+
 **Write both numbers.** Every finding in the report shows the engine's severity as
 it came and the report's priority as you argue it. When they differ, the reason
 goes in the finding, in one sentence: *"The engine grades this `warning`; on this

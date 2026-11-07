@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { eq, sql } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import { closeDb, createDb, type Db } from "../../src/db/client.js";
 import { runMigrations } from "../../src/db/migrate.js";
 import {
@@ -21,7 +21,8 @@ import {
   leaseBatch,
 } from "../../src/crawl/frontier.js";
 import type { FetchResult } from "../../src/crawl/fetch-page.js";
-import type { PageAnalysis } from "../../src/crawl/parse/page-analyzer.js";
+import { analyzePage, type PageAnalysis } from "../../src/crawl/parse/page-analyzer.js";
+import { HEAD_SNIPPET_MAX } from "../../src/crawl/parse/page-facts.js";
 
 function databaseUrl(): string {
   const url = process.env.DATABASE_URL;
@@ -59,10 +60,11 @@ function makeAnalysis(overrides: Partial<PageAnalysis> = {}): PageAnalysis {
     footerLinkCount: 4,
     frameworkMarkers: ["__NEXT_DATA__"],
     links: [
-      { href: `${SITE}/one`, anchor: "one", rel: null, nofollow: false, position: 0 },
+      { href: `${SITE}/one`, anchor: "one", ariaLabel: null, rel: null, nofollow: false, position: 0 },
       {
         href: `${SITE}/two`,
-        anchor: "two",
+        anchor: "",
+        ariaLabel: "Wishlist",
         rel: "nofollow",
         nofollow: true,
         position: 1,
@@ -70,6 +72,7 @@ function makeAnalysis(overrides: Partial<PageAnalysis> = {}): PageAnalysis {
       {
         href: "https://other.example/three",
         anchor: "three",
+        ariaLabel: null,
         rel: null,
         nofollow: false,
         position: 2,
@@ -109,6 +112,25 @@ function makeAnalysis(overrides: Partial<PageAnalysis> = {}): PageAnalysis {
     robotsOutsideHead: false,
     canonicalOutsideHead: false,
     hreflangOutsideHeadCount: 0,
+    // Phase 26b (extraction 2). No social tags and so no social image refs by
+    // default: the resource cases below count rows and edges exactly, and an
+    // og:image would add a row with no edge (deviation 3).
+    htmlLang: "en",
+    social: null,
+    socialImageRefs: [],
+    h2Text: "A subheading",
+    titleCount: 1,
+    metaDescriptionCount: 1,
+    robotsMetas: [],
+    metaRefresh: null,
+    anchorCounts: { noHref: 0, javascript: 0, hashOnly: 0, emptyHref: 0, unsafeBlank: 0 },
+    insecureRefs: { iframe: 0, media: 0, formAction: 0, forms: 0, sample: [] },
+    imagesEmptyAlt: 0,
+    imagesAltTooLong: 0,
+    imagesMissingAltSample: [],
+    relNextCount: 0,
+    relPrevCount: 0,
+    htmlStructure: { htmlTags: 1, headTags: 1, bodyTags: 1, headBeforeBody: true, closedEarly: null },
     ...overrides,
   };
 }
@@ -205,6 +227,7 @@ describe("PageWriter", () => {
     const many = Array.from({ length: 250 }, (_, i) => ({
       href: `${SITE}/l/${i}`,
       anchor: `l${i}`,
+      ariaLabel: null,
       rel: null,
       nofollow: false,
       position: i,
@@ -388,6 +411,7 @@ describe("PageWriter", () => {
         sourcePageId: links.sourcePageId,
         targetUrl: links.targetUrl,
         anchor: links.anchor,
+        ariaLabel: links.ariaLabel,
         isInternal: links.isInternal,
         isNofollow: links.isNofollow,
         position: links.position,
@@ -395,6 +419,13 @@ describe("PageWriter", () => {
       .from(links)
       .where(eq(links.crawlId, crawlId));
     expect(rows).toHaveLength(3);
+    // Owner call O1 (migration 0028): the link's aria-label is written as the
+    // analyzer gave it, null included.
+    expect(Object.fromEntries(rows.map((r) => [r.targetUrl, r.ariaLabel]))).toEqual({
+      [`${SITE}/one`]: null,
+      [`${SITE}/two`]: "Wishlist",
+      "https://other.example/three": null,
+    });
     expect(rows.every((r) => r.sourcePageId === pageId)).toBe(true);
     const byTarget = new Map(rows.map((r) => [r.targetUrl, r]));
     expect(byTarget.get(`${SITE}/one`)?.isInternal).toBe(true);
@@ -430,7 +461,7 @@ describe("PageWriter", () => {
     expect(row?.h2Count).toBe(2);
   });
 
-  it("stamps extraction_version 1 on every row it writes, a robots-blocked row included", async () => {
+  it("stamps extraction_version 2 on every row it writes, a robots-blocked row included", async () => {
     const crawlId = await newCrawl();
     const writer = new PageWriter(db, crawlId);
     await writer.addPage(item(`${SITE}/a`), makeFetch(`${SITE}/a`), makeAnalysis(), {
@@ -446,8 +477,8 @@ describe("PageWriter", () => {
 
     const rows = await db.select().from(pages).where(eq(pages.crawlId, crawlId));
     expect(rows).toHaveLength(3);
-    expect(EXTRACTION_VERSION).toBe(1);
-    for (const row of rows) expect(row.extractionVersion, row.url).toBe(1);
+    expect(EXTRACTION_VERSION).toBe(2);
+    for (const row of rows) expect(row.extractionVersion, row.url).toBe(2);
     const blocked = rows.find((r) => r.url === `${SITE}/blocked`);
     expect(blocked?.fetchClass).toBe("disallowed");
     expect(blocked?.responseHeaders).toBeNull();
@@ -728,6 +759,22 @@ describe("PageWriter", () => {
     expect(row?.robotsOutsideHead).toBeNull();
     expect(row?.canonicalOutsideHead).toBeNull();
     expect(row?.hreflangOutsideHeadCount).toBeNull();
+    // The Phase 26b facts (0026): no HTML, nothing measured.
+    expect(row?.htmlLang).toBeNull();
+    expect(row?.social).toBeNull();
+    expect(row?.h2Text).toBeNull();
+    expect(row?.titleCount).toBeNull();
+    expect(row?.metaDescriptionCount).toBeNull();
+    expect(row?.robotsMetas).toBeNull();
+    expect(row?.metaRefresh).toBeNull();
+    expect(row?.anchorCounts).toBeNull();
+    expect(row?.insecureRefs).toBeNull();
+    expect(row?.imagesEmptyAlt).toBeNull();
+    expect(row?.imagesAltTooLong).toBeNull();
+    expect(row?.imagesMissingAltSample).toBeNull();
+    expect(row?.relNextCount).toBeNull();
+    expect(row?.relPrevCount).toBeNull();
+    expect(row?.htmlStructure).toBeNull();
     expect(await countOf(links, crawlId)).toBe(0);
     expect(await countOf(hreflang, crawlId)).toBe(0);
     expect(await countOf(structuredData, crawlId)).toBe(0);
@@ -761,6 +808,325 @@ describe("PageWriter", () => {
     expect(row?.hreflangOutsideHeadCount).toBe(4);
   });
 
+  it("writes the Phase 26b head facts and social set (migration 0026)", async () => {
+    const crawlId = await newCrawl();
+    const writer = new PageWriter(db, crawlId);
+    const url = `${SITE}/head-facts`;
+    const social = {
+      og: { title: "Share title", image: "/og.png" },
+      x: { card: "summary" },
+      counts: { "og:title": 2, "og:image": 1, "twitter:card": 1 } as const,
+      conflicting: ["og:title" as const],
+      outsideHead: true,
+      xViaProperty: true,
+      imageRefs: { og: `${SITE}/og.png`, x: null },
+    };
+    await writer.addPage(
+      item(url),
+      makeFetch(url),
+      makeAnalysis({
+        htmlLang: "en-GB",
+        social,
+        h2Text: "Second heading",
+        titleCount: 2,
+        metaDescriptionCount: 0,
+        robotsMeta: "index, noarchive",
+        robotsMetas: [{ name: "googlebot", content: "noindex" }],
+        metaRefresh: { raw: "0;url=/x", delaySeconds: 0, target: `${SITE}/x` },
+      }),
+      { complete: true },
+    );
+    await writer.flush();
+
+    const [row] = await db.select().from(pages).where(eq(pages.crawlId, crawlId));
+    expect(row?.htmlLang).toBe("en-GB");
+    expect(row?.social).toEqual(social);
+    expect(row?.h2Text).toBe("Second heading");
+    expect(row?.titleCount).toBe(2);
+    expect(row?.metaDescriptionCount).toBe(0);
+    expect(row?.robotsMeta).toBe("index, noarchive");
+    expect(row?.robotsMetas).toEqual([{ name: "googlebot", content: "noindex" }]);
+    expect(row?.metaRefresh).toEqual({ raw: "0;url=/x", delaySeconds: 0, target: `${SITE}/x` });
+  });
+
+  it("reads a later robots noindex into is_indexable through the joined robots_meta (deviation 4)", async () => {
+    const crawlId = await newCrawl();
+    const writer = new PageWriter(db, crawlId);
+    const url = `${SITE}/second-robots-noindex`;
+    // Google combines repeated robots metas; the first one alone said index.
+    const analysis = analyzePage(
+      `<html><head><meta name="robots" content="index, follow">` +
+        `<meta name="robots" content="noindex"></head><body><p>x</p></body></html>`,
+      url,
+    );
+    await writer.addPage(item(url), makeFetch(url), analysis, { complete: true });
+    await writer.flush();
+    const [row] = await db.select().from(pages).where(eq(pages.crawlId, crawlId));
+    expect(row?.robotsMeta).toBe("index, follow, noindex");
+    expect(row?.isIndexable).toBe(false);
+  });
+
+  it("writes the Phase 26b body facts, and an image link's alt as its anchor (migration 0026)", async () => {
+    const crawlId = await newCrawl();
+    const writer = new PageWriter(db, crawlId);
+    const url = `${SITE}/body-facts`;
+    const analysis = analyzePage(
+      `<html><head><link rel="next" href="/2"><link rel="next" href="/3"><link rel="prev" href="/0">` +
+        `</head><body><a href="/home"><img src="/logo.png" alt="Home"></a>` +
+        `<a href="#">top</a><a href="javascript:void(0)">js</a><a href="">e</a>` +
+        `<a onclick="go()">x</a><a target="_blank" href="https://elsewhere.test/out">out</a>` +
+        `<iframe src="http://x.test/f"></iframe><form action="http://x.test/post"></form>` +
+        `<form action="/same-scheme"></form>` +
+        `<img src="/a.png" alt=""><img src="/b.png" alt="${"b".repeat(101)}"><img src="/c.png">` +
+        `</body></html>`,
+      url,
+    );
+    await writer.addPage(item(url), makeFetch(url), analysis, { complete: true });
+    await writer.flush();
+
+    const [row] = await db.select().from(pages).where(eq(pages.crawlId, crawlId));
+    expect(row?.anchorCounts).toEqual({
+      noHref: 1, javascript: 1, hashOnly: 1, emptyHref: 1, unsafeBlank: 1,
+    });
+    expect(row?.insecureRefs).toEqual({
+      iframe: 1,
+      media: 0,
+      formAction: 1,
+      forms: 2,
+      sample: [
+        { kind: "iframe", url: "http://x.test/f" },
+        { kind: "form", url: "http://x.test/post" },
+      ],
+    });
+    expect(row?.imagesEmptyAlt).toBe(1);
+    expect(row?.imagesAltTooLong).toBe(1);
+    expect(row?.imagesMissingAltSample).toEqual(["/c.png"]);
+    expect(row?.relNextCount).toBe(2);
+    expect(row?.relPrevCount).toBe(1);
+    const [home] = await db
+      .select({ anchor: links.anchor })
+      .from(links)
+      .where(and(eq(links.crawlId, crawlId), eq(links.targetUrl, `${SITE}/home`)));
+    expect(home?.anchor).toBe("Home");
+  });
+
+  it("writes the Phase 26b html structure facts (migration 0026)", async () => {
+    const crawlId = await newCrawl();
+    const writer = new PageWriter(db, crawlId);
+    const url = `${SITE}/structure-facts`;
+    const analysis = analyzePage(
+      `<html><head><meta charset="utf-8"><noscript><iframe src="https://gtm.test/x"></iframe></noscript>` +
+        `</head><body><p>x</p></body><body></body></html>`,
+      url,
+    );
+    await writer.addPage(item(url), makeFetch(url), analysis, { complete: true });
+    await writer.flush();
+
+    const [row] = await db.select().from(pages).where(eq(pages.crawlId, crawlId));
+    expect(row?.htmlStructure).toEqual({
+      htmlTags: 1,
+      headTags: 1,
+      bodyTags: 2,
+      headBeforeBody: true,
+      closedEarly: {
+        tag: "iframe",
+        snippet: `<iframe src="https://gtm.test/x">`,
+        inNoscript: true,
+        lost: [],
+      },
+    });
+  });
+
+  it("persists hostile 26b strings: a NUL, a pair cut at a cap, a lone surrogate", async () => {
+    const crawlId = await newCrawl();
+    const writer = new PageWriter(db, crawlId);
+    const url = `${SITE}/hostile-strings`;
+    // `<img data-x="` is 13 units: the emoji's high surrogate lands on the
+    // snippet cap's last unit. The robots content carries a raw lone surrogate,
+    // which no decoder produces but a direct string can. The og:title NUL
+    // reaches both the 26b `social` column and the pre-26b `og_title` column
+    // (ruling R10 covers the latter at the writer's boundary).
+    const prefix = `<img data-x="${"x".repeat(HEAD_SNIPPET_MAX - 14)}`;
+    const analysis = analyzePage(
+      `<html><head><meta property="og:title" content="Sh\u0000are">` +
+        `<meta name="twitter:title" content="X\u0000">` +
+        `<meta name="robots" content="noindex\uD800">${prefix}😀"><title>t</title></head>` +
+        `<body><p>x</p></body></html>`,
+      url,
+    );
+    await writer.addPage(item(url), makeFetch(url), analysis, { complete: true });
+    await writer.flush();
+
+    const [row] = await db.select().from(pages).where(eq(pages.crawlId, crawlId));
+    expect(row?.ogTitle).toBe("Sh\u2400are");
+    expect(row?.social?.og.title).toBe("Sh\u2400are");
+    expect(row?.social?.x.title).toBe("X\u2400");
+    expect(row?.robotsMeta).toBe("noindex\uFFFD");
+    expect(row?.htmlStructure?.closedEarly).toEqual({
+      tag: "img",
+      snippet: prefix,
+      inNoscript: false,
+      lost: ["title"],
+    });
+  });
+
+  it("persists every page-derived string storably at the writer's boundary (ruling R10)", async () => {
+    const crawlId = await newCrawl();
+    const writer = new PageWriter(db, crawlId);
+    const url = `${SITE}/hostile-r10`;
+    // A NUL in the title, an anchor's text and a JSON-LD string value and key
+    // (the `\\u0000` escape is JSON's: JSON.parse turns it into a real NUL).
+    const analysis = analyzePage(
+      `<html><head><title>Ti\u0000tle</title>` +
+        `<script type="application/ld+json">{"@type":"Article","name":"a\\u0000b","k\\u0000":["c\\u0000"]}</script>` +
+        `</head><body><h1>H\u0000</h1><a href="/target">an\u0000chor</a></body></html>`,
+      url,
+    );
+    expect(analysis.title).toBe("Ti\u0000tle");
+    await writer.addPage(item(url), makeFetch(url), analysis, { complete: true });
+    await writer.flush();
+
+    const [row] = await db.select().from(pages).where(eq(pages.crawlId, crawlId));
+    expect(row?.title).toBe("Ti\u2400tle");
+    expect(row?.h1Text).toBe("H\u2400");
+    const [link] = await db
+      .select({ anchor: links.anchor })
+      .from(links)
+      .where(and(eq(links.crawlId, crawlId), eq(links.targetUrl, `${SITE}/target`)));
+    expect(link?.anchor).toBe("an\u2400chor");
+    const [block] = await db
+      .select({ raw: structuredData.raw })
+      .from(structuredData)
+      .where(eq(structuredData.crawlId, crawlId));
+    expect(block?.raw).toEqual({ "@type": "Article", name: "a\u2400b", "k\u2400": ["c\u2400"] });
+  });
+
+  it("round-trips a JSON-LD `__proto__` key intact (review I2)", async () => {
+    const crawlId = await newCrawl();
+    const writer = new PageWriter(db, crawlId);
+    const url = `${SITE}/proto-key`;
+    const analysis = analyzePage(
+      `<html><head><script type="application/ld+json">{"@type":"X","__proto__":{"a":1},"name":"n"}</script>` +
+        `</head><body><p>x</p></body></html>`,
+      url,
+    );
+    await writer.addPage(item(url), makeFetch(url), analysis, { complete: true });
+    await writer.flush();
+
+    const [block] = await db
+      .select({ raw: structuredData.raw })
+      .from(structuredData)
+      .where(eq(structuredData.crawlId, crawlId));
+    const raw = block?.raw as Record<string, unknown>;
+    expect(Object.hasOwn(raw, "__proto__")).toBe(true);
+    expect(Object.getPrototypeOf(raw)).toBe(Object.prototype);
+    expect(raw).toEqual(JSON.parse(`{"@type":"X","__proto__":{"a":1},"name":"n"}`));
+  });
+
+  it("persists a page whose 5,000-deep JSON-LD block was refused (ruling R11)", async () => {
+    const crawlId = await newCrawl();
+    const writer = new PageWriter(db, crawlId);
+    const url = `${SITE}/deep-ld`;
+    const deep = `{"@type":"X","a":${"[".repeat(5_000)}${"]".repeat(5_000)}}`;
+    const analysis = analyzePage(
+      `<html><head><script type="application/ld+json">${deep}</script></head><body><p>x</p></body></html>`,
+      url,
+    );
+    expect(analysis.structuredDataParseErrors).toBe(1);
+    expect(analysis.structuredData).toEqual([]);
+    await writer.addPage(item(url), makeFetch(url), analysis, { complete: true });
+    await writer.flush();
+
+    const [row] = await db.select().from(pages).where(eq(pages.crawlId, crawlId));
+    expect(row?.structuredDataParseErrors).toBe(1);
+    expect(await countOf(structuredData, crawlId)).toBe(0);
+  });
+
+  it("persists a lone surrogate in a direct analysis string as U+FFFD (ruling R10)", async () => {
+    const crawlId = await newCrawl();
+    const writer = new PageWriter(db, crawlId);
+    const url = `${SITE}/lone-surrogate`;
+    await writer.addPage(
+      item(url),
+      makeFetch(url),
+      makeAnalysis({
+        title: "t\uD800",
+        metaDescription: "d\uDC00",
+        social: {
+          og: { title: "o\uD800" },
+          x: {},
+          counts: { "og:title": 1 },
+          conflicting: [],
+          outsideHead: false,
+          xViaProperty: false,
+          imageRefs: { og: null, x: null },
+        },
+      }),
+      { complete: true },
+    );
+    await writer.flush();
+
+    const [row] = await db.select().from(pages).where(eq(pages.crawlId, crawlId));
+    expect(row?.title).toBe("t\uFFFD");
+    expect(row?.metaDescription).toBe("d\uFFFD");
+    expect(row?.social?.og.title).toBe("o\uFFFD");
+  });
+
+  it("leaves a clean page's row exactly as it was: the boundary rewrites nothing storable", async () => {
+    const crawlId = await newCrawl();
+    const writer = new PageWriter(db, crawlId);
+    const url = `${SITE}/clean-r10`;
+    // Non-ASCII, emoji, a U+2400 the page wrote itself, an escaped-looking
+    // literal and JSON-LD: all storable already, so all must come back ===.
+    const analysis = analyzePage(
+      `<html lang="de"><head><title>Grüße 😀 ␀ \\u0000</title>` +
+        `<meta name="description" content="Ünïcödé — “quotes”">` +
+        `<meta property="og:title" content="Share 🎉">` +
+        `<script type="application/ld+json">{"@type":"Product","name":"Ä 😀","offers":[{"price":"1"}]}</script>` +
+        `</head><body><h1>Überschrift</h1><h2>Zwei 🎈</h2><a href="/z">Zürich 🚋</a></body></html>`,
+      url,
+    );
+    await writer.addPage(item(url), makeFetch(url), analysis, { complete: true });
+    await writer.flush();
+
+    const [row] = await db.select().from(pages).where(eq(pages.crawlId, crawlId));
+    expect(row?.title).toBe(analysis.title);
+    expect(row?.metaDescription).toBe(analysis.metaDescription);
+    expect(row?.ogTitle).toBe(analysis.ogTitle);
+    expect(row?.h1Text).toBe(analysis.h1Text);
+    expect(row?.h2Text).toBe(analysis.h2Text);
+    expect(row?.htmlLang).toBe(analysis.htmlLang);
+    expect(row?.social).toEqual(analysis.social);
+    expect(row?.htmlStructure).toEqual(analysis.htmlStructure);
+    const [link] = await db
+      .select({ anchor: links.anchor })
+      .from(links)
+      .where(and(eq(links.crawlId, crawlId), eq(links.targetUrl, `${SITE}/z`)));
+    expect(link?.anchor).toBe(analysis.links[0]?.anchor);
+    const [block] = await db
+      .select({ raw: structuredData.raw })
+      .from(structuredData)
+      .where(eq(structuredData.crawlId, crawlId));
+    // jsonb stores keys in its own order, so the read-back is compared by value;
+    // the string-level identity is pinned in test/crawl/storable-text.test.ts.
+    expect(block?.raw).toEqual(analysis.structuredData[0]?.raw);
+  });
+
+  it("persists a rel=next count past the smallint range (Ruling R7, migration 0027)", async () => {
+    const crawlId = await newCrawl();
+    const writer = new PageWriter(db, crawlId);
+    const url = `${SITE}/many-next`;
+    const analysis = analyzePage(
+      `<html><head>${`<link rel="next" href="/2">`.repeat(40_000)}</head><body><p>x</p></body></html>`,
+      url,
+    );
+    expect(analysis.relNextCount).toBe(40_000);
+    await writer.addPage(item(url), makeFetch(url), analysis, { complete: true });
+    await writer.flush();
+    const [row] = await db.select().from(pages).where(eq(pages.crawlId, crawlId));
+    expect(row?.relNextCount).toBe(40_000);
+  });
+
   it("ignores a second row for the same (crawl, url)", async () => {
     const crawlId = await newCrawl();
     const writer = new PageWriter(db, crawlId);
@@ -786,6 +1152,7 @@ describe("PageWriter", () => {
           {
             href: `${SITE}/one`,
             anchor: "one",
+            ariaLabel: null,
             rel: null,
             nofollow: false,
             position: 3_000_000_000,
@@ -1248,6 +1615,63 @@ describe("PageWriter", () => {
       await writer.flush();
       expect(await countOf(resources, crawlId)).toBe(0);
       expect(await countOf(pageResources, crawlId)).toBe(0);
+    });
+
+    /**
+     * Deviation 3 (Phase 26b): a browser does not load an og:image, so it is a
+     * `resources` row (the pass fetches its status and bytes) with NO
+     * `page_resources` edge — never page weight, mixed content or
+     * `resources.broken`.
+     */
+    it("writes an og:image as a resources row with no page_resources edge", async () => {
+      const crawlId = await newCrawl();
+      const writer = new PageWriter(db, crawlId);
+      const url = `${SITE}/shared`;
+      const analysis = analyzePage(
+        `<html><head><meta property="og:image" content="${SITE}/og/share.png">` +
+          `<meta name="twitter:image" content="${SITE}/img/logo.png"></head>` +
+          `<body><img src="/img/logo.png" alt="logo"></body></html>`,
+        url,
+      );
+      expect(analysis.socialImageRefs).toEqual([`${SITE}/og/share.png`, `${SITE}/img/logo.png`]);
+      await writer.addPage(item(url), makeFetch(url), analysis, { complete: true });
+      await writer.flush();
+
+      const rows = await db
+        .select({ url: resources.url, kind: resources.kind, fetchClass: resources.fetchClass })
+        .from(resources)
+        .where(eq(resources.crawlId, crawlId))
+        .orderBy(resources.url);
+      expect(rows).toEqual([
+        // Referenced by the <img> too: one row, and that page edge below.
+        { url: `${SITE}/img/logo.png`, kind: "image", fetchClass: null },
+        { url: `${SITE}/og/share.png`, kind: "image", fetchClass: null },
+      ]);
+      const edges = await db
+        .select({ url: pageResources.resourceUrl })
+        .from(pageResources)
+        .where(eq(pageResources.crawlId, crawlId));
+      expect(edges).toEqual([{ url: `${SITE}/img/logo.png` }]);
+      expect(writer.stats().resources).toBe(2);
+      expect(writer.stats().pageResources).toBe(1);
+    });
+
+    it("writes no resources row for a relative or non-http(s) share image", async () => {
+      const crawlId = await newCrawl();
+      const writer = new PageWriter(db, crawlId);
+      const url = `${SITE}/shared-relative`;
+      const analysis = analyzePage(
+        `<html><head><meta property="og:image" content="/og.png">` +
+          `<meta name="twitter:image" content="ftp://x/a.png"></head>` +
+          `<body><p>x</p></body></html>`,
+        url,
+      );
+      expect(analysis.social?.imageRefs).toEqual({ og: null, x: null });
+      expect(analysis.socialImageRefs).toEqual([]);
+      await writer.addPage(item(url), makeFetch(url), analysis, { complete: true });
+      await writer.flush();
+      expect(await countOf(resources, crawlId)).toBe(0);
+      expect(writer.stats().resources).toBe(0);
     });
 
     /**

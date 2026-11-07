@@ -1,6 +1,7 @@
 import * as cheerio from "cheerio";
 import { describe, expect, it } from "vitest";
 import { analyzePage } from "../../src/crawl/parse/page-analyzer.js";
+import { HEAD_LOST_MAX, HEAD_SNIPPET_MAX } from "../../src/crawl/parse/page-facts.js";
 
 const HTML = `<!doctype html><html><head>
 <title>Widget Shop</title>
@@ -34,6 +35,7 @@ describe("analyzePage", () => {
     expect(a.links[0]).toEqual({
       href: "https://shop.example/a",
       anchor: "A",
+      ariaLabel: null,
       rel: "nofollow",
       nofollow: true,
       position: 0,
@@ -713,5 +715,474 @@ describe("outside-head flags are first-occurrence flags", () => {
     const a = headOf(`<html><head><link rel="alternate" hreflang="en" href="/en"></head><body>
       <link rel="alternate" hreflang="en" href="/en"></body></html>`);
     expect(a.hreflangOutsideHeadCount).toBe(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Phase 26b T4 — HTML structure facts. Explicit start-tag counts, head/body
+// order and the element that closed the head early (deviation 6). Cheerio
+// cannot be the oracle for these: parse5 normalises the tree (one html, one
+// head, one body, whatever the markup says), so every case is asserted by
+// value. The head-flag cases go through `headOf`, so the oracle still holds the
+// five outside-head flags while the structure facts are read beside them.
+// ---------------------------------------------------------------------------
+
+const structureOf = (html: string) => analyzePage(html, "https://x.test/").htmlStructure;
+
+describe("html structure: explicit tag counts and order", () => {
+  it("counts a second explicit <body>", () => {
+    expect(structureOf(`<html><head></head><body></body><body></body>`)).toEqual({
+      htmlTags: 1,
+      headTags: 1,
+      bodyTags: 2,
+      headBeforeBody: true,
+      closedEarly: null,
+    });
+  });
+
+  it("a <head> after the <body> is out of order", () => {
+    expect(structureOf(`<body></body><head></head>`).headBeforeBody).toBe(false);
+  });
+
+  it("no explicit tags at all: counts 0, order null", () => {
+    expect(structureOf(`<title>t</title><p>x</p>`)).toEqual({
+      htmlTags: 0,
+      headTags: 0,
+      bodyTags: 0,
+      headBeforeBody: null,
+      closedEarly: null,
+    });
+  });
+
+  it("order is null when only one of the two is explicit", () => {
+    expect(structureOf(`<html><head><title>t</title></head><p>x</p>`).headBeforeBody).toBeNull();
+    expect(structureOf(`<title>t</title><body><p>x</p></body>`).headBeforeBody).toBeNull();
+  });
+
+  it("counts every explicit <html> and <head>; the first of head and body decides the order", () => {
+    const s = structureOf(`<html><head></head><body><html lang="x"><head></head></body></html>`);
+    expect(s).toMatchObject({ htmlTags: 2, headTags: 2, bodyTags: 1, headBeforeBody: true });
+  });
+
+  it("implied tags are not counted: htmlparser2 implies none of the three", () => {
+    expect(structureOf(`<p>x`)).toMatchObject({ htmlTags: 0, headTags: 0, bodyTags: 0 });
+  });
+});
+
+describe("html structure: the head closed early (deviation 6, Review Focus 3)", () => {
+  it("a valid document that omits </head> and starts its body is not flagged", () => {
+    expect(structureOf(`<!doctype html><title>x</title><div>a</div>`).closedEarly).toBeNull();
+  });
+
+  it("a non-head child of a head <noscript> is the candidate, and </head> confirms it", () => {
+    const a = headOf(
+      `<head><meta charset=utf-8><noscript><iframe src="https://gtm/x"></iframe></noscript></head><body>`,
+    );
+    expect(a.htmlStructure.closedEarly).toEqual({
+      tag: "iframe",
+      inNoscript: true,
+      snippet: `<iframe src="https://gtm/x">`,
+      lost: [],
+    });
+  });
+
+  it("the head-noscript detection leaves the head machine exactly as it was", () => {
+    // The iframe is invisible to the head machine (Phase 23): the canonical
+    // after the noscript is still in the head, and nothing closed it.
+    const a = headOf(
+      `<html><head><noscript><iframe src="/x"></iframe></noscript>${CANONICAL}</head><body><p>x</p></body></html>`,
+    );
+    expect(a.headClosedBy).toBeNull();
+    expect(a.canonicalOutsideHead).toBe(false);
+    expect(a.htmlStructure.closedEarly).toMatchObject({ tag: "iframe", inNoscript: true });
+  });
+
+  it("link, meta and style inside a head <noscript> are not candidates", () => {
+    const s = structureOf(
+      `<html><head><noscript><link rel="stylesheet" href="/a.css"><meta name="x" content="y">` +
+        `<style>p{}</style></noscript><title>t</title></head><body><p>x</p></body></html>`,
+    );
+    expect(s.closedEarly).toBeNull();
+  });
+
+  it("a <noscript> in the body is not a head noscript", () => {
+    const s = structureOf(
+      `<html><head><title>t</title></head><body><noscript><iframe src="/x"></iframe></noscript>` +
+        `<meta itemprop="name" content="n"></body></html>`,
+    );
+    expect(s.closedEarly).toBeNull();
+  });
+
+  it("a non-head start tag followed by a head-only element", () => {
+    const a = headOf(`<head><div>x</div><title>t</title>`);
+    expect(a.htmlStructure.closedEarly).toEqual({
+      tag: "div",
+      inNoscript: false,
+      snippet: "<div>",
+      lost: ["title"],
+    });
+    expect(a.headClosedBy).toBe("div");
+  });
+
+  it("text in the head is recorded as #text with the trimmed text as its snippet", () => {
+    const a = headOf(`<head>hello</head>`);
+    expect(a.htmlStructure.closedEarly).toEqual({
+      tag: "#text",
+      inNoscript: false,
+      snippet: "hello",
+      lost: [],
+    });
+    expect(a.headClosedBy).toBe("#text");
+  });
+
+  it("a 500-character start tag is capped at HEAD_SNIPPET_MAX", () => {
+    const tag = `<img src="/p.gif" data-x="${"x".repeat(500)}">`;
+    const s = structureOf(`<head>${tag}<title>t</title></head>`);
+    expect(s.closedEarly?.tag).toBe("img");
+    expect(s.closedEarly?.snippet).toBe(tag.slice(0, HEAD_SNIPPET_MAX));
+    expect(s.closedEarly?.snippet).toHaveLength(HEAD_SNIPPET_MAX);
+  });
+
+  it("long head text is capped at HEAD_SNIPPET_MAX", () => {
+    const s = structureOf(`<head>${"t".repeat(500)}</head>`);
+    expect(s.closedEarly?.snippet).toBe("t".repeat(HEAD_SNIPPET_MAX));
+  });
+
+  it("an explicit <body> after the candidate confirms it", () => {
+    const s = structureOf(`<html><head><img src="/p.gif"><body><p>x</p></body></html>`);
+    expect(s.closedEarly).toMatchObject({ tag: "img", inNoscript: false });
+  });
+
+  it("each head-only element after the candidate confirms it (ruling R8)", () => {
+    const tails = [
+      `<title>t</title>`,
+      `<meta name="a" content="b">`,
+      `<link rel="icon" href="/i">`,
+      `<link rel="canonical" href="/c">`,
+      `<link rel="stylesheet icon" href="/i">`,
+      `<base href="/">`,
+    ];
+    for (const tail of tails) {
+      expect(structureOf(`<head><img src="/p.gif"><p>x</p>${tail}`).closedEarly, tail).toMatchObject({
+        tag: "img",
+      });
+    }
+  });
+
+  it("what a body may hold is not evidence (ruling R8)", () => {
+    const tails = [
+      `<style>p{}</style>`,
+      `<meta itemprop="name" content="a">`,
+      `<link rel="stylesheet" href="/a.css">`,
+      `<link rel="stylesheet preload" href="/a.css">`,
+      `<link rel="MODULEPRELOAD" href="/m.js">`,
+      `<link href="/no-rel">`,
+      `<link rel="  " href="/blank-rel">`,
+      `<svg><title>i</title></svg>`,
+    ];
+    for (const tail of tails) {
+      expect(structureOf(`<head><img src="/p.gif"><p>x</p>${tail}`).closedEarly, tail).toBeNull();
+    }
+  });
+
+  it("a minified page: body-ok elements leave it unflagged, a head-only one confirms (R8)", () => {
+    const page =
+      `<title>t</title><div>x</div><meta itemprop="name" content="a">` +
+      `<link rel="stylesheet" href="/a.css"><style>p{}</style><svg><title>i</title></svg>`;
+    expect(structureOf(page).closedEarly).toBeNull();
+    expect(structureOf(`${page}<meta name="description" content="d">`).closedEarly).toEqual({
+      tag: "div",
+      inNoscript: false,
+      snippet: "<div>",
+      lost: ["meta"],
+    });
+    expect(structureOf(`${page}<link rel="canonical" href="/c">`).closedEarly).toMatchObject({
+      tag: "div",
+    });
+  });
+
+  it("a title after a closed svg is evidence again", () => {
+    expect(
+      structureOf(`<title>t</title><div>x</div><svg><title>i</title></svg><title>u</title>`).closedEarly,
+    ).toMatchObject({ tag: "div" });
+  });
+
+  it("nothing after the candidate but body content: not confirmed", () => {
+    const s = structureOf(`<head><title>t</title><img src="/p.gif"><p>x</p><script>1</script>`);
+    expect(s.closedEarly).toBeNull();
+  });
+
+  it("an explicit </head> before the body is not an early close", () => {
+    const s = structureOf(
+      `<html><head><title>t</title></head><body><div>x</div><title>u</title></body></html>`,
+    );
+    expect(s.closedEarly).toBeNull();
+  });
+
+  it("<body> is where the head ends, not an early close, whatever follows it", () => {
+    // An omitted </head> with the body opened by <body>: the head ended where
+    // it was meant to, so a stylesheet link or a microdata meta in the body is
+    // no evidence of anything.
+    const s = structureOf(
+      `<html><head><title>t</title><body><link rel="stylesheet" href="/a.css">` +
+        `<meta itemprop="n" content="v"></body></html>`,
+    );
+    expect(s.closedEarly).toBeNull();
+  });
+
+  it("the FIRST candidate wins: a head-noscript child before a non-head tag", () => {
+    const s = structureOf(`<head><noscript><img src="/n.gif"></noscript><div>x</div></head>`);
+    expect(s.closedEarly).toEqual({
+      tag: "img",
+      inNoscript: true,
+      snippet: `<img src="/n.gif">`,
+      lost: [],
+    });
+  });
+
+  it("a stray </p> in the head is ignored; a stray </br> is a candidate, read as <br>", () => {
+    expect(structureOf(`<head><title>t</title></p></head>`).closedEarly).toBeNull();
+    expect(structureOf(`<head><title>t</title></br></head>`).closedEarly).toEqual({
+      tag: "br",
+      inNoscript: false,
+      snippet: "</br>",
+      lost: [],
+    });
+  });
+
+  it("a <div> inside a head <template> is not a candidate", () => {
+    const s = structureOf(`<head><template><div>x</div></template><title>t</title></head>`);
+    expect(s.closedEarly).toBeNull();
+  });
+
+  it("a head tag inside a head <noscript> is never a candidate (R12, R12b)", () => {
+    for (const child of [
+      `<script>1</script>`,
+      `<noframes>n</noframes>`,
+      `<basefont size="3">`,
+      `<bgsound src="/s.wav">`,
+      `<title>nt</title>`,
+      `<base href="/">`,
+      `<template><p>t</p></template>`,
+      `<link rel="stylesheet" href="/a.css">`,
+      `<meta name="x" content="y">`,
+      `<style>p{}</style>`,
+    ]) {
+      const s = structureOf(
+        `<html><head><noscript>${child}</noscript><title>t</title></head><body></body></html>`,
+      );
+      expect(s.closedEarly, child).toBeNull();
+    }
+  });
+
+  it("a tag the head cannot hold inside a head <noscript> is a candidate (R12b)", () => {
+    for (const [child, tag] of [
+      [`<iframe src="/f"></iframe>`, "iframe"],
+      [`<div>x</div>`, "div"],
+      [`<img src="/p.gif">`, "img"],
+    ] as const) {
+      const s = structureOf(
+        `<html><head><noscript>${child}</noscript><title>t</title></head><body></body></html>`,
+      );
+      expect(s.closedEarly, child).toMatchObject({ tag, inNoscript: true });
+    }
+  });
+
+  it("an orphan </head> is not evidence: htmlparser2 drops it (documented limit)", () => {
+    expect(structureOf(`<title>t</title><div>x</div></head>`).closedEarly).toBeNull();
+  });
+
+  it("C1: a head text of 2 MiB of inner spaces is trimmed in linear time", () => {
+    // `[ws]+$` backtracked quadratically on this shape (80k spaces: ~10 s); the
+    // edge scan is linear, so 2 MiB finishes well inside the test timeout.
+    const spaces = " ".repeat(2 * 1024 * 1024);
+    const s = structureOf(`<head>a${spaces}b</head>`);
+    expect(s.closedEarly).toEqual({
+      tag: "#text",
+      inNoscript: false,
+      snippet: `a${" ".repeat(HEAD_SNIPPET_MAX - 1)}`,
+      lost: [],
+    });
+    // Short text: both edges trimmed, the inner run kept.
+    expect(structureOf(`<head> \t a  b \n</head>`).closedEarly?.snippet).toBe("a  b");
+  });
+
+  it("20 MB-safe: 100,000 divs leave a capped snippet and scalar state", () => {
+    const div = `<div class="${"c".repeat(300)}">x</div>`;
+    const s = structureOf(
+      `<html><head>${div.repeat(100_000)}<title>t</title></head><body></body></html>`,
+    );
+    expect(s.closedEarly?.snippet.length).toBeLessThanOrEqual(HEAD_SNIPPET_MAX);
+    // Four scalars and one fixed-shape object whose one array, `lost`, is
+    // capped at HEAD_LOST_MAX (owner call O3).
+    expect(s).toEqual({
+      htmlTags: 1,
+      headTags: 1,
+      bodyTags: 1,
+      headBeforeBody: true,
+      closedEarly: {
+        tag: "div",
+        inNoscript: false,
+        snippet: div.slice(0, HEAD_SNIPPET_MAX),
+        lost: ["title"],
+      },
+    });
+    expect(JSON.stringify(s).length).toBeLessThan(400);
+  });
+});
+
+// Owner call O3 (2026-11-07): `closedEarly.lost`, the head tags after the
+// candidate that a parser closing the head there moves into the body.
+describe("html structure: what an early close loses (owner call O3)", () => {
+  const PIXEL =
+    `<noscript><img height="1" width="1" style="display:none" ` +
+    `src="https://www.facebook.com/tr?id=1&ev=PageView&noscript=1"></noscript>`;
+  const HEAD =
+    `<meta charset="utf-8"><title>t</title><meta name="description" content="d">` +
+    `<link rel="canonical" href="/c">`;
+
+  it("the Meta pixel last in the head loses nothing: </head> and <body> are evidence, never lost", () => {
+    const s = structureOf(`<html><head>${HEAD}${PIXEL}</head><body><p>x</p></body></html>`);
+    expect(s.closedEarly).toMatchObject({ tag: "img", inNoscript: true, lost: [] });
+  });
+
+  it("a pixel followed by a description and a canonical loses both, in document order", () => {
+    const s = structureOf(
+      `<html><head><title>t</title>${PIXEL}<meta name="description" content="d">` +
+        `<link rel="canonical" href="/c"></head><body><p>x</p></body></html>`,
+    );
+    expect(s.closedEarly?.lost).toEqual(["meta", "link rel=canonical"]);
+  });
+
+  it("a body-ok link, a microdata meta and an svg title after the candidate are not lost", () => {
+    const s = structureOf(
+      `<html><head><title>t</title>${PIXEL}<link rel="stylesheet" href="/a.css">` +
+        `<link rel="PRELOAD" href="/f.woff2"><link href="/no-rel"><meta itemprop="n" content="v">` +
+        `<style>p{}</style><svg><title>i</title></svg></head><body><p>x</p></body></html>`,
+    );
+    expect(s.closedEarly).toMatchObject({ tag: "img", lost: [] });
+  });
+
+  it("records base, title, meta and each head-only link rel once, in first-seen order", () => {
+    const s = structureOf(
+      `<head><div>x</div><meta name="a" content="1"><title>t</title><meta name="b" content="2">` +
+        `<link rel="stylesheet ICON" href="/i"><link rel="canonical" href="/c">` +
+        `<link rel="alternate" hreflang="fr" href="/fr"><link rel="Canonical" href="/c2">` +
+        `<base href="/"><title>u</title></head><body></body>`,
+    );
+    expect(s.closedEarly?.lost).toEqual([
+      "meta",
+      "title",
+      "link rel=icon",
+      "link rel=canonical",
+      "link rel=alternate",
+      "base",
+    ]);
+  });
+
+  it("stops at the explicit <body>: a head tag after it is in the body whatever closed the head", () => {
+    const s = structureOf(
+      `<html><head><title>t</title>${PIXEL}<body><meta name="x" content="y">` +
+        `<link rel="canonical" href="/c"></body></html>`,
+    );
+    expect(s.closedEarly).toMatchObject({ tag: "img", lost: [] });
+    const t = structureOf(
+      `<html><head>${PIXEL}<meta name="robots" content="noindex"></head><body>` +
+        `<link rel="canonical" href="/c"></body></html>`,
+    );
+    expect(t.closedEarly?.lost).toEqual(["meta"]);
+  });
+
+  it("caps the list at HEAD_LOST_MAX", () => {
+    const links = Array.from({ length: HEAD_LOST_MAX + 3 }, (_, i) => `<link rel="r${i}" href="/${i}">`).join("");
+    const s = structureOf(`<head><div>x</div>${links}</head><body></body>`);
+    expect(s.closedEarly?.lost).toEqual(
+      Array.from({ length: HEAD_LOST_MAX }, (_, i) => `link rel=r${i}`),
+    );
+  });
+
+  it("ignores tags inside a <template>: template content is never in the head", () => {
+    const s = structureOf(
+      `<html><head><div>x</div><template><meta name="x" content="y"><title>t</title></template></head><body></body></html>`,
+    );
+    // The `<body>` start tag is still evidence; nothing in the template is lost.
+    expect(s.closedEarly).toMatchObject({ tag: "div", lost: [] });
+    const t = structureOf(
+      `<html><head><div>x</div><template><meta name="x" content="y"></template><link rel="canonical" href="/c"></head><body></body></html>`,
+    );
+    expect(t.closedEarly?.lost).toEqual(["link rel=canonical"]);
+  });
+
+  it("a hostile rel token is made storable and cut at HEAD_SNIPPET_MAX", () => {
+    const token = "x".repeat(HEAD_SNIPPET_MAX + 50);
+    const s = structureOf(`<head><div>x</div><link rel="${token}" href="/"></head>`);
+    const [entry] = s.closedEarly?.lost ?? [];
+    expect(entry).toHaveLength(HEAD_SNIPPET_MAX);
+    expect(entry?.startsWith("link rel=xxx")).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Phase 26b: every new page-derived string is storable (storable-text.ts):
+// U+0000 to U+2400, a lone surrogate to U+FFFD, caps cut on a code point.
+// ---------------------------------------------------------------------------
+
+describe("Phase 26b strings are storable in Postgres", () => {
+  const NUL = "\u0000";
+  const MARK = "␀";
+
+  it("a NUL in any 26b string fact is stored as U+2400", () => {
+    const a = analyzePage(
+      `<html lang="e${NUL}n"><head><meta property="og:title" content="T${NUL}">` +
+        `<meta name="robots" content="index${NUL}"><meta name="googlebot" content="noindex${NUL}">` +
+        `<meta http-equiv="refresh" content="5;url=/x${NUL}y"></head>` +
+        `<body><h2>H${NUL}</h2><img src="/i${NUL}.png"><iframe src="http://x.test/f${NUL}g"></iframe></body></html>`,
+      "https://x.test/",
+    );
+    expect(a.htmlLang).toBe(`e${MARK}n`);
+    expect(a.social?.og.title).toBe(`T${MARK}`);
+    expect(a.robotsMeta).toBe(`index${MARK}`);
+    expect(a.robotsMetas).toEqual([{ name: "googlebot", content: `noindex${MARK}` }]);
+    expect(a.metaRefresh?.raw).toBe(`5;url=/x${MARK}y`);
+    // The URL parser percent-encodes an inner NUL; the helper leaves that alone.
+    expect(a.metaRefresh?.target).toBe("https://x.test/x%00y");
+    expect(a.h2Text).toBe(`H${MARK}`);
+    expect(a.imagesMissingAltSample).toEqual([`/i${MARK}.png`]);
+    expect(a.insecureRefs.sample[0]?.url).toBe("http://x.test/f%00g");
+  });
+
+  it("a NUL in head text and in a candidate tag reaches the snippet as U+2400", () => {
+    expect(structureOf(`<head>a${NUL}b</head>`).closedEarly?.snippet).toBe(`a${MARK}b`);
+    expect(structureOf(`<head><img alt="${NUL}"><title>t</title></head>`).closedEarly?.snippet).toBe(
+      `<img alt="${MARK}">`,
+    );
+  });
+
+  it("a snippet cut in the middle of an emoji drops the whole pair", () => {
+    // `<img data-x="` is 13 units; 186 more put the emoji's high surrogate at
+    // index 199, the last unit under the cap.
+    const prefix = `<img data-x="${"x".repeat(186)}`;
+    expect(prefix).toHaveLength(HEAD_SNIPPET_MAX - 1);
+    expect(structureOf(`<head>${prefix}😀"><title>t</title></head>`).closedEarly?.snippet).toBe(prefix);
+    const text = "t".repeat(HEAD_SNIPPET_MAX - 1);
+    expect(structureOf(`<head>${text}😀</head>`).closedEarly?.snippet).toBe(text);
+  });
+
+  it("a social value cut in the middle of an emoji drops the whole pair", () => {
+    const a = analyzePage(
+      `<head><meta property="og:title" content="${"x".repeat(299)}😀"></head>`,
+      "https://x.test/",
+    );
+    expect(a.social?.og.title).toBe("x".repeat(299));
+  });
+
+  it("a lone surrogate (a direct string: entities already decode to U+FFFD) becomes U+FFFD", () => {
+    const a = analyzePage(
+      `<head><meta property="og:title" content="a\uD800b"></head><body><h2>c\uDC00</h2></body>`,
+      "https://x.test/",
+    );
+    expect(a.social?.og.title).toBe("a�b");
+    expect(a.h2Text).toBe("c�");
+    expect(structureOf(`<head>x\uD800</head>`).closedEarly?.snippet).toBe("x�");
   });
 });

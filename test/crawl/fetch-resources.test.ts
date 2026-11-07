@@ -17,7 +17,7 @@ import { and, eq } from "drizzle-orm";
 import { ApiService } from "../../src/api/service.js";
 import { closeDb, createDb, type Db } from "../../src/db/client.js";
 import { runMigrations } from "../../src/db/migrate.js";
-import { crawls, resources } from "../../src/db/schema.js";
+import { crawls, pageResources, resources } from "../../src/db/schema.js";
 import { HostGate } from "../../src/crawl/politeness.js";
 import { runCrawl } from "../../src/crawl/loop.js";
 import { closeFetchAgents } from "../../src/crawl/http.js";
@@ -1388,5 +1388,48 @@ describe("the crawl runs the pass itself", () => {
     // an abort means stop asking servers for things, and this pass is all
     // asking. The nulls it left are the resume's work list.
     expect(summary.resources).toBeNull();
+  });
+});
+
+/**
+ * A share image (`og:image` / `twitter:image`) is a `resources` row with NO
+ * `page_resources` edge (Phase 26b deviation 3): no page loads it, so it must
+ * not count toward page weight or mixed content. `social.image-broken` still
+ * judges its status and bytes, so the pass has to ask about it exactly as it
+ * asks about a file a page loads. The work list reads `resources` alone; this
+ * pins that an edge-less row gets the same verdict as an edge-backed one.
+ */
+describe("a share image with no page_resources edge is fetched like any other row", () => {
+  it("writes the same status, bytes and class for an og-only row as for a page-loaded one", async () => {
+    const crawlId = await seedCrawl(assets.base);
+    const loaded = `${assets.base}/a.png`;
+    // The same file under a second spelling, so both rows get the same answer.
+    const ogOnly = `${assets.base}/a.png?share=1`;
+    const ogMissing = `${assets.base}/missing.png`;
+    await seedResources(crawlId, [{ url: loaded }, { url: ogOnly }, { url: ogMissing }]);
+    await db.insert(pageResources).values({ crawlId, pageId: "page_loader", resourceUrl: loaded });
+
+    await runPass(crawlId, assets.base);
+
+    const pick = (row: Awaited<ReturnType<typeof rowFor>>) => ({
+      fetchClass: row.fetchClass,
+      statusCode: row.statusCode,
+      bytes: row.bytes,
+      bytesSource: row.bytesSource,
+      contentType: row.contentType,
+    });
+    const loadedRow = pick(await rowFor(crawlId, loaded));
+    expect(loadedRow).toEqual({
+      fetchClass: "ok",
+      statusCode: 200,
+      bytes: 1234,
+      bytesSource: "header",
+      contentType: "image/png",
+    });
+    expect(pick(await rowFor(crawlId, ogOnly))).toEqual(loadedRow);
+    const missing = await rowFor(crawlId, ogMissing);
+    expect(missing.statusCode).toBe(404);
+    expect(missing.fetchedAt).not.toBeNull();
+    expect(hitsFor(assets, "/missing.png").map((hit) => hit.method)).toEqual(["HEAD"]);
   });
 });

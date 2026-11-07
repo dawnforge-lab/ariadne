@@ -189,6 +189,119 @@ const LEGACY_IMAGE_TYPES = ["image/png", "image/jpeg", "image/jpg"] as const;
 const bareContentType = sql`btrim(lower(split_part(r.content_type, ';', 1)))`;
 
 /**
+ * THE FAMILY'S POPULATION: files a page LOADS, which is a `resources` row with
+ * at least one `page_resources` edge (Phase 26b, deviation 3).
+ *
+ * Since extraction 2 an `og:image` / `twitter:image` URL is a `resources` row
+ * too — so the fetch pass learns its status and size for `social.image-broken`
+ * — with NO edge, because a browser never loads a share image. Every statement
+ * here that reads `resources` WITHOUT going through `page_resources` therefore
+ * carries this condition: the file rules (a social image is not a page's file
+ * to judge for type, weight, format or caching) and the four markers (they
+ * explain the file rules' silence, so they count the same population — an
+ * og-only `ok` row must not read as "partial coverage the judging rules carry"
+ * when the judging rules cannot see it). `resources.broken` joins through the
+ * edges already and needs nothing. Served by `page_resources_crawl_resource`.
+ */
+const LOADED_BY_A_PAGE = sql`exists (
+  select 1 from page_resources pr_loaded
+  where pr_loaded.crawl_id = r.crawl_id and pr_loaded.resource_url = r.url
+)`;
+
+/**
+ * Which `resources` rows a census counts: the files a page loads (the family's
+ * population), the og/X share images with no edge (deviation 3), or both.
+ */
+type CensusRows = "loaded" | "share-only" | "all";
+
+/** How many rows were seen, how many the file check never decided, and why. */
+export interface UnaskedCensus {
+  seen: number;
+  unfetched: number;
+  /** Undecided rows stamped `RESOURCE_OFF_REASON` (the check was turned off). */
+  offRows: number;
+  /** Undecided rows with no reason at all (the check never reached them). */
+  unaskedRows: number;
+  /** Undecided rows stamped `RESOURCE_CAP_REASON` (a budget claimed them). */
+  capRows: number;
+}
+
+/**
+ * The fetch census `resources.not-fetched` decides on, over the rows `rows`
+ * names. One statement for every reader, so "did the file check ask about
+ * anything" has one answer (ruling R13).
+ */
+async function unaskedCensus(
+  db: Db,
+  crawlId: string,
+  rows: CensusRows,
+  ruleId: string,
+): Promise<UnaskedCensus> {
+  const scope =
+    rows === "loaded"
+      ? LOADED_BY_A_PAGE
+      : rows === "share-only"
+        ? sql`not ${LOADED_BY_A_PAGE}`
+        : sql`true`;
+  const result = await db.execute<{
+    seen: number;
+    unfetched: number;
+    off_rows: number;
+    unasked_rows: number;
+    cap_rows: number;
+  }>(sql`
+    select
+      count(*)::int as seen,
+      count(*) filter (where r.fetch_class is null)::int as unfetched,
+      count(*) filter (
+        where r.fetch_class is null and r.fetch_reason = ${RESOURCE_OFF_REASON}
+      )::int as off_rows,
+      count(*) filter (
+        where r.fetch_class is null and r.fetch_reason is null
+      )::int as unasked_rows,
+      count(*) filter (
+        where r.fetch_class is null and r.fetch_reason = ${RESOURCE_CAP_REASON}
+      )::int as cap_rows
+    from resources r
+    where r.crawl_id = ${crawlId} and ${scope}`);
+  const row = result.rows[0];
+  if (row === undefined) {
+    throw new Error(`${ruleId}: crawl '${crawlId}' resource-census query returned no row`);
+  }
+  return {
+    seen: row.seen,
+    unfetched: row.unfetched,
+    offRows: row.off_rows,
+    unaskedRows: row.unasked_rows,
+    capRows: row.cap_rows,
+  };
+}
+
+/**
+ * THE PREDICATE: the file check decided none of the census's rows (an empty
+ * census included: nothing was asked). `resources.not-fetched` fires on it, and
+ * `social.image-broken` reads it over every row to tell an unfetched share
+ * image on a crawl whose check ran (a specific gap it lists) from one on a
+ * crawl whose check never asked anything (the marker's fact, said once).
+ */
+function askedNothing(census: UnaskedCensus): boolean {
+  return census.unfetched === census.seen;
+}
+
+/**
+ * Whether the file check asked about NO `resources` row of this crawl, page
+ * files and share images alike: turned off, never run, or budgeted away before
+ * its first request. `askedNothing` over the `all` census.
+ */
+export async function resourceCheckAskedNothing(
+  db: Db,
+  crawlId: string,
+  ruleId: string,
+): Promise<boolean> {
+  return askedNothing(await unaskedCensus(db, crawlId, "all", ruleId));
+}
+
+/**
  * Pages referencing at least one resource a server answered 4xx or 5xx for.
  *
  * PAGE-CENTRIC, unlike `links.broken-internal` next door, and the difference is
@@ -358,6 +471,8 @@ async function badContentTypeFindings(
       where r.crawl_id = ${crawlId}
         and r.status_code = 200
         and r.fetch_class = ${RESOURCE_OK_CLASS}
+        -- Deviation 3: a social-only image is no page's file (LOADED_BY_A_PAGE).
+        and ${LOADED_BY_A_PAGE}
         and (
           (r.kind = 'css' and ${bareContentType} <> 'text/css')
           or (r.kind = 'js' and ${bareContentType} <> all(${sql.param([...JS_CONTENT_TYPES])}::text[]))
@@ -459,6 +574,8 @@ async function heavyImageFindings(
         and r.fetch_class = ${RESOURCE_OK_CLASS}
         and r.bytes is not null
         and r.bytes > ${IMAGE_WEIGHT_WARN}
+        -- Deviation 3: a share image is heavy by design and no page loads it.
+        and ${LOADED_BY_A_PAGE}
         and ${extra}
       order by r.bytes desc, r.url
       ${limitTo(caps.listing)}
@@ -547,7 +664,8 @@ async function uncachedFindings(self: RuleIdentity, db: Db, crawlId: string): Pr
         array[]::text[]
       ) as sample
     from resources r
-    where r.crawl_id = ${crawlId}`);
+    -- Deviation 3: only files a page loads (LOADED_BY_A_PAGE).
+    where r.crawl_id = ${crawlId} and ${LOADED_BY_A_PAGE}`);
 
   const row = result.rows[0];
   if (row === undefined) {
@@ -616,7 +734,9 @@ async function notRecordedFindings(
     pages_crawled: number;
   }>(sql`
     select
-      (select count(*)::int from resources r where r.crawl_id = ${crawlId}) as resources_seen,
+      -- Deviation 3: a social-only row is not a recorded page resource.
+      (select count(*)::int from resources r
+        where r.crawl_id = ${crawlId} and ${LOADED_BY_A_PAGE}) as resources_seen,
       count(*) filter (where p.images_total > 0)::int as pages_with_images,
       count(*)::int as pages_crawled
     from pages p
@@ -786,56 +906,53 @@ async function notFetchedFindings(
   db: Db,
   crawlId: string,
 ): Promise<Finding[]> {
-  const result = await db.execute<{
-    resources_seen: number;
-    unfetched: number;
-    off_rows: number;
-    unasked_rows: number;
-    cap_rows: number;
-    pages_crawled: number;
-  }>(sql`
-    select
-      count(*)::int as resources_seen,
-      count(*) filter (where r.fetch_class is null)::int as unfetched,
-      count(*) filter (
-        where r.fetch_class is null and r.fetch_reason = ${RESOURCE_OFF_REASON}
-      )::int as off_rows,
-      count(*) filter (
-        where r.fetch_class is null and r.fetch_reason is null
-      )::int as unasked_rows,
-      count(*) filter (
-        where r.fetch_class is null and r.fetch_reason = ${RESOURCE_CAP_REASON}
-      )::int as cap_rows,
-      (select count(*)::int from pages p where p.crawl_id = ${crawlId}) as pages_crawled
-    from resources r
-    where r.crawl_id = ${crawlId}`);
-
-  const row = result.rows[0];
-  if (row === undefined) {
-    throw new Error(`${self.id}: crawl '${crawlId}' resource-census query returned no row`);
+  // Deviation 3: the census of files a page loads (LOADED_BY_A_PAGE).
+  let row = await unaskedCensus(db, crawlId, "loaded", self.id);
+  const pages = await db.execute<{ pages_crawled: number; pages_with_images: number }>(sql`
+    select count(*)::int as pages_crawled,
+           count(*) filter (where p.images_total > 0)::int as pages_with_images
+    from pages p
+    where p.crawl_id = ${crawlId}`);
+  const pageRow = pages.rows[0];
+  if (pageRow === undefined) {
+    throw new Error(`${self.id}: crawl '${crawlId}' page-count query returned no row`);
   }
-  const seen = row.resources_seen;
+  if (row.seen === 0) {
+    // NO FILE A PAGE LOADS WAS RECORDED. Usually `resources.not-recorded`'s
+    // fact. But a crawl whose only rows are og/X share images (deviation 3: no
+    // edge) and whose pages count no `<img>` gets no `resources.not-recorded`,
+    // and when the file check asked about none of those share images either,
+    // `social.image-broken` stays silent about them (ruling R13: it lists an
+    // unfetched image only when the check DID run). This marker speaks for them
+    // then, over the share-only rows, and only then: never while
+    // `resources.not-recorded` fires (the two stay mutually exclusive), and
+    // never on a decided share-only row, so an og-only `ok` row can no more
+    // quiet `all-unknown` / `partial-unknown` than before (they do not read it).
+    if (pageRow.pages_with_images > 0) return [];
+    row = await unaskedCensus(db, crawlId, "share-only", self.id);
+  }
+  const seen = row.seen;
   // Nothing seen is the other marker's fact; one row fewer unfetched than seen
   // means something WAS decided, which is a pass that measured.
-  if (seen === 0 || row.unfetched < seen) return [];
+  if (seen === 0 || !askedNothing(row)) return [];
 
   // One reason true of the WHOLE census, or none. Each writer touches every
   // undecided row or none of them, so a count equal to `seen` is the writer
   // identifying itself; anything else is a mixture nobody wrote.
   const reason =
-    row.off_rows === seen
+    row.offRows === seen
       ? NOT_FETCHED_REASON.off
-      : row.unasked_rows === seen
+      : row.unaskedRows === seen
         ? NOT_FETCHED_REASON.notRun
-        : row.cap_rows === seen
+        : row.capRows === seen
           ? NOT_FETCHED_REASON.cap
           : null;
   if (reason === null) {
     throw new Error(
       `${self.id}: crawl '${crawlId}' asked about none of its ${seen} resources and the ` +
-        `unfetched rows carry a mixture of reasons — ${row.off_rows} say ` +
-        `'${RESOURCE_OFF_REASON}', ${row.cap_rows} say '${RESOURCE_CAP_REASON}', ` +
-        `${row.unasked_rows} say nothing at all, and any remainder says something else ` +
+        `unfetched rows carry a mixture of reasons — ${row.offRows} say ` +
+        `'${RESOURCE_OFF_REASON}', ${row.capRows} say '${RESOURCE_CAP_REASON}', ` +
+        `${row.unaskedRows} say nothing at all, and any remainder says something else ` +
         `again. No writer of ours produces a mixture: each stamps every undecided row ` +
         `or none`,
     );
@@ -855,7 +972,7 @@ async function notFetchedFindings(
         // finding, in the vocabulary `crawl_status.resources` already uses.
         resourcesSeen: seen,
         resourcesSkipped: row.unfetched,
-        pagesCrawled: row.pages_crawled,
+        pagesCrawled: pageRow.pages_crawled,
       },
       dedupeKey: "site",
     }),
@@ -941,7 +1058,8 @@ async function allUnknownFindings(
     with census as (
       select r.fetch_class as fetch_class, count(*)::int as n
       from resources r
-      where r.crawl_id = ${crawlId}
+      -- Deviation 3: the census of files a page loads (LOADED_BY_A_PAGE).
+      where r.crawl_id = ${crawlId} and ${LOADED_BY_A_PAGE}
       group by r.fetch_class
     )
     select
@@ -1071,7 +1189,8 @@ async function partialUnknownFindings(
     with census as (
       select r.fetch_class as fetch_class, count(*)::int as n
       from resources r
-      where r.crawl_id = ${crawlId}
+      -- Deviation 3: the census of files a page loads (LOADED_BY_A_PAGE).
+      where r.crawl_id = ${crawlId} and ${LOADED_BY_A_PAGE}
       group by r.fetch_class
     )
     select
@@ -1270,11 +1389,12 @@ export const resourceRules: QueryRule[] = [
   // The marker claims every check whose silence it explains — the
   // `content.thin-skipped` contract, which claims the checks of the rule it
   // stands in for. CHECK-48 is on the list because `page.weight` is as blind on
-  // such a crawl as the four rules above are.
+  // such a crawl as the four rules above are. CHECK-87 since Phase 26b: a share
+  // image's status and size come from the same file check.
   defineRule<QueryRule>({
     kind: "query",
     id: NOT_RECORDED.id,
-    checkIds: ["CHECK-48", "CHECK-49", "CHECK-50", "CHECK-51", "CHECK-85"],
+    checkIds: ["CHECK-48", "CHECK-49", "CHECK-50", "CHECK-51", "CHECK-85", "CHECK-87"],
     category: CATEGORY,
     severity: NOT_RECORDED.severity,
     columns: [
@@ -1293,10 +1413,14 @@ export const resourceRules: QueryRule[] = [
   // beside it and for the same reason: the silence it explains is the same
   // silence — the four judging rules quiet and `page.weight` counting HTML
   // alone. Which of the two speaks is decided by whether the crawl has rows.
+  // CHECK-87 since Phase 26b, as its sibling: a share image is fetched by the
+  // same file check. When the check asked about nothing this marker (or its
+  // sibling) is the one voice for the share images (ruling R13); when it ran,
+  // `social.image-broken` lists each share image it missed.
   defineRule<QueryRule>({
     kind: "query",
     id: NOT_FETCHED.id,
-    checkIds: ["CHECK-48", "CHECK-49", "CHECK-50", "CHECK-51"],
+    checkIds: ["CHECK-48", "CHECK-49", "CHECK-50", "CHECK-51", "CHECK-87"],
     category: CATEGORY,
     severity: NOT_FETCHED.severity,
     columns: [

@@ -381,7 +381,9 @@ const hreflangNoXDefault: Fixture = {
  * ABOVE the page's only title, description and canonical, so a browser and the
  * analyzer both end the head there and the FIRST (and only) occurrence of each
  * lands in the body: `head.directives-outside-head` (canonical, closed by
- * `<div>`) and `head.tags-outside-head` (title, meta description). The values
+ * `<div>`) and `head.tags-outside-head` (title, meta description, and since
+ * Phase 26b `social`: the default Open Graph / X set is written after the
+ * title, so it lands in the body too; same rule, wider evidence). The values
  * are unchanged — still this page's own — so it stays judged. The `<div>` is
  * empty and a `<title>` in the body is not rendered text, so no word count on
  * either side of the render moves.
@@ -393,6 +395,9 @@ const noViewport: Fixture = {
   expectedIssues: [
     "head.directives-outside-head",
     "head.tags-outside-head",
+    // Phase 26b: the banner div is a real early close, confirmed by the title
+    // that follows it.
+    "html.head-closed-early",
     "mobile.viewport-missing",
   ],
   exact: true,

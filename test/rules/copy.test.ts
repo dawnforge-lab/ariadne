@@ -6,6 +6,7 @@ import { buildRegistry } from "../../src/rules/index.js";
 import {
   HEADING_MAX_STEP,
   H1_MAX,
+  H2_MAX,
   META_MAX,
   META_MIN,
   TITLE_MAX,
@@ -64,7 +65,9 @@ import {
 } from "../../src/rules/metric/crawl-metrics.js";
 import {
   CANONICAL_MAX_HOPS,
+  IMAGE_ALT_MAX,
   RESTRICTIVE_DIRECTIVES,
+  SOCIAL_IMAGE_MAX_BYTES,
   UNAVAILABLE_AFTER_WARN_DAYS,
 } from "../../src/rules/thresholds.js";
 import { TOP_PARAMS_CAP } from "../../src/rules/metric/url-metrics.js";
@@ -1683,6 +1686,8 @@ const AREAS = [
   "Performance",
   "Rendering",
   "Robots.txt",
+  "Social",
+  "HTML",
 ];
 
 /** `Area: Condition` — an area from the list above, then a condition. */
@@ -1850,6 +1855,7 @@ describe("copy rubric: a threshold belongs in the title", () => {
     "meta-description.too-short": String(META_MIN),
     "meta-description.too-long": String(META_MAX),
     "headings.h1-too-long": String(H1_MAX),
+    "h2.too-long": String(H2_MAX),
     "url.too-long": String(URL_MAX),
     "content.thin": String(THIN_WORDS),
     "performance.slow-response": String(SLOW_MS),
@@ -1877,6 +1883,10 @@ describe("copy rubric: a threshold belongs in the title", () => {
     "title.pixel-too-short": String(TITLE_PX_MIN),
     "meta-description.pixel-too-long": String(META_PX_MAX),
     "meta-description.pixel-too-short": String(META_PX_MIN),
+    // The id names no threshold; the size half of its predicate is one, quoted
+    // in megabytes as the title writes it ("over 5 MB").
+    "social.image-broken": String(SOCIAL_IMAGE_MAX_BYTES / (1024 * 1024)),
+    "images.alt-too-long": String(IMAGE_ALT_MAX),
   };
 
   it("states the number in the title of every rule that fires on one", () => {

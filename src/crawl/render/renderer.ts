@@ -164,6 +164,7 @@ import {
   UrlPolicyError,
   type AddressResolver,
 } from "../url-policy.js";
+import { storableDeep } from "../storable-text.js";
 
 /**
  * The two waits, as production runs them.
@@ -338,7 +339,12 @@ export interface RenderResult {
   h1Count: number | null;
   /** The first post-JS `<link rel=canonical>` href, or null if there is none. */
   canonical: string | null;
-  /** The first post-JS `<meta name=robots>` content, verbatim, or null if there is none (P23-T6). */
+  /**
+   * Every post-JS `<meta name=robots>` content joined with ", ", as the
+   * analyzer's `robotsMeta` joins them (deviation 4), or null if there is none
+   * (P23-T6). Joined from render capture 2 (`RENDER_CAPTURE_VERSION`); a row
+   * stamped 1 holds the first meta only.
+   */
   robotsMeta: string | null;
   /** The first post-JS meta description, trimmed, or null if there is none (P23-T6). */
   metaDescription: string | null;
@@ -2154,27 +2160,32 @@ export async function writeRenderResult(
   crawlId: string,
   result: RenderResult,
 ): Promise<void> {
+  // The storability boundary (ruling R10, as in persist.ts `push`): the
+  // rendered title, description, robots, canonical, H1 text and redirect are
+  // the site's DOM, and U+0000 or a lone surrogate in one would make this
+  // update throw. A clean value passes through unchanged.
+  const row = storableDeep(result);
   const res = await db.execute(sql`
     update pages set
-      rendered = ${result.rendered},
-      rendered_word_count = ${result.wordCount},
-      rendered_link_count = ${result.linkCount},
-      rendered_nav_link_count = ${result.navLinkCount},
-      rendered_footer_link_count = ${result.footerLinkCount},
-      rendered_filter_link_count = ${result.filterLinkCount},
-      rendered_analyzer_word_count = ${result.analyzerWordCount},
-      rendered_renderable_word_count = ${result.renderableWordCount},
-      rendered_title = ${result.title},
-      rendered_h1_count = ${result.h1Count},
-      rendered_canonical = ${result.canonical},
-      rendered_robots_meta = ${result.robotsMeta},
-      rendered_meta_description = ${result.metaDescription},
-      rendered_h1_text = ${result.h1Text},
-      rendered_tags_read = ${result.rendered ? true : null},
-      rendered_html_path = ${result.htmlPath},
-      rendered_redirect_url = ${result.redirectUrl},
-      render_error = ${result.error},
-      render_console = ${result.console === null ? null : JSON.stringify(result.console)}::jsonb,
+      rendered = ${row.rendered},
+      rendered_word_count = ${row.wordCount},
+      rendered_link_count = ${row.linkCount},
+      rendered_nav_link_count = ${row.navLinkCount},
+      rendered_footer_link_count = ${row.footerLinkCount},
+      rendered_filter_link_count = ${row.filterLinkCount},
+      rendered_analyzer_word_count = ${row.analyzerWordCount},
+      rendered_renderable_word_count = ${row.renderableWordCount},
+      rendered_title = ${row.title},
+      rendered_h1_count = ${row.h1Count},
+      rendered_canonical = ${row.canonical},
+      rendered_robots_meta = ${row.robotsMeta},
+      rendered_meta_description = ${row.metaDescription},
+      rendered_h1_text = ${row.h1Text},
+      rendered_tags_read = ${row.rendered ? true : null},
+      rendered_html_path = ${row.htmlPath},
+      rendered_redirect_url = ${row.redirectUrl},
+      render_error = ${row.error},
+      render_console = ${row.console === null ? null : JSON.stringify(row.console)}::jsonb,
       render_version = ${RENDER_CAPTURE_VERSION}
     where crawl_id = ${crawlId} and url = ${result.url}
     returning id`);

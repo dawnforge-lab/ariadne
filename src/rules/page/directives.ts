@@ -33,7 +33,79 @@ function tokensOf(p: PageRecord): { meta: string[]; header: string[] } {
 const says = (tokens: string[], ...wanted: string[]): boolean =>
   tokens.some((t) => wanted.includes(t));
 
+/** Index and follow state of a token list; `none` is both noindex and nofollow. */
+function stateOf(tokens: string[]): { noindex: boolean; nofollow: boolean } {
+  return {
+    noindex: says(tokens, "noindex", "none"),
+    nofollow: says(tokens, "nofollow", "none"),
+  };
+}
+
 export const directiveRules: PageRule[] = [
+  // A bot-specific robots meta (`googlebot`, `bingbot`, ...) that contradicts
+  // the combined generic `robots` meta (ruling R17). An engine COMBINES the
+  // meta naming it with the generic one and applies the most restrictive set;
+  // the bot meta does not replace the generic one. So, for each of index and
+  // follow, two things are a contradiction:
+  //   - stricter: the bot meta says noindex (or nofollow; `none` is both) and
+  //     the generic meta does not. That engine is kept out (or does not
+  //     follow) while the rest index (or follow) the page.
+  //   - overridden: the bot meta explicitly permits (`index` / `all`, or
+  //     `follow` / `all`) what the generic meta restricts, and does not itself
+  //     restrict it. The permission has no effect: the generic restriction
+  //     still applies to that engine.
+  // A bot meta that is silent on a directive the generic meta carries, or that
+  // repeats it, is not a conflict. An absent generic meta means index, follow.
+  // Entries naming one bot are combined (engines combine repeated metas). Only
+  // the meta channel is compared; the header is
+  // `indexability.meta-header-conflict`'s. A null `robotsMetas` is a row
+  // extraction 2 never wrote: silent, the marker speaks.
+  pageRule(
+    "directives.bot-conflict",
+    ["CHECK-04"],
+    CATEGORY,
+    "warning",
+    [{ key: "conflicts", label: "Bot Conflicts" }],
+    (p, self) => {
+      if (!isAuditable(p) || p.robotsMetas === null) return [];
+      const generic = stateOf(robotsTokens(p.robotsMeta));
+      const byBot = new Map<string, string[]>();
+      for (const entry of p.robotsMetas) {
+        const list = byBot.get(entry.name);
+        if (list === undefined) byBot.set(entry.name, [entry.content]);
+        else list.push(entry.content);
+      }
+      type Differs = { directive: "noindex" | "nofollow"; direction: "stricter" | "overridden" };
+      const conflicts: {
+        bot: string;
+        differs: Differs[];
+        botDirectives: string;
+        robotsDirectives: string | null;
+      }[] = [];
+      for (const [bot, contents] of byBot) {
+        const botDirectives = contents.join(", ");
+        const tokens = robotsTokens(botDirectives);
+        const restricts = stateOf(tokens);
+        const permits = {
+          noindex: says(tokens, "index", "all"),
+          nofollow: says(tokens, "follow", "all"),
+        };
+        const differs: Differs[] = [];
+        for (const directive of ["noindex", "nofollow"] as const) {
+          if (restricts[directive] && !generic[directive]) {
+            differs.push({ directive, direction: "stricter" });
+          } else if (permits[directive] && !restricts[directive] && generic[directive]) {
+            differs.push({ directive, direction: "overridden" });
+          }
+        }
+        if (differs.length > 0) {
+          conflicts.push({ bot, differs, botDirectives, robotsDirectives: p.robotsMeta });
+        }
+      }
+      return conflicts.length > 0 ? [finding(self, p, { conflicts })] : [];
+    },
+  ),
+
   // `nofollow` (or `none`, which is noindex plus nofollow) tells engines to
   // ignore every outgoing link of the page. Often deliberate on user-generated
   // or login pages; a warning because on an ordinary page it starves the pages

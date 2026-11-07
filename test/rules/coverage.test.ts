@@ -414,11 +414,86 @@ describe("checklist coverage", () => {
   //
   //   page    45 + 4 = 49
   //   total   150 + 4 = 154
-  it("pins the ruleset split the gate doc reports: 154 rules = 49 page + 91 query + 14 metric", () => {
+  //
+  // Phase 26b Task 5 adds ONE query rule, the `extraction.not-recorded` marker in
+  // `src/rules/query/page-facts.ts`, claiming the fifteen checks a v2-gated rule
+  // reads.
+  //
+  //   query   91 + 1 = 92
+  //   total   154 + 1 = 155
+  //
+  // Phase 26b Task 6 adds the six social rules on CHECK-87: FOUR page rules in
+  // `src/rules/page/social.ts` (`social.og-incomplete`, `social.og-multiple`,
+  // `social.og-url-mismatch`, `social.x-incomplete`) and TWO query rules in
+  // `src/rules/query/social.ts` (`social.og-duplicate`, `social.image-broken`).
+  //
+  //   page    49 + 4 = 53
+  //   query   92 + 2 = 94
+  //   total   155 + 6 = 161
+  //
+  // Phase 26b Task 7 adds six more: FIVE page rules in
+  // `src/rules/page/on-page.ts` (`h2.missing`, `h2.too-long`, `title.multiple`,
+  // `meta-description.multiple`, `title.same-as-h1`) and ONE query rule,
+  // `h2.duplicate`, in `src/rules/query/field-duplicates.ts`.
+  //
+  //   page    53 + 5 = 58
+  //   query   94 + 1 = 95
+  //   total   161 + 6 = 167
+  //
+  // Phase 26b Task 8 adds TWO page rules, `directives.bot-conflict` (CHECK-04)
+  // and `redirect.meta-refresh` (CHECK-10), and ONE query rule,
+  // `hreflang.html-lang-mismatch` (CHECK-25); all three claim checks already
+  // claimed.
+  //
+  //   page    58 + 2 = 60
+  //   query   95 + 1 = 96
+  //   total   167 + 3 = 170
+  //
+  // Phase 26b Task 9 adds THREE page rules, `links.uncrawlable` (CHECK-34),
+  // `links.empty-href` and `links.unsafe-target-blank` (CHECK-86), and ONE query
+  // rule, `links.no-anchor-text` (CHECK-86); all four claim checks already claimed.
+  //
+  //   page    60 + 3 = 63
+  //   query   96 + 1 = 97
+  //   total   170 + 4 = 174
+  //
+  // Phase 26b Task 10 adds FOUR page rules: `security.form-insecure` (CHECK-85,
+  // in `src/rules/page/technical.ts`), `images.empty-alt` and
+  // `images.alt-too-long` (CHECK-49, same file) and `pagination.multiple`
+  // (CHECK-22, `src/rules/page/pagination.ts`). `security.mixed-content`
+  // widens, and is not a new rule.
+  //
+  //   page    63 + 4 = 67
+  //   query   97
+  //   total   174 + 4 = 178
+  //
+  // Phase 26b Task 11 adds TWO page rules in `src/rules/page/html-structure.ts`:
+  // `html.head-closed-early` (CHECK-18 / CHECK-04 / CHECK-24) and
+  // `html.structure-invalid` (CHECK-88). Both claim checks already claimed.
+  //
+  //   page    67 + 2 = 69
+  //   query   97
+  //   total   178 + 2 = 180
+  //
+  // Owner call O1 (2026-11-07) adds ONE query rule, `links.aria-label-only`
+  // (CHECK-86, already claimed), in `src/rules/query/link-hygiene.ts`.
+  //
+  //   page    69
+  //   query   97 + 1 = 98
+  //   total   180 + 1 = 181
+  //
+  // Owner call O3 (2026-11-07) adds ONE page rule,
+  // `html.head-closed-early-harmless` (CHECK-18 / CHECK-04 / CHECK-24, already
+  // claimed), in `src/rules/page/html-structure.ts`.
+  //
+  //   page    69 + 1 = 70
+  //   query   98
+  //   total   181 + 1 = 182
+  it("pins the ruleset split: 182 rules = 70 page + 98 query + 14 metric", () => {
     const registry = buildRegistry();
-    expect(registry.all()).toHaveLength(154);
-    expect(registry.byKind("page")).toHaveLength(49);
-    expect(registry.byKind("query")).toHaveLength(91);
+    expect(registry.all()).toHaveLength(182);
+    expect(registry.byKind("page")).toHaveLength(70);
+    expect(registry.byKind("query")).toHaveLength(98);
     // The link-graph five, the two content metrics and hreflang coverage, plus
     // the URL-parameter, redirect-volume and sitemap-structure metrics, plus
     // the render pass's coverage, the health rollup, and the page-weight table.
@@ -446,22 +521,25 @@ describe("checklist coverage", () => {
     // CHECK-49's; a metric evidences both and judges neither.
     expect(byId.get("page.weight")).toEqual(["CHECK-48", "CHECK-49"]);
     // The marker claims every check whose silence it explains, `page.weight`'s
-    // included — the `content.thin-skipped` contract.
+    // included — the `content.thin-skipped` contract. CHECK-87 (26b): a share
+    // image's status and size come from the same file check.
     expect(byId.get("resources.not-recorded")).toEqual([
       "CHECK-48",
       "CHECK-49",
       "CHECK-50",
       "CHECK-51",
       "CHECK-85",
+      "CHECK-87",
     ]);
     // And its sibling claims the same four (P12-T2): the silence it explains is
     // the same silence, so a marker claiming fewer would leave a check whose
-    // reader never meets it.
+    // reader never meets it. CHECK-87 too, for the share image (26b).
     expect(byId.get("resources.not-fetched")).toEqual([
       "CHECK-48",
       "CHECK-49",
       "CHECK-50",
       "CHECK-51",
+      "CHECK-87",
     ]);
     // The third marker (P13-T2) claims the same four again, for the same reason:
     // on a crawl whose every row is a decided unknown class the same four

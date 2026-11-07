@@ -350,17 +350,189 @@
  * rendered one by 1 per unclosed `<a>` crossing a container boundary, and
  * never over. CHECK-34's threshold must tolerate ±1 for that reason (Task 5 —
  * the same note is on `pages.nav_link_count` in src/db/schema.ts).
+ *
+ * Phase 26b (P26b-T2, extraction version 2) added head facts and the social
+ * set, all as tokenizer state in the same pass and all capped (shapes and caps
+ * in page-facts.ts). Metas inside `<noscript>` stay ignored, as every meta is.
+ *  - `htmlLang`: the FIRST `<html>` start tag's `lang`, trimmed and capped.
+ *  - `social`: the Open Graph and X tags, read in `handleMetaTag` beside the
+ *    existing chain rather than inside it (one element may carry a `name` the
+ *    chain matches and a social `property`). Open Graph is read from
+ *    `property=` or `name=`; `twitter:*` from `name=`, or from `property=`,
+ *    which X ignores and so raises `xViaProperty`. The first value of each tag
+ *    is trimmed and capped; every element is counted; a tag seen with two
+ *    distinct trimmed values is `conflicting` (compared uncapped, capped once
+ *    at the end); `outsideHead` is any social tag met in body mode. Null only
+ *    when the page has no social tag. `ogTitle` / `ogDescription` / `ogImage`
+ *    (the legacy `og_*` columns) are filled from the same path (PR #23
+ *    review): the FIRST element whose `property` OR `name` is the tag, its
+ *    `content` untrimmed (null when it has none), as before. Before, they read
+ *    `property=` only from the meta else-if chain, so `<meta name=og:title>`
+ *    and `<meta name=description property=og:description>` (the chain matched
+ *    `description` first) left them null while `social.og` had them, and
+ *    `social.og-duplicate`, which groups those columns, missed the groups the
+ *    page rules saw. On an extraction-1 row they keep the old meaning.
+ *  - `socialImageRefs`: the two JUDGED share images only, the first `og:image`
+ *    and the first `twitter:image`, each resolved once (`shareImageRef`:
+ *    `normalizeUrl` of the whole value, only when it is absolute http(s)) and
+ *    stored as `social.imageRefs`; deduped, at most two (final review I1) —
+ *    and deliberately NOT through `addResource`. A browser never loads a share
+ *    image, so these become `resources` rows with no `page_resources` edge
+ *    (deviation 3): no page weight, no mixed content, no `resources.broken`.
+ *  - `h2Text`: the first `<h2>`, collected exactly as `h1Text` is.
+ *  - `titleCount` (non-svg `<title>` elements) and `metaDescriptionCount`.
+ *  - `robotsMetas`: the bot-specific robots metas (`ROBOTS_META_BOTS`), in
+ *    document order, capped.
+ *  - `metaRefresh`: the `<meta http-equiv=refresh>` a browser acts on (the first non-empty one that parses; failing that, the first refused one), through
+ *    `parseRefresh`.
+ * ONE EXISTING FIELD CHANGES MEANING (deviation 4): `robotsMeta` is now every
+ * `<meta name=robots>` content joined with ", ", not the first one's. Google
+ * combines repeated robots metas, and reading only the first missed a later
+ * `noindex` — `isIndexable` (persist.ts) reads this field and now sees it.
+ * `robotsOutsideHead` stays a first-element flag. Ruling R6 then refined two
+ * of these: a robots content identical (after trim) to one already kept is
+ * dropped before the join (first-seen order and spelling kept, every distinct
+ * directive survives), and one meta naming two social tags (`name=twitter:title
+ * property=og:title`) records both.
+ *
+ * Phase 26b (P26b-T3) added the body facts, in the same pass, every one a
+ * counter or a sample capped at ten (caps in page-facts.ts). `<noscript>`
+ * content stays invisible to all of them, as to every element read here.
+ *  - `anchorCounts`, over EVERY `<a>` start tag, including the ones that never
+ *    open a link: `noHref` (no `href` attribute AND `onclick`, or `role`
+ *    `link`/`button` — a bookmark is not a link, deviation 5); `emptyHref`
+ *    (`href` blank after trim); `javascript` (`/^\s*javascript:/i`);
+ *    `hashOnly` (trimmed href exactly `#` or `#!`; `#section` is in-page
+ *    navigation); `unsafeBlank` (`target=_blank`, an href that is not
+ *    `javascript:`, and neither `noopener` nor `noreferrer` among the `rel`
+ *    tokens, and an href that resolves (`normalizeUrl` against the page) to
+ *    an origin other than the page's, by exact `URL.origin` compare, so a
+ *    subdomain or a `www.` variant counts while a same-origin link and an
+ *    href that does not resolve do not: owner call O2, 2026-11-07, since
+ *    reverse tabnabbing needs another origin). The first three are exclusive;
+ *    `unsafeBlank` is orthogonal.
+ *  - ANCHOR TEXT NOW INCLUDES IMAGE ALT: an `<img>` inside an open anchor
+ *    pushes its trimmed, non-empty `alt` into the anchor's text, as a text
+ *    node would, with a space either side so it is a word of its own
+ *    (`Home<img alt=Logo>` is "Home Logo"). `links.anchor` on a v2 row
+ *    carries it; the oracle agrees.
+ *  - `PageLink.ariaLabel` (owner call O1, 2026-11-07; `links.aria_label`,
+ *    migration 0028): the `aria-label` of the SAME element that supplies the
+ *    link row's anchor, the first `<a>` start tag to resolve to that target
+ *    (`closeAnchor`: first one wins). Trimmed, cut at `ARIA_LABEL_MAX` through
+ *    `storableCap`, null when absent or blank. It never enters the anchor.
+ *  - `relNextCount` / `relPrevCount`: every `<link rel~=next|prev>`, href or
+ *    not. The first-only `relNext` / `relPrev` are unchanged.
+ *  - `insecureRefs`: references that resolve (`normalizeUrl`) to `http:` —
+ *    `iframe` (`<iframe src>`), `media` (`<video src|poster>`, `<audio src>`,
+ *    `<source src>` inside a `<video>`/`<audio>` (a `mediaDepth` counter, on
+ *    `pictureDepth`'s idiom), `<track src>`, `<embed src>`, `<object data>`)
+ *    and `formAction` (`<form action>`); `forms` counts every `<form>`. The
+ *    sample keeps the first `INSECURE_SAMPLE_MAX` of each kind, in document
+ *    order. A sampled URL is cut at `INSECURE_SAMPLE_URL_MAX`; the counters see
+ *    it whole. Recorded
+ *    on every page whatever its scheme; the rules decide by the page's.
+ *  - `imagesEmptyAlt`, `imagesAltTooLong` (trimmed alt over
+ *    `ALT_TEXT_LONG_CHARS`, applied here, deviation 10) and
+ *    `imagesMissingAltSample` (raw `src` of the first images with no `alt`),
+ *    all in the existing `img` case beside `imagesMissingAlt`.
+ *
+ * Phase 26b (P26b-T4) added `htmlStructure`, in the same pass and as scalars
+ * (shape and cap in page-facts.ts). Every start tag the tokenizer emits is read,
+ * `<noscript>` and `<template>` content included.
+ *  - `htmlTags` / `headTags` / `bodyTags`: EXPLICIT start tags only.
+ *    htmlparser2 implies none of the three; an `isImplied` open is not counted.
+ *  - `headBeforeBody`: whether the first explicit `<head>` precedes the first
+ *    explicit `<body>`; null when either is absent.
+ *  - `closedEarly` (deviation 6): the first CANDIDATE met while the head
+ *    machine is in head mode — a start tag outside `HEAD_ALLOWED` (the token
+ *    `headClosedBy` names; a stray `</br>` included, a stray `</p>` not), a
+ *    start tag inside a head `<noscript>` that is ALSO outside `HEAD_ALLOWED`
+ *    (ruling R12b: the same test as outside it; `inNoscript: true`), or non-whitespace text (`#text`, snippet the text
+ *    trimmed of HTML whitespace). A start tag's snippet is its source,
+ *    `html.slice(startIndex, endIndex + 1)`, cut at `HEAD_SNIPPET_MAX` before it
+ *    is copied. `<body>` is NEVER a candidate: it is where a head is meant to
+ *    end (ruling R8 (a)). The candidate is reported only if a later token is
+ *    evidence the head was meant to go on, and is null otherwise, so a valid
+ *    document that omits `</head>` and starts its body is not flagged. Ruling
+ *    R8 (b) narrowed deviation 6's evidence list to elements that only belong
+ *    in a head, because a body may legitimately hold the others: an explicit
+ *    `</head>`; an explicit `<body>`; `<base>`; a `<title>` outside `<svg>`; a
+ *    `<meta>` without `itemprop` (microdata metas are body content); a `<link>`
+ *    with at least one `rel` token that is not body-ok (`BODY_OK_LINK_RELS`; a
+ *    link with no or blank `rel` is body-ok). `<style>` is not evidence: it is
+ *    allowed in a body. The head-noscript read is BESIDE the Phase 23 machine,
+ *    not in it: a head noscript's children stay invisible to `headClosedBy`,
+ *    `headMode` and every outside-head flag, exactly as before.
+ *  - `closedEarly.lost` (owner call O3, 2026-11-07): the head-only tags of the
+ *    evidence list above (`base`, a non-svg `title`, `meta` without
+ *    `itemprop`, `link rel=<first head-only token>`) met AFTER the candidate
+ *    and before the first explicit `<body>`: what a parser closing the head at
+ *    the candidate moves into the body. Document order, deduped, capped at
+ *    `HEAD_LOST_MAX`. `<body>` and `</head>` confirm but are never lost, so
+ *    a tracking pixel's `<noscript><img>` last in the head is an early close
+ *    with `lost: []`. The confirmation rule itself is unchanged.
+ *
+ * EVERY PHASE 26b STRING IS MADE STORABLE where it is capped, by the one shared
+ * `storableCap` (src/crawl/storable-text.ts, also the render console's):
+ * U+0000 becomes U+2400, a lone surrogate U+FFFD, and the cap cuts on a
+ * code-point boundary, so a hostile page cannot make the page-row insert throw.
+ * That covers the html-structure snippet (tag and text), every `social` value,
+ * `robotsMetas` contents, the joined `robotsMeta`, `metaRefresh` (in
+ * `parseRefresh`), `htmlLang`, `h2Text`, the insecure sample URLs and the
+ * missing-alt sample. Storability itself is the WRITER's: ruling R10 put
+ * `storableDeep` at persist.ts's one buffering boundary, which also covers the
+ * pre-26b strings (`title`, `metaDescription`, `h1Text`, the og trio, link
+ * anchors, JSON-LD, …). It is applied here as well only so these caps cut on a
+ * code point. The pre-26b caps (`h1Text`, the placeholder window, …) still
+ * cut UTF-16 units: a half pair left at their edge reaches the writer and is
+ * stored as U+FFFD, never as a failed insert.
  */
 import { createHash } from "node:crypto";
 import { Parser } from "htmlparser2";
 import { normalizeUrl, isSameOrigin } from "./url-utils.js";
 import { simhash64 } from "./simhash.js";
+import { storableCap } from "../storable-text.js";
+import {
+  ALT_TEXT_LONG_CHARS,
+  ARIA_LABEL_MAX,
+  H2_TEXT_MAX,
+  HEAD_LOST_MAX,
+  HEAD_SNIPPET_MAX,
+  HTML_LANG_MAX,
+  IMAGE_SAMPLE_MAX,
+  IMAGE_SAMPLE_SRC_MAX,
+  INSECURE_SAMPLE_MAX,
+  INSECURE_SAMPLE_URL_MAX,
+  parseRefresh,
+  ROBOTS_META_BOTS,
+  ROBOTS_META_CONTENT_MAX,
+  ROBOTS_METAS_MAX,
+  SOCIAL_TEXT_MAX,
+  SOCIAL_URL_MAX,
+  type AnchorCounts,
+  type HtmlStructure,
+  type InsecureRefKind,
+  type InsecureRefs,
+  type RefreshFact,
+  type RobotsMetaEntry,
+  type SocialFacts,
+  type SocialTag,
+} from "./page-facts.js";
 
 /** A link as the `links` table wants it. */
 export interface PageLink {
   /** Absolute, normalized target URL (see url-utils `normalizeUrl`). */
   href: string;
   anchor: string;
+  /**
+   * The `aria-label` of the element that supplied `anchor` (the first `<a>` to
+   * this target), trimmed and cut at `ARIA_LABEL_MAX` through `storableCap`;
+   * null when the attribute is absent or blank (owner call O1). Never folded
+   * into `anchor`: search engines read visible text and image alt as anchor
+   * text, not `aria-label`.
+   */
+  ariaLabel: string | null;
   /** Raw `rel` attribute, lowercased; null when the attribute was absent. */
   rel: string | null;
   nofollow: boolean;
@@ -607,6 +779,78 @@ export interface PageAnalysis {
    * `href` — the `hreflangTags` condition) after the head ended. Uncapped.
    */
   hreflangOutsideHeadCount: number;
+  // ---- Phase 26b (extraction version 2); shapes and caps in page-facts.ts ----
+  /**
+   * The FIRST `<html>` start tag's `lang`, trimmed and capped at
+   * `HTML_LANG_MAX`. Null when that tag has no `lang`, a blank one, or the
+   * document has no `<html>` tag at all.
+   */
+  htmlLang: string | null;
+  /**
+   * The Open Graph and X (`twitter:`) tags. Null ONLY when the page carries no
+   * social tag at all; see the module header's Phase 26b block for how each
+   * part is read.
+   */
+  social: SocialFacts | null;
+  /**
+   * The non-null `social.imageRefs` (the first `og:image`, then the first
+   * `twitter:image`, each resolved by `shareImageRef`), deduped, so at most
+   * `MAX_SOCIAL_IMAGE_REFS`. NOT resource refs: a browser
+   * never loads them, so they become `resources` rows with no `page_resources`
+   * edge (deviation 3). A value that is not absolute http(s) (relative, another
+   * scheme, empty) or that `normalizeUrl` refuses is skipped here and stays,
+   * raw, in `social`.
+   */
+  socialImageRefs: string[];
+  /** The first `<h2>`'s text, collected exactly as `h1Text` is; capped at `H2_TEXT_MAX`. */
+  h2Text: string | null;
+  /** `<title>` elements outside `<svg>`. A count, never null. */
+  titleCount: number;
+  /** `<meta name=description>` elements. A count, never null. */
+  metaDescriptionCount: number;
+  /**
+   * The bot-specific robots metas (`ROBOTS_META_BOTS`, `name` lower-cased), in
+   * document order, at most `ROBOTS_METAS_MAX`, content capped at
+   * `ROBOTS_META_CONTENT_MAX`. Plain `robots` is `robotsMeta`'s.
+   */
+  robotsMetas: RobotsMetaEntry[];
+  /** The `<meta http-equiv=refresh>` a browser acts on (first non-empty one that parses, else the first refused one), through `parseRefresh`. */
+  metaRefresh: RefreshFact | null;
+  /**
+   * The `<a>` start tags outside `<noscript>` that fall into each link-hygiene
+   * kind (Phase 26b, T3; the module header has each definition). Never null.
+   */
+  anchorCounts: AnchorCounts;
+  /** Every `<link rel~=next>`, with or without `href`. `relNext` is the first. */
+  relNextCount: number;
+  /** Every `<link rel~=prev>`, with or without `href`. `relPrev` is the first. */
+  relPrevCount: number;
+  /**
+   * Frame, media and form references that resolve (`normalizeUrl`) to an
+   * `http:` URL, on every page whatever its own scheme (the rules decide by
+   * the page's scheme), with every `<form>` counted and the first
+   * `INSECURE_SAMPLE_MAX` references OF EACH KIND sampled (at most three times
+   * that in all), in document order, each sampled URL cut at
+   * `INSECURE_SAMPLE_URL_MAX`.
+   */
+  insecureRefs: InsecureRefs;
+  /** `<img>` with an `alt` that is empty after trim. */
+  imagesEmptyAlt: number;
+  /** `<img>` whose trimmed `alt` is longer than `ALT_TEXT_LONG_CHARS`. */
+  imagesAltTooLong: number;
+  /**
+   * The raw `src` of the first `IMAGE_SAMPLE_MAX` images `imagesMissingAlt`
+   * counts, in document order, each capped at `IMAGE_SAMPLE_SRC_MAX`; `""` for
+   * one with no `src`, so the sample is exactly the first such images.
+   */
+  imagesMissingAltSample: string[];
+  /**
+   * The document's explicit `<html>` / `<head>` / `<body>` start tags, the
+   * order of the first head and body, and what closed the head early, if
+   * anything did (Phase 26b, T4; deviation 6). Never null; see the module
+   * header's T4 block for each part.
+   */
+  htmlStructure: HtmlStructure;
 }
 
 /**
@@ -639,6 +883,27 @@ const SKIPPED_LINK_PROTOCOLS = /^(javascript:|mailto:|tel:|#)/;
  * `normalizeUrl`, which returns null for any other scheme.
  */
 const SKIPPED_RESOURCE_PROTOCOLS = /^(data:|javascript:|#)/i;
+/** An absolute http(s) address, any case: the only share image a platform can fetch. */
+const ABSOLUTE_HTTP = /^https?:/i;
+/**
+ * The `resources` key of one share image (Phase 26b): its trimmed, UNCAPPED
+ * value resolved by `normalizeUrl`, or null unless the value starts with
+ * `http:` or `https:` (any case). A platform fetches a share image from the
+ * address as written, so `social.image-broken` reports a value with no scheme
+ * as `relative` and any other scheme as `invalid` from the stored value and
+ * never reads a fetch of it; resolving and fetching it would spend politeness
+ * and the resource cap on a row no rule reads (PR #23 review). An http(s)
+ * value `normalizeUrl` refuses is null too, and the rule calls it `invalid`.
+ * The one place a share image is resolved: the analyzer stores the result in
+ * `SocialFacts.imageRefs` and queues it as a `resources` row, and
+ * `social.image-broken` reads the stored string back rather than resolving
+ * again (final review I1). Exported so a test can seed exactly what the
+ * analyzer would have stored.
+ */
+export function shareImageRef(value: string, pageUrl: string): string | null {
+  if (!ABSOLUTE_HTTP.test(value)) return null;
+  return normalizeUrl(value, pageUrl);
+}
 /**
  * The start tags the tree builder's "in head" insertion mode keeps in the head
  * (HTML Living Standard §13.2.6.4.4). Anything else — and `<body>` is anything
@@ -684,8 +949,27 @@ const AFTER_HEAD_REOPENS = new Set([
   "template",
   "title",
 ]);
+/**
+ * The HTML "body-ok" link types: a `<link>` whose `rel` tokens are all among
+ * these may sit in a body, so it is no evidence the head was meant to continue
+ * (ruling R8 (b), narrowing deviation 6). Any other token makes the link
+ * head-only evidence.
+ */
+const BODY_OK_LINK_RELS = new Set([
+  "stylesheet",
+  "preload",
+  "prefetch",
+  "modulepreload",
+  "pingback",
+  "dns-prefetch",
+  "preconnect",
+  "prerender",
+]);
 /** Text that is not ASCII whitespace as HTML defines it (tab, LF, FF, CR, space). */
 const NON_HTML_WHITESPACE = /[^\t\n\f\r ]/;
+/** Tab, LF, FF, CR and space: ASCII whitespace as HTML defines it. */
+const isHtmlWhitespace = (code: number) =>
+  code === 0x20 || code === 0x09 || code === 0x0a || code === 0x0c || code === 0x0d;
 /** Subtrees whose text is not visible content. */
 const NON_CONTENT_TAGS = new Set(["script", "style", "noscript", "svg"]);
 /**
@@ -800,6 +1084,41 @@ const MAX_EXTRACTED_LINKS = 2_000;
  * (the SOFT_404_PHRASES precedent).
  */
 export const MAX_RESOURCE_REFS = 2_000;
+/**
+ * Social image refs kept per page (Phase 26b): one per JUDGED share image, the
+ * first `og:image` and the first `twitter:image` — exactly what
+ * `social.image-broken` reads. Open Graph allows `og:image` to repeat (a
+ * gallery), but an alternate no rule judges would be a request spent against
+ * somebody's server for nothing (final review I1), and it could crowd out the
+ * twitter:image that is judged. The bound holds by construction (one ref per
+ * tag); the constant names it. Exported so the suite pins the constant rather
+ * than a copy of its value.
+ */
+export const MAX_SOCIAL_IMAGE_REFS = 2;
+/** Where each social tag's first value lands in `SocialFacts`, and its cap. */
+type SocialSlot =
+  | { group: "og"; key: keyof SocialFacts["og"]; cap: number }
+  | { group: "x"; key: keyof SocialFacts["x"]; cap: number };
+/**
+ * The closed list of social tags, keyed by the lower-cased tag name. A
+ * `Record` over `SocialTag`, so a tag added to the union without a slot here
+ * fails to compile rather than going silently unread.
+ */
+const SOCIAL_SLOTS: Record<SocialTag, SocialSlot> = {
+  "og:title": { group: "og", key: "title", cap: SOCIAL_TEXT_MAX },
+  "og:description": { group: "og", key: "description", cap: SOCIAL_TEXT_MAX },
+  "og:image": { group: "og", key: "image", cap: SOCIAL_URL_MAX },
+  "og:url": { group: "og", key: "url", cap: SOCIAL_URL_MAX },
+  "og:type": { group: "og", key: "type", cap: SOCIAL_TEXT_MAX },
+  "og:site_name": { group: "og", key: "site_name", cap: SOCIAL_TEXT_MAX },
+  "twitter:card": { group: "x", key: "card", cap: SOCIAL_TEXT_MAX },
+  "twitter:title": { group: "x", key: "title", cap: SOCIAL_TEXT_MAX },
+  "twitter:description": { group: "x", key: "description", cap: SOCIAL_TEXT_MAX },
+  "twitter:image": { group: "x", key: "image", cap: SOCIAL_URL_MAX },
+};
+const isSocialTag = (value: string | undefined): value is SocialTag =>
+  value !== undefined && Object.hasOwn(SOCIAL_SLOTS, value);
+const ROBOTS_META_BOT_NAMES: ReadonlySet<string> = new Set(ROBOTS_META_BOTS);
 const MAX_HEADING_ORDER = 500;
 const MAX_HREFLANG_PAIRS = 200;
 const MAX_STRUCTURED_DATA_BLOCKS = 50;
@@ -813,6 +1132,14 @@ const MAX_STRUCTURED_DATA_BLOCKS = 50;
 const MAX_LD_JSON_CHARS = 100_000;
 /** How far into nested arrays / `@graph` the JSON-LD node walk will go. */
 const MAX_LD_JSON_DEPTH = 5;
+/**
+ * The deepest array/object nesting a JSON-LD block may have (ruling R11). A
+ * deeper block is refused as a parse error, before `JSON.parse` sees it: its
+ * nodes would reach the writer's recursive storability walk and the driver's
+ * `JSON.stringify` (both recursive), and real JSON-LD is a handful of levels
+ * deep. Below `STORABLE_MAX_DEPTH` (storable-text.ts) by design.
+ */
+export const MAX_LD_JSON_NESTING = 64;
 /**
  * Placeholder copy, matched against the visible text (never the raw HTML — a
  * lorem-ipsum string in a script or a CSS comment is not shipped copy).
@@ -918,7 +1245,41 @@ export const FRAMEWORK_MARKERS = ["__NEXT_DATA__", "data-reactroot", "ng-app"] a
 interface OpenAnchor {
   href: string;
   rel: string | null;
+  ariaLabel: string | null;
   text: string[];
+}
+
+/** An `aria-label` as `PageLink.ariaLabel` stores it: trimmed, capped, null when blank. */
+function ariaLabelOf(raw: string | undefined): string | null {
+  const trimmed = raw?.trim() ?? "";
+  return trimmed === "" ? null : storableCap(trimmed, ARIA_LABEL_MAX);
+}
+
+/**
+ * The deepest `{` / `[` nesting in a JSON text, read without parsing it and
+ * without recursion: one pass, string literals (and their escapes) skipped.
+ * The text may not be valid JSON; `JSON.parse` decides that afterwards. Ruling
+ * R11 refuses a block deeper than `MAX_LD_JSON_NESTING`.
+ */
+function jsonNestingDepth(text: string): number {
+  let depth = 0;
+  let max = 0;
+  let inString = false;
+  for (let i = 0; i < text.length; i += 1) {
+    const c = text.charCodeAt(i);
+    if (inString) {
+      if (c === 0x5c) i += 1; // backslash: skip the escaped unit
+      else if (c === 0x22) inString = false;
+    } else if (c === 0x22) {
+      inString = true;
+    } else if (c === 0x7b || c === 0x5b) {
+      depth += 1;
+      if (depth > max) max = depth;
+    } else if (c === 0x7d || c === 0x5d) {
+      depth -= 1;
+    }
+  }
+  return max;
 }
 
 /**
@@ -992,6 +1353,9 @@ function ldJsonType(node: unknown): string {
  * only the accumulated text and the extracted fields in memory.
  */
 export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
+  // The page's own origin, for `unsafeBlank`'s cross-origin test (O2). An
+  // invalid page URL throws here, loudly: every caller hands a fetched URL.
+  const pageOrigin = new URL(pageUrl).origin;
   // Upstream accumulated the title into a `string | null`; the parts array
   // plus a sawTitle flag says the same thing without the += churn, and keeps
   // "present but empty" distinguishable from "absent".
@@ -1006,7 +1370,6 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
   // wins; `null` = seen without a usable attribute.
   let metaDescription: string | null | undefined;
   let canonical: string | null | undefined;
-  let robotsMeta: string | null | undefined;
   let ogTitle: string | null | undefined;
   let ogDescription: string | null | undefined;
   let ogImage: string | null | undefined;
@@ -1019,6 +1382,35 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
   let relPrev: string | null | undefined;
   const hreflang: HreflangPair[] = [];
   let domSize = 0;
+
+  // PHASE 26b HEAD FACTS (module header). Every one is O(1) in page size: a
+  // fixed number of capped strings, or a counter.
+  // `undefined` = no `<html>` start tag seen yet, the first-element sentinel.
+  let htmlLang: string | null | undefined;
+  let titleCount = 0;
+  let metaDescriptionCount = 0;
+  // Every `<meta name=robots>` content, joined at the end (deviation 4). The
+  // list is O(page) in principle, as the hreflang codes are; robots metas are
+  // a handful on any real page.
+  const robotsContents: string[] = [];
+  // The trimmed contents already in `robotsContents` (ruling R6's dedupe).
+  const robotsSeen = new Set<string>();
+  let sawRobotsMeta = false;
+  const robotsMetas: RobotsMetaEntry[] = [];
+  let metaRefresh: RefreshFact | undefined;
+  // The social set. `socialFirst` holds each tag's first TRIMMED value
+  // UNCAPPED while the parse runs — at most ten strings the tokenizer already
+  // allocated — so a later value that differs only past the cap is still
+  // seen to conflict; the caps are applied once, at the end.
+  const socialFirst = new Map<SocialTag, string>();
+  const socialCounts = new Map<SocialTag, number>();
+  const socialConflicting = new Set<SocialTag>();
+  let socialOutsideHead = false;
+  let xViaProperty = false;
+  // The judged share images' refs (`shareImageRef` of each tag's FIRST value,
+  // whole, never capped), set when that first value is met; null while the tag
+  // is unseen, which is also what an absent tag stores.
+  const socialImageRef: SocialFacts["imageRefs"] = { og: null, x: null };
 
   // JSON-LD is buffered one block at a time: the tokenizer hands its text over
   // in pieces, and only the closing </script> says the block is complete.
@@ -1033,12 +1425,85 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
   const headingOrder: number[] = [];
   const headingCounts = [0, 0, 0, 0, 0, 0];
   let openH1: string[] | null = null;
+  // The first `<h2>` only (Phase 26b), on `openH1`'s footing: opened by the
+  // heading block below, fed by `ontext` under the same gates, closed on
+  // `</h2>`. `h2Done` retires it so a second h2 is never captured.
+  let openH2: string[] | null = null;
+  let h2Done = false;
+  let h2Text: string | null = null;
 
   let imagesTotal = 0;
   let imagesMissingAlt = 0;
   let imagesMissingDimensions = 0;
   const linksByTarget = new Map<string, RawPageLink>();
   let openAnchor: OpenAnchor | null = null;
+
+  // PHASE 26b BODY FACTS (T3; module header). Counters, plus two samples
+  // capped at ten entries each: O(1) in page size.
+  const anchorCounts: AnchorCounts = {
+    noHref: 0,
+    javascript: 0,
+    hashOnly: 0,
+    emptyHref: 0,
+    unsafeBlank: 0,
+  };
+  let relNextCount = 0;
+  let relPrevCount = 0;
+  let imagesEmptyAlt = 0;
+  let imagesAltTooLong = 0;
+  const imagesMissingAltSample: string[] = [];
+  const insecureRefs: InsecureRefs = { iframe: 0, media: 0, formAction: 0, forms: 0, sample: [] };
+  // Open `<video>` / `<audio>` elements: a `<source>` is a media reference only
+  // inside one, told apart without a tree on `pictureDepth`'s idiom.
+  let mediaDepth = 0;
+  // The sample is capped PER KIND, so one kind filling its share never leaves
+  // a counted kind with no sample; each kind's count is its counter's value.
+  const noteInsecure = (kind: InsecureRefKind, raw: string | undefined) => {
+    if (raw === undefined) return;
+    const resolved = normalizeUrl(raw, pageUrl);
+    if (resolved === null || !resolved.startsWith("http:")) return;
+    let counted: number;
+    if (kind === "iframe") counted = ++insecureRefs.iframe;
+    else if (kind === "media") counted = ++insecureRefs.media;
+    else counted = ++insecureRefs.formAction;
+    if (counted <= INSECURE_SAMPLE_MAX) {
+      insecureRefs.sample.push({ kind, url: storableCap(resolved, INSECURE_SAMPLE_URL_MAX) });
+    }
+  };
+  /** One `<a>` start tag into `anchorCounts` (definitions in the module header). */
+  const countAnchor = (attribs: Record<string, string>) => {
+    const href = attribs["href"];
+    if (href === undefined) {
+      // Deviation 5: a bookmark (`<a name>`, `<a id>`) is not a link. Only an
+      // href-less anchor that behaves like one is counted.
+      const role = attribs["role"]?.trim().toLowerCase();
+      if ("onclick" in attribs || role === "link" || role === "button") {
+        anchorCounts.noHref += 1;
+      }
+      return;
+    }
+    const trimmed = href.trim();
+    const isJavascript = /^\s*javascript:/i.test(href);
+    if (trimmed === "") anchorCounts.emptyHref += 1;
+    else if (isJavascript) anchorCounts.javascript += 1;
+    else if (trimmed === "#" || trimmed === "#!") anchorCounts.hashOnly += 1;
+    if (attribs["target"]?.trim().toLowerCase() === "_blank" && !isJavascript) {
+      const rel = (attribs["rel"] ?? "").trim().toLowerCase().split(/\s+/);
+      if (!rel.includes("noopener") && !rel.includes("noreferrer") && isCrossOrigin(href)) {
+        anchorCounts.unsafeBlank += 1;
+      }
+    }
+  };
+  /**
+   * Owner call O2 (2026-11-07): whether `href` resolves to an origin other than
+   * the page's. Exact `URL.origin` comparison, NOT `isSameOrigin`: a subdomain
+   * and a `www.` variant are other origins to the browser, and reverse
+   * tabnabbing is a browser question. An href `normalizeUrl` refuses is false.
+   */
+  const isCrossOrigin = (href: string): boolean => {
+    const resolved = normalizeUrl(href, pageUrl);
+    return resolved !== null && new URL(resolved).origin !== pageOrigin;
+  };
 
   // The page's resource references, keyed by resolved URL so one page says one
   // thing about one file. O(page) and capped, like `linksByTarget` — the
@@ -1227,9 +1692,71 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
   // (fetch's TextDecoder does); this is for callers who hand over a raw string.
   // It can only sit in the first text event, which it necessarily is.
   let bomPending = html.charCodeAt(0) === 0xfeff;
-  const headOnOpenTag = (name: string, isImplied: boolean) => {
+
+  // HTML STRUCTURE (Phase 26b T4; module header). Scalars only: three counters,
+  // the first of head/body, and one candidate whose snippet is capped when it
+  // is taken, so the state is O(1) in page size whatever the document holds.
+  let htmlTags = 0;
+  let headTags = 0;
+  let bodyTags = 0;
+  let firstOfHeadBody: "head" | "body" | null = null;
+  // The first closed-early candidate (deviation 6), and whether a later token
+  // confirmed the head was meant to go on (narrowed by ruling R8). Read
+  // together at the end.
+  let earlyCandidate: Omit<NonNullable<HtmlStructure["closedEarly"]>, "lost"> | null = null;
+  let earlyConfirmed = false;
+  // Owner call O3: the head tags after the candidate that an early close moves
+  // into the body, deduped and capped at HEAD_LOST_MAX (O(1)), collected until
+  // the first explicit `<body>` (after it, a tag is in the body whatever closed
+  // the head). Read with the candidate at the end.
+  const earlyLost: string[] = [];
+  let earlyLostDone = false;
+  // Open `<svg>` elements, so an svg `<title>` is not read as head evidence
+  // (R8). Its own counter: `suppressDepth` also counts script/style/noscript.
+  let structureSvgDepth = 0;
+  // A `<noscript>` opened in head mode with no other container around it is
+  // open. Its children are invisible to the head machine (they ride
+  // `headContainerDepth`) and STAY invisible to it; this flag only lets the
+  // candidate see them.
+  let inHeadNoscript = false;
+  const takeCandidate = (tag: string, snippet: string, inNoscript: boolean) => {
+    if (earlyCandidate !== null) return;
+    earlyCandidate = { tag, snippet, inNoscript };
+  };
+  /** The confirmed candidate with what it loses (O3), or null. Read once, at the end. */
+  const closedEarlyFact = (): HtmlStructure["closedEarly"] =>
+    earlyConfirmed && earlyCandidate !== null ? { ...earlyCandidate, lost: [...earlyLost] } : null;
+  /**
+   * The current start tag's source, made storable and cut at the cap. The
+   * slice takes one unit past the cap so a cut through a surrogate pair is
+   * seen and the whole pair dropped; the copy stays O(cap).
+   */
+  const tagSnippet = (start: number, end: number) =>
+    storableCap(html.slice(start, Math.min(end + 1, start + HEAD_SNIPPET_MAX + 1)), HEAD_SNIPPET_MAX);
+
+  const headOnOpenTag = (name: string, isImplied: boolean, start: number, end: number) => {
     if (headMode === "body") return;
     if (headContainerDepth > 0) {
+      // A non-head child of a head `<noscript>` is a candidate (deviation 6),
+      // read here without touching the machine: it stays suspended. RULING
+      // R12b: the test is `HEAD_ALLOWED`, the same as outside the noscript.
+      // With scripting off, the "in head noscript" insertion mode keeps
+      // `link`/`meta`/`style`/`noframes`/`basefont`/`bgsound` in the head. It
+      // pops the noscript for any other head tag (`title`, `base`, `script`,
+      // `template`) and reprocesses that tag in the head, and it ignores
+      // `head`/`noscript`. None of these closes the head, so only a tag the
+      // head cannot hold is a candidate. Only the noscript's OWN content is
+      // read (`headContainerDepth === 1`). Inside a nested container, a
+      // `<template>`'s fragment or a `<noframes>`' raw text, nothing is in the
+      // head at all. The stray-`</p>` exemption below applies here too.
+      if (
+        inHeadNoscript &&
+        headContainerDepth === 1 &&
+        !(isImplied && name === "p") &&
+        !HEAD_ALLOWED.has(name)
+      ) {
+        takeCandidate(name, tagSnippet(start, end), true);
+      }
       if (HEAD_CONTAINERS.has(name)) headContainerDepth += 1;
       return;
     }
@@ -1241,10 +1768,14 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
     if (headMode === "head") {
       if (HEAD_ALLOWED.has(name)) {
         if (HEAD_CONTAINERS.has(name)) headContainerDepth += 1;
+        if (name === "noscript") inHeadNoscript = true;
         return;
       }
       headClosedBy = name;
       headMode = "body";
+      // `<body>` is where a head is meant to end, so it is never an early
+      // close; every other tag that ends the head here is a candidate.
+      if (name !== "body") takeCandidate(name, tagSnippet(start, end), false);
       return;
     }
     // "after head": `<html>` merges into the root and a second `<head>` is
@@ -1261,6 +1792,7 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
     if (headMode === "body") return;
     if (headContainerDepth > 0) {
       if (HEAD_CONTAINERS.has(name)) headContainerDepth -= 1;
+      if (headContainerDepth === 0) inHeadNoscript = false;
       return;
     }
     // Implied closes are htmlparser2's tree repair (it closes the head itself
@@ -1283,15 +1815,185 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
     }
     if (headMode === "body" || headContainerDepth > 0) return;
     if (!NON_HTML_WHITESPACE.test(probe)) return;
-    if (headMode === "head") headClosedBy = "#text";
+    if (headMode === "head") {
+      headClosedBy = "#text";
+      // Trimmed of HTML whitespace only, so the text that made it a candidate
+      // (a non-breaking space included) is what the snippet shows. Linear by
+      // construction: one forward search for the first non-whitespace unit,
+      // one backward scan for the last, and a slice of at most the cap plus
+      // one unit (so a pair straddling the cap is seen and dropped whole).
+      // Never a trimming regex: `[ws]+$` backtracks quadratically on a long
+      // inner whitespace run (review C1).
+      const start = probe.search(NON_HTML_WHITESPACE);
+      let end = probe.length;
+      while (end > start && isHtmlWhitespace(probe.charCodeAt(end - 1))) end -= 1;
+      takeCandidate(
+        "#text",
+        storableCap(probe.slice(start, Math.min(end, start + HEAD_SNIPPET_MAX + 1)), HEAD_SNIPPET_MAX),
+        false,
+      );
+    }
     headMode = "body";
+  };
+  /**
+   * The counts, the order, and the evidence that confirms a candidate, read
+   * from every explicit start tag BEFORE the head machine sees it, so the
+   * token that becomes the candidate can never confirm itself.
+   */
+  const structureOnOpenTag = (
+    name: string,
+    attribs: Record<string, string>,
+    isImplied: boolean,
+  ) => {
+    if (isImplied) return;
+    if (name === "html") htmlTags += 1;
+    else if (name === "head") headTags += 1;
+    else if (name === "body") bodyTags += 1;
+    if ((name === "head" || name === "body") && firstOfHeadBody === null) firstOfHeadBody = name;
+    // Template content is never in the head (or the body): a tag inside a
+    // `<template>` neither shows the head was meant to go on nor is lost by an
+    // early close. `templateDepth` counts this tag's own `<template>` only after
+    // this call, so the template element itself is judged as a tag.
+    if (
+      earlyCandidate !== null &&
+      !earlyConfirmed &&
+      templateDepth === 0 &&
+      isHeadEvidence(name, attribs)
+    ) {
+      earlyConfirmed = true;
+    }
+    if (earlyCandidate !== null && !earlyLostDone && templateDepth === 0) {
+      if (name === "body") {
+        earlyLostDone = true;
+      } else {
+        const lost = headOnlyTag(name, attribs);
+        if (lost !== null && earlyLost.length < HEAD_LOST_MAX && !earlyLost.includes(lost)) {
+          earlyLost.push(lost);
+        }
+      }
+    }
+    if (name === "svg") structureSvgDepth += 1;
+  };
+  /**
+   * Ruling R8 (b): the start tags that only belong in a head, and so show a
+   * head that was meant to go on. Everything a body may legitimately hold
+   * (a microdata `<meta itemprop>`, a stylesheet or preload `<link>`, a
+   * `<style>`, an svg `<title>`) is not evidence.
+   */
+  const isHeadEvidence = (name: string, attribs: Record<string, string>): boolean =>
+    name === "body" || headOnlyTag(name, attribs) !== null;
+  /**
+   * The head-only start tags of ruling R8 (b), named as `closedEarly.lost`
+   * records them (owner call O3): `base`, `title` outside `<svg>`, `meta`
+   * without `itemprop`, and `link rel=<first token that is not body-ok>`. Null
+   * for everything a body may hold, `<body>` included: it is evidence (see
+   * `isHeadEvidence`) but never a lost tag. The token is page text, so it is
+   * made storable and the entry cut at `HEAD_SNIPPET_MAX`.
+   */
+  const headOnlyTag = (name: string, attribs: Record<string, string>): string | null => {
+    switch (name) {
+      case "base":
+        return "base";
+      case "title":
+        return structureSvgDepth === 0 ? "title" : null;
+      case "meta":
+        return "itemprop" in attribs ? null : "meta";
+      case "link": {
+        // No `rel`, or a blank one, is body-ok.
+        const rel = attribs["rel"];
+        if (rel === undefined) return null;
+        const token = rel
+          .toLowerCase()
+          .split(/[\t\n\f\r ]+/)
+          .find((t) => t !== "" && !BODY_OK_LINK_RELS.has(t));
+        return token === undefined ? null : storableCap(`link rel=${token}`, HEAD_SNIPPET_MAX);
+      }
+      default:
+        return null;
+    }
+  };
+  /**
+   * An ORPHAN `</head>` (no `<head>` open) is never evidence here: htmlparser2
+   * drops an end tag whose element is not open, so no event arrives. For
+   * example, `<title>t</title><div>x</div></head>` reports null. This is the
+   * Phase 23 known limit again, here as a rare false negative.
+   */
+  const structureOnCloseTag = (name: string, isImplied: boolean) => {
+    // Implied or not: an svg htmlparser2 closes at its parent's end is closed.
+    if (name === "svg" && structureSvgDepth > 0) structureSvgDepth -= 1;
+    if (!isImplied && name === "head" && earlyCandidate !== null) earlyConfirmed = true;
+  };
+
+  /**
+   * The social tags one element names (Phase 26b). Open Graph is read from
+   * `property=` or `name=` (both are in the wild); X from `name=`, or from
+   * `property=`, which X does not read and so is recorded as `xViaProperty`.
+   * Each DISTINCT tag the element names is recorded once (ruling R6):
+   * `<meta name=twitter:title property=og:title>` is both og:title and
+   * twitter:title, while `<meta name=og:title property=og:title>` is og:title
+   * once.
+   */
+  const handleSocialTag = (
+    name: string | undefined,
+    property: string | undefined,
+    content: string | undefined,
+  ) => {
+    if (isSocialTag(property)) {
+      // Named by `name=` as well, a twitter tag is where X reads it.
+      if (property.startsWith("twitter:") && name !== property) xViaProperty = true;
+      recordSocialTag(property, content);
+    }
+    if (isSocialTag(name) && name !== property) recordSocialTag(name, content);
+  };
+
+  const recordSocialTag = (tag: SocialTag, content: string | undefined) => {
+    if (headMode === "body") socialOutsideHead = true;
+    socialCounts.set(tag, (socialCounts.get(tag) ?? 0) + 1);
+    // A tag with no `content` is present and empty, as a `<meta
+    // name=description>` without one is.
+    const value = content?.trim() ?? "";
+    const first = socialFirst.get(tag);
+    if (first === undefined) {
+      socialFirst.set(tag, value);
+      // The legacy og columns read the element the social set reads: the
+      // first whose `property` OR `name` is the tag, the value untrimmed as
+      // the columns always stored it, null when there is no `content`
+      // (PR #23 review; the module header's Phase 26b block).
+      if (tag === "og:title") ogTitle = content ?? null;
+      if (tag === "og:description") ogDescription = content ?? null;
+      if (tag === "og:image") ogImage = content ?? null;
+      // Only the FIRST value of each image tag is judged, so only it is
+      // resolved: into a slot of its own, never a resource ref (deviation 3,
+      // and the header).
+      if (tag === "og:image") socialImageRef.og = shareImageRef(value, pageUrl);
+      if (tag === "twitter:image") socialImageRef.x = shareImageRef(value, pageUrl);
+    } else if (first !== value) socialConflicting.add(tag);
   };
 
   const handleMetaTag = (attribs: Record<string, string>) => {
     const content = attribs["content"];
     const name = attribs["name"]?.trim().toLowerCase();
     const property = attribs["property"]?.trim().toLowerCase();
+    // Phase 26b: the social set and the refresh are read beside the chain
+    // below, never inside it — an element carrying `name=description` and
+    // `property=og:description` is both, and the chain's first match must not
+    // hide the second.
+    handleSocialTag(name, property, content);
+    // The refresh a browser acts on (HTML Standard, meta refresh): an empty
+    // `content` returns before the steps, and a value the steps refuse leaves
+    // the document free to refresh, so a LATER valid one wins. The first refused
+    // value is kept until one parses, as evidence that the page tried.
+    if (
+      (metaRefresh === undefined || metaRefresh.delaySeconds === null) &&
+      content !== undefined &&
+      content !== "" &&
+      attribs["http-equiv"]?.trim().toLowerCase() === "refresh"
+    ) {
+      const parsed = parseRefresh(content, pageUrl);
+      if (metaRefresh === undefined || parsed.delaySeconds !== null) metaRefresh = parsed;
+    }
     if (name === "description") {
+      metaDescriptionCount += 1;
       // FIRST OCCURRENCE: the flag says the description the value is read
       // from sits outside the head; a body duplicate of an in-head one is not.
       if (metaDescription === undefined) {
@@ -1299,20 +2001,33 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
         metaDescriptionOutsideHead = headMode === "body";
       }
     } else if (name === "robots") {
-      if (robotsMeta === undefined) {
-        robotsMeta = content ?? null;
+      // EVERY robots meta's content, joined at the end (deviation 4): Google
+      // combines repeated robots metas, so a `noindex` in the second one is a
+      // `noindex`. The outside-head flag stays about the FIRST element.
+      if (!sawRobotsMeta) {
+        sawRobotsMeta = true;
         robotsOutsideHead = headMode === "body";
+      }
+      // Ruling R6: a content identical (after trim) to one already kept adds
+      // nothing to the directives, so it is dropped; first-seen order and the
+      // first spelling stay, and every distinct content survives.
+      if (content !== undefined && !robotsSeen.has(content.trim())) {
+        robotsSeen.add(content.trim());
+        robotsContents.push(content);
+      }
+    } else if (name !== undefined && ROBOTS_META_BOT_NAMES.has(name)) {
+      if (robotsMetas.length < ROBOTS_METAS_MAX) {
+        // No `content` is present and empty, as for the description: the
+        // element is a fact even when it directs nothing.
+        robotsMetas.push({
+          name,
+          content: storableCap(content ?? "", ROBOTS_META_CONTENT_MAX),
+        });
       }
     } else if (name === "viewport") {
       // Presence is the whole signal; the content string is the agent's
       // business, not the evidence layer's.
       hasViewport = true;
-    } else if (property === "og:title") {
-      if (ogTitle === undefined) ogTitle = content ?? null;
-    } else if (property === "og:description") {
-      if (ogDescription === undefined) ogDescription = content ?? null;
-    } else if (property === "og:image") {
-      if (ogImage === undefined) ogImage = content ?? null;
     }
   };
 
@@ -1354,6 +2069,9 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
     if (tokens.includes("amphtml")) hasAmp = true;
     if (tokens.includes("next") && relNext === undefined) relNext = href ?? null;
     if (tokens.includes("prev") && relPrev === undefined) relPrev = href ?? null;
+    // Every one, href or not (Phase 26b): the first-only reads above stay.
+    if (tokens.includes("next")) relNextCount += 1;
+    if (tokens.includes("prev")) relPrevCount += 1;
   };
 
   /**
@@ -1368,6 +2086,11 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
     ldJsonChars = 0;
     ldJsonOversize = false;
     if (oversize) {
+      structuredDataParseErrors += 1;
+      return;
+    }
+    // Ruling R11: too deep is refused like too big, counted and not stored.
+    if (jsonNestingDepth(text) > MAX_LD_JSON_NESTING) {
       structuredDataParseErrors += 1;
       return;
     }
@@ -1430,7 +2153,7 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
 
   const closeAnchor = () => {
     if (!openAnchor) return;
-    const { href, rel, text } = openAnchor;
+    const { href, rel, ariaLabel, text } = openAnchor;
     openAnchor = null;
     if (linksByTarget.size >= MAX_EXTRACTED_LINKS) return;
     const resolved = normalizeUrl(href, pageUrl);
@@ -1443,6 +2166,7 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
     linksByTarget.set(resolved, {
       href: resolved,
       anchor,
+      ariaLabel,
       rel,
       nofollow: (rel ?? "").split(/\s+/).includes("nofollow"),
       isInternal: isSameOrigin(resolved, pageUrl),
@@ -1455,8 +2179,11 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
       onopentag(name, attribs, isImplied) {
         domSize += 1;
         // The head machine reads every open tag, above the noscript return:
-        // a `<noscript>` in the head is a container it has to see open.
-        headOnOpenTag(name, isImplied);
+        // a `<noscript>` in the head is a container it has to see open. The
+        // structure facts read it first (see `structureOnOpenTag`), and the
+        // machine gets the token's source span for a candidate's snippet.
+        structureOnOpenTag(name, attribs, isImplied);
+        headOnOpenTag(name, isImplied, parser.startIndex, parser.endIndex);
         // Hidden-surface bookkeeping first, and unconditionally: the
         // `noscript` early return below skips the rest of this handler, and
         // `onclosetag` has the mirror of it, so anything that must stay
@@ -1490,6 +2217,8 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
             // The outside-head flag is about the FIRST document title, the one
             // `title` is read from, under the same svg guard.
             if (!sawTitle && suppressDepth === 0) titleOutsideHead = headMode === "body";
+            // Every document title, under the same svg guard (Phase 26b).
+            if (suppressDepth === 0) titleCount += 1;
             if (!titleDone && suppressDepth === 0) {
               titleDepth += 1;
               sawTitle = true;
@@ -1507,6 +2236,12 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
             // that merely *has* an AMP twin links to it with rel=amphtml.
             // Either is enough for pages.has_amp.
             if ("amp" in attribs || "⚡" in attribs) hasAmp = true;
+            // The FIRST `<html>` start tag decides `htmlLang`, lang or not.
+            if (htmlLang === undefined) {
+              const lang = attribs["lang"]?.trim();
+              htmlLang =
+                lang === undefined || lang === "" ? null : storableCap(lang, HTML_LANG_MAX);
+            }
             break;
           case "meta":
             handleMetaTag(attribs);
@@ -1516,7 +2251,23 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
             break;
           case "img": {
             imagesTotal += 1;
-            if (!("alt" in attribs)) imagesMissingAlt += 1;
+            const alt = attribs["alt"];
+            if (alt === undefined) {
+              imagesMissingAlt += 1;
+              // Phase 26b: which images, raw, so the finding can name them.
+              if (imagesMissingAltSample.length < IMAGE_SAMPLE_MAX) {
+                imagesMissingAltSample.push(storableCap(attribs["src"] ?? "", IMAGE_SAMPLE_SRC_MAX));
+              }
+            } else {
+              const trimmedAlt = alt.trim();
+              if (trimmedAlt === "") imagesEmptyAlt += 1;
+              else if (trimmedAlt.length > ALT_TEXT_LONG_CHARS) imagesAltTooLong += 1;
+              // An image link's alt is its anchor text (Phase 26b): pushed
+              // where a text node's words would be, spaced off on both sides
+              // so it never glues to them ("Home" + "Logo" is "Home Logo",
+              // final review I2); `closeAnchor` collapses and trims.
+              if (openAnchor && trimmedAlt !== "") openAnchor.text.push(` ${trimmedAlt} `);
+            }
             // One image, one count: missing either attribute is the same
             // layout-shift defect and must not be double-counted.
             if (!("width" in attribs) || !("height" in attribs)) {
@@ -1538,10 +2289,37 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
           case "picture":
             pictureDepth += 1;
             break;
+          case "video":
+            mediaDepth += 1;
+            noteInsecure("media", attribs["src"]);
+            noteInsecure("media", attribs["poster"]);
+            break;
+          case "audio":
+            mediaDepth += 1;
+            noteInsecure("media", attribs["src"]);
+            break;
+          case "track":
+          case "embed":
+            noteInsecure("media", attribs["src"]);
+            break;
+          case "object":
+            noteInsecure("media", attribs["data"]);
+            break;
+          case "iframe":
+            noteInsecure("iframe", attribs["src"]);
+            break;
+          case "form":
+            insecureRefs.forms += 1;
+            noteInsecure("form", attribs["action"]);
+            break;
           case "source": {
-            // ONLY inside a <picture>. The same element inside <video> /
-            // <audio> names media, which is out of this phase's owner scope,
-            // and a depth counter is how the two are told apart without a tree.
+            // Inside a <video> / <audio> it names media: an insecure-reference
+            // site only (Phase 26b), never a resource ref.
+            if (mediaDepth > 0) noteInsecure("media", attribs["src"]);
+            // A resource ref ONLY inside a <picture>. The same element inside
+            // <video> / <audio> names media, which is out of this phase's owner
+            // scope, and a depth counter is how the two are told apart without
+            // a tree.
             if (pictureDepth === 0) break;
             addResource(attribs["src"], "image");
             const sourceSrcset = attribs["srcset"];
@@ -1603,6 +2381,9 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
               if (navDepth > 0) navLinkCount += 1;
               if (footerDepth > 0) footerLinkCount += 1;
             }
+            // Every `<a>` start tag, including those that never open below
+            // (no href, `javascript:`, `#…`): Phase 26b's anchor counts.
+            countAnchor(attribs);
             // HTML forbids nested <a>; browsers implicitly close the open
             // one, and the tokenizer has no tree correction, so mirror that.
             closeAnchor();
@@ -1611,6 +2392,7 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
               openAnchor = {
                 href,
                 rel: attribs["rel"]?.trim().toLowerCase() ?? null,
+                ariaLabel: ariaLabelOf(attribs["aria-label"]),
                 text: [],
               };
             }
@@ -1630,6 +2412,7 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
             headingOrder.push(headingLevel);
           }
           if (headingLevel === 1 && openH1 === null) openH1 = [];
+          if (headingLevel === 2 && openH2 === null && !h2Done) openH2 = [];
         }
         if (isTextBoundary(name)) emitTextBoundary();
       },
@@ -1654,6 +2437,7 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
           return;
         }
         if (openH1) openH1.push(text);
+        if (openH2) openH2.push(text);
         if (openAnchor) openAnchor.text.push(text);
         // THE TEMPLATE GATE, and its position is the point: every capture
         // above it sees template text (the DOM oracle's selectors do too, so
@@ -1685,6 +2469,7 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
       onclosetag(name, isImplied) {
         // The head machine's mirror of its open-tag hook, above the noscript
         // returns for the same reason.
+        structureOnCloseTag(name, isImplied);
         headOnCloseTag(name, isImplied);
         // The mirror of `onopentag`'s first block, in the same position and
         // for the same reason. An element is popped by the DEPTH it opened at,
@@ -1728,6 +2513,7 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
         }
         if (name === "nav" && navDepth > 0) navDepth -= 1;
         if (name === "picture" && pictureDepth > 0) pictureDepth -= 1;
+        if ((name === "video" || name === "audio") && mediaDepth > 0) mediaDepth -= 1;
         if (name === "footer" && footerDepth > 0) footerDepth -= 1;
         if (name === "head" && headDepth > 0) headDepth -= 1;
         if (name === "body" && bodyDepth > 0) bodyDepth -= 1;
@@ -1735,6 +2521,11 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
         if (name === "h1" && openH1) {
           h1s.push(openH1.join("").trim());
           openH1 = null;
+        }
+        if (name === "h2" && openH2) {
+          h2Text = storableCap(openH2.join("").replace(/\s+/g, " ").trim(), H2_TEXT_MAX);
+          openH2 = null;
+          h2Done = true;
         }
       },
     },
@@ -1789,12 +2580,43 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
   const textRatio =
     htmlBytes === 0 ? 0 : Math.min(1, Buffer.byteLength(bodyText) / htmlBytes);
 
+  // The social set, capped here and only here (see `socialFirst`). Null only
+  // when the page carried no social tag at all. `imageRefs` is NOT capped: it
+  // is the key of a `resources` row (see the field), and `socialImageRefs` is
+  // exactly its non-null values, deduped, og first.
+  let social: SocialFacts | null = null;
+  let socialImageRefs: string[] = [];
+  if (socialCounts.size > 0) {
+    const og: SocialFacts["og"] = {};
+    const x: SocialFacts["x"] = {};
+    for (const [tag, value] of socialFirst) {
+      const slot = SOCIAL_SLOTS[tag];
+      const capped = storableCap(value, slot.cap);
+      if (slot.group === "og") og[slot.key] = capped;
+      else x[slot.key] = capped;
+    }
+    social = {
+      og,
+      x,
+      counts: Object.fromEntries(socialCounts),
+      conflicting: [...socialConflicting].sort(),
+      outsideHead: socialOutsideHead,
+      xViaProperty,
+      imageRefs: { ...socialImageRef },
+    };
+    const { og: ogRef, x: xRef } = socialImageRef;
+    socialImageRefs = [...new Set([ogRef, xRef].filter((ref) => ref !== null))];
+  }
+
   return {
     title,
     metaDescription: metaDescription ?? null,
     canonicalHtml: canonical ?? null,
     canonicalCount,
-    robotsMeta: robotsMeta ?? null,
+    // Deviation 4: every robots meta, joined. Null when there was none — or
+    // when none carried a `content`, which is what the first-only read said.
+    // Made storable (no cap): the joined value is a 26b reading of the column.
+    robotsMeta: robotsContents.length === 0 ? null : storableCap(robotsContents.join(", ")),
     ogTitle: ogTitle ?? null,
     ogDescription: ogDescription ?? null,
     ogImage: ogImage ?? null,
@@ -1843,6 +2665,31 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
     robotsOutsideHead,
     canonicalOutsideHead,
     hreflangOutsideHeadCount,
+    htmlLang: htmlLang ?? null,
+    social,
+    socialImageRefs,
+    h2Text,
+    titleCount,
+    metaDescriptionCount,
+    robotsMetas,
+    metaRefresh: metaRefresh ?? null,
+    anchorCounts,
+    relNextCount,
+    relPrevCount,
+    insecureRefs,
+    imagesEmptyAlt,
+    imagesAltTooLong,
+    imagesMissingAltSample,
+    htmlStructure: {
+      htmlTags,
+      headTags,
+      bodyTags,
+      headBeforeBody: headTags > 0 && bodyTags > 0 ? firstOfHeadBody === "head" : null,
+      // A candidate nothing confirmed is a document that simply started its
+      // body without `</head>` (deviation 6, evidence narrowed by ruling R8):
+      // not an early close.
+      closedEarly: closedEarlyFact(),
+    },
     bodyText,
     h1s,
     hasStructuredData,
@@ -1880,9 +2727,10 @@ export function analyzePage(html: string, url: string): PageAnalysis {
     navLinkCount: raw.navLinkCount,
     footerLinkCount: raw.footerLinkCount,
     frameworkMarkers: raw.frameworkMarkers,
-    links: raw.links.map(({ href, anchor, rel, nofollow, position }) => ({
+    links: raw.links.map(({ href, anchor, ariaLabel, rel, nofollow, position }) => ({
       href,
       anchor,
+      ariaLabel,
       rel,
       nofollow,
       position,
@@ -1910,5 +2758,21 @@ export function analyzePage(html: string, url: string): PageAnalysis {
     robotsOutsideHead: raw.robotsOutsideHead,
     canonicalOutsideHead: raw.canonicalOutsideHead,
     hreflangOutsideHeadCount: raw.hreflangOutsideHeadCount,
+    htmlLang: raw.htmlLang,
+    social: raw.social,
+    socialImageRefs: [...raw.socialImageRefs],
+    h2Text: raw.h2Text,
+    titleCount: raw.titleCount,
+    metaDescriptionCount: raw.metaDescriptionCount,
+    robotsMetas: raw.robotsMetas,
+    metaRefresh: raw.metaRefresh,
+    anchorCounts: raw.anchorCounts,
+    relNextCount: raw.relNextCount,
+    relPrevCount: raw.relPrevCount,
+    insecureRefs: raw.insecureRefs,
+    imagesEmptyAlt: raw.imagesEmptyAlt,
+    imagesAltTooLong: raw.imagesAltTooLong,
+    imagesMissingAltSample: raw.imagesMissingAltSample,
+    htmlStructure: raw.htmlStructure,
   };
 }

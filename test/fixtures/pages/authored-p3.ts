@@ -160,7 +160,7 @@ const soft404: Fixture = {
   path: "/authored3/soft-404",
   category: CONTENT,
   name: "Soft 404 (200 OK, page cannot be found)",
-  expectedIssues: ["content.soft-404"],
+  expectedIssues: ["content.soft-404", "title.same-as-h1"],
   exact: true,
   handler: (req, res) =>
     serve(req, res, () => ({
@@ -380,6 +380,8 @@ const hreflangB: Fixture = {
       title: "Opening hours on the fixture site",
       metaDescription:
         "The French half of the pair, carrying the same three annotations as its English counterpart so the cluster is complete from both sides.",
+      // The page names itself `fr`, so its `<html lang>` says so (26b).
+      htmlLang: "fr",
       headExtra: [
         alternate("en", HREFLANG_A, self),
         alternate("fr", HREFLANG_B, self),

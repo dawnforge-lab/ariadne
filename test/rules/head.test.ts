@@ -5,6 +5,7 @@ import {
   expectSilentOnNonOkFetches,
   expectSilentOnNotJudged,
   mkPage,
+  mkV1Page,
   NOT_JUDGED_200S,
   ruleLookup,
 } from "./mk-page.js";
@@ -34,11 +35,12 @@ describe("head rule metadata", () => {
     expect(directives.checkIds).toEqual(["CHECK-18", "CHECK-04", "CHECK-24"]);
     expect(tags.severity).toBe("warning");
     expect(tags.category).toBe("on-page");
-    expect(tags.checkIds).toEqual(["CHECK-35", "CHECK-36"]);
+    expect(tags.checkIds).toEqual(["CHECK-35", "CHECK-36", "CHECK-87"]);
     for (const r of headRules) {
       expect(r.columns).toEqual([
         { key: "elements", label: "Elements Outside Head" },
         { key: "headClosedBy", label: "Closed By" },
+        { key: "headClosedEarly", label: "Head Closed By (element)", optional: true },
       ]);
     }
   });
@@ -140,6 +142,25 @@ describe("head.tags-outside-head", () => {
     });
   });
 
+  it("names social tags outside the head (26b), after the title and description", () => {
+    const social = mkPage().social;
+    if (social === null) throw new Error("mkPage's clean page lost its social set");
+    const outside = { social: { ...social, outsideHead: true } };
+    expect(tags.run(mkPage({ ...outside, headClosedBy: "div" }))[0]?.evidence).toEqual({
+      elements: "social",
+      headClosedBy: "<div>",
+    });
+    expect(
+      tags.run(mkPage({ ...outside, titleOutsideHead: true, metaDescriptionOutsideHead: true }))[0]
+        ?.evidence,
+    ).toEqual({ elements: "title, meta description, social", headClosedBy: "</head>" });
+  });
+
+  it("is silent on social tags inside the head, and on a v1 row's null social", () => {
+    expect(tags.run(mkPage())).toHaveLength(0);
+    expect(tags.run(mkV1Page())).toHaveLength(0);
+  });
+
   it("does not fire on directives outside the head", () => {
     expect(
       tags.run(
@@ -155,5 +176,67 @@ describe("head.tags-outside-head", () => {
   it("is judged-only: silent on non-200s and on noindexed or canonicalised 200s", () => {
     expectSilentOnNonOkFetches([tags], [{ metaDescriptionOutsideHead: true }]);
     expectSilentOnNotJudged([tags], [{ titleOutsideHead: true }]);
+  });
+});
+
+describe("the head rules name the closing element (26b)", () => {
+  const closedEarly = {
+    tag: "div",
+    snippet: '<div class="promo">',
+    inNoscript: false,
+    lost: ["title", "link rel=canonical"],
+  };
+  const structure = {
+    htmlTags: 1, headTags: 1, bodyTags: 1, headBeforeBody: true as boolean | null, closedEarly,
+  };
+
+  it("carries headClosedEarly {tag, snippet} on a v2 row that has one, on both rules", () => {
+    const row = {
+      htmlStructure: structure,
+      headClosedBy: "div",
+      canonicalOutsideHead: true,
+      titleOutsideHead: true,
+    };
+    expect(directives.run(mkPage(row))[0]?.evidence).toEqual({
+      elements: "canonical",
+      headClosedBy: "<div>",
+      headClosedEarly: { tag: "div", snippet: '<div class="promo">' },
+    });
+    expect(tags.run(mkPage(row))[0]?.evidence).toEqual({
+      elements: "title",
+      headClosedBy: "<div>",
+      headClosedEarly: { tag: "div", snippet: '<div class="promo">' },
+    });
+  });
+
+  // Owner call O3: an early close that loses nothing is not why anything is
+  // outside the head (a tag after the explicit <body> is in the body whatever
+  // closed the head), so it is not offered as the explanation.
+  it("omits the key when the early close lost nothing, and throws on a pre-O3 row", () => {
+    const row = {
+      htmlStructure: { ...structure, closedEarly: { ...closedEarly, lost: [] } },
+      headClosedBy: "div",
+      canonicalOutsideHead: true,
+      titleOutsideHead: true,
+    };
+    expect(directives.run(mkPage(row))[0]?.evidence).not.toHaveProperty("headClosedEarly");
+    expect(tags.run(mkPage(row))[0]?.evidence).not.toHaveProperty("headClosedEarly");
+    const stale = mkPage({
+      ...row,
+      htmlStructure: {
+        ...structure,
+        closedEarly: { tag: "div", snippet: "<div>", inNoscript: false },
+      } as unknown as typeof structure,
+    });
+    expect(() => directives.run(stale)).toThrow(/re-crawl/);
+    expect(() => tags.run(stale)).toThrow(/re-crawl/);
+  });
+
+  it("omits the key on a v1 row and on a v2 row with no early close", () => {
+    const v1 = mkV1Page({ headClosedBy: "div", canonicalOutsideHead: true, titleOutsideHead: true });
+    expect(directives.run(v1)[0]?.evidence).not.toHaveProperty("headClosedEarly");
+    expect(tags.run(v1)[0]?.evidence).not.toHaveProperty("headClosedEarly");
+    const v2 = mkPage({ canonicalOutsideHead: true, headClosedBy: null });
+    expect(directives.run(v2)[0]?.evidence).not.toHaveProperty("headClosedEarly");
   });
 });

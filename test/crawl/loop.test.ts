@@ -1174,6 +1174,26 @@ describe("a capped crawl fills its budget behind a site-wide nav", () => {
     expect(await frontierCappedOf(summary.crawlId)).toBe(false);
   });
 
+  // Ruling R11: robots.txt is site text and rides in `crawls.discovery`. A NUL
+  // in it once failed that update, so the crawl died before any page was read.
+  it("stores a robots.txt holding a NUL, marked U+2400, and crawls on", async () => {
+    tableBodies = {
+      "/robots.txt": "User-agent: *\nAllow: /\n# odd\u0000byte\n",
+      "/": html("<p>no links</p>"),
+    };
+    const summary = await crawl(
+      config({ siteUrl: table, probeHosts: false, maxPages: 1, maxConcurrency: 1 }),
+    );
+    expect(summary.status).toBe("finished");
+    expect(summary.pagesCrawled).toBe(1);
+    const [row] = await db
+      .select({ discovery: crawls.discovery })
+      .from(crawls)
+      .where(eq(crawls.id, summary.crawlId));
+    const discovery = row?.discovery as DiscoveryEvidence;
+    expect(discovery.robots.raw).toContain("# odd␀byte");
+  });
+
   // The repeat that does reach `enqueue` in one call: a sitemap listing one new
   // URL under two spellings — discovery keys entries on the parsed href, which
   // keeps a fragment; the frontier key (`normalizeUrl`) drops it — with two

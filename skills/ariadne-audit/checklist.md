@@ -37,7 +37,7 @@ WHAT CHANGED AFTER IMPORT (the living authority's own change log):
   - CHECK-35 / 36 / 37: title floor 30, meta description ceiling 155,
     `headings.h1-too-long`, rel=prev pages left out of the three duplicate rules.
   - CHECK-04 / 18 / 24 / 35 / 36: `head.directives-outside-head` and
-    `head.tags-outside-head`.
+    `head.tags-outside-head`. CHECK-04 / 18 / 24 also gain `html.head-closed-early`.
   - CHECK-01: the five `render.*-changed` rules, each also claiming its element's
     check.
 
@@ -352,7 +352,7 @@ answered from, and its verdict is the confidence interval around all of them.
   `host.probe-skipped`, `resources.not-recorded`, `resources.not-fetched`,
   `resources.all-unknown`, `resources.partial-unknown`,
   `hreflang.alternates-not-crawled`, `content.near-duplicate-skipped`,
-  `security.headers-not-recorded`,
+  `security.headers-not-recorded`, `extraction.not-recorded`,
   and the per-page `crawl.blocked` and `crawl.unreadable-encoding`. Each one
   is the engine saying a check below could not be answered on this crawl. The four
   resource markers are siblings and never more than one appears: `resources.not-recorded` means
@@ -768,7 +768,7 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
 ### CHECK-04: Meta robots & X-Robots-Tag directives
 - **Priority**: Critical | **Requires**: Engine
 - **Engine**:
-  1. `issues_list` with `checkId: "CHECK-04"`. Seven rules:
+  1. `issues_list` with `checkId: "CHECK-04"`. Eight rules:
      - `indexability.noindex` (info) — every page the crawl found excluded from the
        index, whether by meta tag or by header.
      - `indexability.nofollow` (warning) — a page whose meta tag or header says
@@ -788,6 +788,22 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
        the outcome of, and it is a finding on its own.
      - `head.directives-outside-head` (critical) — a robots meta (or canonical, or
        hreflang) after the `<head>` ended, where search engines may not read it.
+     - `html.head-closed-early` (warning) — names the element or text that ended the
+       head early and the head tags after it (Head Tags Lost), so a robots meta among
+       them is read as body content.
+     - `html.head-closed-early-harmless` (info) — the same early close with no head
+       tag after it, so nothing is lost today (typically a tracking pixel's
+       `<noscript><img>` last in the head). Not a FAIL: record it as a risk for tags
+       added later.
+     - `directives.bot-conflict` (warning) — a bot-specific robots meta (`googlebot`,
+       `bingbot`, ...) that contradicts the generic `robots` meta (absent means
+       index, follow). Engines combine the two and obey the most restrictive, so a
+       contradiction is either `stricter` (the bot meta says noindex or nofollow
+       where the generic one does not: that engine is kept out) or `overridden`
+       (the bot meta permits with `index` / `follow` / `all` what the generic one
+       restricts: the permission has no effect). A bot meta that is silent on, or
+       repeats, a generic directive is not one. Needs extraction version 2;
+       `extraction.not-recorded` marks it NOT MEASURED.
      - `render.noindex-changed` (critical) — a rendered page whose noindex the
        JavaScript added or removed (rendered pages only; see CHECK-01 step 6).
   2. `issue_urls` with `ruleId: "indexability.noindex"` for the FULL list — this is
@@ -809,6 +825,7 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
   - Paginated blog pages noindexed — prevents discovery of older articles
   - Collection pages with filters noindexed (may be intentional, but verify)
   - Policy pages noindexed (shipping, returns — these have organic value)
+- **Crawl-level marker**: `extraction.not-recorded` (info) is the NOT MEASURED marker for the page facts this check reads from extraction version 2: on a crawl extracted before them (or one mixing old and new pages) the rules that read those facts did not run, so their part of this check is NOT MEASURED, never a pass. The remedy is a re-crawl.
 - **Evaluate**:
   - PASS if noindex/nofollow only on truly intended pages (account, cart, checkout, search internal)
   - **FAIL if blog index or blog paginated pages are noindexed** — this blocks article discovery
@@ -965,11 +982,15 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
 ### CHECK-10: Redirect chains, loops, JS redirects, and redirect volume
 - **Priority**: Critical | **Requires**: Engine
 - **Engine**:
-  1. `issues_list` with `checkId: "CHECK-10"` — three finding rules:
+  1. `issues_list` with `checkId: "CHECK-10"` — four finding rules:
      - `redirect.chain` (warning) — a redirect that lands on another redirect
      - `redirect.loop` (critical) — a redirect that returns to a URL already in its chain
      - `redirect.js` (critical) — a redirect performed by JavaScript rather than by a
        3xx, found by the render pass (so it needs `renderPassCount` ≥ 1 to be measured)
+     - `redirect.meta-refresh` (warning) — a `<meta http-equiv=refresh>` or `Refresh`
+       header that names a URL (a refresh with no URL is not reported); the evidence
+       says whether the page refreshes to itself. Needs extraction version 2;
+       `extraction.not-recorded` marks it NOT MEASURED.
      `issue_urls` per rule for the hops and the URLs.
   2. `metrics_get` with `metricId: "redirect.volume"` — the site row carries
      `{redirectPages, redirectInlinks, totalPages, ratioPct, chains, loops}`: how
@@ -1018,6 +1039,7 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
      URLs crawled is `ratioPct`. The inlink-weighted one — `redirectInlinks` ÷
      `totalPages` — is the one the Evaluate line's 10% threshold grades, and it
      is the one that moves when a template link is repointed.
+- **Crawl-level marker**: `extraction.not-recorded` (info) is the NOT MEASURED marker for the page facts this check reads from extraction version 2: on a crawl extracted before them (or one mixing old and new pages) the rules that read those facts did not run, so their part of this check is NOT MEASURED, never a pass. The remedy is a re-crawl.
 - **Evaluate**:
   - FAIL if redirect chains > 0
   - CRITICAL if redirect loops found
@@ -1270,7 +1292,7 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
     re-crawl
   - Record: per-header count of pages that send it, and the URLs that do not
 
-### CHECK-85: Mixed content
+### CHECK-85: Mixed content and insecure forms
 - **Priority**: High | **Requires**: Engine
 - **Engine**: `issues_list` with `checkId: "CHECK-85"`. The check asks whether an
   HTTPS page references any image, script or stylesheet over `http:`, which a browser
@@ -1280,12 +1302,18 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
   The crawl must have recorded the page's files for this to be answerable: when it
   recorded none, `resources.not-recorded` (info) is the NOT MEASURED marker, and the
   silence of the mixed-content finding says the crawl never recorded them rather
-  than that the site is clean. The remedy is a re-crawl. One rule answers it:
+  than that the site is clean. The remedy is a re-crawl. Two rules answer it:
   `security.mixed-content` (warning) — an HTTPS page with at least one `http:`
-  resource. One finding per page, carrying the count and up to ten of the URLs.
+  resource, iframe or media element. One finding per page, carrying the count and
+  up to ten of the URLs; on a page crawled with extraction 2 the optional `byKind`
+  splits the count into resources, iframes and media. `security.form-insecure`
+  (warning) — a form on an `http:` page, or a form on an `https:` page whose action
+  is `http:`; the evidence carries the page scheme, the form counts and up to ten of
+  the insecure actions. It is silent on a page extracted before version 2.
+- **Crawl-level marker**: `extraction.not-recorded` (info) is the NOT MEASURED marker for the page facts this check reads from extraction version 2: on a crawl extracted before them (or one mixing old and new pages) the rules that read those facts did not run, so their part of this check is NOT MEASURED, never a pass. The remedy is a re-crawl.
 - **Evaluate**:
-  - PASS if no HTTPS page references an `http:` image, script or stylesheet
-  - FAIL if `security.mixed-content` fired
+  - PASS if no HTTPS page references an `http:` image, script, stylesheet, iframe or media element, and no form posts to or is served over `http:`
+  - FAIL if `security.mixed-content` or `security.form-insecure` fired
   - NOT MEASURED if `resources.not-recorded` fired
   - Record: the referencing pages, the `http:` URLs and how many there are per page
 
@@ -1340,10 +1368,19 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
     link after the point the `<head>` ended (at `</head>`, or implicitly at an element
     a head does not allow); Closed By names the element. Shared with CHECK-04 and
     CHECK-24.
+  - `html.head-closed-early` (warning) — the same early close seen from the document:
+    the element or text that ended the head (Closing Element, Element Snippet, Inside
+    noscript), reported when head tags followed it, which Head Tags Lost lists (`base`,
+    `title`, `meta`, `link rel=…`). Shared with CHECK-04 and CHECK-24.
+  - `html.head-closed-early-harmless` (info) — an early close with no head tag after
+    it (an explicit `</head>` or `<body>` is the next head-relevant tag), so nothing is
+    lost today; a canonical added after it later would be. Typically a tracking
+    pixel's `<noscript><img>` last in the head. Shared with CHECK-04 and CHECK-24.
   - `render.canonical-changed` (critical) — a rendered page whose canonical the
     JavaScript added, removed or pointed elsewhere (rendered pages only; see CHECK-01
     step 6).
   `issue_urls` per rule; the evidence carries the competing targets.
+- **Crawl-level marker**: `extraction.not-recorded` (info) is the NOT MEASURED marker for the page facts this check reads from extraction version 2: on a crawl extracted before them (or one mixing old and new pages) the rules that read those facts did not run, so their part of this check is NOT MEASURED, never a pass. The remedy is a re-crawl.
 - **Evaluate**:
   - FAIL if multiple conflicting canonicals > 0
   - Record: count, affected URLs, conflicting targets
@@ -1410,6 +1447,9 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
   - `pagination.sequence-error` (info) — the page's `rel="next"` names a crawled 200 page
     whose `rel="prev"` is absent or names a different page. A series that omits
     `rel="prev"` everywhere fires on every page of it; say so rather than listing it.
+  - `pagination.multiple` (info) — a page that declares more than one `rel="next"` or
+    more than one `rel="prev"` link; the evidence carries both counts. Two templates
+    or plugins have written the same tag. Silent on a page extracted before version 2.
   A JS-only "Load more" with no `rel="next"` at all leaves ALL FIVE rules silent — the
   engine cannot report a declaration nobody made. That is what the DevTools steps
   below are for, and it is why this check keeps them.
@@ -1434,6 +1474,7 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
   recommend noindexing paginated content. The correct approach is indexed pages with
   self-referencing canonicals. Noindexing pagination removes those pages and their
   linked content from the index.
+- **Crawl-level marker**: `extraction.not-recorded` (info) is the NOT MEASURED marker for the page facts this check reads from extraction version 2: on a crawl extracted before them (or one mixing old and new pages) the rules that read those facts did not run, so their part of this check is NOT MEASURED, never a pass. The remedy is a re-crawl.
 - **Evaluate**:
   - PASS if pagination links are HTML anchor tags and paginated pages are indexable
   - FAIL if JS-only (infinite scroll / "View More" button with no HTML link fallback)
@@ -1517,6 +1558,9 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
      engine stores no language for a page and naming one would be a guess.
      `head.directives-outside-head` (critical) also claims this check: hreflang links
      after the `<head>` ended, with their count.
+     `html.head-closed-early` (warning) also claims it: the element that ended the head
+     before those links, with the head tags lost. `html.head-closed-early-harmless`
+     (info) is the early close that lost nothing.
   4. `issues_list` with `checkId: "CHECK-24"` — `hreflang.alternates-not-crawled`
      (info) is a NOT MEASURED marker, not a finding about the site: it fires once
      when declared alternates have no page in this crawl, with the count of
@@ -1548,6 +1592,7 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
   real one, and search engines read hreflang on the canonical, so an inherited
   alternates block on a tracking-parameter variant is not judged at all. Its
   canonical is reported by CHECK-17 where it belongs.
+- **Crawl-level marker**: `extraction.not-recorded` (info) is the NOT MEASURED marker for the page facts this check reads from extraction version 2: on a crawl extracted before them (or one mixing old and new pages) the rules that read those facts did not run, so their part of this check is NOT MEASURED, never a pass. The remedy is a re-crawl.
 - **Evaluate**:
   - FAIL if missing return links > 0
   - FAIL if pages missing their own self-reference > 0
@@ -1562,11 +1607,14 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
 
 ### CHECK-25: Language-region codes and x-default
 - **Priority**: High | **Requires**: Engine
-- **Engine**: `issues_list` with `checkId: "CHECK-25"` — two rules:
+- **Engine**: `issues_list` with `checkId: "CHECK-25"` — three rules:
   - `hreflang.invalid-code` (critical) — a declared code that is not a valid
     language, or language-region, value
   - `hreflang.missing-x-default` (info) — a cluster with no `x-default` member
+  - `hreflang.html-lang-mismatch` (info) — a page whose `<html lang>` primary language
+    differs from its own self-referencing hreflang codes (region is not compared)
   `issue_urls` per rule for the affected URLs and the codes they declared.
+- **Crawl-level marker**: `extraction.not-recorded` (info) is the NOT MEASURED marker for the page facts this check reads from extraction version 2: on a crawl extracted before them (or one mixing old and new pages) the rules that read those facts did not run, so their part of this check is NOT MEASURED, never a pass. The remedy is a re-crawl.
 - **Evaluate**:
   - FAIL if incorrect codes > 0
   - WARN if x-default or self-reference missing
@@ -1985,6 +2033,13 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
   It needs `renderPassCount` ≥ 1; without a render pass this is SKIP, not PASS.
   Whether the nav contains the RIGHT links (key categories) is judgement — read the
   nav on one page in a browser for that, and say that is what you did.
+- **Link elements a crawler cannot follow**: `links.uncrawlable` (warning) — a page
+  with `<a>` elements that have no `href` (only with an `onclick` or `role="link"` /
+  `role="button"`; a bookmark such as `<a name="top">` is not a link), a `javascript:`
+  href, or a bare `#` / `#!` href. `#section` is in-page navigation and is not counted.
+  The evidence is the three counts. A link written this way is not discovered through
+  that element, so a target reached only through such links is a crawl-reach gap.
+- **Crawl-level marker**: `extraction.not-recorded` (info) is the NOT MEASURED marker for the page facts this check reads from extraction version 2: on a crawl extracted before them (or one mixing old and new pages) the rules that read those facts did not run, so their part of this check is NOT MEASURED, never a pass. The remedy is a re-crawl.
 - **Evaluate**:
   - PASS if main nav and footer links are in initial HTML
   - FAIL if key navigation is JS-only
@@ -2009,11 +2064,124 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
     anchor is a generic English phrase ("click here", "read more", "learn more" and the
     rest of the list in the rule's thresholds). The judgement covers internal anchors
     only; anchors in other languages, and external anchors, are not judged.
+  Four more rules answer the rest of the check:
+  - `links.empty-href` (info) — a page with `<a href="">`, which points back at the
+    page itself.
+  - `links.unsafe-target-blank` (info) — a page with `target="_blank"` links to
+    another origin that carry neither `noopener` nor `noreferrer` in `rel`. Only a
+    cross-origin target counts (an exact origin compare, so a subdomain or a `www.`
+    variant is another origin): reverse tabnabbing needs the opened page to be on
+    another origin, and a same-origin new-tab link is not reported.
+  - `links.no-anchor-text` (warning) — a page with an INTERNAL link that nothing names:
+    its stored anchor is empty after whitespace is removed AND it has no `aria-label`
+    (absent or blank). The stored anchor includes the alt text of an image inside the
+    link, so an image link with alt text is not textless and one without is. Only the
+    first anchor per target is stored, so a target reached first by a textless link
+    and later by a text link is listed too.
+  - `links.aria-label-only` (info) — a page with an INTERNAL link whose anchor is empty
+    but which carries a non-blank `aria-label`; the row lists the targets and their
+    labels. The label names the link for screen readers, but search engines document
+    visible text and image alt as anchor text, not `aria-label`, so the link passes no
+    anchor relevance. Often fine for icon links (cart, wishlist, account); where the
+    target matters for search, the fix is visible text or an image alt.
+- **Crawl-level marker**: `extraction.not-recorded` (info) is the NOT MEASURED marker for the page facts this check reads from extraction version 2: on a crawl extracted before them (or one mixing old and new pages) the rules that read those facts did not run, so their part of this check is NOT MEASURED, never a pass. The remedy is a re-crawl.
 - **Evaluate**:
   - PASS if no link points at a private host and generic anchors are rare
-  - WARN if any link points at `localhost` or a private address, or generic anchors
-    are common
+  - WARN if any link points at `localhost` or a private address, any internal link has
+    nothing that names it (`links.no-anchor-text`), or generic anchors are common
   - Record: source page, target URL and anchor text for each finding
+
+### CHECK-87: Social sharing tags (Open Graph and X)
+- **Priority**: Medium | **Requires**: Engine
+- **Engine**: `issues_list` with `checkId: "CHECK-87"`. The check asks whether a page
+  carries the Open Graph and X (Twitter) tags that decide how a shared link looks:
+  a complete Open Graph set (title, type, image, url), an X card, tags that do not
+  contradict each other, tags placed in the head, and a share image that loads. The
+  evidence is the social tag set the crawler stored on each page; the image check
+  reads the recorded fetch of the image. These facts exist only for crawls written by
+  extraction version 2 or later: on an older crawl `extraction.not-recorded` (info) is the
+  NOT MEASURED marker, and silence says the crawl never measured them, not that the
+  site is clean. The remedy is a re-crawl. Seven rules answer it, all on judged pages
+  (indexable, self-canonical):
+  - `social.og-incomplete` (info): og:title, og:type, og:image or og:url missing or
+    empty; evidence `{missing, none}`, `none` true when the page has no Open Graph
+    tag at all.
+  - `social.og-multiple` (info): an `og:` tag repeated with different values;
+    evidence `{tags}`. `og:image` is never listed: Open Graph makes it an array (a
+    gallery's images, first preferred), so several values are not a conflict.
+  - `social.og-url-mismatch` (info): og:url resolves to another address than the
+    page's canonical (its own URL when it declares none); evidence `{ogUrl,
+    canonical}`. A trailing slash on a path is a different address.
+  - `social.x-incomplete` (info): no `twitter:card`, a card with no title
+    (`twitter:title`, or the `og:title` X falls back to), or X tags written as
+    `property=`; evidence `{missing, viaProperty}`.
+  - `social.og-duplicate` (info): one og:title or og:description on several pages,
+    grouped exactly as CHECK-35's `title.duplicate` (hreflang alternates one page,
+    rel=prev pages set aside); evidence `{field, value, count, pages,
+    alternatesCollapsed, paginationExcluded}`. It reads columns older crawls have
+    too, so it judges every crawl.
+  - `social.image-broken` (warning): per page, the first og:image and the first
+    twitter:image, each if relative or malformed, answered non-200, or over 5 MB;
+    evidence `{images: [{tag, url, problem, statusCode?, bytes?, fetchClass?}]}`. A
+    `problem` of `not-fetched` appears only on a crawl whose file check ran, and means this
+    image was skipped by it (a budget, no record) or its request got no answer
+    (`fetchClass` says which): report it as NOT CHECKED for that image, never as
+    broken and never as a pass. When the file check asked about nothing on the
+    whole crawl, no image is listed for that reason; the marker below says it once.
+  - `head.tags-outside-head` (warning): `social` in its `elements` when any Open
+    Graph or X tag came after the head ended.
+- **Crawl-level markers**: `extraction.not-recorded` (info) as above, and for the
+  image's status and size the file-check markers `resources.not-recorded` (info, no
+  file recorded) and `resources.not-fetched` (info, files recorded and none
+  requested). Share images are not files a page loads, so those markers count page
+  files; on a crawl that recorded no page file and whose pages count no image,
+  `resources.not-fetched` counts the unrequested share images instead, so a crawl
+  with the file check off that recorded any file meets one of the two. On a crawl whose check ran,
+  `social.image-broken`'s `not-fetched` entries name each share image it missed.
+- **Evaluate**:
+  - PASS if every judged page carries a complete, consistent, head-placed social set
+    and its share image loads
+  - FAIL if any rule listed under this check fired (a `social.image-broken` finding
+    whose every image is `not-fetched` is NOT MEASURED for those images, not FAIL)
+  - NOT MEASURED if `extraction.not-recorded` (info) fired; if
+    `resources.not-recorded` (info) or `resources.not-fetched` (info) fired, only
+    the share image's status, size and `not-fetched` part is NOT MEASURED: a
+    `relative` or `invalid` image in `social.image-broken` is judged without a
+    fetch and stays FAIL
+  - Record: the pages with each gap and the tags that are missing or conflicting
+
+### CHECK-88: HTML document structure
+- **Priority**: Medium | **Requires**: Engine
+- **Engine**: `issues_list` with `checkId: "CHECK-88"` — `html.structure-invalid`
+  (info: not exactly one `<head>` or one `<body>` tag, or a `<head>` tag after the
+  `<body>`; Problems lists which), read beside the early-close pair filed under
+  CHECK-18: `html.head-closed-early` (warning: an element or text the head does not
+  allow ended it while head tags followed; Closing Element names it and Head Tags
+  Lost lists them) and `html.head-closed-early-harmless` (info: the same early close
+  with no head tag after it, so nothing is lost today). The check asks whether the
+  HTML document is shaped so a parser reads it as written: one `<html>`, one `<head>`
+  before one `<body>`, and a `<head>` that is not closed early by an element that does
+  not belong in it (which pushes the tags after it, including the title, canonical and
+  robots tags, out of the head). The `<head>` and `<body>` start tags are optional in
+  HTML, so a page that leaves them out is valid and is not broken; it is still reported
+  (head-missing / body-missing, info) because without them nothing marks where the head
+  ends and one stray element moves the head tags into the body. Recommend explicit
+  tags; do not describe such a page as invalid. The evidence is the document structure the crawler
+  recorded while parsing each page. These facts exist only for crawls written by
+  extraction version 2 or later: on an older crawl `extraction.not-recorded` (info) is the
+  NOT MEASURED marker. The remedy is a re-crawl.
+- **Evaluate**:
+  - PASS if every judged page has a single, correctly ordered html, head and body and
+    its head is not closed early. A page whose only problems are head-missing /
+    body-missing (tags left out, which HTML allows) passes; record the explicit-tag
+    recommendation beside it
+  - FAIL if `html.head-closed-early` fired, or `html.structure-invalid` fired with a
+    repeated or misplaced tag (head-repeated, body-repeated, head-after-body).
+    `html.head-closed-early-harmless` alone is not a FAIL: record the element and
+    recommend moving it into the `<body>`
+  - NOT MEASURED if `extraction.not-recorded` (info) fired
+  - Record: the pages, the structural fault and, for an early close, the tag that
+    ended the head
 
 ---
 
@@ -2021,15 +2189,20 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
 
 ### CHECK-35: Title tags — unique, intent-led, not truncated
 - **Priority**: High | **Requires**: Engine
-- **Engine**: `issues_list` with `checkId: "CHECK-35"` — eight rules:
+- **Engine**: `issues_list` with `checkId: "CHECK-35"` — ten rules:
   `title.missing` (critical), `title.too-short` (info, under 30 characters),
   `title.too-long` (info, over 60) and `title.duplicate` (warning), plus
   `title.pixel-too-long` (warning, wider than 561 pixels) and
   `title.pixel-too-short` (info, narrower than 200 pixels), which measure the
   title in the search result's font and do not judge a title with a character
   outside the Latin, Greek and Cyrillic scripts (the character rules still apply
-  to it), plus `head.tags-outside-head` (warning, a title or meta
-  description after the `<head>` ended) and `render.title-changed` (warning, a
+  to it), plus `title.multiple` (warning, more than one `<title>` element; judged
+  only on a crawl extracted at version 2, `extraction.not-recorded` speaks for an older
+  one) and `title.same-as-h1` (info, the title and the first H1 equal after collapsing
+  whitespace and ignoring case; judges every crawl), plus `head.tags-outside-head` (warning, a title or meta
+  description after the `<head>` ended; since 26b its `elements` also names
+  `social` for Open Graph or X tags there, which is CHECK-87's half of the same
+  finding, so a row naming only `social` is not a title fault) and `render.title-changed` (warning, a
   rendered page whose title JavaScript changed; see CHECK-01 step 6). Use `pageType` on `issues_list` to get each count per
   template cohort directly, which is what the per-page-type breakdown below needs;
   `issue_urls` gives the titles themselves in the evidence, which is where the
@@ -2098,6 +2271,7 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
      show what Google actually displays at 60 chars. Flag if important keywords are
      being cut off.
 
+- **Crawl-level marker**: `extraction.not-recorded` (info) is the NOT MEASURED marker for the page facts this check reads from extraction version 2: on a crawl extracted before them (or one mixing old and new pages) the rules that read those facts did not run, so their part of this check is NOT MEASURED, never a pass. The remedy is a re-crawl.
 - **Evaluate**:
   - FAIL if missing titles > 0
   - FAIL if collection titles lack category keywords (just marketing names + brand)
@@ -2115,12 +2289,15 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
 - **Priority**: High | **Requires**: Engine
 - **Engine**: `issues_list` with `checkId: "CHECK-36"` — `meta-description.missing`
   (warning), `meta-description.too-short` (info), `meta-description.too-long` (info)
-  and `meta-description.duplicate` (warning), plus `meta-description.pixel-too-long`
+  and `meta-description.duplicate` (warning), plus `meta-description.multiple`
+  (warning, more than one meta description element; judged only on a crawl extracted
+  at version 2) and `meta-description.pixel-too-long`
   (warning, wider than 985 pixels) and `meta-description.pixel-too-short` (info,
   narrower than 400 pixels), which measure the description in the search result's
   font and do not judge one with a character outside the Latin, Greek and Cyrillic
   scripts, plus `head.tags-outside-head` (warning,
-  a meta description or title after the `<head>` ended) and
+  a meta description or title after the `<head>` ended; `social` in its `elements`
+  is CHECK-87's half, see CHECK-35) and
   `render.meta-description-changed` (warning, a rendered page whose description
   JavaScript changed; see CHECK-01 step 6). Filter by `pageType` for the per-type
   breakdown; `issue_urls` carries each description and its length, which is what the
@@ -2146,6 +2323,7 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
      - Garbage content? (e.g., data tables, code, repeated text scraped from page body)
   4. **Duplicate analysis**: Group duplicates by page type. Template-generated duplicates
      (all products share the same description) are worse than coincidental duplicates.
+- **Crawl-level marker**: `extraction.not-recorded` (info) is the NOT MEASURED marker for the page facts this check reads from extraction version 2: on a crawl extracted before them (or one mixing old and new pages) the rules that read those facts did not run, so their part of this check is NOT MEASURED, never a pass. The remedy is a re-crawl.
 - **Evaluate**:
   - WARN if missing > 10% for any page type
   - WARN if duplicates > 5%
@@ -2163,6 +2341,9 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
 - **Engine**: `issues_list` with `checkId: "CHECK-37"` — `headings.h1-missing`
   (warning), `headings.h1-multiple` (info), `headings.h1-too-long` (info, first H1
   over 70 characters), `headings.level-skip` (info),
+  `h2.missing` (info, no H2 on the page; judges every crawl), `h2.too-long` (info, first
+  H2 over 70 characters) and `h2.duplicate` (info, the first H2 shared across pages,
+  grouped as `h1.duplicate-text` is; the last two need a crawl extracted at version 2),
   `h1.duplicate-text` (warning; rel=prev pages left out, see CHECK-35),
   `h1.duplicate-skipped` (info) and
   `render.h1-changed` (warning, a rendered page whose first H1 JavaScript changed;
@@ -2229,6 +2410,7 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
      - Is there a clean H1 → H2 → H3 hierarchy?
      - Are headings used for non-heading elements (nav items as H3, promo text as H4)?
      - Are semantic sections properly headed?
+- **Crawl-level marker**: `extraction.not-recorded` (info) is the NOT MEASURED marker for the page facts this check reads from extraction version 2: on a crawl extracted before them (or one mixing old and new pages) the rules that read those facts did not run, so their part of this check is NOT MEASURED, never a pass. The remedy is a re-crawl.
 - **Evaluate**:
   - FAIL if missing H1 > 0
   - **FAIL if a template element is incorrectly coded as H1 across all pages** — this is
@@ -2672,11 +2854,14 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
 
 ### CHECK-49: Image optimisation and responsive images
 - **Priority**: Medium | **Requires**: Engine + DevTools
-- **Engine**: `issues_list` with `checkId: "CHECK-49"` — six rule ids can come back,
-  four of them findings about the site and two about the crawl.
+- **Engine**: `issues_list` with `checkId: "CHECK-49"` — eight rule ids can come back,
+  six of them findings about the site and two about the crawl.
   `images.missing-dimensions` (info) and `images.missing-alt` (warning), page by page
   across the whole crawl, with `issue_urls` naming the pages and the offending
-  images; and, since the resource pass, `images.oversized` (warning) for every image
+  images (on a page crawled with extraction 2, `images.missing-alt` also lists up to
+  ten image addresses); `images.empty-alt` (info) for pages with `alt=""` images,
+  which is right for decorative images and is a count to review, and
+  `images.alt-too-long` (info) for alt text over 100 characters; and, since the resource pass, `images.oversized` (warning) for every image
   over the 100,000 bytes this check's own WARN line names, and `images.legacy-format`
   (info) for the heavy ones a server sent as PNG or JPEG. Both name the FILE and say
   how many pages carry it, which is what turns "oversized image count" into a list of
@@ -2715,6 +2900,7 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
   the remedy is a re-crawl or a resume.
 - **DevTools**: Check the network panel for image formats (WebP/AVIF vs PNG/JPG) and file
   sizes. Check srcset/sizes on product images
+- **Crawl-level marker**: `extraction.not-recorded` (info) is the NOT MEASURED marker for the page facts this check reads from extraction version 2: on a crawl extracted before them (or one mixing old and new pages) the rules that read those facts did not run, so their part of this check is NOT MEASURED, never a pass. The remedy is a re-crawl.
 - **Evaluate**:
   - WARN if >100KB images on key pages, no modern formats, or missing dimensions
   - Record: oversized image count, format breakdown, missing dimensions count

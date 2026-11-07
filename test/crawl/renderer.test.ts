@@ -2527,18 +2527,56 @@ describe("runRenderPass", () => {
     await expect(writeRenderResult(db, crawlId, ghost)).rejects.toThrow(/no page row/i);
   });
 
+  it("stores rendered strings holding a NUL or a lone surrogate (ruling R10)", async () => {
+    const crawlId = await newCrawl(["/hostile-render"]);
+    const result: RenderResult = {
+      url: `${site.base}/hostile-render`,
+      rendered: true,
+      wordCount: 1,
+      linkCount: 0,
+      navLinkCount: 0,
+      footerLinkCount: 0,
+      filterLinkCount: 0,
+      analyzerWordCount: 1,
+      renderableWordCount: 1,
+      title: "Ti\u0000tle",
+      h1Count: 1,
+      canonical: null,
+      robotsMeta: "noindex\u0000",
+      metaDescription: "d\uD800",
+      h1Text: "H\u0000\uDC00",
+      htmlPath: "/dev/null",
+      redirectUrl: null,
+      error: null,
+      blockedRequests: 0,
+      skippedPaintRequests: 0,
+      pacedRequests: 0,
+      cachedResponses: 0,
+      unpacedNetworkRequests: 0,
+      console: null,
+    };
+
+    await writeRenderResult(db, crawlId, result);
+
+    const row = await pageRow(crawlId, "/hostile-render");
+    expect(row.renderedTitle).toBe("Ti␀tle");
+    expect(row.renderedRobotsMeta).toBe("noindex␀");
+    expect(row.renderedMetaDescription).toBe("d�");
+    expect(row.renderedH1Text).toBe("H␀�");
+  });
+
   // -------------------------------------------------------------------------
   // Phase 25: render_console and render_version on the page row.
   // -------------------------------------------------------------------------
 
-  it("writes render_console and render_version 1", async () => {
+  it("writes render_console and render_version 2", async () => {
     const crawlId = await newCrawl(["/console-errors", "/console-clean"]);
 
     const summary = await runRenderPass(db, crawlId, passConfig());
 
     expect(summary.failures).toBe(0);
     const errors = await pageRow(crawlId, "/console-errors");
-    expect(errors.renderVersion).toBe(1);
+    expect(errors.renderVersion).toBe(2);
     const stored = errors.renderConsole as RenderConsole;
     expect(stored.exceptionsTotal).toBeGreaterThanOrEqual(1);
     expect(stored.console).toContainEqual({ level: "error", text: "site says no", cut: false });
@@ -2551,7 +2589,7 @@ describe("runRenderPass", () => {
     expect(stored.blockedByRenderer.thirdParty).toBeGreaterThanOrEqual(1);
 
     const clean = await pageRow(crawlId, "/console-clean");
-    expect(clean.renderVersion).toBe(1);
+    expect(clean.renderVersion).toBe(2);
     expect(clean.renderConsole).toEqual({
       console: [],
       consoleTotal: 0,
@@ -2572,7 +2610,7 @@ describe("runRenderPass", () => {
 
     expect(summary.rendered).toBe(1);
     const row = await pageRow(crawlId, "/console-hostile");
-    expect(row.renderVersion).toBe(1);
+    expect(row.renderVersion).toBe(2);
     const stored = row.renderConsole as RenderConsole;
     // The NUL is marked as U+2400 (␀), never dropped; the lone surrogate is U+FFFD.
     expect(stored.console).toEqual([
@@ -2582,7 +2620,7 @@ describe("runRenderPass", () => {
     expect(stored.exceptions[0]!.text).toContain("thrown nul:\u2400 lone:\uFFFD");
   });
 
-  it("a pre-browser policy refusal writes render_version 1 with render_console null", async () => {
+  it("a pre-browser policy refusal writes render_version 2 with render_console null", async () => {
     // `www.` answers a metadata address, so it is left out of the pin at
     // launch and a page on it is refused before any browser page opens.
     const port = new URL(site.base).port;
@@ -2611,7 +2649,7 @@ describe("runRenderPass", () => {
     expect(row.renderError).toMatch(/^policy refusal: www\.shop\.test was not approved/);
     // The render writer wrote this row (its stamp says so), and nothing was
     // looked at: null, which `render_version` tells apart from a pre-25 null.
-    expect(row.renderVersion).toBe(1);
+    expect(row.renderVersion).toBe(2);
     expect(row.renderConsole).toBeNull();
   });
 });

@@ -7,6 +7,9 @@ import type { StoredHostSpacing } from "../crawl/politeness.js";
 import type { StoredPlatformProfile } from "../crawl/platform.js";
 import type { RenderConsole } from "../crawl/render/console-capture.js";
 import type { StoredResponseHeaders } from "../crawl/response-headers.js";
+import type {
+  AnchorCounts, HtmlStructure, InsecureRefs, RefreshFact, RobotsMetaEntry, SocialFacts,
+} from "../crawl/parse/page-facts.js";
 
 export const crawls = pgTable("crawls", {
   id: text("id").primaryKey(),                 // e.g. crawl_<ulid>
@@ -384,9 +387,16 @@ export const pages = pgTable("pages", {
   // keeps the first; this counts them all, because "more than one canonical"
   // (CHECK-18) is a finding a single-value column cannot express.
   canonicalCount: integer("canonical_count").notNull().default(0),
+  // Extraction 2 (Phase 26b, deviation 4): EVERY `<meta name=robots>` content,
+  // joined with ", " — Google combines them. Extraction 1 rows hold the first
+  // one's only. Bot-specific metas are `robots_metas`.
   robotsMeta: text("robots_meta"),
   xRobotsTag: text("x_robots_tag"),
   isIndexable: boolean("is_indexable"),
+  // The first og:title / og:description / og:image `content`, untrimmed, null
+  // when that element has none. Extraction 2 (PR #23 review): the first `meta`
+  // whose `property` OR `name` is the tag, as the `social` set reads it.
+  // Extraction 1 rows: the first `property=` element only.
   ogTitle: text("og_title"),
   ogDescription: text("og_description"),
   ogImage: text("og_image"),
@@ -862,6 +872,29 @@ export const pages = pgTable("pages", {
   // loudly rather than reading a missing fact as an absent one
   // (`extractionCoverage`, src/rules/helpers.ts).
   extractionVersion: smallint("extraction_version"),
+  // PHASE 26b PAGE FACTS (migration 0026, extraction version 2). Every column
+  // below is NULLABLE with no default: null means "not measured" (the row was
+  // written before extraction 2, `extraction_version` < 2), never "absent".
+  // Shapes live in src/crawl/parse/page-facts.ts.
+  // The four counts (`title_count`, `meta_description_count`, `rel_next_count`,
+  // `rel_prev_count`) were created smallint by 0026 and widened to integer by
+  // 0027 (Ruling R7): a page inside the body cap can hold more than 32,767 such
+  // tags, and an out-of-range insert would fail the crawl. They are not clamped.
+  htmlLang: text("html_lang"),
+  social: jsonb("social").$type<SocialFacts>(),
+  h2Text: text("h2_text"),
+  titleCount: integer("title_count"),
+  metaDescriptionCount: integer("meta_description_count"),
+  robotsMetas: jsonb("robots_metas").$type<RobotsMetaEntry[]>(),
+  metaRefresh: jsonb("meta_refresh").$type<RefreshFact>(),
+  anchorCounts: jsonb("anchor_counts").$type<AnchorCounts>(),
+  insecureRefs: jsonb("insecure_refs").$type<InsecureRefs>(),
+  imagesEmptyAlt: integer("images_empty_alt"),
+  imagesAltTooLong: integer("images_alt_too_long"),
+  imagesMissingAltSample: jsonb("images_missing_alt_sample").$type<string[]>(),
+  relNextCount: integer("rel_next_count"),
+  relPrevCount: integer("rel_prev_count"),
+  htmlStructure: jsonb("html_structure").$type<HtmlStructure>(),
   // WHICH RENDER CAPTURE WROTE THE RENDERED COLUMNS (migration 0025;
   // `RENDER_CAPTURE_VERSION`, src/crawl/versions.ts). Stamped by the render writer
   // only, so it is independent of `extraction_version`: re-rendering a pre-25 crawl
@@ -968,6 +1001,15 @@ export const pages = pgTable("pages", {
   index("pages_dupe_h1_text")
     .on(t.crawlId, sql`btrim(${t.h1Text})`, t.url)
     .where(sql`${t.fetchClass} = 'ok' and ${t.statusCode} = 200 and ${t.isIndexable} = true and ${t.h1Text} is not null`),
+  index("pages_dupe_h2_text")
+    .on(t.crawlId, sql`btrim(${t.h2Text})`, t.url)
+    .where(sql`${t.fetchClass} = 'ok' and ${t.statusCode} = 200 and ${t.isIndexable} = true and ${t.h2Text} is not null`),
+  index("pages_dupe_og_title")
+    .on(t.crawlId, sql`btrim(${t.ogTitle})`, t.url)
+    .where(sql`${t.fetchClass} = 'ok' and ${t.statusCode} = 200 and ${t.isIndexable} = true and ${t.ogTitle} is not null`),
+  index("pages_dupe_og_description")
+    .on(t.crawlId, sql`btrim(${t.ogDescription})`, t.url)
+    .where(sql`${t.fetchClass} = 'ok' and ${t.statusCode} = 200 and ${t.isIndexable} = true and ${t.ogDescription} is not null`),
 ]);
 
 export const links = pgTable("links", {
@@ -976,6 +1018,10 @@ export const links = pgTable("links", {
   targetUrl: text("target_url").notNull(),
   targetPageId: text("target_page_id"),
   anchor: text("anchor"),
+  // Owner call O1 (migration 0028): the link element's trimmed `aria-label`,
+  // capped at ARIA_LABEL_MAX; null when absent or blank, and on a row written
+  // before 0028.
+  ariaLabel: text("aria_label"),
   rel: text("rel"),
   isInternal: boolean("is_internal").notNull(),
   isNofollow: boolean("is_nofollow").notNull().default(false),

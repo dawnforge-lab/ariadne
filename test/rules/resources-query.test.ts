@@ -84,14 +84,15 @@ describe("resourceRules metadata", () => {
       "resources.uncached": [["CHECK-50"], "info", "technical"],
       // The marker claims every check whose silence it explains.
       "resources.not-recorded": [
-        ["CHECK-48", "CHECK-49", "CHECK-50", "CHECK-51", "CHECK-85"],
+        ["CHECK-48", "CHECK-49", "CHECK-50", "CHECK-51", "CHECK-85", "CHECK-87"],
         "info",
         "technical",
       ],
       // Its sibling claims the same four, for the same reason: the silence it
-      // explains is the same silence.
+      // explains is the same silence. Both claim CHECK-87 (26b): a share
+      // image's status and size come from the same file check.
       "resources.not-fetched": [
-        ["CHECK-48", "CHECK-49", "CHECK-50", "CHECK-51"],
+        ["CHECK-48", "CHECK-49", "CHECK-50", "CHECK-51", "CHECK-87"],
         "info",
         "technical",
       ],
@@ -1462,6 +1463,177 @@ describe("resourceRules against the database", () => {
         expect(await run(id, crawlId), id).toEqual([]);
       }
       expect(await run("resources.not-recorded", crawlId)).toHaveLength(1);
+    });
+  });
+
+  /**
+   * Deviation 3 (Phase 26b, Review Focus 2). An og:image / twitter:image URL
+   * is a `resources` row with NO `page_resources` edge: a browser never loads
+   * it, so it is not a page's resource and this family does not judge it. Its
+   * own rule is `social.image-broken`.
+   */
+  describe("a social-only image row (no page_resources edge)", () => {
+    const OG_ONLY = "/og/share.png";
+
+    it("never fires resources.broken, even on a 404", async () => {
+      const { crawlId } = await seed(
+        [{ path: "/a" }],
+        [
+          { url: "/img/fine.svg", on: ["/a"] },
+          {
+            url: OG_ONLY,
+            on: [],
+            fetchClass: "client_error",
+            statusCode: 404,
+            contentType: "text/html",
+            bytes: null,
+            bytesSource: null,
+          },
+        ],
+      );
+      expect(await run("resources.broken", crawlId)).toEqual([]);
+    });
+
+    it("is judged by none of the file rules: content type, weight, format, caching", async () => {
+      const { crawlId } = await seed(
+        [{ path: "/a" }],
+        [
+          { url: "/img/fine.svg", on: ["/a"] },
+          // Wrong type, heavy, a legacy format and uncached: every file rule
+          // would fire on this row if it had an edge.
+          {
+            url: OG_ONLY,
+            on: [],
+            contentType: "text/html",
+            bytes: IMAGE_WEIGHT_WARN * 3,
+            cacheControl: null,
+          },
+          {
+            url: "/og/heavy.png",
+            on: [],
+            contentType: "image/png",
+            bytes: IMAGE_WEIGHT_WARN * 3,
+            cacheControl: null,
+          },
+        ],
+      );
+      for (const id of [
+        "resources.bad-content-type",
+        "images.oversized",
+        "images.legacy-format",
+        "resources.uncached",
+      ]) {
+        expect(await run(id, crawlId), id).toEqual([]);
+      }
+    });
+
+    it("does not count toward the census markers, which explain the file rules' silence", async () => {
+      // Every page resource is a decided unknown; the og-only row came back ok.
+      // Counting it would read as "partial coverage the judging rules carry"
+      // and silence both markers while every judging rule is silent too.
+      const { crawlId } = await seed(
+        [{ path: "/a", imagesTotal: 1 }],
+        [
+          {
+            url: "https://cdn.example/a.png",
+            on: ["/a"],
+            fetchClass: "robots_denied",
+            fetchReason: "disallowed by robots.txt",
+            statusCode: null,
+            bytes: null,
+            cacheControl: null,
+          },
+          { url: OG_ONLY, on: [] },
+        ],
+      );
+      const [allUnknown] = await run("resources.all-unknown", crawlId);
+      expect(allUnknown?.evidence.resourcesSeen).toBe(1);
+      expect(await run("resources.partial-unknown", crawlId)).toEqual([]);
+    });
+
+    it("does not stand in for a page resource on resources.not-recorded", async () => {
+      // Pages that carry images but no page resource row: the file rules have
+      // nothing to judge, whatever the social tags pointed at.
+      const { crawlId } = await seed([{ path: "/a", imagesTotal: 2 }], [{ url: OG_ONLY, on: [] }]);
+      const [marker] = await run("resources.not-recorded", crawlId);
+      expect(marker?.evidence.resourcesSeen).toBe(0);
+    });
+
+    /** An og-only row the file check never asked about, for the R13 cases. */
+    const unasked = (fetchReason: string | null) => ({
+      url: OG_ONLY,
+      on: [],
+      fetchClass: null,
+      fetchReason,
+      statusCode: null,
+      contentType: null,
+      bytes: null,
+      bytesSource: null,
+      cacheControl: null,
+    });
+
+    it("R13: a crawl whose ONLY rows are unasked share images gets resources.not-fetched", async () => {
+      // No page file recorded and no page counts an <img>, so not-recorded is
+      // silent; `social.image-broken` lists nothing when the check asked
+      // nothing, so this marker is what says the share images went unchecked.
+      for (const [fetchReason, reason] of [
+        [RESOURCE_OFF_REASON, NOT_FETCHED_REASON.off],
+        [null, NOT_FETCHED_REASON.notRun],
+      ] as const) {
+        const { crawlId } = await seed([{ path: "/a" }], [unasked(fetchReason)]);
+        expect(await run("resources.not-recorded", crawlId)).toEqual([]);
+        const findings = await run("resources.not-fetched", crawlId);
+        expect(findings.map((f) => f.evidence)).toEqual([
+          expect.objectContaining({ reason, resourcesSeen: 1, resourcesSkipped: 1 }),
+        ]);
+      }
+    });
+
+    it("R13: not-recorded keeps the og-only crawl whose pages count images, and the two never both fire", async () => {
+      const { crawlId } = await seed(
+        [{ path: "/a", imagesTotal: 2 }],
+        [unasked(RESOURCE_OFF_REASON)],
+      );
+      expect(await run("resources.not-recorded", crawlId)).toHaveLength(1);
+      expect(await run("resources.not-fetched", crawlId)).toEqual([]);
+    });
+
+    it("R13: a decided og-only row is a check that ran; no marker, and it quiets no unknown marker", async () => {
+      const { crawlId } = await seed([{ path: "/a" }], [{ url: OG_ONLY, on: [] }]);
+      for (const id of [
+        "resources.not-recorded",
+        "resources.not-fetched",
+        "resources.all-unknown",
+        "resources.partial-unknown",
+      ]) {
+        expect(await run(id, crawlId), id).toEqual([]);
+      }
+    });
+
+    it("R13: page files decide the marker even when share images were asked about", async () => {
+      // Every page file unasked (fetch-off) beside an og-only row that is: the
+      // census is the page files', exactly as before.
+      const { crawlId } = await seed(
+        [{ path: "/a" }],
+        [
+          {
+            url: "/img/a.png",
+            on: ["/a"],
+            fetchClass: null,
+            fetchReason: RESOURCE_OFF_REASON,
+            statusCode: null,
+            contentType: null,
+            bytes: null,
+            bytesSource: null,
+            cacheControl: null,
+          },
+          { url: OG_ONLY, on: [] },
+        ],
+      );
+      const findings = await run("resources.not-fetched", crawlId);
+      expect(findings.map((f) => f.evidence)).toEqual([
+        expect.objectContaining({ reason: NOT_FETCHED_REASON.off, resourcesSeen: 1 }),
+      ]);
     });
   });
 });

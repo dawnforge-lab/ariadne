@@ -754,6 +754,12 @@ async function divergenceFindings(
 const FAMILY_2_READ = "p.rendered_analyzer_word_count is not null";
 /** A Phase 23 pass rendered this row: the three 0022 columns were read. */
 const TAGS_READ = "p.rendered_tags_read = true";
+/**
+ * The raw and rendered robots readings have one definition: both joined
+ * (extraction 2 and render capture 2) or both first-only. Ruling R18.
+ */
+const SAME_ROBOTS_DEFINITION =
+  "((coalesce(p.extraction_version, 0) >= 2) = (coalesce(p.render_version, 0) >= 2))";
 
 const DIVERGENCES: Divergence[] = [
   /**
@@ -771,6 +777,22 @@ const DIVERGENCES: Divergence[] = [
    * its header whose script adds a noindex meta is reported — the HTML said
    * nothing and the DOM says noindex — and the header is the
    * `indexability.meta-header-conflict` rule's subject, not this one's.
+   *
+   * BOTH READINGS MUST HAVE ONE DEFINITION (ruling R18). From extraction 2
+   * `robots_meta` joins every robots meta, and from render capture 2
+   * `rendered_robots_meta` does; below 2 each holds the FIRST meta only. A row
+   * whose two stamps fall on different sides of 2 would compare a first-only
+   * reading with a joined one, and a second robots meta saying noindex would
+   * read as "JavaScript added a noindex". Such a row is left out. Nulls are
+   * coalesced to 0: a pre-25 row has both stamps null and both readings
+   * first-only, so it IS compared.
+   *
+   * A row left out is not silent at crawl level when its raw side is the old
+   * one: a page below extraction 2 makes `extraction.not-recorded` fire on the
+   * crawl, which claims CHECK-04 and says "re-crawl" (it does not claim
+   * CHECK-01). The other mismatch, an extraction-2 page with a capture-1
+   * render, has no marker; no released code writes it, because capture 1
+   * shipped only with extraction 1 or older.
    */
   {
     self: NOINDEX_CHANGED,
@@ -779,7 +801,7 @@ const DIVERGENCES: Divergence[] = [
     labels: ["Robots (HTML)", "Robots (Rendered)"],
     raw: "robots_meta",
     rendered: "rendered_robots_meta",
-    measured: TAGS_READ,
+    measured: `${TAGS_READ} and ${SAME_ROBOTS_DEFINITION}`,
     same: (raw, rendered) => saysNoindex(raw) === saysNoindex(rendered),
   },
   /**
