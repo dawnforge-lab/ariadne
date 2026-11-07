@@ -92,6 +92,10 @@ export const ROBOTS_META_CONTENT_MAX = 512;
 export const REFRESH_RAW_MAX = 512;
 /** `metaRefresh.target` (resolved absolute) is cut here (ruling R16). */
 export const REFRESH_TARGET_MAX = 1024;
+/**
+ * `insecureRefs.sample` keeps at most this many references PER KIND (iframe,
+ * media, form), so at most three times this in all, in document order.
+ */
 export const INSECURE_SAMPLE_MAX = 10;
 /** Each `insecureRefs.sample[].url` is cut here; the counters use the whole URL. */
 export const INSECURE_SAMPLE_URL_MAX = 1024;

@@ -1616,15 +1616,36 @@ describe("insecureRefs: http: references from iframes, media and forms", () => {
     });
   });
 
-  it("caps the sample at INSECURE_SAMPLE_MAX while the counters stay exact", () => {
+  it("caps the sample at INSECURE_SAMPLE_MAX per kind while the counters stay exact", () => {
+    const n = INSECURE_SAMPLE_MAX + 3;
+    const frames = Array.from({ length: n }, (_, i) => `<iframe src="http://x.test/f${i}"></iframe>`);
+    const media = Array.from({ length: n }, (_, i) => `<embed src="http://x.test/m${i}">`);
+    const forms = Array.from({ length: n }, (_, i) => `<form action="http://x.test/a${i}"></form>`);
+    const a = bodyPage([...frames, ...media, ...forms].join(""), "https://s.test/");
+    expect(a.insecureRefs?.iframe).toBe(n);
+    expect(a.insecureRefs?.media).toBe(n);
+    expect(a.insecureRefs?.formAction).toBe(n);
+    expect(a.insecureRefs?.forms).toBe(n);
+    const sample = a.insecureRefs?.sample ?? [];
+    expect(sample).toHaveLength(3 * INSECURE_SAMPLE_MAX);
+    for (const [kind, prefix] of [["iframe", "f"], ["media", "m"], ["form", "a"]] as const) {
+      expect(sample.filter((s) => s.kind === kind).map((s) => s.url)).toEqual(
+        Array.from({ length: INSECURE_SAMPLE_MAX }, (_, i) => `http://x.test/${prefix}${i}`),
+      );
+    }
+  });
+
+  it("one kind filling its sample never crowds out another kind", () => {
     const frames = Array.from(
-      { length: INSECURE_SAMPLE_MAX + 3 },
+      { length: INSECURE_SAMPLE_MAX },
       (_, i) => `<iframe src="http://x.test/${i}"></iframe>`,
     );
-    const a = bodyPage(frames.join(""), "https://s.test/");
-    expect(a.insecureRefs?.iframe).toBe(INSECURE_SAMPLE_MAX + 3);
-    expect(a.insecureRefs?.sample).toHaveLength(INSECURE_SAMPLE_MAX);
-    expect(a.insecureRefs?.sample[0]?.url).toBe("http://x.test/0");
+    const a = bodyPage(
+      frames.join("") + `<form action="http://x.test/post"></form>`,
+      "https://s.test/",
+    );
+    expect(a.insecureRefs?.sample).toHaveLength(INSECURE_SAMPLE_MAX + 1);
+    expect(a.insecureRefs?.sample.at(-1)).toEqual({ kind: "form", url: "http://x.test/post" });
   });
 
   it("caps each sampled URL at INSECURE_SAMPLE_URL_MAX; the counters see it whole", () => {

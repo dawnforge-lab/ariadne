@@ -363,8 +363,12 @@ async function httpUrlFindings(
  * page written by extraction 2, the `http:` iframes and media counted in
  * `pages.insecure_refs`. A v1 page has a null `insecure_refs`, contributes
  * nothing from it and carries no `byKind`, so its finding is exactly the 0.20.0
- * one. Each source's sample is already sorted and capped at the limit, so the
- * merged, re-sorted, re-capped sample is the first entries of the union.
+ * one. The two samples are built differently: the resource sample is sorted
+ * and capped at the limit here, while the ref sample is the stored one, the
+ * first `INSECURE_SAMPLE_MAX` iframes and the first media references in
+ * document order, each kind capped on its own. The merged sample is re-sorted
+ * and capped, so it is a sorted sample of the page's insecure references, not
+ * necessarily their alphabetically first entries; the counts stay exact.
  */
 async function mixedContentFindings(
   self: RuleIdentity,

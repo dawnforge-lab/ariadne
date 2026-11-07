@@ -599,7 +599,13 @@ function analyzeHtmlWithCheerio(html: string, pageUrl: string): UpstreamShape {
     }
   };
   walkInsecure($.root()[0] as unknown as DomNode, false);
-  insecureRefs.sample = insecureRefs.sample.slice(0, INSECURE_SAMPLE_MAX);
+  // At most INSECURE_SAMPLE_MAX per kind, in document order.
+  const sampledPerKind = new Map<InsecureRefKind, number>();
+  insecureRefs.sample = insecureRefs.sample.filter((s) => {
+    const n = (sampledPerKind.get(s.kind) ?? 0) + 1;
+    sampledPerKind.set(s.kind, n);
+    return n <= INSECURE_SAMPLE_MAX;
+  });
   const imagesMissingAltSampleCapped = imagesMissingAltSample.slice(0, IMAGE_SAMPLE_MAX);
 
   // `.text()` with every image's trimmed, non-empty `alt` read where the image

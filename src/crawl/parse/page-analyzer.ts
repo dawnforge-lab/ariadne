@@ -410,8 +410,10 @@
  *    `iframe` (`<iframe src>`), `media` (`<video src|poster>`, `<audio src>`,
  *    `<source src>` inside a `<video>`/`<audio>` (a `mediaDepth` counter, on
  *    `pictureDepth`'s idiom), `<track src>`, `<embed src>`, `<object data>`)
- *    and `formAction` (`<form action>`); `forms` counts every `<form>`. A sampled
- *    URL is cut at `INSECURE_SAMPLE_URL_MAX`; the counters see it whole. Recorded
+ *    and `formAction` (`<form action>`); `forms` counts every `<form>`. The
+ *    sample keeps the first `INSECURE_SAMPLE_MAX` of each kind, in document
+ *    order. A sampled URL is cut at `INSECURE_SAMPLE_URL_MAX`; the counters see
+ *    it whole. Recorded
  *    on every page whatever its scheme; the rules decide by the page's.
  *  - `imagesEmptyAlt`, `imagesAltTooLong` (trimmed alt over
  *    `ALT_TEXT_LONG_CHARS`, applied here, deviation 10) and
@@ -791,8 +793,9 @@ export interface PageAnalysis {
    * Frame, media and form references that resolve (`normalizeUrl`) to an
    * `http:` URL, on every page whatever its own scheme (the rules decide by
    * the page's scheme), with every `<form>` counted and the first
-   * `INSECURE_SAMPLE_MAX` references sampled in document order, each sampled
-   * URL cut at `INSECURE_SAMPLE_URL_MAX`.
+   * `INSECURE_SAMPLE_MAX` references OF EACH KIND sampled (at most three times
+   * that in all), in document order, each sampled URL cut at
+   * `INSECURE_SAMPLE_URL_MAX`.
    */
   insecureRefs: InsecureRefs;
   /** `<img>` with an `alt` that is empty after trim. */
@@ -1399,14 +1402,17 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
   // Open `<video>` / `<audio>` elements: a `<source>` is a media reference only
   // inside one, told apart without a tree on `pictureDepth`'s idiom.
   let mediaDepth = 0;
+  // The sample is capped PER KIND, so one kind filling its share never leaves
+  // a counted kind with no sample; each kind's count is its counter's value.
   const noteInsecure = (kind: InsecureRefKind, raw: string | undefined) => {
     if (raw === undefined) return;
     const resolved = normalizeUrl(raw, pageUrl);
     if (resolved === null || !resolved.startsWith("http:")) return;
-    if (kind === "iframe") insecureRefs.iframe += 1;
-    else if (kind === "media") insecureRefs.media += 1;
-    else insecureRefs.formAction += 1;
-    if (insecureRefs.sample.length < INSECURE_SAMPLE_MAX) {
+    let counted: number;
+    if (kind === "iframe") counted = ++insecureRefs.iframe;
+    else if (kind === "media") counted = ++insecureRefs.media;
+    else counted = ++insecureRefs.formAction;
+    if (counted <= INSECURE_SAMPLE_MAX) {
       insecureRefs.sample.push({ kind, url: storableCap(resolved, INSECURE_SAMPLE_URL_MAX) });
     }
   };

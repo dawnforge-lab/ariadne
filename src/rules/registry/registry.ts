@@ -648,6 +648,9 @@ const KINDS = ["page", "query", "metric"] as const satisfies readonly AnyRule["k
 //     render stamps are both at least 2 or both below (nulls as 0), so a
 //     re-rendered version-1 crawl no longer reports a second robots meta as a
 //     JavaScript noindex (ruling R18).
+//     PR #23 review: `insecure_refs.sample` keeps `INSECURE_SAMPLE_MAX` per
+//     kind (iframe, media, form; at most 30 in all), so ten `http:` iframes
+//     no longer leave a counted `http:` form action with no sample.
 export const RULESET_VERSION = "0.21.0";
 
 /**
