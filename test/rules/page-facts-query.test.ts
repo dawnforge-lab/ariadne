@@ -11,7 +11,12 @@ import { eq } from "drizzle-orm";
 import { closeDb, createDb, type Db } from "../../src/db/client.js";
 import { runMigrations } from "../../src/db/migrate.js";
 import { crawls, pages } from "../../src/db/schema.js";
-import { pageFactsRules, v2Gate, v3Gate } from "../../src/rules/query/page-facts.js";
+import {
+  pageFactsRules,
+  sitemapFactsRecorded,
+  v2Gate,
+  v3Gate,
+} from "../../src/rules/query/page-facts.js";
 import type { QueryRule } from "../../src/rules/registry/types.js";
 
 function databaseUrl(): string {
@@ -21,6 +26,14 @@ function databaseUrl(): string {
 }
 
 const SITE = "https://facts.example";
+const SITEMAP_FACTS = {
+  memberships: 0,
+  membershipLimited: false,
+  hreflangRows: 0,
+  hreflangLimited: false,
+  overlongLocsSkipped: 0,
+  oversizedDocs: [],
+};
 const MARKER_ID = "extraction.not-recorded";
 
 function marker(): QueryRule {
@@ -39,9 +52,18 @@ describe("extraction.not-recorded and v2Gate", () => {
   let db: Db;
   const created: string[] = [];
 
-  async function newCrawl(): Promise<string> {
+  /**
+   * A crawl row; by default its discovery recorded `sitemapFacts` (a 26c crawl),
+   * so only the page stamps decide. `sitemapFacts: false` writes discovery as a
+   * pre-26c crawl did, without the key.
+   */
+  async function newCrawl(opts: { sitemapFacts?: boolean } = {}): Promise<string> {
     const id = `crawl_${randomUUID()}`;
-    await db.insert(crawls).values({ id, siteUrl: SITE, config: {}, rulesetVersion: "test" });
+    const discovery =
+      opts.sitemapFacts === false ? { docsFetched: 0 } : { docsFetched: 0, sitemapFacts: SITEMAP_FACTS };
+    await db
+      .insert(crawls)
+      .values({ id, siteUrl: SITE, config: {}, rulesetVersion: "test", discovery });
     created.push(id);
     return id;
   }
@@ -78,7 +100,7 @@ describe("extraction.not-recorded and v2Gate", () => {
     expect(r.severity).toBe("info");
     expect(r.category).toBe("crawl");
     expect(r.marker).toBe(
-      "This crawl was extracted before the page facts these checks read existed, so they were not run; re-crawl the site.",
+      "This crawl was extracted before the page and sitemap facts these checks read existed, so they were not run; re-crawl the site.",
     );
     expect(r.checkIds).toEqual([
       "CHECK-04", "CHECK-08", "CHECK-10", "CHECK-18", "CHECK-22", "CHECK-24", "CHECK-25",
@@ -102,7 +124,7 @@ describe("extraction.not-recorded and v2Gate", () => {
       pageId: null,
       pageUrl: null,
       dedupeKey: "site",
-      evidence: { pagesNotRecorded: 2, pagesRecorded: 0, requiredVersion: 3 },
+      evidence: { pagesNotRecorded: 2, pagesRecorded: 0, requiredVersion: 3, sitemapFactsRecorded: true },
     });
   });
 
@@ -110,7 +132,7 @@ describe("extraction.not-recorded and v2Gate", () => {
     const crawl = await newCrawl();
     await addPages(crawl, [{ url: `${SITE}/a`, extractionVersion: null }]);
     expect((await marker().run(db, crawl)).map((f) => f.evidence)).toEqual([
-      { pagesNotRecorded: 1, pagesRecorded: 0, requiredVersion: 3 },
+      { pagesNotRecorded: 1, pagesRecorded: 0, requiredVersion: 3, sitemapFactsRecorded: true },
     ]);
   });
 
@@ -122,7 +144,7 @@ describe("extraction.not-recorded and v2Gate", () => {
     ]);
     expect(await v2Gate(db, crawl)).toEqual({ recorded: false, atOrAbove: 1, below: 1 });
     expect((await marker().run(db, crawl)).map((f) => f.evidence)).toEqual([
-      { pagesNotRecorded: 2, pagesRecorded: 0, requiredVersion: 3 },
+      { pagesNotRecorded: 2, pagesRecorded: 0, requiredVersion: 3, sitemapFactsRecorded: true },
     ]);
   });
 
@@ -135,7 +157,7 @@ describe("extraction.not-recorded and v2Gate", () => {
     expect(await v2Gate(db, crawl)).toEqual({ recorded: true, atOrAbove: 2, below: 0 });
     expect(await v3Gate(db, crawl)).toEqual({ recorded: false, atOrAbove: 0, below: 2 });
     expect((await marker().run(db, crawl)).map((f) => f.evidence)).toEqual([
-      { pagesNotRecorded: 2, pagesRecorded: 0, requiredVersion: 3 },
+      { pagesNotRecorded: 2, pagesRecorded: 0, requiredVersion: 3, sitemapFactsRecorded: true },
     ]);
   });
 
@@ -158,7 +180,7 @@ describe("extraction.not-recorded and v2Gate", () => {
     ]);
     expect(await v3Gate(db, crawl)).toEqual({ recorded: false, atOrAbove: 1, below: 1 });
     expect((await marker().run(db, crawl)).map((f) => f.evidence)).toEqual([
-      { pagesNotRecorded: 1, pagesRecorded: 1, requiredVersion: 3 },
+      { pagesNotRecorded: 1, pagesRecorded: 1, requiredVersion: 3, sitemapFactsRecorded: true },
     ]);
   });
 
@@ -173,6 +195,51 @@ describe("extraction.not-recorded and v2Gate", () => {
     const crawl = await newCrawl();
     await addPages(crawl, [{ url: `${SITE}/gone`, extractionVersion: 1, statusCode: 404 }]);
     expect(await marker().run(db, crawl)).toEqual([]);
+  });
+
+  // Ruling R1: the marker also speaks for the sitemap facts discovery records
+  // from Phase 26c on (`discovery_jsonb.sitemapFacts`).
+  it("an all-v3 crawl whose discovery predates sitemapFacts fires, with no stale pages", async () => {
+    const crawl = await newCrawl({ sitemapFacts: false });
+    await addPages(crawl, [{ url: `${SITE}/a`, extractionVersion: 3 }]);
+    expect(await sitemapFactsRecorded(db, crawl)).toBe(false);
+    expect((await marker().run(db, crawl)).map((f) => f.evidence)).toEqual([
+      { pagesNotRecorded: 0, pagesRecorded: 1, requiredVersion: 3, sitemapFactsRecorded: false },
+    ]);
+  });
+
+  it("an all-v3 crawl with sitemapFacts is silent", async () => {
+    const crawl = await newCrawl();
+    await addPages(crawl, [{ url: `${SITE}/a`, extractionVersion: 3 }]);
+    expect(await sitemapFactsRecorded(db, crawl)).toBe(true);
+    expect(await marker().run(db, crawl)).toEqual([]);
+  });
+
+  it("a v2 crawl without sitemapFacts fires for both", async () => {
+    const crawl = await newCrawl({ sitemapFacts: false });
+    await addPages(crawl, [
+      { url: `${SITE}/a`, extractionVersion: 2 },
+      { url: `${SITE}/b`, extractionVersion: 2 },
+    ]);
+    expect((await marker().run(db, crawl)).map((f) => f.evidence)).toEqual([
+      { pagesNotRecorded: 2, pagesRecorded: 0, requiredVersion: 3, sitemapFactsRecorded: false },
+    ]);
+  });
+
+  it("a crawl with no discovery at all has no sitemapFacts, and fires even with no pages", async () => {
+    const id = `crawl_${randomUUID()}`;
+    await db.insert(crawls).values({ id, siteUrl: SITE, config: {}, rulesetVersion: "test" });
+    created.push(id);
+    expect(await sitemapFactsRecorded(db, id)).toBe(false);
+    expect((await marker().run(db, id)).map((f) => f.evidence)).toEqual([
+      { pagesNotRecorded: 0, pagesRecorded: 0, requiredVersion: 3, sitemapFactsRecorded: false },
+    ]);
+  });
+
+  it("sitemapFactsRecorded throws for a crawl nothing knows", async () => {
+    await expect(sitemapFactsRecorded(db, `crawl_${randomUUID()}`)).rejects.toThrow(
+      /no such crawl/,
+    );
   });
 
   it("throws for a crawl nothing knows, rather than reading it as clean", async () => {

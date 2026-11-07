@@ -3,7 +3,7 @@ import { createServer, type Server } from "node:http";
 import { and, eq } from "drizzle-orm";
 import { closeDb, createDb, type Db } from "../../src/db/client.js";
 import { runMigrations } from "../../src/db/migrate.js";
-import { crawls, frontier, links, pages, sitemapUrls } from "../../src/db/schema.js";
+import { crawls, frontier, links, pages, sitemapHreflang, sitemapMemberships, sitemapUrls } from "../../src/db/schema.js";
 import { frontierCounts, leaseBatch } from "../../src/crawl/frontier.js";
 import { PageWriter } from "../../src/crawl/persist.js";
 import {
@@ -2490,5 +2490,203 @@ describe("crawl stamps (Phase 25)", () => {
     expect(row?.requestHeaders).toEqual(
       redactRequestHeaders(pageRequestHeaders("AriadneBot-test")),
     );
+  });
+});
+
+/**
+ * Phase 26c (Task 8): the walk's memberships and staged alternates reach their
+ * tables through the loop's sink, and `discovery_jsonb.sitemapFacts` is written
+ * on every crawl. A small table-driven site per test.
+ */
+describe("sitemap memberships and staged hreflang (Phase 26c)", () => {
+  let tableServer: Server;
+  let table: string;
+  let tableBodies: Record<string, string> = {};
+
+  const URLSET_OPEN =
+    '<?xml version="1.0" encoding="UTF-8"?>' +
+    '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9" ' +
+    'xmlns:xhtml="http://www.w3.org/1999/xhtml">';
+
+  function locs(paths: string[]): string {
+    return (
+      URLSET_OPEN + paths.map((p) => `<url><loc>${table}${p}</loc></url>`).join("") + "</urlset>"
+    );
+  }
+
+  async function sitemapFactsOf(crawlId: string): Promise<unknown> {
+    const [row] = await db
+      .select({ discovery: crawls.discovery })
+      .from(crawls)
+      .where(eq(crawls.id, crawlId));
+    if (row === undefined) throw new Error(`no crawls row for ${crawlId}`);
+    return (row.discovery as DiscoveryEvidence).sitemapFacts;
+  }
+
+  beforeAll(async () => {
+    tableServer = createServer((req, res) => {
+      const body = tableBodies[req.url ?? ""];
+      if (body === undefined) {
+        res.writeHead(404, { "content-type": "text/html" });
+        res.end(html("<p>gone</p>"));
+        return;
+      }
+      const type = (req.url ?? "").endsWith(".xml")
+        ? "application/xml"
+        : (req.url ?? "") === "/robots.txt"
+          ? "text/plain"
+          : "text/html; charset=utf-8";
+      res.writeHead(200, { "content-type": type });
+      res.end(body);
+    });
+    table = await listen(tableServer);
+  });
+
+  afterAll(async () => {
+    await new Promise<void>((r) => tableServer.close(() => r()));
+  });
+
+  const tableConfig = () =>
+    config({ siteUrl: table, probeHosts: false, maxPages: 10, maxConcurrency: 1 });
+
+  it("a URL two sitemaps list is one sitemap_urls row and two memberships", async () => {
+    tableBodies = {
+      "/robots.txt": `User-agent: *\nSitemap: ${table}/one.xml\nSitemap: ${table}/two.xml\n`,
+      "/one.xml": locs(["/a", "/b"]),
+      "/two.xml": locs(["/a"]),
+      "/": html("<p>home</p>"),
+      "/a": html("<p>a</p>"),
+      "/b": html("<p>b</p>"),
+    };
+    const summary = await crawl(tableConfig());
+    const listed = await db
+      .select()
+      .from(sitemapUrls)
+      .where(and(eq(sitemapUrls.crawlId, summary.crawlId), eq(sitemapUrls.url, `${table}/a`)));
+    expect(listed.map((r) => r.sitemapSource)).toEqual([`${table}/one.xml`]);
+    const members = await db
+      .select()
+      .from(sitemapMemberships)
+      .where(eq(sitemapMemberships.crawlId, summary.crawlId));
+    expect(members.map((m) => [m.url, m.urlNormalised, m.sitemapSource]).sort()).toEqual(
+      [
+        [`${table}/a`, `${table}/a`, `${table}/one.xml`],
+        [`${table}/a`, `${table}/a`, `${table}/two.xml`],
+        [`${table}/b`, `${table}/b`, `${table}/one.xml`],
+      ].sort(),
+    );
+    expect(await sitemapFactsOf(summary.crawlId)).toMatchObject({
+      memberships: 3,
+      membershipLimited: false,
+    });
+  });
+
+  it("a URL one sitemap lists twice is one membership", async () => {
+    tableBodies = {
+      "/robots.txt": `User-agent: *\nSitemap: ${table}/twice.xml\n`,
+      "/twice.xml": locs(["/a", "/a"]),
+      "/": html("<p>home</p>"),
+      "/a": html("<p>a</p>"),
+    };
+    const summary = await crawl(tableConfig());
+    const members = await db
+      .select()
+      .from(sitemapMemberships)
+      .where(eq(sitemapMemberships.crawlId, summary.crawlId));
+    expect(members.map((m) => m.url)).toEqual([`${table}/a`]);
+  });
+
+  it("stages a urlset's alternates in sitemap_hreflang, targets resolved", async () => {
+    tableBodies = {
+      "/robots.txt": `User-agent: *\nSitemap: ${table}/alts.xml\n`,
+      "/alts.xml":
+        URLSET_OPEN +
+        `<url><loc>${table}/en/a?b=2&amp;a=1#top</loc>` +
+        '<xhtml:link rel="alternate" hreflang="de" href="/de/a"/>' +
+        `<xhtml:link rel="alternate" hreflang="en" href="${table}/en/a"/>` +
+        "</url></urlset>",
+      "/": html("<p>home</p>"),
+    };
+    const summary = await crawl(tableConfig());
+    const rows = await db
+      .select()
+      .from(sitemapHreflang)
+      .where(eq(sitemapHreflang.crawlId, summary.crawlId));
+    const loc = `${table}/en/a?b=2&a=1#top`;
+    const normalised = `${table}/en/a?a=1&b=2`;
+    const source = `${table}/alts.xml`;
+    expect(
+      rows.map((r) => [r.url, r.urlNormalised, r.hreflangCode, r.targetUrl, r.sitemapSource]).sort(),
+    ).toEqual(
+      [
+        [loc, normalised, "de", `${table}/de/a`, source],
+        [loc, normalised, "en", `${table}/en/a`, source],
+      ].sort(),
+    );
+    expect(await sitemapFactsOf(summary.crawlId)).toMatchObject({
+      hreflangRows: 2,
+      hreflangLimited: false,
+    });
+  });
+
+  it("a resume re-reads the sitemaps without doubling the staged alternates", async () => {
+    tableBodies = {
+      "/robots.txt": `User-agent: *\nSitemap: ${table}/alts.xml\n`,
+      "/alts.xml":
+        URLSET_OPEN +
+        `<url><loc>${table}/en/a</loc>` +
+        '<xhtml:link rel="alternate" hreflang="de" href="/de/a"/></url></urlset>',
+      "/": html("<p>home</p>"),
+    };
+    const first = await crawl(tableConfig());
+    await resumeCrawl(db, first.crawlId, { config: tableConfig() });
+    const rows = await db
+      .select()
+      .from(sitemapHreflang)
+      .where(eq(sitemapHreflang.crawlId, first.crawlId));
+    expect(rows).toHaveLength(1);
+    const members = await db
+      .select()
+      .from(sitemapMemberships)
+      .where(eq(sitemapMemberships.crawlId, first.crawlId));
+    expect(members).toHaveLength(1);
+  });
+
+  it("a crawl with no sitemap writes sitemapFacts with zeros", async () => {
+    tableBodies = {
+      "/robots.txt": "User-agent: *\nAllow: /\n",
+      "/": html("<p>home</p>"),
+    };
+    const summary = await crawl(tableConfig());
+    expect(await sitemapFactsOf(summary.crawlId)).toEqual({
+      memberships: 0,
+      membershipLimited: false,
+      hreflangRows: 0,
+      hreflangLimited: false,
+      overlongLocsSkipped: 0,
+      oversizedDocs: [],
+    });
+  });
+
+  it("a 3,000-character <loc> is counted, never inserted, and the crawl finishes", async () => {
+    tableBodies = {
+      "/robots.txt": `User-agent: *\nSitemap: ${table}/long.xml\n`,
+      "/long.xml": locs([`/${"l".repeat(3_000)}`, "/a"]),
+      "/": html("<p>home</p>"),
+      "/a": html("<p>a</p>"),
+    };
+    const summary = await crawl(tableConfig());
+    expect(summary.status).toBe("finished");
+    expect(await sitemapFactsOf(summary.crawlId)).toMatchObject({ overlongLocsSkipped: 1 });
+    const listed = await db
+      .select({ url: sitemapUrls.url })
+      .from(sitemapUrls)
+      .where(eq(sitemapUrls.crawlId, summary.crawlId));
+    expect(listed.map((r) => r.url)).toEqual([`${table}/a`]);
+    const members = await db
+      .select({ url: sitemapMemberships.url })
+      .from(sitemapMemberships)
+      .where(eq(sitemapMemberships.crawlId, summary.crawlId));
+    expect(members.map((r) => r.url)).toEqual([`${table}/a`]);
   });
 });

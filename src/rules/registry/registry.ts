@@ -779,6 +779,20 @@ const KINDS = ["page", "query", "metric"] as const satisfies readonly AnyRule["k
 //     `MAX_HREFLANG_PAIRS` `xhtml:link` alternates per `<url>`. DOCTYPE and
 //     wrong-root refusals keep discovery's reason text; an unknown charset is
 //     refused. No rule change. 184 rules.
+//  8. (T8) Discovery reads every sitemap through that stream; fast-xml-parser
+//     is gone. A 10–50 MB sitemap is read whole; one over the cap (decompressed,
+//     or on the wire) keeps the URLs read before it and is named in
+//     `sitemapFacts.oversizedDocs` (at most 50) instead of
+//     `truncation.failures`, so `sitemap.invalid` no longer reports it;
+//     `oversizedDocsSkipped` still counts it. Each `<loc>` a urlset lists is a
+//     `sitemap_memberships` row (one per URL and document) and each alternate
+//     a `sitemap_hreflang` row (href resolved against the document), written
+//     through a sink the stream flushes after every chunk, capped at 800,000 and
+//     1,000,000 per crawl. A `<loc>` or alternate target over `INDEXED_URL_MAX`
+//     is counted in `sitemapFacts.overlongLocsSkipped` and stored nowhere.
+//     `discovery_jsonb.sitemapFacts` is written on every crawl. The marker
+//     `extraction.not-recorded` also fires when it is absent, with the new
+//     evidence key `sitemapFactsRecorded` (ruling R1). 184 rules.
 export const RULESET_VERSION = "0.22.0";
 
 /**

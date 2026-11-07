@@ -6,8 +6,39 @@ import {
   ROBOTS_BLOCKED_REASON_PREFIX,
   robotsBlockedReason,
   robotsRulesOf,
+  type SitemapSink,
 } from "../../src/crawl/discovery.js";
 import { closeFetchAgents } from "../../src/crawl/http.js";
+import { INDEXED_URL_MAX } from "../../src/crawl/parse/url-utils.js";
+
+/**
+ * A sink that records what discovery hands it, in order. The crawl loop's sink
+ * writes rows (test/crawl/loop.test.ts); what is under test here is what the
+ * walk decides to hand over.
+ */
+interface RecordingSink extends SitemapSink {
+  memberships: { url: string; source: string }[];
+  alternates: { url: string; hreflang: string; href: string; source: string }[];
+  flushes: number;
+}
+
+function recordingSink(): RecordingSink {
+  const sink: RecordingSink = {
+    memberships: [],
+    alternates: [],
+    flushes: 0,
+    membership(url, source) {
+      sink.memberships.push({ url, source });
+    },
+    alternate(url, a, source) {
+      sink.alternates.push({ url, hreflang: a.hreflang, href: a.href, source });
+    },
+    async flush() {
+      sink.flushes++;
+    },
+  };
+  return sink;
+}
 
 /**
  * `maxCrawlDelayMs: 0` because the site fixture's robots.txt declares
@@ -22,7 +53,22 @@ const OPTS = {
   retryBackoffMs: 1,
   // Unpaced by default; the politeness block sets a real one.
   perHostDelayMs: 0,
+  // Shared by the tests that do not look at it; the ones that do bring their own.
+  sink: recordingSink(),
 };
+
+const NO_SITEMAP_FACTS = {
+  memberships: 0,
+  membershipLimited: false,
+  hreflangRows: 0,
+  hreflangLimited: false,
+  overlongLocsSkipped: 0,
+  oversizedDocs: [],
+};
+
+/** The 12 MB fixture: over the old 10 MB cap, well under the protocol's 50 MB. */
+const BIG_ENTRIES = 11_000;
+let bigSitemap: Buffer;
 
 /** The site with a robots.txt: the brief's fixture. */
 let siteServer: Server;
@@ -118,10 +164,7 @@ beforeAll(async () => {
         ].join("\n"),
       );
     } else if (path === "/sitemap.xml") {
-      xml(
-        res,
-        sitemapIndex([`${base}/sitemap-1.xml`, `${base}/sitemap-oversized.xml`]),
-      );
+      xml(res, sitemapIndex([`${base}/sitemap-1.xml`]));
     } else if (path === "/sitemap-1.xml") {
       xml(
         res,
@@ -131,12 +174,6 @@ beforeAll(async () => {
           { loc: `${base}/about` },
         ]),
       );
-    } else if (path === "/sitemap-oversized.xml") {
-      // 11MB of padding: over the 10MB per-document cap, skipped whole.
-      res.setHeader("content-type", "application/xml");
-      const chunk = Buffer.alloc(1024 * 1024, 0x61);
-      for (let i = 0; i < 11; i++) res.write(chunk);
-      res.end();
     } else {
       res.statusCode = 404;
       res.end("nope");
@@ -159,9 +196,66 @@ beforeAll(async () => {
       res.end(gzipSync(Buffer.from(urlset([{ loc: `${bare}/gz-b` }]))));
     } else if (path === "/gz/bomb.xml.gz") {
       // ~11KB on the wire, 11MB decompressed: the cap is on the decompressed
-      // bytes, so this is skipped as oversized.
+      // bytes, so this stops oversized at the (test-lowered) cap.
       res.setHeader("content-type", "application/gzip");
-      res.end(gzipSync(Buffer.alloc(11 * 1024 * 1024, 0x61)));
+      res.end(
+        gzipSync(
+          Buffer.concat([
+            Buffer.from(`<urlset><url><loc>${bare}/bomb-first</loc></url>`),
+            Buffer.alloc(11 * 1024 * 1024, 0x20),
+            Buffer.from("</urlset>"),
+          ]),
+        ),
+      );
+    } else if (path === "/gz/hollow.xml.gz") {
+      // Thousands of empty gzip members: ~40KB on the wire that inflate to
+      // almost nothing. The decompressed cap never trips; the wire cap does.
+      const empty = gzipSync(Buffer.alloc(0));
+      res.setHeader("content-type", "application/gzip");
+      res.end(
+        Buffer.concat([
+          gzipSync(Buffer.from(`<urlset><url><loc>${bare}/hollow</loc></url>`)),
+          ...Array.from({ length: 2_000 }, () => empty),
+          gzipSync(Buffer.from("</urlset>")),
+        ]),
+      );
+    } else if (path === "/big.xml") {
+      res.setHeader("content-type", "application/xml");
+      res.end(bigSitemap);
+    } else if (path === "/cut.xml" || /^\/cuts\/\d+\.xml$/.test(path)) {
+      xml(
+        res,
+        urlset(Array.from({ length: 2_000 }, (_, i) => ({ loc: `${bare}/cut/${i}` }))),
+      );
+    } else if (path === "/cuts.xml") {
+      xml(res, sitemapIndex(Array.from({ length: 60 }, (_, i) => `${bare}/cuts/${i}.xml`)));
+    } else if (path === "/twice.xml") {
+      xml(res, urlset([{ loc: `${bare}/same` }, { loc: `${bare}/same` }]));
+    } else if (path === "/alts.xml") {
+      xml(
+        res,
+        '<?xml version="1.0" encoding="UTF-8"?>' +
+          '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9" ' +
+          'xmlns:xhtml="http://www.w3.org/1999/xhtml">' +
+          `<url><loc>${bare}/en/a</loc>` +
+          '<xhtml:link rel="alternate" hreflang="de" href="/de/a"/>' +
+          `<xhtml:link rel="alternate" hreflang="en" href="${bare}/en/a"/>` +
+          "</url></urlset>",
+      );
+    } else if (path === "/long.xml") {
+      const longLoc = `${bare}/${"l".repeat(3_000)}`;
+      xml(
+        res,
+        '<?xml version="1.0" encoding="UTF-8"?>' +
+          '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9" ' +
+          'xmlns:xhtml="http://www.w3.org/1999/xhtml">' +
+          `<url><loc>${longLoc}</loc>` +
+          '<xhtml:link rel="alternate" hreflang="de" href="/de/x"/></url>' +
+          `<url><loc>${bare}/short</loc>` +
+          `<xhtml:link rel="alternate" hreflang="de" href="/${"d".repeat(3_000)}"/>` +
+          '<xhtml:link rel="alternate" hreflang="fr" href="/fr/short"/></url>' +
+          "</urlset>",
+      );
     } else if (deep !== null) {
       const n = Number(deep[1]);
       if (n < 4) xml(res, sitemapIndex([`${bare}/deep/${n + 1}.xml`]));
@@ -228,6 +322,10 @@ beforeAll(async () => {
     }
   });
   bare = await listen(bareServer);
+  const pad = "x".repeat(1_200);
+  bigSitemap = Buffer.from(
+    urlset(Array.from({ length: BIG_ENTRIES }, (_, i) => ({ loc: `${bare}/big/${i}/${pad}` }))),
+  );
 
   flakyServer = createServer((req, res) => {
     if (req.url === "/robots.txt") {
@@ -578,12 +676,41 @@ describe("discover: sitemaps", () => {
     expect(d.sitemapEntries.every((e) => e.source === `${bare}/gz/encoded.xml`)).toBe(true);
   });
 
-  it("skips oversized shards whole and counts them", async () => {
-    const d = await discover(base, OPTS);
+  it("reads a 12 MB sitemap (over the old 10 MB cap) whole", async () => {
+    expect(bigSitemap.byteLength).toBeGreaterThan(12 * 1024 * 1024);
+    const sink = recordingSink();
+    const d = await discover(bare, { ...OPTS, sink, extraSitemaps: [`${bare}/big.xml`] });
+    expect(d.truncation.failures).toEqual([]);
+    expect(d.truncation.oversizedDocsSkipped).toBe(0);
+    expect(d.sitemapEntries).toHaveLength(BIG_ENTRIES);
+    expect(sink.memberships).toHaveLength(BIG_ENTRIES);
+    expect(d.sitemapFacts.memberships).toBe(BIG_ENTRIES);
+    expect(d.sitemapFacts.oversizedDocs).toEqual([]);
+  });
+
+  it("stops a sitemap at the cap, keeps the URLs read before it, and names it oversized", async () => {
+    const sink = recordingSink();
+    const cap = 32 * 1024;
+    const d = await discover(bare, {
+      ...OPTS,
+      sink,
+      maxSitemapBytes: cap,
+      extraSitemaps: [`${bare}/cut.xml`],
+    });
+    // Oversized is not a failure any more: `sitemap.oversized` reports it, not
+    // `sitemap.invalid` (deviation 3).
+    expect(d.truncation.failures).toEqual([]);
     expect(d.truncation.oversizedDocsSkipped).toBe(1);
-    // index + shard + oversized shard: the oversized one was fetched, then
-    // dropped — it is accounted for, not silently missing.
-    expect(d.truncation.docsFetched).toBe(3);
+    const kept = d.sitemapEntries.length;
+    expect(kept).toBeGreaterThan(100);
+    expect(kept).toBeLessThan(2_000);
+    // The entries kept are the document's first ones, in order.
+    expect(d.sitemapEntries[0]?.url).toBe(`${bare}/cut/0`);
+    expect(d.sitemapEntries[kept - 1]?.url).toBe(`${bare}/cut/${kept - 1}`);
+    expect(sink.memberships).toHaveLength(kept);
+    expect(d.sitemapFacts.oversizedDocs).toEqual([
+      { url: `${bare}/cut.xml`, bytesRead: cap, urlsKept: kept },
+    ]);
   });
 
   it("reads gzip sitemaps, by extension and by content-encoding", async () => {
@@ -597,13 +724,33 @@ describe("discover: sitemaps", () => {
     ]);
   });
 
-  it("caps decompressed bytes, so a gzip bomb is an oversized skip", async () => {
+  it("caps decompressed bytes, so a gzip bomb stops oversized at the cap", async () => {
+    const cap = 1024 * 1024;
     const d = await discover(bare, {
       ...OPTS,
+      maxSitemapBytes: cap,
       extraSitemaps: [`${bare}/gz/bomb.xml.gz`],
     });
     expect(d.truncation.oversizedDocsSkipped).toBe(1);
-    expect(d.sitemapEntries).toEqual([]);
+    expect(d.truncation.failures).toEqual([]);
+    expect(d.sitemapEntries.map((e) => e.url)).toEqual([`${bare}/bomb-first`]);
+    expect(d.sitemapFacts.oversizedDocs).toEqual([
+      { url: `${bare}/gz/bomb.xml.gz`, bytesRead: cap, urlsKept: 1 },
+    ]);
+  });
+
+  it("caps wire bytes too, so a gzip that inflates to nothing still stops", async () => {
+    const cap = 8 * 1024;
+    const d = await discover(bare, {
+      ...OPTS,
+      maxSitemapBytes: cap,
+      extraSitemaps: [`${bare}/gz/hollow.xml.gz`],
+    });
+    expect(d.truncation.oversizedDocsSkipped).toBe(1);
+    expect(d.truncation.failures).toEqual([]);
+    expect(d.sitemapFacts.oversizedDocs).toHaveLength(1);
+    expect(d.sitemapFacts.oversizedDocs[0]?.url).toBe(`${bare}/gz/hollow.xml.gz`);
+    expect(d.sitemapFacts.oversizedDocs[0]?.bytesRead).toBeGreaterThan(cap);
   });
 
   it("stops recursing below the depth cap", async () => {
@@ -713,6 +860,93 @@ describe("discover: sitemaps", () => {
     });
     expect(evil.sitemapEntries).toEqual([]);
     expect(evil.truncation.failures[0]?.reason).toContain("scheme");
+  });
+});
+
+/**
+ * Phase 26c (Task 8): every `<loc>` a document lists is a membership, every
+ * `xhtml:link` alternate is a staged hreflang row, and the walk's account of
+ * both is `sitemapFacts`. The entry list (first source wins) is unchanged.
+ */
+describe("discover: memberships, alternates and sitemapFacts", () => {
+  it("hands the sink one membership per document that lists a URL", async () => {
+    const sink = recordingSink();
+    const d = await discover(bare, {
+      ...OPTS,
+      sink,
+      extraSitemaps: [`${bare}/dupes.xml`, `${bare}/dupes-2.xml`],
+    });
+    // One entry, first source wins — as before.
+    expect(d.sitemapEntries.map((e) => [e.url, e.source])).toEqual([
+      [`${bare}/same`, `${bare}/dupes.xml`],
+    ]);
+    // Two memberships: the URL is in both documents.
+    expect(sink.memberships).toEqual([
+      { url: `${bare}/same`, source: `${bare}/dupes.xml` },
+      { url: `${bare}/same`, source: `${bare}/dupes-2.xml` },
+    ]);
+    expect(d.sitemapFacts.memberships).toBe(2);
+    // Flushed while the walk ran, not only at its end.
+    expect(sink.flushes).toBeGreaterThanOrEqual(2);
+  });
+
+  it("offers a URL one document lists twice twice; the table's key keeps one", async () => {
+    const sink = recordingSink();
+    const d = await discover(bare, { ...OPTS, sink, extraSitemaps: [`${bare}/twice.xml`] });
+    expect(d.sitemapEntries).toHaveLength(1);
+    expect(sink.memberships).toEqual([
+      { url: `${bare}/same`, source: `${bare}/twice.xml` },
+      { url: `${bare}/same`, source: `${bare}/twice.xml` },
+    ]);
+  });
+
+  it("stages each alternate with its href resolved against the sitemap URL", async () => {
+    const sink = recordingSink();
+    const d = await discover(bare, { ...OPTS, sink, extraSitemaps: [`${bare}/alts.xml`] });
+    expect(sink.alternates).toEqual([
+      { url: `${bare}/en/a`, hreflang: "de", href: `${bare}/de/a`, source: `${bare}/alts.xml` },
+      { url: `${bare}/en/a`, hreflang: "en", href: `${bare}/en/a`, source: `${bare}/alts.xml` },
+    ]);
+    expect(d.sitemapFacts.hreflangRows).toBe(2);
+    expect(d.sitemapFacts.hreflangLimited).toBe(false);
+  });
+
+  it("counts a <loc> or alternate target over the index limit and hands neither over", async () => {
+    const sink = recordingSink();
+    const d = await discover(bare, { ...OPTS, sink, extraSitemaps: [`${bare}/long.xml`] });
+    // The 3,000-character <loc> (and so its alternate) and the 3,000-character
+    // alternate target on /short: two skips, counted once each.
+    expect(d.sitemapFacts.overlongLocsSkipped).toBe(2);
+    expect(d.sitemapEntries.map((e) => e.url)).toEqual([`${bare}/short`]);
+    expect(sink.memberships.map((m) => m.url)).toEqual([`${bare}/short`]);
+    expect(sink.alternates.map((a) => a.href)).toEqual([`${bare}/fr/short`]);
+    for (const m of sink.memberships) expect(m.url.length).toBeLessThanOrEqual(INDEXED_URL_MAX);
+    // Not a malformed entry: it is a URL, just one no index can hold.
+    expect(d.truncation.malformedEntriesSkipped).toBe(0);
+  });
+
+  it("writes sitemapFacts with zeros when there is no sitemap", async () => {
+    const d = await discover(bare, OPTS);
+    expect(d.truncation.docsFetched).toBe(0);
+    expect(d.sitemapFacts).toEqual(NO_SITEMAP_FACTS);
+  });
+
+  it("writes sitemapFacts with zeros when robots.txt is unreachable", async () => {
+    const d = await discover(flaky, { ...OPTS, extraSitemaps: [`${flaky}/s.xml`] });
+    expect(d.sitemapFacts).toEqual(NO_SITEMAP_FACTS);
+  });
+
+  it("counts every oversized document and names the first 50", async () => {
+    const d = await discover(bare, {
+      ...OPTS,
+      maxSitemapBytes: 32 * 1024,
+      extraSitemaps: [`${bare}/cuts.xml`],
+    });
+    // Sixty shards over the cap: every one counted, the first fifty named.
+    expect(d.truncation.oversizedDocsSkipped).toBe(60);
+    expect(d.sitemapFacts.oversizedDocs).toHaveLength(50);
+    expect(d.sitemapFacts.oversizedDocs[0]?.url).toBe(`${bare}/cuts/0.xml`);
+    expect(d.truncation.failures).toEqual([]);
   });
 });
 

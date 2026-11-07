@@ -13,7 +13,7 @@
  * is about.
  */
 import type { DiscoveryEvidence } from "../../src/crawl/loop.js";
-import type { DiscoveryTruncation } from "../../src/crawl/discovery.js";
+import type { DiscoverySitemapFacts, DiscoveryTruncation } from "../../src/crawl/discovery.js";
 import type { HostProbeResult } from "../../src/crawl/host-probe.js";
 import { hostProbeStarts } from "../../src/crawl/parse/url-utils.js";
 
@@ -33,12 +33,36 @@ export function mkTruncation(
   };
 }
 
+/**
+ * `discovery.sitemapFacts` for a walk that handed over nothing and hit no cap:
+ * what a Phase 26c crawl writes when it read no sitemap URL.
+ */
+export function mkSitemapFacts(
+  overrides: Partial<DiscoverySitemapFacts> = {},
+): DiscoverySitemapFacts {
+  return {
+    memberships: 0,
+    membershipLimited: false,
+    hreflangRows: 0,
+    hreflangLimited: false,
+    overlongLocsSkipped: 0,
+    oversizedDocs: [],
+    ...overrides,
+  };
+}
+
+/**
+ * The default is a Phase 26c crawl's discovery, `sitemapFacts` included, so
+ * `extraction.not-recorded` stays quiet. `sitemapFacts: null` writes the
+ * discovery an older crawl wrote, without the key.
+ */
 export function mkDiscovery(overrides: {
   robots?: Partial<DiscoveryEvidence["robots"]>;
   sitemapSources?: string[];
   suppliedSitemaps?: string[];
   truncation?: Partial<DiscoveryTruncation>;
   docsFetched?: number;
+  sitemapFacts?: Partial<DiscoverySitemapFacts> | null;
 } = {}): DiscoveryEvidence {
   const truncation = mkTruncation(overrides.truncation);
   return {
@@ -58,6 +82,9 @@ export function mkDiscovery(overrides: {
     suppliedSitemaps: overrides.suppliedSitemaps ?? [],
     truncation,
     docsFetched: overrides.docsFetched ?? truncation.docsFetched,
+    ...(overrides.sitemapFacts === null
+      ? {}
+      : { sitemapFacts: mkSitemapFacts(overrides.sitemapFacts) }),
   };
 }
 

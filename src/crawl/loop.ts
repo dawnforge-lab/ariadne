@@ -52,7 +52,7 @@
 import { randomUUID } from "node:crypto";
 import { eq, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
-import { crawls, sitemapUrls } from "../db/schema.js";
+import { crawls, sitemapHreflang, sitemapMemberships, sitemapUrls } from "../db/schema.js";
 // Ruleset provenance for the `crawls` row: the registry owns the number, the
 // loop only stamps it.
 import { RULESET_VERSION } from "../rules/registry/registry.js";
@@ -61,8 +61,10 @@ import {
   ROBOTS_BLOCKED_REASON_PREFIX,
   robotsBlockedReason,
   type DiscoveryResult,
+  type DiscoverySitemapFacts,
   type DiscoveryTruncation,
   type RobotsInfo,
+  type SitemapSink,
 } from "./discovery.js";
 import { fetchPage, MAX_BODY, pageRequestHeaders, type FetchClass, type FetchResult } from "./fetch-page.js";
 import { probeHostVariants } from "./host-probe.js";
@@ -346,6 +348,13 @@ export interface DiscoveryEvidence {
   truncation: DiscoveryTruncation;
   /** Sitemap documents attempted. Lifted out of `truncation` for the rules. */
   docsFetched: number;
+  /**
+   * What the walk handed `sitemap_memberships` and `sitemap_hreflang`, and what
+   * it could not (Phase 26c). Written on every crawl from then on, zeros when
+   * there was no sitemap; ABSENT on an older crawl, which is how a rule tells
+   * "no memberships" from "never recorded" (`sitemapFactsRecorded`).
+   */
+  sitemapFacts?: DiscoverySitemapFacts;
 }
 
 /** `crawls.notfound_probe_jsonb` when the probe ran: the site's 404 template. */
@@ -528,7 +537,7 @@ const ADMIT_POLL_MS = 25;
 /** Wait before re-leasing when the frontier is empty but another worker is busy. */
 const IDLE_POLL_MS = 500;
 
-/** Rows per `sitemap_urls` insert. */
+/** Rows per `sitemap_urls`, `sitemap_memberships` and `sitemap_hreflang` insert. */
 const SITEMAP_BATCH = 500;
 
 /**
@@ -1167,6 +1176,11 @@ async function runToCompletion(
     await recordPlatform(activeProfile);
   }
 
+  // A resume walks the sitemaps again. `sitemap_urls` and `sitemap_memberships`
+  // are keyed, so a re-read lands on the rows the first read wrote; the staged
+  // alternates have no key (two documents may state one pair), so the earlier
+  // read's go first rather than being doubled.
+  await db.delete(sitemapHreflang).where(eq(sitemapHreflang.crawlId, crawlId));
   const discovery = await discover(config.siteUrl, {
     userAgent: config.userAgent,
     allowPrivate,
@@ -1176,6 +1190,7 @@ async function runToCompletion(
     // The documents the client named, walked beside the declared ones. The
     // engine still probes nothing on its own (see discover's header).
     extraSitemaps: config.sitemapUrls,
+    sink: new SitemapRowSink(db, crawlId),
   });
 
   // INSERTION 2 — discovery's own findings, written before anything branches on
@@ -2282,6 +2297,7 @@ function discoveryEvidence(
     suppliedSitemaps: [...(config.sitemapUrls ?? [])],
     truncation: discovery.truncation,
     docsFetched: discovery.truncation.docsFetched,
+    sitemapFacts: discovery.sitemapFacts,
   };
 }
 
@@ -2462,6 +2478,72 @@ async function persistSitemap(
     // the same sitemap. The first read's row stands. `lastmod` is the sitemap's
     // own text, so the batch passes the storability boundary (ruling R10).
     await db.insert(sitemapUrls).values(storableDeep(batch)).onConflictDoNothing();
+  }
+}
+
+/**
+ * The crawl's `SitemapSink` (Phase 26c): discovery's memberships into
+ * `sitemap_memberships`, its alternates into `sitemap_hreflang`, written while
+ * the walk runs. The calls only buffer; `flush`, which the sitemap stream awaits
+ * after every chunk, writes everything buffered in batches of SITEMAP_BATCH, so
+ * the buffers never outgrow a chunk's entries (hard rule 6).
+ *
+ * Each row carries its URL twice, as `sitemap_urls` does: as the site wrote it
+ * and through `normalizeUrl`, the spelling a join to `pages` needs. Discovery
+ * has measured both against the index limit and policy-checked the URL, so one
+ * that will not normalise is this engine's defect and throws (hard rule 7).
+ *
+ * A membership is keyed on (crawl, URL, document): a URL one document lists
+ * twice is one row (`onConflictDoNothing`). A staged alternate is not keyed —
+ * two documents may state the same pair — and is the sitemap's own text (the
+ * `hreflang` attribute), so both batches cross the storability boundary.
+ */
+class SitemapRowSink implements SitemapSink {
+  private readonly memberships: (typeof sitemapMemberships.$inferInsert)[] = [];
+  private readonly alternates: (typeof sitemapHreflang.$inferInsert)[] = [];
+
+  constructor(
+    private readonly db: Db,
+    private readonly crawlId: string,
+  ) {}
+
+  private normalised(url: string): string {
+    const normalised = normalizeUrl(url);
+    if (normalised === null) {
+      throw new Error(`SitemapRowSink: cannot normalise sitemap URL ${url}`);
+    }
+    return normalised;
+  }
+
+  membership(url: string, source: string): void {
+    this.memberships.push({
+      crawlId: this.crawlId,
+      url,
+      urlNormalised: this.normalised(url),
+      sitemapSource: source,
+    });
+  }
+
+  alternate(url: string, a: { hreflang: string; href: string }, source: string): void {
+    this.alternates.push({
+      crawlId: this.crawlId,
+      url,
+      urlNormalised: this.normalised(url),
+      hreflangCode: a.hreflang,
+      targetUrl: a.href,
+      sitemapSource: source,
+    });
+  }
+
+  async flush(): Promise<void> {
+    while (this.memberships.length > 0) {
+      const batch = this.memberships.splice(0, SITEMAP_BATCH);
+      await this.db.insert(sitemapMemberships).values(storableDeep(batch)).onConflictDoNothing();
+    }
+    while (this.alternates.length > 0) {
+      const batch = this.alternates.splice(0, SITEMAP_BATCH);
+      await this.db.insert(sitemapHreflang).values(storableDeep(batch));
+    }
   }
 }
 

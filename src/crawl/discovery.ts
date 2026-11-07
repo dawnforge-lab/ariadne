@@ -15,6 +15,14 @@
  * honest account of everything it could not read. Persisting sitemap entries
  * to `sitemap_urls` is the crawl loop's job.
  *
+ * Phase 26c: sitemaps are read as a stream (`parseSitemapStream`), never
+ * buffered whole, and the walk hands the caller's `SitemapSink` two things the
+ * entry list cannot hold — every (URL, document) MEMBERSHIP, so a URL two
+ * documents list is listed twice, and every `xhtml:link` ALTERNATE, staged for
+ * the hreflang rules. The sink is flushed from the stream's `drain`, so memory
+ * is O(chunk + one sink batch) whatever the document's size. What the walk
+ * handed over, and what it could not, is `sitemapFacts`.
+ *
  * Two things it does decide, because they are politeness and both bite before
  * the crawl loop exists (build plan rule 9):
  *  - An *unreachable* robots.txt (5xx, timeout, network error, refused URL —
@@ -35,27 +43,40 @@
  *  - robots.txt: 500KB read, the remainder ignored — Google's documented
  *    behaviour. A robots.txt this big is already pathological; refusing it
  *    outright would be *less* polite than honouring the part we read.
- *  - sitemap document: 10MB, on the DECOMPRESSED bytes. Over the cap the
- *    document is skipped whole, never half-parsed: half a sitemap looks
- *    exactly like a complete one, and would quietly under-report coverage.
+ *  - sitemap document: the protocol's 50MB (`SITEMAP_MAX_BYTES`), on the
+ *    DECOMPRESSED bytes, and the same number on the wire. Since Phase 26c a
+ *    document over it keeps the entries read before the cap (deviation 3): it
+ *    is named in `sitemapFacts.oversizedDocs` and counted in
+ *    `truncation.oversizedDocsSkipped`, and it is not a failure.
  *  - sitemap index recursion: 3 levels below the first document.
  *  - 300 documents per crawl, and a cap on the entries kept in memory (the
  *    memory contract is RAM O(concurrency), and 300 × 50k entries is not).
- * Every cap that bites is counted in `truncation`; none of them is silent.
+ *  - memberships and staged alternates: MAX_SITEMAP_MEMBERSHIPS and
+ *    MAX_SITEMAP_HREFLANG_ROWS per crawl; a URL over the index limit
+ *    (`INDEXED_URL_MAX`) is never handed over, only counted.
+ * Every cap that bites is counted in `truncation` or `sitemapFacts`; none of
+ * them is silent.
  *
- * The byte caps bound what arrives on the wire, which is not the same as
- * bounding what a parser can make of it — so a sitemap carrying a `<!DOCTYPE`
- * is refused before it reaches the XML parser. See parseSitemapDoc.
+ * The byte caps bound what arrives, which is not the same as bounding what a
+ * parser can make of it — so a sitemap carrying a `<!DOCTYPE` is refused before
+ * it reaches the XML tokenizer (src/crawl/sitemap-stream.ts).
  */
 import { gunzip as gunzipCallback } from "node:zlib";
 import { promisify } from "node:util";
-import { XMLParser } from "fast-xml-parser";
 import robotsParserImport from "robots-parser";
-import { request } from "undici";
+import { request, type Dispatcher } from "undici";
 import { isUrlAllowed } from "./url-policy.js";
-import { isSameOrigin, normalizeUrl, onRulesOrigin } from "./parse/url-utils.js";
+import { fitsIndex, isSameOrigin, normalizeUrl, onRulesOrigin } from "./parse/url-utils.js";
+import { hreflangTarget } from "./parse/page-analyzer.js";
+import {
+  parseSitemapStream,
+  SITEMAP_MAX_BYTES,
+  type SitemapStreamResult,
+  type SitemapUrlEntry,
+} from "./sitemap-stream.js";
 import {
   blockedAddressMessage,
+  charsetOf,
   decodeBody,
   describeError,
   headerValue,
@@ -91,9 +112,20 @@ const robotsParser = robotsParserImport as unknown as (
 ) => RobotsRules;
 
 const ROBOTS_MAX_BYTES = 500 * 1024;
-const SITEMAP_MAX_BYTES = 10 * 1024 * 1024;
 const MAX_SITEMAP_DEPTH = 3;
 const MAX_SITEMAP_DOCS = 300;
+
+/**
+ * Per-crawl caps on what the walk hands the sink (Phase 26c). Rows, not memory
+ * — the sink writes them as they come — but a hostile tree of 300 documents of
+ * 50 MB each must not become tens of millions of rows. A cap that bites sets
+ * its `sitemapFacts` flag; the walk goes on, and only that kind of row stops.
+ */
+export const MAX_SITEMAP_MEMBERSHIPS = 800_000;
+export const MAX_SITEMAP_HREFLANG_ROWS = 1_000_000;
+
+/** `sitemapFacts.oversizedDocs` names at most this many documents. */
+const MAX_OVERSIZED_DOCS_NAMED = 50;
 
 /**
  * The one cap the brief does not name, and the reason it exists: the sitemap
@@ -226,7 +258,12 @@ export interface SitemapEntry {
 }
 
 export interface DiscoveryTruncation {
-  /** Documents fetched and then dropped whole for exceeding the size cap. */
+  /**
+   * Documents that ran past the size cap. Until Phase 26c each was dropped
+   * whole and also listed in `failures`; since then the entries read before the
+   * cap are kept and the document is named in `sitemapFacts.oversizedDocs`
+   * instead. The count keeps its name, for the `sitemap.structure` metric.
+   */
   oversizedDocsSkipped: number;
   /**
    * Documents we attempted: fetched, refused by the URL policy, or failed.
@@ -241,7 +278,10 @@ export interface DiscoveryTruncation {
   docLimited: boolean;
   /** The entry cap stopped collection. */
   entryLimited: boolean;
-  /** `<loc>` values that were empty, unparseable, or refused by the policy. */
+  /**
+   * `<loc>` values that were empty, unparseable, or refused by the policy, and
+   * (Phase 26c) alternate `href`s that do not resolve against the document.
+   */
   malformedEntriesSkipped: number;
   /** One line per document that was pointed at and could not be read. */
   failures: { url: string; reason: string }[];
@@ -252,12 +292,29 @@ export interface DiscoveryTruncation {
  * `crawls.discovery_jsonb.sitemapFacts`. A crawl without the key predates it.
  */
 export type DiscoverySitemapFacts = {
+  /**
+   * Memberships handed to the sink: one per `<loc>` a urlset lists. A document
+   * that repeats a URL hands it over again, and `sitemap_memberships` (keyed on
+   * URL and document) stores it once, so the table can hold fewer.
+   */
   memberships: number;
+  /** MAX_SITEMAP_MEMBERSHIPS was reached and later memberships were dropped. */
   membershipLimited: boolean;
+  /** Alternates handed to the sink (`sitemap_hreflang` rows). */
   hreflangRows: number;
+  /** MAX_SITEMAP_HREFLANG_ROWS was reached and later alternates were dropped. */
   hreflangLimited: boolean;
+  /**
+   * `<loc>`s, and alternate targets, over `INDEXED_URL_MAX` in the spelling a
+   * row would store: counted here, handed to nobody.
+   */
   overlongLocsSkipped: number;
-  /** Capped at 50. */
+  /**
+   * Documents that ran past the size cap, in walk order, capped at 50 (every
+   * one is counted in `truncation.oversizedDocsSkipped`). `bytesRead` is the
+   * decompressed bytes read, or the wire bytes when the compressed body itself
+   * passed the cap; `urlsKept` is the entries kept from it.
+   */
   oversizedDocs: { url: string; bytesRead: number; urlsKept: number }[];
 };
 
@@ -266,6 +323,24 @@ export interface DiscoveryResult {
   /** Deduped by url, first source wins. */
   sitemapEntries: SitemapEntry[];
   truncation: DiscoveryTruncation;
+  /** Phase 26c: written on every result, zeros when there was no sitemap. */
+  sitemapFacts: DiscoverySitemapFacts;
+}
+
+/**
+ * Where the walk's memberships and alternates go (Phase 26c). The calls are
+ * synchronous and only buffer; `flush` writes what is buffered and is awaited
+ * after every chunk of every document, so the buffer is O(chunk). A `flush`
+ * that throws stops the walk: it is the engine's failure, not the site's.
+ *
+ * Every URL handed over has passed `fitsIndex` in the spelling it is given in
+ * and in its `normalizeUrl` spelling, and a membership's URL has passed the URL
+ * policy. `alternate`'s `href` is already resolved against the document.
+ */
+export interface SitemapSink {
+  membership(url: string, source: string): void;
+  alternate(url: string, a: { hreflang: string; href: string }, source: string): void;
+  flush(): Promise<void>;
 }
 
 /**
@@ -286,6 +361,14 @@ export interface DiscoverOpts extends DiscoveryOpts {
    * ourselves, and the crawl's gate bounds it the same way (30 s).
    */
   perHostDelayMs: number;
+  /** Receives every membership and staged alternate. See `SitemapSink`. */
+  sink: SitemapSink;
+  /**
+   * The per-document size cap, decompressed and on the wire. Defaults to the
+   * protocol's `SITEMAP_MAX_BYTES`; lowered by tests, which cannot afford a
+   * 50 MB fixture per case.
+   */
+  maxSitemapBytes?: number;
 }
 
 export interface DiscoveryOpts {
@@ -430,7 +513,82 @@ async function decompress(bytes: Buffer, maxBytes: number): Promise<Buffer | "ov
 }
 
 /**
- * GET one non-HTML document, capped and policy-checked.
+ * One hop's deadline, which the reader may pause.
+ *
+ * A sitemap is read while the walk writes its rows: the stream awaits the
+ * sink's `flush` after every chunk, and the socket waits meanwhile. That time
+ * is ours, not the site's, so it stops the clock — otherwise a 50 MB document
+ * with half a million memberships would time out on our own inserts.
+ */
+class Deadline {
+  private readonly controller = new AbortController();
+  private timer: NodeJS.Timeout | null = null;
+  private remainingMs: number;
+  private startedAt = 0;
+  private done = false;
+  /** The deadline fired and aborted the request. */
+  hit = false;
+
+  constructor(ms: number) {
+    this.remainingMs = ms;
+    this.resume();
+  }
+
+  get signal(): AbortSignal {
+    return this.controller.signal;
+  }
+
+  pause(): void {
+    if (this.timer === null) return;
+    clearTimeout(this.timer);
+    this.timer = null;
+    this.remainingMs -= Date.now() - this.startedAt;
+  }
+
+  resume(): void {
+    if (this.timer !== null || this.done || this.hit) return;
+    this.startedAt = Date.now();
+    this.timer = setTimeout(
+      () => {
+        this.hit = true;
+        this.timer = null;
+        this.controller.abort();
+      },
+      Math.max(this.remainingMs, 0),
+    );
+  }
+
+  clear(): void {
+    this.done = true;
+    if (this.timer !== null) clearTimeout(this.timer);
+    this.timer = null;
+  }
+}
+
+/** The final 2xx answer to a document request, as its reader gets it. */
+interface DocResponse {
+  /** The URL the bytes come from, after any redirects. */
+  url: string;
+  status: number;
+  headers: HeaderBag;
+  /** The reader owns it: read it to the end or destroy it. */
+  body: Dispatcher.ResponseData["body"];
+  deadline: Deadline;
+}
+
+/**
+ * The reader's own failure — the sitemap sink's insert, say — as opposed to the
+ * site's. `requestDoc` classifies everything a reader throws as a failed
+ * document unless it is wrapped in this, which it rethrows unwrapped.
+ */
+class ReaderFault extends Error {
+  constructor(readonly fault: unknown) {
+    super("discovery: the document reader failed", { cause: fault });
+  }
+}
+
+/**
+ * GET one non-HTML document, policy-checked, and hand the 2xx answer to `read`.
  *
  * Every hop — the URL as given and every redirect target — goes through
  * `isUrlAllowed` before a socket is opened (hard rule 5), and the connect-time
@@ -439,30 +597,29 @@ async function decompress(bytes: Buffer, maxBytes: number): Promise<Buffer | "ov
  * robots.txt or a sitemap is plumbing (apex -> www, http -> https), not a fact
  * about the site's URL graph, and refusing to follow it would lose the
  * sitemap on a large share of real sites.
+ *
+ * The hop's deadline runs while `read` reads (less any time it pauses it), and
+ * whatever `read` throws is classified like a failed request — a reset, a
+ * timeout, a corrupt gzip — unless it is a programmer error or a `ReaderFault`.
  */
-async function fetchDoc(
+async function requestDoc<T>(
   startUrl: string,
-  maxBytes: number,
-  keepTruncated: boolean,
   opts: DiscoveryOpts,
-): Promise<DocResult> {
+  drainBytes: number,
+  read: (response: DocResponse) => Promise<T>,
+): Promise<{ ok: true; value: T } | { ok: false; failure: DocResult }> {
   const allowPrivate = opts.allowPrivate === true;
   const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const failed = (doc: DocResult) => ({ ok: false as const, failure: doc });
   let url = startUrl;
 
   for (let hop = 0; hop <= MAX_REDIRECT_HOPS; hop++) {
     const verdict = await isUrlAllowed(url, { allowPrivate });
     if (!verdict.allowed) {
-      return failedDoc(url, `refused by URL policy: ${verdict.reason}`, null, true);
+      return failed(failedDoc(url, `refused by URL policy: ${verdict.reason}`, null, true));
     }
 
-    const deadline = new AbortController();
-    let deadlineHit = false;
-    const timer = setTimeout(() => {
-      deadlineHit = true;
-      deadline.abort();
-    }, timeoutMs);
-
+    const deadline = new Deadline(timeoutMs);
     try {
       const response = await request(url, {
         dispatcher: sharedAgent(allowPrivate),
@@ -481,90 +638,96 @@ async function fetchDoc(
 
       if (status >= 300 && status < 400) {
         // Drain so the socket goes back to the pool, then take the hop.
-        await readCapped(response.body, maxBytes, false);
+        await readCapped(response.body, drainBytes, false);
         const location = headerValue(headers, "location");
         if (location === null) {
-          return failedDoc(url, `HTTP ${status} without a Location header`, status);
+          return failed(failedDoc(url, `HTTP ${status} without a Location header`, status));
         }
         try {
           url = new URL(location, url).href;
         } catch {
-          return failedDoc(url, `unresolvable Location header (${location})`, status);
+          return failed(failedDoc(url, `unresolvable Location header (${location})`, status));
         }
         continue;
       }
 
       if (status < 200 || status >= 300) {
-        await readCapped(response.body, maxBytes, false);
-        return failedDoc(url, `HTTP ${status}`, status);
+        await readCapped(response.body, drainBytes, false);
+        return failed(failedDoc(url, `HTTP ${status}`, status));
       }
 
-      const read = await readCapped(response.body, maxBytes, true);
-      if (read.truncated && !keepTruncated) {
-        return {
-          ok: false,
-          url,
-          status,
-          body: null,
-          contentType: headerValue(headers, "content-type"),
-          oversized: true,
-          refused: false,
-          truncated: true,
-          reason: `larger than the ${maxBytes}-byte document cap`,
-        };
-      }
-
-      const raw = read.buffer ?? Buffer.alloc(0);
-      const decoded = await decompress(raw, maxBytes);
-      if (decoded === "oversized") {
-        return {
-          ok: false,
-          url,
-          status,
-          body: null,
-          contentType: headerValue(headers, "content-type"),
-          oversized: true,
-          refused: false,
-          truncated: true,
-          reason: `expands beyond the ${maxBytes}-byte document cap`,
-        };
-      }
-
-      // Anything still encoded after that is an encoding we do not implement;
-      // say so rather than handing the parser bytes it will read as empty.
-      const encoding = headerValue(headers, "content-encoding");
-      if (
-        decoded === raw &&
-        encoding !== null &&
-        !/^\s*(identity|gzip|x-gzip)\s*$/i.test(encoding)
-      ) {
-        return failedDoc(url, `unsupported content-encoding (${encoding})`, status);
-      }
-
-      return {
-        ok: true,
-        url,
-        status,
-        body: decoded,
-        contentType: headerValue(headers, "content-type"),
-        oversized: false,
-        refused: false,
-        truncated: read.truncated,
-        reason: null,
-      };
+      return { ok: true, value: await read({ url, status, headers, body: response.body, deadline }) };
     } catch (error) {
+      if (error instanceof ReaderFault) throw error.fault;
       // Our bug, not theirs — the same contract fetch-page keeps.
       if (isProgrammerError(error)) throw error;
       const refusal = blockedAddressMessage(error);
-      if (refusal !== null) return failedDoc(url, `refused at connect: ${refusal}`, null, true);
-      if (deadlineHit || isTimeout(error)) return failedDoc(url, "timed out");
-      return failedDoc(url, describeError(error));
+      if (refusal !== null) {
+        return failed(failedDoc(url, `refused at connect: ${refusal}`, null, true));
+      }
+      if (deadline.hit || isTimeout(error)) return failed(failedDoc(url, "timed out"));
+      return failed(failedDoc(url, describeError(error)));
     } finally {
-      clearTimeout(timer);
+      deadline.clear();
     }
   }
 
-  return failedDoc(url, `more than ${MAX_REDIRECT_HOPS} redirects`);
+  return failed(failedDoc(url, `more than ${MAX_REDIRECT_HOPS} redirects`));
+}
+
+/** A content-encoding the bytes may arrive in: none, or gzip (sniffed anyway). */
+function readableEncoding(encoding: string | null): boolean {
+  return encoding === null || /^\s*(identity|gzip|x-gzip)\s*$/i.test(encoding);
+}
+
+/**
+ * GET robots.txt: buffered, capped at `maxBytes`, the bytes past the cap
+ * ignored (`truncated`), and gzip undone.
+ */
+async function fetchDoc(
+  startUrl: string,
+  maxBytes: number,
+  opts: DiscoveryOpts,
+): Promise<DocResult> {
+  const result = await requestDoc(startUrl, opts, maxBytes, async (response): Promise<DocResult> => {
+    const { url, status, headers } = response;
+    const read = await readCapped(response.body, maxBytes, true);
+    const raw = read.buffer ?? Buffer.alloc(0);
+    const decoded = await decompress(raw, maxBytes);
+    if (decoded === "oversized") {
+      return {
+        ok: false,
+        url,
+        status,
+        body: null,
+        contentType: headerValue(headers, "content-type"),
+        oversized: true,
+        refused: false,
+        truncated: true,
+        reason: `expands beyond the ${maxBytes}-byte document cap`,
+      };
+    }
+
+    // Anything still encoded after that is an encoding we do not implement;
+    // say so rather than handing the parser bytes it will read as empty.
+    const encoding = headerValue(headers, "content-encoding");
+    if (decoded === raw && !readableEncoding(encoding)) {
+      return failedDoc(url, `unsupported content-encoding (${encoding})`, status);
+    }
+
+    return {
+      ok: true,
+      url,
+      status,
+      body: decoded,
+      contentType: headerValue(headers, "content-type"),
+      oversized: false,
+      refused: false,
+      truncated: read.truncated,
+      reason: null,
+    };
+  });
+  return result.ok ? result.value : result.failure;
 }
 
 /**
@@ -692,13 +855,13 @@ export async function fetchRobots(
   }
 
   const backoffMs = opts.retryBackoffMs ?? ROBOTS_RETRY_BACKOFF_MS;
-  let doc = await fetchDoc(robotsUrl, ROBOTS_MAX_BYTES, true, opts);
+  let doc = await fetchDoc(robotsUrl, ROBOTS_MAX_BYTES, opts);
   let attempts = 1;
   while (!doc.ok && classifyRobotsFailure(doc) === "retry" && attempts < ROBOTS_ATTEMPTS) {
     // Linear backoff, deliberately short: this is a 60-byte text file, and the
     // origin is already unhappy. Three tries, ~750ms, then we stop asking.
     await sleep(backoffMs * attempts);
-    doc = await fetchDoc(robotsUrl, ROBOTS_MAX_BYTES, true, opts);
+    doc = await fetchDoc(robotsUrl, ROBOTS_MAX_BYTES, opts);
     attempts++;
   }
 
@@ -756,92 +919,105 @@ export async function fetchRobots(
   };
 }
 
-const xmlParser = new XMLParser({
-  ignoreAttributes: true,
-  // Sitemaps in the wild use both the default namespace and a prefix
-  // (<sm:urlset>); strip the prefix so one shape reaches the reader.
-  removeNSPrefix: true,
-  // Keep every leaf a string: lastmod "2026" is a date, not the number 2026.
-  parseTagValue: false,
-  trimValues: true,
-});
-
-function toArray(value: unknown): unknown[] {
-  if (value === undefined || value === null) return [];
-  return Array.isArray(value) ? value : [value];
-}
-
-/** A child element's text, when it is text. */
-function childText(node: unknown, name: string): string | null {
-  if (typeof node !== "object" || node === null) return null;
-  const value = (node as Record<string, unknown>)[name];
-  if (typeof value !== "string") return null;
-  const trimmed = value.trim();
-  return trimmed === "" ? null : trimmed;
-}
-
-interface ParsedDoc {
-  kind: "index" | "urlset";
-  locs: { loc: string | null; lastmod: string | null }[];
-}
-
 /**
- * How much of the document is searched for a DTD. A `<!DOCTYPE` may only
- * appear in the prolog, before the root element, so a generous prefix is the
- * whole of where it can legally be — and a `<!DOCTYPE` further in is not a
- * doctype at all.
- */
-const PROLOG_SEARCH_CHARS = 4_096;
-
-/**
- * A DTD in a sitemap is refused, and the document with it.
+ * Count the bytes a body brings over the wire and stop it past `maxBytes`.
  *
- * The 10MB cap bounds the bytes that arrive, not what a parser can be made to
- * build out of them: a few hundred bytes of nested entity definitions
- * ("billion laughs") expand inside the parser to gigabytes, which is the
- * memory contract (rule 6) broken by a document that never came close to the
- * size cap. Sitemaps have no legitimate use for a DTD — the entities that
- * matter in a `<loc>` (`&amp;`, `&lt;`, `&quot;`) are XML's predefined five
- * and need no declaration — so refusing every one of them costs nothing real
- * and is one check rather than a parser audit.
+ * The stream caps DECOMPRESSED bytes, which is the cap that protects memory,
+ * but a gzip body of empty blocks inflates to nothing and would never reach it:
+ * the request would run until its deadline, pulling bytes the whole time. This
+ * is the wire half of the old buffered cap, kept at the same number. The chunk
+ * that crosses the line is still handed on — for an uncompressed body it is the
+ * chunk the stream's own cap stops on, so the stream reports that one — and the
+ * next pull throws, with `wire.exceeded` set for the caller to read.
  */
-function hasDoctype(xml: string): boolean {
-  return /<!DOCTYPE/i.test(xml.slice(0, PROLOG_SEARCH_CHARS));
+async function* wireCapped(
+  body: AsyncIterable<Uint8Array>,
+  maxBytes: number,
+  wire: { bytes: number; exceeded: boolean },
+): AsyncGenerator<Uint8Array> {
+  for await (const chunk of body) {
+    wire.bytes += chunk.byteLength;
+    yield chunk;
+    if (wire.bytes > maxBytes) {
+      wire.exceeded = true;
+      throw new Error(`more than the ${maxBytes}-byte document cap on the wire`);
+    }
+  }
 }
 
+/** The stream's callbacks for one document, bound to the URL it came from. */
+interface SitemapHandlers {
+  onUrl: (entry: SitemapUrlEntry) => void;
+  onSitemap: (loc: string, lastmod: string | null) => void;
+  /** Hand what the last chunk produced to the sink, and flush it. */
+  drain: () => Promise<void>;
+}
+
+type StreamedDoc =
+  | {
+      outcome: "read";
+      /** The URL the bytes came from, after any redirects. */
+      url: string;
+      result: SitemapStreamResult;
+    }
+  | { outcome: "oversized-on-wire"; url: string; wireBytes: number }
+  | { outcome: "failed"; reason: string };
+
 /**
- * `<sitemapindex>` or `<urlset>` -> its `<loc>`/`<lastmod>` pairs, or null
- * when the document is neither. Null is the interesting case: a server that
- * answers a sitemap request with an HTML error page and a 200 is common, and
- * reading that as "a sitemap with no URLs" would under-report a whole site's
- * coverage with no trace of why.
+ * GET one sitemap and stream it through `parseSitemapStream`, which owns the
+ * body from there on.
+ *
+ * The hop's deadline still bounds the read (the stream bounds bytes, not
+ * time), paused while `drain` runs: see `Deadline`. A content-encoding other
+ * than gzip or identity is refused before a byte is read. A `drain` that throws
+ * is the walk's own failure and leaves here as itself (`ReaderFault`); anything
+ * the body or the inflater throws is the document's, and becomes `failed`.
  */
-function parseSitemapDoc(xml: string): ParsedDoc | null {
-  const root = xmlParser.parse(xml) as Record<string, unknown>;
-
-  const index = root["sitemapindex"];
-  if (typeof index === "object" && index !== null) {
-    return {
-      kind: "index",
-      locs: toArray((index as Record<string, unknown>)["sitemap"]).map((node) => ({
-        loc: childText(node, "loc"),
-        lastmod: childText(node, "lastmod"),
-      })),
-    };
+async function streamSitemap(
+  startUrl: string,
+  opts: DiscoveryOpts,
+  maxBytes: number,
+  handlersFor: (source: string) => SitemapHandlers,
+): Promise<StreamedDoc> {
+  const wire = { bytes: 0, exceeded: false };
+  let source: string | null = null;
+  const result = await requestDoc(
+    startUrl,
+    opts,
+    maxBytes,
+    async (response): Promise<SitemapStreamResult> => {
+      source = response.url;
+      const encoding = headerValue(response.headers, "content-encoding");
+      if (!readableEncoding(encoding)) {
+        response.body.destroy();
+        return { kind: "refused", reason: `unsupported content-encoding (${encoding})` };
+      }
+      const handlers = handlersFor(response.url);
+      return parseSitemapStream(wireCapped(response.body, maxBytes, wire), {
+        maxBytes,
+        charset: charsetOf(headerValue(response.headers, "content-type")),
+        onUrl: handlers.onUrl,
+        onSitemap: handlers.onSitemap,
+        drain: async () => {
+          response.deadline.pause();
+          try {
+            await handlers.drain();
+          } catch (error) {
+            throw new ReaderFault(error);
+          } finally {
+            response.deadline.resume();
+          }
+        },
+      });
+    },
+  );
+  // Checked first: the throw that stopped the body surfaces as a failure.
+  if (wire.exceeded && source !== null) {
+    return { outcome: "oversized-on-wire", url: source, wireBytes: wire.bytes };
   }
-
-  const urlset = root["urlset"];
-  if (typeof urlset === "object" && urlset !== null) {
-    return {
-      kind: "urlset",
-      locs: toArray((urlset as Record<string, unknown>)["url"]).map((node) => ({
-        loc: childText(node, "loc"),
-        lastmod: childText(node, "lastmod"),
-      })),
-    };
-  }
-
-  return null;
+  if (!result.ok) return { outcome: "failed", reason: result.failure.reason ?? "no body" };
+  if (source === null) throw new Error(`streamSitemap: ${startUrl} was read with no source URL`);
+  return { outcome: "read", url: source, result: result.value };
 }
 
 /**
@@ -879,9 +1055,10 @@ function startingSources(declared: readonly string[], supplied: readonly string[
  * Read robots.txt and walk the sitemap tree it points at.
  *
  * Never throws for anything the target site does — an absent robots.txt, a
- * sitemap that 404s, a 200 that is really an HTML error page and an 11MB
+ * sitemap that 404s, a 200 that is really an HTML error page and a 60MB
  * shard are all recorded facts on the result. It does throw for our own bugs
- * (a malformed user agent), for the same reason fetch-page does.
+ * (a malformed user agent), for the same reason fetch-page does — and for a
+ * sink that cannot write, which is ours too.
  *
  * Sitemap sources are exactly the ones robots.txt declares plus the caller's
  * `extraSitemaps`; there is no speculative probe of `/sitemap.xml`, because a
@@ -914,10 +1091,15 @@ export async function discover(
   if (!Number.isFinite(opts.perHostDelayMs) || opts.perHostDelayMs < 0) {
     throw new RangeError(`discover: perHostDelayMs must be ≥ 0, got ${opts.perHostDelayMs}`);
   }
+  const maxSitemapBytes = opts.maxSitemapBytes ?? SITEMAP_MAX_BYTES;
+  if (!Number.isInteger(maxSitemapBytes) || maxSitemapBytes <= 0) {
+    throw new RangeError(`discover: maxSitemapBytes must be a positive integer, got ${maxSitemapBytes}`);
+  }
   const allowPrivate = opts.allowPrivate === true;
   const maxEntries = opts.maxEntries ?? MAX_SITEMAP_ENTRIES;
   const unreachableMode = opts.onUnreachableRobots ?? "disallow";
   const maxCrawlDelayMs = opts.maxCrawlDelayMs ?? MAX_CRAWL_DELAY_MS;
+  const sink = opts.sink;
 
   const truncation: DiscoveryTruncation = {
     oversizedDocsSkipped: 0,
@@ -928,6 +1110,14 @@ export async function discover(
     entryLimited: false,
     malformedEntriesSkipped: 0,
     failures: [],
+  };
+  const sitemapFacts: DiscoverySitemapFacts = {
+    memberships: 0,
+    membershipLimited: false,
+    hreflangRows: 0,
+    hreflangLimited: false,
+    overlongLocsSkipped: 0,
+    oversizedDocs: [],
   };
 
   const robots = await fetchRobots(siteUrl, opts, unreachableMode);
@@ -944,7 +1134,7 @@ export async function discover(
         reason: "not fetched: robots.txt unreachable, complete disallow in force",
       });
     }
-    return { robots, sitemapEntries: [], truncation };
+    return { robots, sitemapEntries: [], truncation, sitemapFacts };
   }
 
   const queue: { url: string; depth: number }[] = sources.map((url) => ({
@@ -954,6 +1144,96 @@ export async function discover(
 
   const seen = new Set<string>();
   const entries = new Map<string, SitemapEntry>();
+
+  /**
+   * One `<url>` of a urlset, read from `source` (the document's URL after
+   * redirects). Every check a `<loc>` faces is here, once, and the entry, its
+   * membership and its alternates all follow from the one verdict.
+   */
+  const acceptUrl = async (
+    entry: SitemapUrlEntry,
+    source: string,
+    doc: { urlsKept: number },
+  ): Promise<void> => {
+    let resolved: string;
+    try {
+      // Absolute only, deliberately: the sitemaps protocol requires it, and
+      // resolving a relative <loc> against the document would manufacture
+      // URLs out of junk ("not a url at all" -> <base>/not%20a%20url…) that
+      // the site never declared. A loc we cannot read as a URL is counted,
+      // not guessed at.
+      resolved = new URL(entry.loc).href;
+    } catch {
+      truncation.malformedEntriesSkipped++;
+      return;
+    }
+    // Measured on both spellings a row stores (`url`, `url_normalised`), before
+    // the policy, which would refuse it too but only as one more malformed
+    // entry: a URL no index can hold is its own fact (deviation 9).
+    const normalised = normalizeUrl(resolved);
+    if (!fitsIndex(resolved) || (normalised !== null && !fitsIndex(normalised))) {
+      sitemapFacts.overlongLocsSkipped++;
+      return;
+    }
+    // A <loc> is site-controlled text heading for a field the crawl loop
+    // will enqueue and the report layer may render: policy-check it here
+    // rather than trusting a later caller to remember (hard rule 5).
+    const verdict = await isUrlAllowed(resolved, { allowPrivate });
+    if (!verdict.allowed) {
+      truncation.malformedEntriesSkipped++;
+      return;
+    }
+    if (normalised === null) {
+      // The policy admits only http(s) URLs it can parse, and those normalise.
+      throw new Error(`discover: an allowed sitemap URL does not normalise: ${resolved}`);
+    }
+    doc.urlsKept++;
+
+    if (sitemapFacts.memberships >= MAX_SITEMAP_MEMBERSHIPS) {
+      sitemapFacts.membershipLimited = true;
+    } else {
+      sink.membership(resolved, source);
+      sitemapFacts.memberships++;
+    }
+
+    // The entry list is unchanged: first source wins, and a full list stops the
+    // walk at the next document. The rest of this one is still read, for its
+    // memberships and alternates.
+    if (!entries.has(resolved)) {
+      if (entries.size >= maxEntries) {
+        truncation.entryLimited = true;
+      } else {
+        entries.set(resolved, { url: resolved, source, lastmod: entry.lastmod });
+      }
+    }
+
+    for (const alternate of entry.alternates) {
+      // Resolved as the page analyzer resolves an HTML alternate, against the
+      // document that states it, so the length checked is the length stored.
+      const target = hreflangTarget(alternate.href, source);
+      if (target === null) {
+        truncation.malformedEntriesSkipped++;
+        continue;
+      }
+      if (!fitsIndex(target)) {
+        sitemapFacts.overlongLocsSkipped++;
+        continue;
+      }
+      if (sitemapFacts.hreflangRows >= MAX_SITEMAP_HREFLANG_ROWS) {
+        sitemapFacts.hreflangLimited = true;
+        break;
+      }
+      sink.alternate(resolved, { hreflang: alternate.hreflang, href: target }, source);
+      sitemapFacts.hreflangRows++;
+    }
+  };
+
+  const recordOversized = (url: string, bytesRead: number, urlsKept: number): void => {
+    truncation.oversizedDocsSkipped++;
+    if (sitemapFacts.oversizedDocs.length < MAX_OVERSIZED_DOCS_NAMED) {
+      sitemapFacts.oversizedDocs.push({ url, bytesRead, urlsKept });
+    }
+  };
 
   // The delay applies from the robots.txt request onwards: that was a request
   // to this origin too, and the delay it declared starts counting there. The
@@ -992,91 +1272,77 @@ export async function discover(
     }
 
     truncation.docsFetched++;
-    const doc = await fetchDoc(next.url, SITEMAP_MAX_BYTES, false, opts);
+    const doc = { urlsKept: 0 };
+    // The stream's callbacks are synchronous and the checks a <loc> faces are
+    // not (the policy), so a chunk's entries wait here, O(chunk), until the
+    // stream drains.
+    const pending: SitemapUrlEntry[] = [];
+    let indexFull = false;
+    let docSource: string | null = null;
+    const drainPending = async (): Promise<void> => {
+      if (docSource === null) return;
+      for (const entry of pending.splice(0)) await acceptUrl(entry, docSource, doc);
+      await sink.flush();
+    };
+
+    const read = await streamSitemap(next.url, opts, maxSitemapBytes, (source) => {
+      docSource = source;
+      return {
+        onUrl: (entry) => {
+          pending.push(entry);
+        },
+        onSitemap: (loc) => {
+          // The rest of an index past a full queue is read, and ignored.
+          if (indexFull) return;
+          let resolved: string;
+          try {
+            resolved = new URL(loc).href;
+          } catch {
+            truncation.malformedEntriesSkipped++;
+            return;
+          }
+          // The queue can never usefully hold more documents than we are
+          // allowed to fetch, and a hostile index listing a million shards must
+          // not cost a million queue entries — RAM is O(concurrency), not
+          // O(URLs). The child's own URL-policy check happens when it is
+          // requested, where a refusal becomes a named failure rather than an
+          // anonymous counter.
+          if (queue.length >= MAX_SITEMAP_DOCS) {
+            truncation.docLimited = true;
+            indexFull = true;
+            return;
+          }
+          queue.push({ url: resolved, depth: next.depth + 1 });
+          doc.urlsKept++;
+        },
+        drain: drainPending,
+      };
+    });
     lastRequestAt = Date.now();
-    if (doc.oversized) truncation.oversizedDocsSkipped++;
-    if (!doc.ok || doc.body === null) {
-      truncation.failures.push({
-        url: next.url,
-        reason: doc.reason ?? "no body",
-      });
+    // A document that failed mid-stream keeps the complete entries it gave
+    // before it failed; the failure is recorded beside them.
+    await drainPending();
+
+    if (read.outcome === "failed") {
+      truncation.failures.push({ url: next.url, reason: read.reason });
       continue;
     }
-    // The bytes came from doc.url; if a redirect took us there, do not walk
+    // The bytes came from read.url; if a redirect took us there, do not walk
     // the same document again under its other name.
-    seen.add(doc.url);
+    seen.add(read.url);
 
-    const xml = decodeBody(doc.body, doc.contentType);
-    if (hasDoctype(xml)) {
-      truncation.failures.push({
-        url: next.url,
-        reason: "refused: <!DOCTYPE declaration in a sitemap (entity-expansion risk)",
-      });
+    if (read.outcome === "oversized-on-wire") {
+      recordOversized(next.url, read.wireBytes, doc.urlsKept);
       continue;
     }
-
-    const parsed = parseSitemapDoc(xml);
-    if (parsed === null) {
-      truncation.failures.push({
-        url: next.url,
-        reason: "no <urlset> or <sitemapindex> root element",
-      });
+    const result = read.result;
+    if (result.kind === "refused") {
+      truncation.failures.push({ url: next.url, reason: result.reason });
       continue;
     }
-
-    for (const item of parsed.locs) {
-      if (item.loc === null) {
-        truncation.malformedEntriesSkipped++;
-        continue;
-      }
-      let resolved: string;
-      try {
-        // Absolute only, deliberately: the sitemaps protocol requires it, and
-        // resolving a relative <loc> against the document would manufacture
-        // URLs out of junk ("not a url at all" -> <base>/not%20a%20url…) that
-        // the site never declared. A loc we cannot read as a URL is counted,
-        // not guessed at.
-        resolved = new URL(item.loc).href;
-      } catch {
-        truncation.malformedEntriesSkipped++;
-        continue;
-      }
-      if (parsed.kind === "index") {
-        // The queue can never usefully hold more documents than we are allowed
-        // to fetch, and a hostile index listing a million shards must not cost
-        // a million queue entries — RAM is O(concurrency), not O(URLs). The
-        // child's own URL-policy check happens in fetchDoc, where a refusal
-        // becomes a named failure rather than an anonymous counter.
-        if (queue.length >= MAX_SITEMAP_DOCS) {
-          truncation.docLimited = true;
-          break;
-        }
-        queue.push({ url: resolved, depth: next.depth + 1 });
-        continue;
-      }
-
-      // A <loc> is site-controlled text heading for a field the crawl loop
-      // will enqueue and the report layer may render: policy-check it here
-      // rather than trusting a later caller to remember (hard rule 5).
-      const verdict = await isUrlAllowed(resolved, { allowPrivate });
-      if (!verdict.allowed) {
-        truncation.malformedEntriesSkipped++;
-        continue;
-      }
-
-      if (entries.size >= maxEntries) {
-        truncation.entryLimited = true;
-        break;
-      }
-      if (!entries.has(resolved)) {
-        entries.set(resolved, {
-          url: resolved,
-          source: doc.url,
-          lastmod: item.lastmod,
-        });
-      }
-    }
+    truncation.malformedEntriesSkipped += result.malformedEntries;
+    if (result.oversized) recordOversized(next.url, result.bytes, doc.urlsKept);
   }
 
-  return { robots, sitemapEntries: [...entries.values()], truncation };
+  return { robots, sitemapEntries: [...entries.values()], truncation, sitemapFacts };
 }

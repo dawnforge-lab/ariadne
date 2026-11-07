@@ -12,6 +12,11 @@
  *
  * Page rules cannot refuse a crawl (they see one row); they stay silent on a null
  * column and rely on this marker.
+ *
+ * Phase 26c widens the marker to the crawl's SITEMAP facts too: discovery writes
+ * `discovery_jsonb.sitemapFacts` (memberships, staged sitemap hreflang) from then
+ * on, and a crawl without the key fires the marker with
+ * `sitemapFactsRecorded: false` (ruling R1).
  */
 import { sql } from "drizzle-orm";
 
@@ -63,6 +68,23 @@ export async function v3Gate(
   return { recorded: below === 0, atOrAbove, below };
 }
 
+/**
+ * Whether the crawl's discovery recorded the Phase 26c sitemap facts
+ * (`crawls.discovery_jsonb.sitemapFacts`). Every crawl since writes the key,
+ * zeros included; a crawl without it — an older one, or one whose discovery
+ * never ran — has no memberships or staged sitemap alternates on record, and a
+ * rule reading those refuses it (the marker speaks). Throws for a crawl that
+ * does not exist rather than answering for it.
+ */
+export async function sitemapFactsRecorded(db: Db, crawlId: string): Promise<boolean> {
+  const rows = await db.execute<{ recorded: boolean }>(sql`
+    select (discovery_jsonb is not null and discovery_jsonb ? 'sitemapFacts') as recorded
+    from crawls where id = ${crawlId}`);
+  const row = rows.rows[0];
+  if (row === undefined) throw new Error(`sitemapFactsRecorded: no such crawl '${crawlId}'`);
+  return row.recorded;
+}
+
 async function notRecordedFindings(
   self: RuleIdentity,
   db: Db,
@@ -72,15 +94,22 @@ async function notRecordedFindings(
   // The marker's bar is the newest extraction: a v2-only crawl is complete for
   // the 26b rules and still lacks the 26c facts, so it speaks for both.
   const gate = await v3Gate(db, crawlId);
-  if (gate.recorded) return [];
-  const cohort = await db.execute<{ n: number }>(sql`
-    select count(*)::int as n from pages p
-    where p.crawl_id = ${crawlId} and ${FETCHED_OK("p")}`);
-  // A count with no `group by` always answers one row: none is a broken query
-  // or driver, never an empty cohort (hard rule 7).
-  const row = cohort.rows[0];
-  if (row === undefined) throw new Error(`${self.id}: aggregate returned no row`);
-  if (row.n === 0) return [];
+  // Ruling R1: and for the sitemap facts discovery records from 26c on, which
+  // belong to the crawl rather than to any page — so they are asked for even
+  // when no page was fetched.
+  const sitemapFacts = await sitemapFactsRecorded(db, crawlId);
+  let pagesStale = false;
+  if (!gate.recorded) {
+    const cohort = await db.execute<{ n: number }>(sql`
+      select count(*)::int as n from pages p
+      where p.crawl_id = ${crawlId} and ${FETCHED_OK("p")}`);
+    // A count with no `group by` always answers one row: none is a broken query
+    // or driver, never an empty cohort (hard rule 7).
+    const row = cohort.rows[0];
+    if (row === undefined) throw new Error(`${self.id}: aggregate returned no row`);
+    pagesStale = row.n > 0;
+  }
+  if (!pagesStale && sitemapFacts) return [];
   return [
     queryFinding(self, {
       pageId: null,
@@ -89,6 +118,7 @@ async function notRecordedFindings(
         pagesNotRecorded: gate.below,
         pagesRecorded: gate.atOrAbove,
         requiredVersion: V3,
+        sitemapFactsRecorded: sitemapFacts,
       },
       dedupeKey: "site",
     }),
@@ -110,11 +140,12 @@ export const pageFactsRules: QueryRule[] = [
       { key: "pagesNotRecorded", label: "Pages Without Current Facts" },
       { key: "pagesRecorded", label: "Pages With Current Facts" },
       { key: "requiredVersion", label: "Required Extraction Version" },
+      { key: "sitemapFactsRecorded", label: "Sitemap Facts Recorded" },
     ],
     ...copyFor(NOT_RECORDED.id),
     rulesetVersion: RULESET_VERSION,
     marker:
-      "This crawl was extracted before the page facts these checks read existed, so they were not run; re-crawl the site.",
+      "This crawl was extracted before the page and sitemap facts these checks read existed, so they were not run; re-crawl the site.",
     run: (db, crawlId) => notRecordedFindings(NOT_RECORDED, db, crawlId),
   }),
 ];

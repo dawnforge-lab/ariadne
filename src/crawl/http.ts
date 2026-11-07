@@ -203,7 +203,8 @@ export function mimeType(contentType: string | null): string | null {
   return value === undefined || value === "" ? null : value;
 }
 
-function charsetOf(contentType: string | null): string | null {
+/** A Content-Type's `charset` label, as written; null when it names none. */
+export function charsetOf(contentType: string | null): string | null {
   if (contentType === null) return null;
   const match = contentType.match(/;\s*charset\s*=\s*"?([^";]+)"?/i);
   return match === null ? null : (match[1] ?? "").trim() || null;

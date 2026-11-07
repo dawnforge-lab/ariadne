@@ -320,11 +320,11 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
 
   // ------------------------------------------------------------- extraction
   "extraction.not-recorded": {
-    title: "Crawl: Page facts not recorded on this crawl",
+    title: "Crawl: Page or sitemap facts not recorded on this crawl",
     explanation:
-      "Some or all pages in this crawl were extracted before the page facts the social, structure, link-hygiene, image, hreflang and URL-length checks read were recorded, so those checks were left unrun rather than reported clean. The Pages Without Current Facts column counts the pages affected, and Required Extraction Version names the version they need.",
+      "Some or all pages in this crawl were extracted before the page facts the social, structure, link-hygiene, image, hreflang and URL-length checks read were recorded, or its sitemaps were read before each sitemap's URLs and hreflang alternates were recorded, so those checks were left unrun rather than reported clean. The Pages Without Current Facts column counts the pages affected, Required Extraction Version names the version they need, and Sitemap Facts Recorded says whether the sitemap facts are on record.",
     howToFix:
-      "Re-crawl the site. These page facts are recorded for every page on crawls from this version onwards.",
+      "Re-crawl the site. These page and sitemap facts are recorded on every crawl from this version onwards.",
   },
   // ----------------------------------------------------------------- social
   "social.og-incomplete": {

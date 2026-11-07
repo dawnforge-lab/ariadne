@@ -49,7 +49,7 @@ licence body is identical for both and reproduced once here.
 
 ## npm dependencies
 
-undici, htmlparser2, robots-parser, fast-xml-parser, pg, drizzle-orm,
+undici, htmlparser2, robots-parser, pg, drizzle-orm,
 playwright, @modelcontextprotocol/sdk, zod — each under its own licence as
 published on npm; see node_modules/<pkg>/LICENSE.
 
