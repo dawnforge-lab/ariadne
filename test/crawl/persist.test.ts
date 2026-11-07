@@ -60,10 +60,11 @@ function makeAnalysis(overrides: Partial<PageAnalysis> = {}): PageAnalysis {
     footerLinkCount: 4,
     frameworkMarkers: ["__NEXT_DATA__"],
     links: [
-      { href: `${SITE}/one`, anchor: "one", rel: null, nofollow: false, position: 0 },
+      { href: `${SITE}/one`, anchor: "one", ariaLabel: null, rel: null, nofollow: false, position: 0 },
       {
         href: `${SITE}/two`,
-        anchor: "two",
+        anchor: "",
+        ariaLabel: "Wishlist",
         rel: "nofollow",
         nofollow: true,
         position: 1,
@@ -71,6 +72,7 @@ function makeAnalysis(overrides: Partial<PageAnalysis> = {}): PageAnalysis {
       {
         href: "https://other.example/three",
         anchor: "three",
+        ariaLabel: null,
         rel: null,
         nofollow: false,
         position: 2,
@@ -225,6 +227,7 @@ describe("PageWriter", () => {
     const many = Array.from({ length: 250 }, (_, i) => ({
       href: `${SITE}/l/${i}`,
       anchor: `l${i}`,
+      ariaLabel: null,
       rel: null,
       nofollow: false,
       position: i,
@@ -408,6 +411,7 @@ describe("PageWriter", () => {
         sourcePageId: links.sourcePageId,
         targetUrl: links.targetUrl,
         anchor: links.anchor,
+        ariaLabel: links.ariaLabel,
         isInternal: links.isInternal,
         isNofollow: links.isNofollow,
         position: links.position,
@@ -415,6 +419,13 @@ describe("PageWriter", () => {
       .from(links)
       .where(eq(links.crawlId, crawlId));
     expect(rows).toHaveLength(3);
+    // Owner call O1 (migration 0028): the link's aria-label is written as the
+    // analyzer gave it, null included.
+    expect(Object.fromEntries(rows.map((r) => [r.targetUrl, r.ariaLabel]))).toEqual({
+      [`${SITE}/one`]: null,
+      [`${SITE}/two`]: "Wishlist",
+      "https://other.example/three": null,
+    });
     expect(rows.every((r) => r.sourcePageId === pageId)).toBe(true);
     const byTarget = new Map(rows.map((r) => [r.targetUrl, r]));
     expect(byTarget.get(`${SITE}/one`)?.isInternal).toBe(true);
@@ -1131,6 +1142,7 @@ describe("PageWriter", () => {
           {
             href: `${SITE}/one`,
             anchor: "one",
+            ariaLabel: null,
             rel: null,
             nofollow: false,
             position: 3_000_000_000,

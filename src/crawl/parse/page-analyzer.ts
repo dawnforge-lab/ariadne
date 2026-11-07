@@ -416,6 +416,11 @@
  *    node would, with a space either side so it is a word of its own
  *    (`Home<img alt=Logo>` is "Home Logo"). `links.anchor` on a v2 row
  *    carries it; the oracle agrees.
+ *  - `PageLink.ariaLabel` (owner call O1, 2026-11-07; `links.aria_label`,
+ *    migration 0028): the `aria-label` of the SAME element that supplies the
+ *    link row's anchor, the first `<a>` start tag to resolve to that target
+ *    (`closeAnchor`: first one wins). Trimmed, cut at `ARIA_LABEL_MAX` through
+ *    `storableCap`, null when absent or blank. It never enters the anchor.
  *  - `relNextCount` / `relPrevCount`: every `<link rel~=next|prev>`, href or
  *    not. The first-only `relNext` / `relPrev` are unchanged.
  *  - `insecureRefs`: references that resolve (`normalizeUrl`) to `http:` —
@@ -482,6 +487,7 @@ import { simhash64 } from "./simhash.js";
 import { storableCap } from "../storable-text.js";
 import {
   ALT_TEXT_LONG_CHARS,
+  ARIA_LABEL_MAX,
   H2_TEXT_MAX,
   HEAD_SNIPPET_MAX,
   HTML_LANG_MAX,
@@ -510,6 +516,14 @@ export interface PageLink {
   /** Absolute, normalized target URL (see url-utils `normalizeUrl`). */
   href: string;
   anchor: string;
+  /**
+   * The `aria-label` of the element that supplied `anchor` (the first `<a>` to
+   * this target), trimmed and cut at `ARIA_LABEL_MAX` through `storableCap`;
+   * null when the attribute is absent or blank (owner call O1). Never folded
+   * into `anchor`: search engines read visible text and image alt as anchor
+   * text, not `aria-label`.
+   */
+  ariaLabel: string | null;
   /** Raw `rel` attribute, lowercased; null when the attribute was absent. */
   rel: string | null;
   nofollow: boolean;
@@ -1222,7 +1236,14 @@ export const FRAMEWORK_MARKERS = ["__NEXT_DATA__", "data-reactroot", "ng-app"] a
 interface OpenAnchor {
   href: string;
   rel: string | null;
+  ariaLabel: string | null;
   text: string[];
+}
+
+/** An `aria-label` as `PageLink.ariaLabel` stores it: trimmed, capped, null when blank. */
+function ariaLabelOf(raw: string | undefined): string | null {
+  const trimmed = raw?.trim() ?? "";
+  return trimmed === "" ? null : storableCap(trimmed, ARIA_LABEL_MAX);
 }
 
 /**
@@ -2085,7 +2106,7 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
 
   const closeAnchor = () => {
     if (!openAnchor) return;
-    const { href, rel, text } = openAnchor;
+    const { href, rel, ariaLabel, text } = openAnchor;
     openAnchor = null;
     if (linksByTarget.size >= MAX_EXTRACTED_LINKS) return;
     const resolved = normalizeUrl(href, pageUrl);
@@ -2098,6 +2119,7 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
     linksByTarget.set(resolved, {
       href: resolved,
       anchor,
+      ariaLabel,
       rel,
       nofollow: (rel ?? "").split(/\s+/).includes("nofollow"),
       isInternal: isSameOrigin(resolved, pageUrl),
@@ -2323,6 +2345,7 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
               openAnchor = {
                 href,
                 rel: attribs["rel"]?.trim().toLowerCase() ?? null,
+                ariaLabel: ariaLabelOf(attribs["aria-label"]),
                 text: [],
               };
             }
@@ -2657,9 +2680,10 @@ export function analyzePage(html: string, url: string): PageAnalysis {
     navLinkCount: raw.navLinkCount,
     footerLinkCount: raw.footerLinkCount,
     frameworkMarkers: raw.frameworkMarkers,
-    links: raw.links.map(({ href, anchor, rel, nofollow, position }) => ({
+    links: raw.links.map(({ href, anchor, ariaLabel, rel, nofollow, position }) => ({
       href,
       anchor,
+      ariaLabel,
       rel,
       nofollow,
       position,

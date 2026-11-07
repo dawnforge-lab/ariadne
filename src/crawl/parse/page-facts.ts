@@ -105,6 +105,11 @@ export const INSECURE_SAMPLE_URL_MAX = 1024;
 export const IMAGE_SAMPLE_MAX = 10;
 export const IMAGE_SAMPLE_SRC_MAX = 512;
 export const HEAD_SNIPPET_MAX = 200;
+/**
+ * A link's `aria-label` (`links.aria_label`, migration 0028; owner call O1) is
+ * trimmed and cut here, on a code point, through `storableCap`.
+ */
+export const ARIA_LABEL_MAX = 200;
 export const HTML_LANG_MAX = 64;
 export const H2_TEXT_MAX = 300;
 /** Alts longer than this are counted at extraction; a change needs an extraction bump. */

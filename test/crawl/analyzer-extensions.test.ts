@@ -9,6 +9,7 @@ import {
 import { simhash64, hammingDistance } from "../../src/crawl/parse/simhash.js";
 import {
   ALT_TEXT_LONG_CHARS,
+  ARIA_LABEL_MAX,
   H2_TEXT_MAX,
   HTML_LANG_MAX,
   IMAGE_SAMPLE_MAX,
@@ -1629,6 +1630,47 @@ describe("anchor text takes an image's alt", () => {
   it("does not take the alt of an image outside any anchor", () => {
     const a = bodyPage(`<img src="a.png" alt="Loose"><a href="/x">Text</a>`);
     expect(a.links[0]?.anchor).toBe("Text");
+  });
+});
+
+describe("a link's aria-label (owner call O1)", () => {
+  it("records the trimmed aria-label beside the anchor", () => {
+    const [link] = bodyPage(`<a href="/cart" aria-label="  Shopping cart "><svg></svg></a>`).links;
+    expect(link?.anchor).toBe("");
+    expect(link?.ariaLabel).toBe("Shopping cart");
+  });
+
+  it("is null when the attribute is absent or blank", () => {
+    const a = bodyPage(`<a href="/a">A</a><a href="/b" aria-label="   ">B</a><a href="/c" aria-label="">C</a>`);
+    expect(a.links.map((l) => l.ariaLabel)).toEqual([null, null, null]);
+  });
+
+  it("keeps text and aria-label apart: the label never enters the anchor", () => {
+    const [link] = bodyPage(`<a href="/x" aria-label="Account">Sign in</a>`).links;
+    expect(link?.anchor).toBe("Sign in");
+    expect(link?.ariaLabel).toBe("Account");
+  });
+
+  it("takes the label from the element that supplies the anchor: the first link to a target", () => {
+    const a = bodyPage(`<a href="/x">First</a><a href="/x" aria-label="Second">Second</a>`);
+    expect(a.links).toHaveLength(1);
+    expect(a.links[0]).toMatchObject({ anchor: "First", ariaLabel: null });
+    const b = bodyPage(`<a href="/y" aria-label="First"></a><a href="/y">Second</a>`);
+    expect(b.links[0]).toMatchObject({ anchor: "", ariaLabel: "First" });
+  });
+
+  it("cuts the label at ARIA_LABEL_MAX on a code point", () => {
+    const long = "l".repeat(ARIA_LABEL_MAX - 1) + "\u{1F600}" + "tail";
+    const [link] = bodyPage(`<a href="/x" aria-label="${long}"></a>`).links;
+    expect(link?.ariaLabel).toBe("l".repeat(ARIA_LABEL_MAX - 1));
+    const exact = "m".repeat(ARIA_LABEL_MAX + 50);
+    expect(bodyPage(`<a href="/x" aria-label="${exact}"></a>`).links[0]?.ariaLabel).toBe(
+      "m".repeat(ARIA_LABEL_MAX),
+    );
+  });
+
+  it("makes the label storable: no U+0000 reaches the row", () => {
+    expect(bodyPage(`<a href="/x" aria-label="a\u0000b"></a>`).links[0]?.ariaLabel).toBe("a\u2400b");
   });
 });
 

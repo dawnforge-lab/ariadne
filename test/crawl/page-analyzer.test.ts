@@ -35,6 +35,7 @@ describe("analyzePage", () => {
     expect(a.links[0]).toEqual({
       href: "https://shop.example/a",
       anchor: "A",
+      ariaLabel: null,
       rel: "nofollow",
       nofollow: true,
       position: 0,

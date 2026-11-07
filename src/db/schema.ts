@@ -1018,6 +1018,10 @@ export const links = pgTable("links", {
   targetUrl: text("target_url").notNull(),
   targetPageId: text("target_page_id"),
   anchor: text("anchor"),
+  // Owner call O1 (migration 0028): the link element's trimmed `aria-label`,
+  // capped at ARIA_LABEL_MAX; null when absent or blank, and on a row written
+  // before 0028.
+  ariaLabel: text("aria_label"),
   rel: text("rel"),
   isInternal: boolean("is_internal").notNull(),
   isNofollow: boolean("is_nofollow").notNull().default(false),

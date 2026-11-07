@@ -123,6 +123,8 @@
  * `img`'s trimmed, non-empty `alt` folded in where the image sits, as the port
  * now reads it; the final review (I2) spaced each alt off as a word of its own.
  * The same review (I1) added `social.imageRefs` to the compared social set.
+ * Owner call O1 (2026-11-07) added each link's `ariaLabel`, read off the same
+ * `a[href]` element the anchor text is (the first to a target), on both sides.
  *
  * Phase 26b (P26b-T4) added `htmlStructure` and stripped it, on `headClosedBy`'s
  * reasoning (see `EXTENSION_FIELDS`): explicit html/head/body start-tag counts,
@@ -152,6 +154,7 @@ import { storableCap } from "../storable-text.js";
 import { normalizeUrl, isSameOrigin } from "./url-utils.js";
 import {
   ALT_TEXT_LONG_CHARS,
+  ARIA_LABEL_MAX,
   H2_TEXT_MAX,
   HTML_LANG_MAX,
   IMAGE_SAMPLE_MAX,
@@ -651,9 +654,13 @@ function analyzeHtmlWithCheerio(html: string, pageUrl: string): UpstreamShape {
       .trim()
       .slice(0, 200);
     const rel = fold($(el).attr("rel")) ?? null;
+    // Owner call O1: the `aria-label` of the same element the anchor is read
+    // from, trimmed, storable and capped, null when absent or blank.
+    const ariaRaw = $(el).attr("aria-label")?.trim() ?? "";
     linksByTarget.set(resolved, {
       href: resolved,
       anchor,
+      ariaLabel: ariaRaw === "" ? null : storableCap(ariaRaw, ARIA_LABEL_MAX),
       rel,
       nofollow: (rel ?? "").split(/\s+/).includes("nofollow"),
       isInternal: isSameOrigin(resolved, pageUrl),
@@ -1525,6 +1532,16 @@ describe("the Phase 26b body facts, against the DOM", () => {
       <a target="_blank" rel="NoReferrer nofollow" href="/z">z</a>
       <a target="_blank" href="javascript:void(0)">jb</a><a target="_blank">nb</a>
       <noscript><a href="#">ns</a></noscript>
+      </body></html>`);
+  });
+
+  it("agrees on a link's aria-label, read off the element the anchor comes from (O1)", () => {
+    expectParity(`<html><body>
+      <a href="/cart" aria-label=" Cart "><svg><path d="M0"></path></svg></a>
+      <a href="/blank" aria-label="   ">Blank</a><a href="/none">None</a>
+      <a href="/both" aria-label="Account">Sign in</a>
+      <a href="/first">First</a><a href="/first" aria-label="Later">Later</a>
+      <a href="/long" aria-label="${"x".repeat(250)}"></a>
       </body></html>`);
   });
 

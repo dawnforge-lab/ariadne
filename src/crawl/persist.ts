@@ -300,6 +300,7 @@ export class PageWriter {
           targetUrl: link.href,
           targetPageId: null,
           anchor: link.anchor,
+          ariaLabel: link.ariaLabel,
           rel: link.rel,
           isInternal: isSameOrigin(link.href, item.url),
           isNofollow: link.nofollow,
