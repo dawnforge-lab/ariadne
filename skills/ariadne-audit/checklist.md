@@ -920,7 +920,9 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
     port, or scheme — never attempted by design; the evidence's `offOrigin` flag
     marks these), or attempted and no response came back. NOT MEASURED, not clean.
   Three more rules read the entry itself, not the page it names:
-  - `sitemap.url-too-long` (info) — a `<loc>` over 2,048 characters
+  - `sitemap.url-too-long` (info) — a `<loc>` over 2,048 characters. A `<loc>` over
+    2,500 characters is not stored; one site row (no URL, evidence `{skipped, max}`)
+    counts them
   - `sitemap.cross-host-loc` (warning) — a `<loc>` whose scheme or host (www and port
     included) is neither its sitemap document's nor the crawled site's. A document on
     another host (a CDN) that lists the crawled site's own URLs is an allowed
@@ -945,22 +947,35 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
 - **Priority**: Medium | **Requires**: Engine (metric and rule)
 - **Engine**: `metrics_get` with `metricId: "sitemap.structure"` for the shape, and
   `issues_list` with `checkId: "CHECK-08"` for one finding rule:
-  `sitemap.over-50k-urls` (warning), one site-scoped finding per sitemap document
-  with more than 50,000 entries. Its count is a LOWER BOUND: a URL listed in two
-  documents is stored, and counted, once, and the crawl's entry cap can stop reading
-  before a document's end. No finding is not proof of a clean sitemap when
-  `entryCapReached` is true. The metric's rows:
-  - the `site` row: `{docs, totalUrls, urlCapBreaches, entryCapReached, oversizedDocsSkipped}`
+  three finding rules:
+  - `sitemap.over-50k-urls` (warning) — one site-scoped finding per sitemap document
+    with more than 50,000 entries. The count is EXACT: it counts the document's own
+    membership rows, so a URL listed in two documents counts once in each
+  - `sitemap.oversized` (warning) — one finding per document larger than 50 MB
+    uncompressed, with `{sitemapUrl, bytesRead, urlsKept, max}`. Search engines reject
+    the whole file; the crawl kept the URLs it read before the limit
+  - `sitemap.url-in-multiple` (info) — one finding per URL listed in more than one
+    sitemap document: `{url, sitemaps (up to 10), count}`; `membershipLimited: true`
+    says the crawl's membership cap was reached and later listings were not recorded
+  The metric's rows:
+  - the `site` row: `{docs, totalUrls, urlCapBreaches, entryCapReached,
+    oversizedDocsSkipped, docCountsExact, membershipLimited, hreflangLimited,
+    overlongLocsSkipped}`. `docCountsExact: false` is a crawl made before memberships
+    were recorded: its counts come from the deduplicated entry list and the three
+    walk-cap fields are null (not recorded)
   - one `sitemap_doc` row per document (`scopeValue` is the document's URL) with
     `{urls, breaches50k}` — the largest 50 are listed
   - `entryCapReached: true` means every count here is a FLOOR, not a total: say so
     rather than quoting the numbers flat
-- **Crawl-level marker**: `extraction.not-recorded` (info) is the NOT MEASURED marker for the facts this check reads from extraction version 3: on a crawl extracted before them (or one mixing old and new pages) the rules that read those facts did not run, so their part of this check is NOT MEASURED, never a pass. The remedy is a re-crawl.
+- **Crawl-level marker**: `extraction.not-recorded` (info) is the NOT MEASURED marker for the facts this check reads from extraction version 3: on a crawl extracted before them (or one mixing old and new pages), or on a crawl whose discovery predates the recorded sitemap facts, the rules that read those facts (`sitemap.oversized`, `sitemap.url-in-multiple`, `sitemap.over-50k-urls`) did not run, so their part of this check is NOT MEASURED, never a pass. The remedy is a re-crawl.
 - **Evaluate**:
   - PASS if sitemaps split logically by type (products, collections, blog, pages)
   - WARN if single flat sitemap on site >5k URLs
   - WARN if `sitemap.over-50k-urls` (warning) > 0: a document over the 50,000-entry limit
-    is not read past it. Quote the count as a floor when `entryCapReached` is true
+    is not read past it. Quote the counts as floors when `entryCapReached` is true
+  - WARN if `sitemap.oversized` (warning) > 0: a document over 50 MB is rejected whole by
+    search engines
+  - INFO if `sitemap.url-in-multiple` (info) > 0: redundant listings, name the count
   - Record: sitemap structure description
 
 ### CHECK-09: URLs not found in sitemaps

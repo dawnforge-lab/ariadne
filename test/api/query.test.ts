@@ -992,7 +992,17 @@ beforeAll(async () => {
     },
     {
       crawlId: crawlM, metricId: "sitemap.structure", scope: "site", scopeValue: "",
-      value: { docs: 2, totalUrls: 376, oversizedDocsSkipped: 0, urlCapBreaches: 0, entryCapReached: false },
+      value: {
+        docs: 2,
+        totalUrls: 376,
+        oversizedDocsSkipped: 0,
+        urlCapBreaches: 0,
+        entryCapReached: false,
+        docCountsExact: true,
+        membershipLimited: false,
+        hreflangLimited: false,
+        overlongLocsSkipped: 0,
+      },
     },
     {
       crawlId: crawlM, metricId: "sitemap.structure", scope: "sitemap_doc",
@@ -1637,6 +1647,10 @@ describe("GET /crawls/:id/metrics/:metricId", () => {
       "Documents",
       "Documents Dropped For Size",
       "Entry Cap Reached",
+      "Counts Exact",
+      "Membership Cap Reached",
+      "Hreflang Cap Reached",
+      "Over-Long Locs Not Stored",
     ]);
     expect(tableRows(res)).toEqual([
       {
@@ -1646,6 +1660,10 @@ describe("GET /crawls/:id/metrics/:metricId", () => {
         docs: 2,
         oversizedDocsSkipped: 0,
         entryCapReached: false,
+        docCountsExact: true,
+        membershipLimited: false,
+        hreflangLimited: false,
+        overlongLocsSkipped: 0,
       },
       // A document row carries its own two facts and NULL — never zero, never
       // false — under the three columns that are the site's alone.
@@ -1656,6 +1674,10 @@ describe("GET /crawls/:id/metrics/:metricId", () => {
         docs: null,
         oversizedDocsSkipped: null,
         entryCapReached: null,
+        docCountsExact: null,
+        membershipLimited: null,
+        hreflangLimited: null,
+        overlongLocsSkipped: null,
       },
       {
         scope: `${SITE}/sitemap_products_1.xml`,
@@ -1664,6 +1686,10 @@ describe("GET /crawls/:id/metrics/:metricId", () => {
         docs: null,
         oversizedDocsSkipped: null,
         entryCapReached: null,
+        docCountsExact: null,
+        membershipLimited: null,
+        hreflangLimited: null,
+        overlongLocsSkipped: null,
       },
     ]);
   });
@@ -3098,10 +3124,11 @@ describe("GET /crawls/:id/export?format=csv", () => {
     );
     expect(sitemap.records[0]).toEqual([
       "Sitemap", "Entries", "Over 50,000 Entries", "Documents",
-      "Documents Dropped For Size", "Entry Cap Reached",
+      "Documents Dropped For Size", "Entry Cap Reached", "Counts Exact",
+      "Membership Cap Reached", "Hreflang Cap Reached", "Over-Long Locs Not Stored",
     ]);
     expect(rows(sitemap)[1]).toEqual([
-      `${SITE}/sitemap_blogs_1.xml`, "5", "false", "", "", "",
+      `${SITE}/sitemap_blogs_1.xml`, "5", "false", "", "", "", "", "", "", "",
     ]);
 
     // The header is written for a metric that measured nothing too: a zero-row

@@ -22,6 +22,7 @@ import { sql } from "drizzle-orm";
 import type { Db } from "../../db/client.js";
 import { metricRow, metricRule, ROBOTS_BLOCKED, type MetricIdentity } from "../helpers.js";
 import { assertCrawl, readCrawlEvidence } from "../query/crawl-evidence.js";
+import { readSitemapFacts } from "../query/page-facts.js";
 import { CHAIN, LOOP } from "../query/redirects.js";
 import { perScope } from "../registry/metric-table.js";
 import type { Metric, MetricRule } from "../registry/registry.js";
@@ -332,6 +333,13 @@ type SitemapRow = {
  *    would have proved it were never collected. It is a column rather than a
  *    footnote for that reason: the numbers beside it change meaning (hard rule
  *    7).
+ *  - `docCountsExact` (Phase 26c) — true when the crawl recorded sitemap facts
+ *    and the counts above come from `sitemap_memberships`, one row per URL per
+ *    document: a URL in three documents counts in all three and `totalUrls` is
+ *    their sum. False for an older crawl, counted from `sitemap_urls` as above.
+ *  - `membershipLimited`, `hreflangLimited`, `overlongLocsSkipped` — the
+ *    sitemap walk's own caps and refusals, from `discovery.sitemapFacts`. A
+ *    pre-26c crawl did not record them and says null, never zero.
  *
  * And each `sitemap_doc` row: `urls`, how many entries that document
  * contributed, and `breaches50k`, whether that is past the protocol's 50,000.
@@ -343,13 +351,24 @@ async function sitemapStructure(db: Db, crawlId: string, self: MetricIdentity): 
   // The discovery blob is read for two of the site row's columns, so this rule
   // takes the gate that validates it — which is also the crawl-exists check.
   const { discovery } = await readCrawlEvidence(db, crawlId, self.id);
+  const facts = await readSitemapFacts(db, crawlId, self.id);
+  // Deviation 7: a crawl that recorded memberships is counted from them (one
+  // row per URL per document, exact); an older one from `sitemap_urls`, where a
+  // URL listed in two documents sits under the first only.
+  const perDocSource =
+    facts === null
+      ? sql`select s.sitemap_source as source, count(*)::int as urls
+            from sitemap_urls s
+            where s.crawl_id = ${crawlId}
+            group by s.sitemap_source`
+      : sql`select m.sitemap_source as source, count(*)::int as urls
+            from sitemap_memberships m
+            where m.crawl_id = ${crawlId}
+            group by m.sitemap_source`;
 
   const rows = await db.execute<SitemapRow>(sql`
     with per_doc as (
-      select s.sitemap_source as source, count(*)::int as urls
-      from sitemap_urls s
-      where s.crawl_id = ${crawlId}
-      group by s.sitemap_source
+      ${perDocSource}
     ),
     totals as (
       select count(*)::int as docs,
@@ -384,6 +403,12 @@ async function sitemapStructure(db: Db, crawlId: string, self: MetricIdentity): 
           oversizedDocsSkipped: discovery.truncation.oversizedDocsSkipped,
           urlCapBreaches: num(row.url_cap_breaches, "url_cap_breaches", self.id),
           entryCapReached: discovery.truncation.entryLimited,
+          docCountsExact: facts !== null,
+          // Not recorded by a pre-26c crawl: null says so, zeros would claim a
+          // clean walk (hard rule 7).
+          membershipLimited: facts?.membershipLimited ?? null,
+          hreflangLimited: facts?.hreflangLimited ?? null,
+          overlongLocsSkipped: facts?.overlongLocsSkipped ?? null,
         },
       });
     }
@@ -434,6 +459,10 @@ export const crawlMetrics: MetricRule[] = [
       { key: "docs", label: "Documents" },
       { key: "oversizedDocsSkipped", label: "Documents Dropped For Size" },
       { key: "entryCapReached", label: "Entry Cap Reached" },
+      { key: "docCountsExact", label: "Counts Exact" },
+      { key: "membershipLimited", label: "Membership Cap Reached" },
+      { key: "hreflangLimited", label: "Hreflang Cap Reached" },
+      { key: "overlongLocsSkipped", label: "Over-Long Locs Not Stored" },
     ], 10),
     async (db, crawlId, self) => sitemapStructure(db, crawlId, self),
   ),

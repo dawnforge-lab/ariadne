@@ -348,6 +348,20 @@ const SKIP_HARNESS_CLAIMS: string[] = [
   // and checks the exact-cap row count is silent. The other three entry rules
   // have fixture pages (`/authored26/bad-lastmod`, `/long-loc`, `/cross-host-loc`).
   "sitemap.over-50k-urls",
+  // Phase 26c Task 9. `sitemap.oversized` is PERMANENT, for the reason above
+  // made larger: it needs a sitemap document past 50 MB (`SITEMAP_MAX_BYTES`)
+  // uncompressed, and a fixture that size is a 50 MB response this suite would
+  // generate and parse on every run. It is proven where the fact costs nothing,
+  // in test/rules/sitemap-entries-query.test.ts (the finding, per recorded
+  // document, and its silence), and the read itself, a generated 50 MB stream
+  // that stops at the cap with the URLs read so far kept, in
+  // test/crawl/sitemap-stream.test.ts and test/crawl/discovery.test.ts.
+  "sitemap.oversized",
+  // Phase 26c Task 9. `sitemap.url-in-multiple` is provokable by two ordinary
+  // fixture sitemaps that list one URL, so this entry is TEMPORARY, like
+  // `url.reference-too-long` below: Task 11 adds the fixture and removes it.
+  // Until then it is proven by test/rules/sitemap-entries-query.test.ts.
+  "sitemap.url-in-multiple",
   // Phase 26c Task 2. `url.reference-too-long` is provokable by an ordinary
   // page (a link, `<img>` or hreflang `href` over 2,500 characters), so this
   // entry is TEMPORARY, not a "no page could" paragraph: the phase's fixture
@@ -2737,6 +2751,13 @@ describe("the fixture site end to end", () => {
       oversizedDocsSkipped: 0,
       urlCapBreaches: 0,
       entryCapReached: false,
+      // Phase 26c: the counts come from the membership table (one document, so
+      // the same 140), and the walk hit none of its own caps and refused no
+      // address: one `<loc>` over 2,500 characters would have been counted here.
+      docCountsExact: true,
+      membershipLimited: false,
+      hreflangLimited: false,
+      overlongLocsSkipped: 0,
     });
     // The per-document row beneath it, which is where `docs: 1` is spent: the
     // one document, with the same 140 entries under its own URL. Asserted as the

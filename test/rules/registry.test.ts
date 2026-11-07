@@ -603,15 +603,18 @@ describe("check annotations", () => {
  * warnings. The critical list does not move.
  *
  * Phase 26c (0.22.0) Task 4 adds `social.image-insecure` (info): 87 info.
+ *
+ * Phase 26c (0.22.0) Task 9 adds `sitemap.oversized` (warning) and
+ * `sitemap.url-in-multiple` (info): 65 warnings, 88 info.
  */
 describe("severity shape of the ruleset", () => {
   const all = buildRegistry().all();
 
-  it("holds 33 critical, 64 warning and 87 info rules", () => {
+  it("holds 33 critical, 65 warning and 88 info rules", () => {
     const counts = { critical: 0, warning: 0, info: 0 };
     for (const r of all) counts[r.severity] += 1;
-    expect(counts).toEqual({ critical: 33, warning: 64, info: 87 });
-    expect(all).toHaveLength(184);
+    expect(counts).toEqual({ critical: 33, warning: 65, info: 88 });
+    expect(all).toHaveLength(186);
   });
 
   it("names exactly the rules that are critical", () => {

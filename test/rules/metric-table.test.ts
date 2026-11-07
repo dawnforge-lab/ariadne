@@ -116,7 +116,17 @@ describe("perScope", () => {
   // are empty on a document row, which is exactly the null rule above.
   it("reads a two-key column from whichever key the row carries", () => {
     const shaped = shapeMetricTable("sitemap.structure", tableOf("sitemap.structure"), [
-      site({ docs: 5, totalUrls: 376, urlCapBreaches: 0, oversizedDocsSkipped: 0, entryCapReached: false }),
+      site({
+        docs: 5,
+        totalUrls: 376,
+        urlCapBreaches: 0,
+        oversizedDocsSkipped: 0,
+        entryCapReached: false,
+        docCountsExact: true,
+        membershipLimited: false,
+        hreflangLimited: false,
+        overlongLocsSkipped: 0,
+      }),
       { scope: "sitemap_doc", scopeValue: "https://site/sitemap-1.xml", value: { urls: 5, breaches50k: false } },
     ]);
     expect(labels(shaped)).toEqual([
@@ -126,6 +136,10 @@ describe("perScope", () => {
       "Documents",
       "Documents Dropped For Size",
       "Entry Cap Reached",
+      "Counts Exact",
+      "Membership Cap Reached",
+      "Hreflang Cap Reached",
+      "Over-Long Locs Not Stored",
     ]);
     expect(shaped.rows).toEqual([
       {
@@ -135,6 +149,10 @@ describe("perScope", () => {
         docs: 5,
         oversizedDocsSkipped: 0,
         entryCapReached: false,
+        docCountsExact: true,
+        membershipLimited: false,
+        hreflangLimited: false,
+        overlongLocsSkipped: 0,
       },
       {
         scope: "https://site/sitemap-1.xml",
@@ -143,6 +161,10 @@ describe("perScope", () => {
         docs: null,
         oversizedDocsSkipped: null,
         entryCapReached: null,
+        docCountsExact: null,
+        membershipLimited: null,
+        hreflangLimited: null,
+        overlongLocsSkipped: null,
       },
     ]);
   });

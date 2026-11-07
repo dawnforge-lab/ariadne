@@ -861,7 +861,7 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
   "sitemap.invalid": {
     title: "Sitemaps: Sitemap could not be read",
     explanation:
-      "Sitemap documents that could not be read: a 4xx or 5xx, no response, a document over the size limit, an unsupported encoding, a non-XML response such as an HTML page served with 200, or a root element that is neither urlset nor sitemapindex. Up to 50 failures are listed and the count is exact. Their URLs are invisible to search engines.",
+      "Sitemap documents that could not be read: a 4xx or 5xx, no response, an unsupported encoding (and, on crawls made before oversized documents were reported on their own, a document over the size limit), a non-XML response such as an HTML page served with 200, or a root element that is neither urlset nor sitemapindex. Up to 50 failures are listed and the count is exact. Their URLs are invisible to search engines.",
     howToFix:
       "Request each listed sitemap URL and check the response. A sitemap must be well-formed XML with a urlset or sitemapindex root, served with 200 and an XML content type; remove index entries pointing at sitemaps that no longer exist.",
   },
@@ -896,9 +896,16 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
   "sitemap.over-50k-urls": {
     title: "Sitemaps: Sitemap over 50,000 URLs",
     explanation:
-      "A sitemap document that lists more than 50,000 URLs, the protocol limit per document; entries past it are not read. The row gives the document and its entry count, a lower bound because a URL listed in two documents is counted once and the crawl stops reading at its entry cap, which can fall before a document's end. No finding is therefore not proof that every document is under the limit.",
+      "A sitemap document that lists more than 50,000 URLs, the protocol limit per document; entries past it are not read. The row gives the document and its entry count, which is exact: a URL listed in two documents counts once in each. A crawl made before sitemap memberships were recorded cannot judge this and reports nothing, and a re-crawl answers it.",
     howToFix:
       "Split the sitemap into several documents of 50,000 URLs or fewer and list them in a sitemap index.",
+  },
+  "sitemap.oversized": {
+    title: "Sitemaps: Sitemap over 50 MB",
+    explanation:
+      "A sitemap document that is larger than 50 MB (52,428,800 bytes) uncompressed, the protocol limit per document. Search engines reject the whole file, not just the excess; this crawl read up to the limit and kept the URLs it had read, so those were crawled and judged. The row gives the document, the bytes read and the URLs kept, and entries past that point were not read.",
+    howToFix:
+      "Split the sitemap into several documents under 50 MB uncompressed and 50,000 URLs each, and list them in a sitemap index.",
   },
   "sitemap.redirected": {
     title: "Sitemaps: Sitemap URLs that redirect",
@@ -910,14 +917,21 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
   "sitemap.structure": {
     title: "Sitemaps: Sitemap structure",
     explanation:
-      "How sitemap entries are distributed across sitemap documents: how many documents contributed at least one unique entry, total entries, documents dropped for size, documents over the 50,000-entry limit, whether the crawl's entry cap stopped collection (every count is then a floor and the 50,000 check may miss), and the largest 50 documents with their entry counts. An entry in several documents is counted once.",
+      "How sitemap entries are distributed across sitemap documents: how many documents contributed at least one unique entry, total entries, documents dropped for size, documents over the 50,000-entry limit, whether the crawl's entry cap stopped collection (every count is then a floor and the 50,000 check may miss), whether the counts are exact, the sitemap walk's own caps (memberships, hreflang alternates) and how many over-long addresses were not stored, and the largest 50 documents with their entry counts. When the counts are exact, an entry in several documents counts in each document; on a crawl made before that was recorded it is counted once, under the first.",
     howToFix:
       "Split sitemaps by content type so stale sections can be seen and submitted separately. Split any document over 50,000 entries; entries past the limit are not read.",
+  },
+  "sitemap.url-in-multiple": {
+    title: "Sitemaps: URL listed in more than one sitemap",
+    explanation:
+      "URLs that appear in two or more sitemap documents of the site. The URL is crawled once and judged once, so this is redundancy rather than an error, but it often means overlapping generators or a section listed both in its own sitemap and in a catch-all one. The row gives the URL, up to 10 of the documents and the exact number of documents; a note says when the crawl's membership cap was reached and later listings were not recorded.",
+    howToFix:
+      "List each URL in one sitemap only. Remove the overlap from the catch-all sitemap, or make the generators agree on which document owns each section.",
   },
   "sitemap.url-too-long": {
     title: "Sitemaps: URL over 2,048 characters",
     explanation:
-      "Sitemap entries whose URL is longer than 2,048 characters. Search engines may drop or truncate entries that long. The row gives the start of the URL and its length.",
+      "Sitemap entries whose URL is longer than 2,048 characters. Search engines may drop or truncate entries that long. The row gives the start of the URL and its length, and one summary row counts the addresses over 2,500 characters, which the crawl does not store.",
     howToFix:
       "Shorten the URL or remove the entry. A very long address is usually a filter or session parameter that should not be in the sitemap.",
   },

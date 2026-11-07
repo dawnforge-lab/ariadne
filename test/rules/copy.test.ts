@@ -77,6 +77,7 @@ import {
   UNCACHED_SAMPLE_RESOURCES,
 } from "../../src/rules/query/resources.js";
 import { INDEXED_URL_MAX } from "../../src/crawl/parse/url-utils.js";
+import { SITEMAP_MAX_BYTES } from "../../src/crawl/sitemap-stream.js";
 
 /**
  * THE CLIENT-FACING COPY, PINNED.
@@ -942,11 +943,25 @@ describe("copy: sitemap entries (26a)", () => {
     );
   });
 
-  it("says the entry count is a lower bound", () => {
+  it("says the entry count is exact, per document, and what a pre-membership crawl gets", () => {
     const text = copy("sitemap.over-50k-urls").explanation;
-    expect(text).toMatch(/lower bound/);
-    expect(text).toMatch(/counted once/);
-    expect(text).toMatch(/entry cap/);
+    expect(text).not.toMatch(/lower bound/);
+    expect(text).toMatch(/exact/);
+    expect(text).toMatch(/counts once in each/);
+    expect(text).toMatch(/re-crawl/);
+  });
+
+  it("quotes the 26c limits from their constants", () => {
+    const mb = SITEMAP_MAX_BYTES / (1024 * 1024);
+    expect(copy("sitemap.oversized").title).toContain(`${mb} MB`);
+    expect(copy("sitemap.oversized").explanation).toContain(
+      `${mb} MB (${SITEMAP_MAX_BYTES.toLocaleString("en-US")} bytes)`,
+    );
+    expect(copy("sitemap.oversized").explanation).toMatch(/reject the whole file/);
+    expect(copy("sitemap.url-too-long").explanation).toContain(
+      `${INDEXED_URL_MAX.toLocaleString("en-US")} characters`,
+    );
+    expect(copy("sitemap.url-in-multiple").explanation).toContain("10 of the documents");
   });
 
   it("names the cross-submission exception the cross-host rule honours", () => {
@@ -1890,6 +1905,7 @@ describe("copy rubric: a threshold belongs in the title", () => {
     "links.high-outlinks": HIGH_INTERNAL_OUTLINKS.toLocaleString("en-US"),
     "sitemap.url-too-long": SITEMAP_LOC_MAX.toLocaleString("en-US"),
     "sitemap.over-50k-urls": SITEMAP_URL_CAP.toLocaleString("en-US"),
+    "sitemap.oversized": String(SITEMAP_MAX_BYTES / (1024 * 1024)),
     "title.pixel-too-long": String(TITLE_PX_MAX),
     "title.pixel-too-short": String(TITLE_PX_MIN),
     "meta-description.pixel-too-long": String(META_PX_MAX),

@@ -141,7 +141,7 @@ describe("buildRegistry", () => {
     expect(ids).toContain("html.head-closed-early-harmless");
     // Phase 26c Task 2: references too long to index.
     expect(ids).toContain("url.reference-too-long");
-    expect(ids.length).toBe(184);
+    expect(ids.length).toBe(186);
   });
 
   it("registers every kind the runner drives", () => {

@@ -796,6 +796,21 @@ const KINDS = ["page", "query", "metric"] as const satisfies readonly AnyRule["k
 //     `discovery_jsonb.sitemapFacts` is written on every crawl. The marker
 //     `extraction.not-recorded` also fires when it is absent, with the new
 //     evidence key `sitemapFactsRecorded` (ruling R1). 184 rules.
+//  9. (T9) Sitemap rules on the recorded facts. Two query rules in
+//     `query/sitemap-entries.ts`, both CHECK-08: `sitemap.oversized` (warning,
+//     one finding per `sitemapFacts.oversizedDocs` entry, evidence
+//     `{sitemapUrl, bytesRead, urlsKept, max}`) and `sitemap.url-in-multiple`
+//     (info, a listing of URLs in more than one `sitemap_memberships` source,
+//     `{url, sitemaps (10), count}`). `sitemap.over-50k-urls` is now exact (it
+//     counts memberships per document, a URL in two documents counts in each)
+//     and, with the two new rules, refuses a crawl without `sitemapFacts` (it
+//     returns nothing; the marker speaks). `sitemap.url-too-long` adds one site
+//     finding `{skipped, max: INDEXED_URL_MAX}` for the over-long locs never
+//     stored. The `sitemap.structure` site row gains `docCountsExact`,
+//     `membershipLimited`, `hreflangLimited` and `overlongLocsSkipped`; its
+//     `sitemap_doc` rows count memberships when the crawl recorded them and
+//     `sitemap_urls` otherwise (Deviation 7; the three cap fields are null on
+//     an older crawl). 186 rules.
 export const RULESET_VERSION = "0.22.0";
 
 /**

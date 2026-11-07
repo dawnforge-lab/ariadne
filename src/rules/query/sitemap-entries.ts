@@ -21,12 +21,18 @@
  * so an over-long entry and a cross-host entry are stored as published. That is
  * what makes these rules able to fire at all (hard rule 1).
  *
- * ## `sitemap.over-50k-urls` is a lower bound
+ * ## `sitemap.over-50k-urls` is exact (Phase 26c)
  *
  * `sitemap_urls` is keyed on (crawl, url), so a URL listed in two documents is
- * stored once and counted once. A document can therefore be under-counted and
- * the rule can miss one, but it never fires on a document that is under the
- * limit. Phase 26c's membership table makes the count exact. The copy says so.
+ * stored once, under the first. `sitemap_memberships` holds one row per URL per
+ * document, so the count per document is exact. The rule, and the two Phase 26c
+ * rules beside it (`sitemap.oversized`, `sitemap.url-in-multiple`), read facts
+ * discovery records from 26c on and REFUSE a crawl without
+ * `discovery.sitemapFacts` (they return no findings; the marker
+ * `extraction.not-recorded` says why).
+ *
+ * Every count is of the TABLE. `sitemapFacts.memberships` counts memberships
+ * offered to the sink and can exceed the stored rows.
  *
  * ## `sitemap.lastmod-invalid`
  *
@@ -65,6 +71,8 @@
  */
 import { sql, type SQL } from "drizzle-orm";
 
+import { INDEXED_URL_MAX } from "../../crawl/parse/url-utils.js";
+import { SITEMAP_MAX_BYTES } from "../../crawl/sitemap-stream.js";
 import type { Db } from "../../db/client.js";
 import { queryFinding, type RuleIdentity } from "../helpers.js";
 import { copyFor } from "../registry/copy/index.js";
@@ -83,13 +91,19 @@ import {
   noteTruncation,
   readCrawlEvidence,
 } from "./crawl-evidence.js";
+import { readSitemapFacts } from "./page-facts.js";
 
 const CATEGORY = "sitemap";
 
 /** Characters of a `<loc>` quoted in evidence. The full length is its own key. */
 const LOC_EXCERPT = 200;
 
+/** Documents named on a `sitemap.url-in-multiple` finding; `count` is exact. */
+const IN_MULTIPLE_LISTED = 10;
+
 const OVER_50K: RuleIdentity = { id: "sitemap.over-50k-urls", severity: "warning" };
+const OVERSIZED: RuleIdentity = { id: "sitemap.oversized", severity: "warning" };
+const IN_MULTIPLE: RuleIdentity = { id: "sitemap.url-in-multiple", severity: "info" };
 const TOO_LONG: RuleIdentity = { id: "sitemap.url-too-long", severity: "info" };
 const CROSS_HOST: RuleIdentity = { id: "sitemap.cross-host-loc", severity: "warning" };
 const LASTMOD: RuleIdentity = { id: "sitemap.lastmod-invalid", severity: "info" };
@@ -209,6 +223,7 @@ export const sitemapEntryRules: QueryRule[] = [
     rulesetVersion: RULESET_VERSION,
     run: async (db, crawlId, caps): Promise<Finding[]> => {
       await readCrawlEvidence(db, crawlId, OVER_50K.id);
+      if ((await readSitemapFacts(db, crawlId, OVER_50K.id)) === null) return [];
       const result = await db.execute<{
         sitemap_source: string;
         entries: number;
@@ -218,7 +233,7 @@ export const sitemapEntryRules: QueryRule[] = [
                count(*) over ()::int as total_matches
         from (
           select sitemap_source, count(*) as entries
-          from sitemap_urls
+          from sitemap_memberships
           where crawl_id = ${crawlId}
           group by sitemap_source
           having count(*) > ${SITEMAP_URL_CAP}
@@ -237,6 +252,9 @@ export const sitemapEntryRules: QueryRule[] = [
     },
   }),
 
+  // A `<loc>` over `INDEXED_URL_MAX` is stored nowhere (it would not fit an
+  // index entry), so discovery counts it in `sitemapFacts.overlongLocsSkipped`.
+  // That count is one more site finding beside the stored 2,049-2,500 ones.
   defineRule<QueryRule>({
     kind: "query",
     id: TOO_LONG.id,
@@ -247,11 +265,13 @@ export const sitemapEntryRules: QueryRule[] = [
       { key: "sitemap", label: "Sitemap" },
       { key: "loc", label: "Loc" },
       { key: "length", label: "Length" },
+      { key: "skipped", label: "Locs Not Stored", optional: true },
+      { key: "max", label: "Storage Limit", optional: true },
     ],
     ...copyFor(TOO_LONG.id),
     rulesetVersion: RULESET_VERSION,
-    run: (db, crawlId, caps) =>
-      entryFindings(
+    run: async (db, crawlId, caps): Promise<Finding[]> => {
+      const findings = await entryFindings(
         TOO_LONG,
         db,
         crawlId,
@@ -263,7 +283,118 @@ export const sitemapEntryRules: QueryRule[] = [
           length: row.url.length,
         }),
         capsOr(caps),
-      ),
+      );
+      const facts = await readSitemapFacts(db, crawlId, TOO_LONG.id);
+      if (facts === null || facts.overlongLocsSkipped === 0) return findings;
+      // After the truncation note, which rides on the last listed entry.
+      return [
+        ...findings,
+        queryFinding(TOO_LONG, {
+          pageId: null,
+          pageUrl: null,
+          evidence: { skipped: facts.overlongLocsSkipped, max: INDEXED_URL_MAX },
+          dedupeKey: "overlong-locs-skipped",
+        }),
+      ];
+    },
+  }),
+
+  defineRule<QueryRule>({
+    kind: "query",
+    id: OVERSIZED.id,
+    checkIds: ["CHECK-08"],
+    category: CATEGORY,
+    severity: OVERSIZED.severity,
+    columns: [
+      { key: "sitemapUrl", label: "Sitemap" },
+      { key: "bytesRead", label: "Bytes Read" },
+      { key: "urlsKept", label: "URLs Kept" },
+      { key: "max", label: "Size Limit (Bytes)" },
+    ],
+    ...copyFor(OVERSIZED.id),
+    rulesetVersion: RULESET_VERSION,
+    run: async (db, crawlId): Promise<Finding[]> => {
+      await readCrawlEvidence(db, crawlId, OVERSIZED.id);
+      const facts = await readSitemapFacts(db, crawlId, OVERSIZED.id);
+      if (facts === null) return [];
+      return facts.oversizedDocs.map((doc) =>
+        queryFinding(OVERSIZED, {
+          pageId: null,
+          pageUrl: null,
+          evidence: {
+            sitemapUrl: doc.url,
+            bytesRead: doc.bytesRead,
+            urlsKept: doc.urlsKept,
+            max: SITEMAP_MAX_BYTES,
+          },
+          dedupeKey: doc.url,
+        }),
+      );
+    },
+  }),
+
+  // A URL listed in more than one sitemap document. It is crawled once (one
+  // `sitemap_urls` row, first source wins) and judged once; the redundancy is
+  // what is reported. Grouped on the frontier key, so two spellings of one URL
+  // (a fragment) in different documents are one URL; the distinct count is of
+  // documents, so a repeat within one document is not a second listing.
+  defineRule<QueryRule>({
+    kind: "query",
+    id: IN_MULTIPLE.id,
+    checkIds: ["CHECK-08"],
+    category: CATEGORY,
+    severity: IN_MULTIPLE.severity,
+    columns: [
+      { key: "url", label: "URL" },
+      { key: "sitemaps", label: "Sitemaps" },
+      { key: "count", label: "Sitemap Count" },
+      { key: "membershipLimited", label: "Membership Cap Reached", optional: true },
+    ],
+    ...copyFor(IN_MULTIPLE.id),
+    rulesetVersion: RULESET_VERSION,
+    run: async (db, crawlId, caps): Promise<Finding[]> => {
+      await readCrawlEvidence(db, crawlId, IN_MULTIPLE.id);
+      const facts = await readSitemapFacts(db, crawlId, IN_MULTIPLE.id);
+      if (facts === null) return [];
+      const result = await db.execute<{
+        url: string;
+        sitemaps: string[];
+        sitemap_count: number;
+        page_id: string | null;
+        page_url: string | null;
+        total_matches: number;
+      }>(sql`
+        with multi as (
+          select m.url_normalised, min(m.url) as url,
+                 (array_agg(distinct m.sitemap_source order by m.sitemap_source))
+                   [1:${sql.raw(String(IN_MULTIPLE_LISTED))}] as sitemaps,
+                 count(distinct m.sitemap_source)::int as sitemap_count
+          from sitemap_memberships m
+          where m.crawl_id = ${crawlId}
+          group by m.url_normalised
+          having count(distinct m.sitemap_source) > 1
+        )
+        select x.url, x.sitemaps, x.sitemap_count, p.id as page_id, p.url as page_url,
+               count(*) over ()::int as total_matches
+        from multi x
+        left join pages p on p.crawl_id = ${crawlId} and p.url = x.url_normalised
+        order by x.url
+        ${limitTo(capsOr(caps).listing)}`);
+      const findings = result.rows.map((row) =>
+        queryFinding(IN_MULTIPLE, {
+          pageId: row.page_id,
+          pageUrl: row.page_url ?? row.url,
+          evidence: {
+            url: row.url,
+            sitemaps: row.sitemaps,
+            count: row.sitemap_count,
+            ...(facts.membershipLimited ? { membershipLimited: true } : {}),
+          },
+          dedupeKey: row.url,
+        }),
+      );
+      return noteTruncation(findings, result.rows[0]?.total_matches ?? 0);
+    },
   }),
 
   // The scheme AND host (with any port) of the `<loc>` against the document's

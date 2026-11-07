@@ -20,6 +20,7 @@
  */
 import { sql } from "drizzle-orm";
 
+import type { DiscoverySitemapFacts } from "../../crawl/discovery.js";
 import type { Db } from "../../db/client.js";
 import { extractionCoverage, FETCHED_OK, queryFinding, type RuleIdentity } from "../helpers.js";
 import { copyFor } from "../registry/copy/index.js";
@@ -83,6 +84,65 @@ export async function sitemapFactsRecorded(db: Db, crawlId: string): Promise<boo
   const row = rows.rows[0];
   if (row === undefined) throw new Error(`sitemapFactsRecorded: no such crawl '${crawlId}'`);
   return row.recorded;
+}
+
+/**
+ * The crawl's `discovery_jsonb.sitemapFacts`, checked field by field, or `null`
+ * for a crawl that predates it (`sitemapFactsRecorded` is `false`). A key that
+ * is present and malformed is a row this engine did not write and throws,
+ * naming the crawl (hard rule 7); it is never read as zeros.
+ */
+export async function readSitemapFacts(
+  db: Db,
+  crawlId: string,
+  ruleId: string,
+): Promise<DiscoverySitemapFacts | null> {
+  const rows = await db.execute<{ facts: unknown }>(sql`
+    select discovery_jsonb -> 'sitemapFacts' as facts from crawls where id = ${crawlId}`);
+  const row = rows.rows[0];
+  if (row === undefined) throw new Error(`${ruleId}: no such crawl '${crawlId}'`);
+  const facts = row.facts;
+  if (facts === null || facts === undefined) return null;
+  const bad = (why: string): never => {
+    throw new Error(`${ruleId}: crawl '${crawlId}' discovery sitemapFacts ${why}; re-crawl the site`);
+  };
+  if (typeof facts !== "object" || Array.isArray(facts)) return bad("is not an object");
+  const f = facts as Record<string, unknown>;
+  const count = (key: string): number => {
+    const v = f[key];
+    if (typeof v !== "number" || !Number.isInteger(v) || v < 0) {
+      return bad(`has a non-count ${key}`);
+    }
+    return v;
+  };
+  const flag = (key: string): boolean => {
+    const v = f[key];
+    if (typeof v !== "boolean") return bad(`has a non-boolean ${key}`);
+    return v;
+  };
+  const docs = f["oversizedDocs"];
+  if (!Array.isArray(docs)) return bad("has no oversizedDocs array");
+  const oversizedDocs = docs.map((d: unknown) => {
+    const o = d as Record<string, unknown> | null;
+    if (
+      o === null ||
+      typeof o !== "object" ||
+      typeof o["url"] !== "string" ||
+      typeof o["bytesRead"] !== "number" ||
+      typeof o["urlsKept"] !== "number"
+    ) {
+      return bad("has a malformed oversizedDocs entry");
+    }
+    return { url: o["url"], bytesRead: o["bytesRead"], urlsKept: o["urlsKept"] };
+  });
+  return {
+    memberships: count("memberships"),
+    membershipLimited: flag("membershipLimited"),
+    hreflangRows: count("hreflangRows"),
+    hreflangLimited: flag("hreflangLimited"),
+    overlongLocsSkipped: count("overlongLocsSkipped"),
+    oversizedDocs,
+  };
 }
 
 async function notRecordedFindings(
