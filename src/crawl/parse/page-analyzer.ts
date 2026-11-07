@@ -405,7 +405,12 @@
  *    `hashOnly` (trimmed href exactly `#` or `#!`; `#section` is in-page
  *    navigation); `unsafeBlank` (`target=_blank`, an href that is not
  *    `javascript:`, and neither `noopener` nor `noreferrer` among the `rel`
- *    tokens). The first three are exclusive; `unsafeBlank` is orthogonal.
+ *    tokens, and an href that resolves (`normalizeUrl` against the page) to
+ *    an origin other than the page's, by exact `URL.origin` compare, so a
+ *    subdomain or a `www.` variant counts while a same-origin link and an
+ *    href that does not resolve do not: owner call O2, 2026-11-07, since
+ *    reverse tabnabbing needs another origin). The first three are exclusive;
+ *    `unsafeBlank` is orthogonal.
  *  - ANCHOR TEXT NOW INCLUDES IMAGE ALT: an `<img>` inside an open anchor
  *    pushes its trimmed, non-empty `alt` into the anchor's text, as a text
  *    node would, with a space either side so it is a word of its own
@@ -1318,6 +1323,9 @@ function ldJsonType(node: unknown): string {
  * only the accumulated text and the extracted fields in memory.
  */
 export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
+  // The page's own origin, for `unsafeBlank`'s cross-origin test (O2). An
+  // invalid page URL throws here, loudly: every caller hands a fetched URL.
+  const pageOrigin = new URL(pageUrl).origin;
   // Upstream accumulated the title into a `string | null`; the parts array
   // plus a sawTitle flag says the same thing without the += churn, and keeps
   // "present but empty" distinguishable from "absent".
@@ -1451,10 +1459,20 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
     else if (trimmed === "#" || trimmed === "#!") anchorCounts.hashOnly += 1;
     if (attribs["target"]?.trim().toLowerCase() === "_blank" && !isJavascript) {
       const rel = (attribs["rel"] ?? "").trim().toLowerCase().split(/\s+/);
-      if (!rel.includes("noopener") && !rel.includes("noreferrer")) {
+      if (!rel.includes("noopener") && !rel.includes("noreferrer") && isCrossOrigin(href)) {
         anchorCounts.unsafeBlank += 1;
       }
     }
+  };
+  /**
+   * Owner call O2 (2026-11-07): whether `href` resolves to an origin other than
+   * the page's. Exact `URL.origin` comparison, NOT `isSameOrigin`: a subdomain
+   * and a `www.` variant are other origins to the browser, and reverse
+   * tabnabbing is a browser question. An href `normalizeUrl` refuses is false.
+   */
+  const isCrossOrigin = (href: string): boolean => {
+    const resolved = normalizeUrl(href, pageUrl);
+    return resolved !== null && new URL(resolved).origin !== pageOrigin;
   };
 
   // The page's resource references, keyed by resolved URL so one page says one

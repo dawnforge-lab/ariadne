@@ -1308,11 +1308,11 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
       "Set each href to the intended URL, or remove the href and use a button element if the element is not meant to navigate.",
   },
   "links.unsafe-target-blank": {
-    title: "Links: New-tab links without noopener",
+    title: "Links: New-tab links to other sites without noopener",
     explanation:
-      "Pages with links that open in a new tab through target=_blank without rel=noopener or noreferrer. The opened page can reach the opener window, and the link leaks the referrer. Modern browsers reduce the risk, so this is a hygiene issue.",
+      "Pages with links to another origin (another site, a subdomain or the www variant of this host) that open in a new tab through target=_blank without rel=noopener or noreferrer; links to the page's own origin are not counted. The opened page can reach the opener window, and the link leaks the referrer. Modern browsers reduce the risk, so this is a hygiene issue.",
     howToFix:
-      "Add rel=\"noopener\" (or rel=\"noopener noreferrer\") to every link that uses target=\"_blank\".",
+      "Add rel=\"noopener\" (or rel=\"noopener noreferrer\") to every link to another site that uses target=\"_blank\".",
   },
   "links.no-anchor-text": {
     title: "Links: Internal links with no anchor text",

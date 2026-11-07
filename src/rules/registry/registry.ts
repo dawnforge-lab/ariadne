@@ -676,6 +676,12 @@ const KINDS = ["page", "query", "metric"] as const satisfies readonly AnyRule["k
 //     as the `social` set reads it, so `social.og-duplicate` groups
 //     `<meta name="og:title">` pages and a `name=description
 //     property=og:description` element fills both columns.
+// 15. Owner calls 2026-11-07 (no bump; 0.21.0 is still unreleased, ruling R20):
+//     Owner calls 2026-11-07: `anchorCounts.unsafeBlank`, and so
+//     `links.unsafe-target-blank`, counts only a link whose href resolves to an
+//     origin other than the page's (exact `URL.origin`, so a subdomain or a
+//     `www.` variant counts); a same-origin new-tab link, and an href that does
+//     not resolve, is not counted (O2).
 export const RULESET_VERSION = "0.21.0";
 
 /**

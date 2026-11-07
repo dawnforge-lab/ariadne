@@ -114,7 +114,8 @@
  *
  * Phase 26b (P26b-T3) put the body facts on the parity surface, each by the
  * selector that defines it: `anchorCounts` over `$("a")` (every anchor element,
- * href or not), `relNextCount` / `relPrevCount` as `link[rel~=next|prev]`
+ * href or not; owner call O2 moved `unsafeBlank` to cross-origin hrefs only,
+ * by exact `URL.origin`, on both sides), `relNextCount` / `relPrevCount` as `link[rel~=next|prev]`
  * counts, `insecureRefs` by a document-order walk over the closed list of
  * frame, media and form sites (a `<source>` only under a `<video>`/`<audio>`),
  * and the three image alt facts in the same `img` walk as the alt counter. The
@@ -567,11 +568,16 @@ function analyzeHtmlWithCheerio(html: string, pageUrl: string): UpstreamShape {
     else if (isJavascript) anchorCounts.javascript += 1;
     else if (["#", "#!"].includes(href.trim())) anchorCounts.hashOnly += 1;
     const rel = relTokens($(el).attr("rel"));
+    // Owner call O2: only an href resolving to ANOTHER origin (exact
+    // `URL.origin`) can tabnab its opener.
+    const resolved = normalizeUrl(href, pageUrl);
     if (
       fold($(el).attr("target")) === "_blank" &&
       !isJavascript &&
       !rel.includes("noopener") &&
-      !rel.includes("noreferrer")
+      !rel.includes("noreferrer") &&
+      resolved !== null &&
+      new URL(resolved).origin !== new URL(pageUrl).origin
     ) {
       anchorCounts.unsafeBlank += 1;
     }
@@ -1514,6 +1520,8 @@ describe("the Phase 26b body facts, against the DOM", () => {
       <a href="#section">s</a><a href="#">h</a><a href=" #! ">b</a>
       <a href=" JavaScript:void(0)">j</a><a href="">e</a><a href="   ">e2</a>
       <a target="_BLANK" rel="noopener" href="/x">x</a><a target="_blank" href="/y">y</a>
+      <a target="_blank" href="https://other.test/y">oy</a><a target="_blank" href="https://www.example.com/y">wy</a>
+      <a target="_blank" href="https://shop.example.com/y">sy</a><a target="_blank" href="https://[bad/y">by</a>
       <a target="_blank" rel="NoReferrer nofollow" href="/z">z</a>
       <a target="_blank" href="javascript:void(0)">jb</a><a target="_blank">nb</a>
       <noscript><a href="#">ns</a></noscript>

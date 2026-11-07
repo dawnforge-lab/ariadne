@@ -1553,13 +1553,44 @@ describe("anchorCounts: anchors that are not links (review focus 4)", () => {
   it("counts target=_blank without noopener/noreferrer as unsafe, never on a javascript: or missing href", () => {
     const a = bodyPage(
       `<a target="_blank" href="https://o.test/">a</a>` +
-        `<a target="_blank" rel="nofollow NoReferrer" href="/b">b</a>` +
-        `<a target="_blank" rel="nofollow" href="/c">c</a>` +
+        `<a target="_blank" rel="nofollow NoReferrer" href="https://o.test/b">b</a>` +
+        `<a target="_blank" rel="nofollow" href="https://o.test/c">c</a>` +
         `<a target="_blank" href="javascript:void(0)">d</a>` +
         `<a target="_blank">e</a>` +
-        `<a target="_self" href="/f">f</a>`,
+        `<a target="_self" href="https://o.test/f">f</a>`,
     );
     expect(a.anchorCounts).toEqual({ ...NO_ANCHORS, javascript: 1, unsafeBlank: 2 });
+  });
+
+  // Owner call O2 (2026-11-07): reverse tabnabbing needs the opened page on
+  // another origin, so only a cross-origin target counts (exact `origin`).
+  it("does not count a same-origin target=_blank without noopener (O2)", () => {
+    const a = bodyPage(
+      `<a target="_blank" href="/same">a</a>` +
+        `<a target="_blank" href="https://ex.com/other">b</a>` +
+        `<a target="_blank" href="?q=1">c</a>`,
+    );
+    expect(a.anchorCounts).toEqual(NO_ANCHORS);
+  });
+
+  it("counts a cross-origin target=_blank, a subdomain and a www. variant included (O2)", () => {
+    const a = bodyPage(
+      `<a target="_blank" href="https://other.test/x">a</a>` +
+        `<a target="_blank" href="https://returns.ex.com/x">b</a>` +
+        `<a target="_blank" href="https://www.ex.com/x">c</a>` +
+        `<a target="_blank" href="http://ex.com/x">d</a>` +
+        `<a target="_blank" href="https://ex.com:8443/x">e</a>`,
+    );
+    expect(a.anchorCounts).toEqual({ ...NO_ANCHORS, unsafeBlank: 5 });
+  });
+
+  it("does not count a cross-origin target=_blank with rel=noopener, nor an href that does not resolve (O2)", () => {
+    const a = bodyPage(
+      `<a target="_blank" rel="noopener" href="https://other.test/x">a</a>` +
+        `<a target="_blank" href="https://[bad/x">b</a>` +
+        `<a target="_blank" href="mailto:a@other.test">c</a>`,
+    );
+    expect(a.anchorCounts).toEqual(NO_ANCHORS);
   });
 
   it("ignores anchors inside <noscript>", () => {

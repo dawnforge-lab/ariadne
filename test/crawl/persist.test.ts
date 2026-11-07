@@ -863,7 +863,7 @@ describe("PageWriter", () => {
       `<html><head><link rel="next" href="/2"><link rel="next" href="/3"><link rel="prev" href="/0">` +
         `</head><body><a href="/home"><img src="/logo.png" alt="Home"></a>` +
         `<a href="#">top</a><a href="javascript:void(0)">js</a><a href="">e</a>` +
-        `<a onclick="go()">x</a><a target="_blank" href="/out">out</a>` +
+        `<a onclick="go()">x</a><a target="_blank" href="https://elsewhere.test/out">out</a>` +
         `<iframe src="http://x.test/f"></iframe><form action="http://x.test/post"></form>` +
         `<form action="/same-scheme"></form>` +
         `<img src="/a.png" alt=""><img src="/b.png" alt="${"b".repeat(101)}"><img src="/c.png">` +

@@ -2056,8 +2056,11 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
   Three more rules answer the rest of the check (all info):
   - `links.empty-href` (info) — a page with `<a href="">`, which points back at the
     page itself.
-  - `links.unsafe-target-blank` (info) — a page with `target="_blank"` links that carry
-    neither `noopener` nor `noreferrer` in `rel`.
+  - `links.unsafe-target-blank` (info) — a page with `target="_blank"` links to
+    another origin that carry neither `noopener` nor `noreferrer` in `rel`. Only a
+    cross-origin target counts (an exact origin compare, so a subdomain or a `www.`
+    variant is another origin): reverse tabnabbing needs the opened page to be on
+    another origin, and a same-origin new-tab link is not reported.
   - `links.no-anchor-text` (info) — a page with an INTERNAL link whose stored anchor is
     empty after whitespace is removed. The stored anchor includes the alt text of an
     image inside the link, so an image link with alt text is not textless and one

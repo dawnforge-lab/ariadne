@@ -4,7 +4,8 @@
  * safe to open in a new tab. All three read `pages.anchorCounts`, counted over
  * every `<a>` start tag at extraction (including links the link table never
  * stores). A v1 row has a null `anchorCounts` and is silent; the
- * `extraction.not-recorded` marker speaks for it.
+ * `extraction.not-recorded` marker speaks for it. `unsafeBlank` counts only
+ * links to ANOTHER origin (owner call O2, 2026-11-07; see the analyzer header).
  */
 import { finding, isAuditable, pageRule } from "../helpers.js";
 import type { PageRule } from "../registry/types.js";

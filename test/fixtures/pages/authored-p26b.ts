@@ -779,7 +779,11 @@ const targetBlank = linkPage(
     h1: "Opening a new tab the careless way",
     lede: "The link below asks the browser for a new tab and gives the opened page no reason to be kept at arm's length.",
     topic: "new-tab",
-    linksHtml: '<a href="/p26b/og-incomplete" target="_blank">Read the sharing example</a>',
+    // Owner call O2: only the link to another origin counts; the same-origin
+    // new-tab link beside it is not reported.
+    linksHtml:
+      '<a href="/p26b/og-incomplete" target="_blank">Read the sharing example</a> and ' +
+      '<a href="https://example.com/sharing-guide" target="_blank">the sharing guide</a>',
   },
 );
 
