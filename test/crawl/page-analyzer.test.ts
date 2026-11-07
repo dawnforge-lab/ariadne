@@ -1,7 +1,7 @@
 import * as cheerio from "cheerio";
 import { describe, expect, it } from "vitest";
 import { analyzePage } from "../../src/crawl/parse/page-analyzer.js";
-import { HEAD_SNIPPET_MAX } from "../../src/crawl/parse/page-facts.js";
+import { HEAD_LOST_MAX, HEAD_SNIPPET_MAX } from "../../src/crawl/parse/page-facts.js";
 
 const HTML = `<!doctype html><html><head>
 <title>Widget Shop</title>
@@ -782,6 +782,7 @@ describe("html structure: the head closed early (deviation 6, Review Focus 3)", 
       tag: "iframe",
       inNoscript: true,
       snippet: `<iframe src="https://gtm/x">`,
+      lost: [],
     });
   });
 
@@ -814,13 +815,23 @@ describe("html structure: the head closed early (deviation 6, Review Focus 3)", 
 
   it("a non-head start tag followed by a head-only element", () => {
     const a = headOf(`<head><div>x</div><title>t</title>`);
-    expect(a.htmlStructure.closedEarly).toEqual({ tag: "div", inNoscript: false, snippet: "<div>" });
+    expect(a.htmlStructure.closedEarly).toEqual({
+      tag: "div",
+      inNoscript: false,
+      snippet: "<div>",
+      lost: ["title"],
+    });
     expect(a.headClosedBy).toBe("div");
   });
 
   it("text in the head is recorded as #text with the trimmed text as its snippet", () => {
     const a = headOf(`<head>hello</head>`);
-    expect(a.htmlStructure.closedEarly).toEqual({ tag: "#text", inNoscript: false, snippet: "hello" });
+    expect(a.htmlStructure.closedEarly).toEqual({
+      tag: "#text",
+      inNoscript: false,
+      snippet: "hello",
+      lost: [],
+    });
     expect(a.headClosedBy).toBe("#text");
   });
 
@@ -883,6 +894,7 @@ describe("html structure: the head closed early (deviation 6, Review Focus 3)", 
       tag: "div",
       inNoscript: false,
       snippet: "<div>",
+      lost: ["meta"],
     });
     expect(structureOf(`${page}<link rel="canonical" href="/c">`).closedEarly).toMatchObject({
       tag: "div",
@@ -920,7 +932,12 @@ describe("html structure: the head closed early (deviation 6, Review Focus 3)", 
 
   it("the FIRST candidate wins: a head-noscript child before a non-head tag", () => {
     const s = structureOf(`<head><noscript><img src="/n.gif"></noscript><div>x</div></head>`);
-    expect(s.closedEarly).toEqual({ tag: "img", inNoscript: true, snippet: `<img src="/n.gif">` });
+    expect(s.closedEarly).toEqual({
+      tag: "img",
+      inNoscript: true,
+      snippet: `<img src="/n.gif">`,
+      lost: [],
+    });
   });
 
   it("a stray </p> in the head is ignored; a stray </br> is a candidate, read as <br>", () => {
@@ -929,6 +946,7 @@ describe("html structure: the head closed early (deviation 6, Review Focus 3)", 
       tag: "br",
       inNoscript: false,
       snippet: "</br>",
+      lost: [],
     });
   });
 
@@ -983,6 +1001,7 @@ describe("html structure: the head closed early (deviation 6, Review Focus 3)", 
       tag: "#text",
       inNoscript: false,
       snippet: `a${" ".repeat(HEAD_SNIPPET_MAX - 1)}`,
+      lost: [],
     });
     // Short text: both edges trimmed, the inner run kept.
     expect(structureOf(`<head> \t a  b \n</head>`).closedEarly?.snippet).toBe("a  b");
@@ -994,15 +1013,100 @@ describe("html structure: the head closed early (deviation 6, Review Focus 3)", 
       `<html><head>${div.repeat(100_000)}<title>t</title></head><body></body></html>`,
     );
     expect(s.closedEarly?.snippet.length).toBeLessThanOrEqual(HEAD_SNIPPET_MAX);
-    // No array anywhere in the fact: four scalars and one fixed-shape object.
+    // Four scalars and one fixed-shape object whose one array, `lost`, is
+    // capped at HEAD_LOST_MAX (owner call O3).
     expect(s).toEqual({
       htmlTags: 1,
       headTags: 1,
       bodyTags: 1,
       headBeforeBody: true,
-      closedEarly: { tag: "div", inNoscript: false, snippet: div.slice(0, HEAD_SNIPPET_MAX) },
+      closedEarly: {
+        tag: "div",
+        inNoscript: false,
+        snippet: div.slice(0, HEAD_SNIPPET_MAX),
+        lost: ["title"],
+      },
     });
     expect(JSON.stringify(s).length).toBeLessThan(400);
+  });
+});
+
+// Owner call O3 (2026-11-07): `closedEarly.lost`, the head tags after the
+// candidate that a parser closing the head there moves into the body.
+describe("html structure: what an early close loses (owner call O3)", () => {
+  const PIXEL =
+    `<noscript><img height="1" width="1" style="display:none" ` +
+    `src="https://www.facebook.com/tr?id=1&ev=PageView&noscript=1"></noscript>`;
+  const HEAD =
+    `<meta charset="utf-8"><title>t</title><meta name="description" content="d">` +
+    `<link rel="canonical" href="/c">`;
+
+  it("the Meta pixel last in the head loses nothing: </head> and <body> are evidence, never lost", () => {
+    const s = structureOf(`<html><head>${HEAD}${PIXEL}</head><body><p>x</p></body></html>`);
+    expect(s.closedEarly).toMatchObject({ tag: "img", inNoscript: true, lost: [] });
+  });
+
+  it("a pixel followed by a description and a canonical loses both, in document order", () => {
+    const s = structureOf(
+      `<html><head><title>t</title>${PIXEL}<meta name="description" content="d">` +
+        `<link rel="canonical" href="/c"></head><body><p>x</p></body></html>`,
+    );
+    expect(s.closedEarly?.lost).toEqual(["meta", "link rel=canonical"]);
+  });
+
+  it("a body-ok link, a microdata meta and an svg title after the candidate are not lost", () => {
+    const s = structureOf(
+      `<html><head><title>t</title>${PIXEL}<link rel="stylesheet" href="/a.css">` +
+        `<link rel="PRELOAD" href="/f.woff2"><link href="/no-rel"><meta itemprop="n" content="v">` +
+        `<style>p{}</style><svg><title>i</title></svg></head><body><p>x</p></body></html>`,
+    );
+    expect(s.closedEarly).toMatchObject({ tag: "img", lost: [] });
+  });
+
+  it("records base, title, meta and each head-only link rel once, in first-seen order", () => {
+    const s = structureOf(
+      `<head><div>x</div><meta name="a" content="1"><title>t</title><meta name="b" content="2">` +
+        `<link rel="stylesheet ICON" href="/i"><link rel="canonical" href="/c">` +
+        `<link rel="alternate" hreflang="fr" href="/fr"><link rel="Canonical" href="/c2">` +
+        `<base href="/"><title>u</title></head><body></body>`,
+    );
+    expect(s.closedEarly?.lost).toEqual([
+      "meta",
+      "title",
+      "link rel=icon",
+      "link rel=canonical",
+      "link rel=alternate",
+      "base",
+    ]);
+  });
+
+  it("stops at the explicit <body>: a head tag after it is in the body whatever closed the head", () => {
+    const s = structureOf(
+      `<html><head><title>t</title>${PIXEL}<body><meta name="x" content="y">` +
+        `<link rel="canonical" href="/c"></body></html>`,
+    );
+    expect(s.closedEarly).toMatchObject({ tag: "img", lost: [] });
+    const t = structureOf(
+      `<html><head>${PIXEL}<meta name="robots" content="noindex"></head><body>` +
+        `<link rel="canonical" href="/c"></body></html>`,
+    );
+    expect(t.closedEarly?.lost).toEqual(["meta"]);
+  });
+
+  it("caps the list at HEAD_LOST_MAX", () => {
+    const links = Array.from({ length: HEAD_LOST_MAX + 3 }, (_, i) => `<link rel="r${i}" href="/${i}">`).join("");
+    const s = structureOf(`<head><div>x</div>${links}</head><body></body>`);
+    expect(s.closedEarly?.lost).toEqual(
+      Array.from({ length: HEAD_LOST_MAX }, (_, i) => `link rel=r${i}`),
+    );
+  });
+
+  it("a hostile rel token is made storable and cut at HEAD_SNIPPET_MAX", () => {
+    const token = "x".repeat(HEAD_SNIPPET_MAX + 50);
+    const s = structureOf(`<head><div>x</div><link rel="${token}" href="/"></head>`);
+    const [entry] = s.closedEarly?.lost ?? [];
+    expect(entry).toHaveLength(HEAD_SNIPPET_MAX);
+    expect(entry?.startsWith("link rel=xxx")).toBe(true);
   });
 });
 

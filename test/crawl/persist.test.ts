@@ -928,7 +928,12 @@ describe("PageWriter", () => {
       headTags: 1,
       bodyTags: 2,
       headBeforeBody: true,
-      closedEarly: { tag: "iframe", snippet: `<iframe src="https://gtm.test/x">`, inNoscript: true },
+      closedEarly: {
+        tag: "iframe",
+        snippet: `<iframe src="https://gtm.test/x">`,
+        inNoscript: true,
+        lost: [],
+      },
     });
   });
 
@@ -957,7 +962,12 @@ describe("PageWriter", () => {
     expect(row?.social?.og.title).toBe("Sh\u2400are");
     expect(row?.social?.x.title).toBe("X\u2400");
     expect(row?.robotsMeta).toBe("noindex\uFFFD");
-    expect(row?.htmlStructure?.closedEarly).toEqual({ tag: "img", snippet: prefix, inNoscript: false });
+    expect(row?.htmlStructure?.closedEarly).toEqual({
+      tag: "img",
+      snippet: prefix,
+      inNoscript: false,
+      lost: ["title"],
+    });
   });
 
   it("persists every page-derived string storably at the writer's boundary (ruling R10)", async () => {

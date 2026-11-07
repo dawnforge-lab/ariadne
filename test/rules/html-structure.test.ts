@@ -102,7 +102,12 @@ describe("html.head-closed-early (Review Focus 3 boundaries)", () => {
   it("is silent on a v1 row (null structure) and on every non-OK fetch", () => {
     expect(early.run(mkV1Page())).toHaveLength(0);
     expectSilentOnNonOkFetches([early], [
-      { htmlStructure: { ...OK, closedEarly: { tag: "div", snippet: "<div>", inNoscript: false } } },
+      {
+        htmlStructure: {
+          ...OK,
+          closedEarly: { tag: "div", snippet: "<div>", inNoscript: false, lost: ["title"] },
+        },
+      },
     ]);
   });
 });

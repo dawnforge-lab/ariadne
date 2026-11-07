@@ -180,7 +180,12 @@ describe("head.tags-outside-head", () => {
 });
 
 describe("the head rules name the closing element (26b)", () => {
-  const closedEarly = { tag: "div", snippet: '<div class="promo">', inNoscript: false };
+  const closedEarly = {
+    tag: "div",
+    snippet: '<div class="promo">',
+    inNoscript: false,
+    lost: ["title", "link rel=canonical"],
+  };
   const structure = {
     htmlTags: 1, headTags: 1, bodyTags: 1, headBeforeBody: true as boolean | null, closedEarly,
   };

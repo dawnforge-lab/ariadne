@@ -464,6 +464,14 @@
  *    allowed in a body. The head-noscript read is BESIDE the Phase 23 machine,
  *    not in it: a head noscript's children stay invisible to `headClosedBy`,
  *    `headMode` and every outside-head flag, exactly as before.
+ *  - `closedEarly.lost` (owner call O3, 2026-11-07): the head-only tags of the
+ *    evidence list above (`base`, a non-svg `title`, `meta` without
+ *    `itemprop`, `link rel=<first head-only token>`) met AFTER the candidate
+ *    and before the first explicit `<body>`: what a parser closing the head at
+ *    the candidate moves into the body. Document order, deduped, capped at
+ *    `HEAD_LOST_MAX`. `<body>` and `</head>` confirm but are never lost, so
+ *    a tracking pixel's `<noscript><img>` last in the head is an early close
+ *    with `lost: []`. The confirmation rule itself is unchanged.
  *
  * EVERY PHASE 26b STRING IS MADE STORABLE where it is capped, by the one shared
  * `storableCap` (src/crawl/storable-text.ts, also the render console's):
@@ -489,6 +497,7 @@ import {
   ALT_TEXT_LONG_CHARS,
   ARIA_LABEL_MAX,
   H2_TEXT_MAX,
+  HEAD_LOST_MAX,
   HEAD_SNIPPET_MAX,
   HTML_LANG_MAX,
   IMAGE_SAMPLE_MAX,
@@ -1694,8 +1703,14 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
   // The first closed-early candidate (deviation 6), and whether a later token
   // confirmed the head was meant to go on (narrowed by ruling R8). Read
   // together at the end.
-  let earlyCandidate: HtmlStructure["closedEarly"] = null;
+  let earlyCandidate: Omit<NonNullable<HtmlStructure["closedEarly"]>, "lost"> | null = null;
   let earlyConfirmed = false;
+  // Owner call O3: the head tags after the candidate that an early close moves
+  // into the body, deduped and capped at HEAD_LOST_MAX (O(1)), collected until
+  // the first explicit `<body>` (after it, a tag is in the body whatever closed
+  // the head). Read with the candidate at the end.
+  const earlyLost: string[] = [];
+  let earlyLostDone = false;
   // Open `<svg>` elements, so an svg `<title>` is not read as head evidence
   // (R8). Its own counter: `suppressDepth` also counts script/style/noscript.
   let structureSvgDepth = 0;
@@ -1708,6 +1723,9 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
     if (earlyCandidate !== null) return;
     earlyCandidate = { tag, snippet, inNoscript };
   };
+  /** The confirmed candidate with what it loses (O3), or null. Read once, at the end. */
+  const closedEarlyFact = (): HtmlStructure["closedEarly"] =>
+    earlyConfirmed && earlyCandidate !== null ? { ...earlyCandidate, lost: [...earlyLost] } : null;
   /**
    * The current start tag's source, made storable and cut at the cap. The
    * slice takes one unit past the cap so a cut through a surrogate pair is
@@ -1835,6 +1853,16 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
     if (earlyCandidate !== null && !earlyConfirmed && isHeadEvidence(name, attribs)) {
       earlyConfirmed = true;
     }
+    if (earlyCandidate !== null && !earlyLostDone) {
+      if (name === "body") {
+        earlyLostDone = true;
+      } else {
+        const lost = headOnlyTag(name, attribs);
+        if (lost !== null && earlyLost.length < HEAD_LOST_MAX && !earlyLost.includes(lost)) {
+          earlyLost.push(lost);
+        }
+      }
+    }
     if (name === "svg") structureSvgDepth += 1;
   };
   /**
@@ -1843,26 +1871,36 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
    * (a microdata `<meta itemprop>`, a stylesheet or preload `<link>`, a
    * `<style>`, an svg `<title>`) is not evidence.
    */
-  const isHeadEvidence = (name: string, attribs: Record<string, string>): boolean => {
+  const isHeadEvidence = (name: string, attribs: Record<string, string>): boolean =>
+    name === "body" || headOnlyTag(name, attribs) !== null;
+  /**
+   * The head-only start tags of ruling R8 (b), named as `closedEarly.lost`
+   * records them (owner call O3): `base`, `title` outside `<svg>`, `meta`
+   * without `itemprop`, and `link rel=<first token that is not body-ok>`. Null
+   * for everything a body may hold, `<body>` included: it is evidence (see
+   * `isHeadEvidence`) but never a lost tag. The token is page text, so it is
+   * made storable and the entry cut at `HEAD_SNIPPET_MAX`.
+   */
+  const headOnlyTag = (name: string, attribs: Record<string, string>): string | null => {
     switch (name) {
-      case "body":
       case "base":
-        return true;
+        return "base";
       case "title":
-        return structureSvgDepth === 0;
+        return structureSvgDepth === 0 ? "title" : null;
       case "meta":
-        return !("itemprop" in attribs);
+        return "itemprop" in attribs ? null : "meta";
       case "link": {
         // No `rel`, or a blank one, is body-ok.
         const rel = attribs["rel"];
-        if (rel === undefined) return false;
-        return rel
+        if (rel === undefined) return null;
+        const token = rel
           .toLowerCase()
           .split(/[\t\n\f\r ]+/)
-          .some((token) => token !== "" && !BODY_OK_LINK_RELS.has(token));
+          .find((t) => t !== "" && !BODY_OK_LINK_RELS.has(t));
+        return token === undefined ? null : storableCap(`link rel=${token}`, HEAD_SNIPPET_MAX);
       }
       default:
-        return false;
+        return null;
     }
   };
   /**
@@ -2641,7 +2679,7 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
       // A candidate nothing confirmed is a document that simply started its
       // body without `</head>` (deviation 6, evidence narrowed by ruling R8):
       // not an early close.
-      closedEarly: earlyConfirmed ? earlyCandidate : null,
+      closedEarly: closedEarlyFact(),
     },
     bodyText,
     h1s,

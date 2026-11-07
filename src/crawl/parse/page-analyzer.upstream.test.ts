@@ -222,6 +222,8 @@ const EXTENSION_FIELDS = [
   // whatever the markup said, so explicit start-tag counts and their order
   // leave no trace in it, and `closedEarly` is `headClosedBy`'s case again (the
   // tree records where nodes are, not what ended the head or what came after).
+  // Owner call O3's `closedEarly.lost` is the same case: which head tags came
+  // after the candidate in the TOKEN stream, which the normalised tree erases.
   // Covered by value, cheerio-free, in test/crawl/page-analyzer.test.ts.
   "htmlStructure",
 ] as const;

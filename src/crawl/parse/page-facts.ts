@@ -84,7 +84,24 @@ export type HtmlStructure = {
   headTags: number;
   bodyTags: number;
   headBeforeBody: boolean | null;
-  closedEarly: { tag: string; snippet: string; inNoscript: boolean } | null;
+  closedEarly: {
+    tag: string;
+    snippet: string;
+    inNoscript: boolean;
+    /**
+     * Owner call O3 (2026-11-07): the head tags AFTER the candidate, and before
+     * the first explicit `<body>`, that a parser closing the head at the
+     * candidate moves into the body: `base`, a `title` outside `<svg>`, `meta`
+     * (any `<meta>` without `itemprop`), and `link rel=<token>` for a `<link>`
+     * with a head-only rel (its first token that is not body-ok, lower-cased).
+     * Document order, each entry once, at most `HEAD_LOST_MAX`, each cut at
+     * `HEAD_SNIPPET_MAX` through `storableCap`. An explicit `<body>` or
+     * `</head>` confirms the candidate but is never lost, so `[]` is an early
+     * close that loses nothing today. A version-2 row written before O3 has no
+     * `lost` key at all; the rules that read it throw "re-crawl".
+     */
+    lost: string[];
+  } | null;
 };
 
 export const SOCIAL_TEXT_MAX = 300;
@@ -105,6 +122,8 @@ export const INSECURE_SAMPLE_URL_MAX = 1024;
 export const IMAGE_SAMPLE_MAX = 10;
 export const IMAGE_SAMPLE_SRC_MAX = 512;
 export const HEAD_SNIPPET_MAX = 200;
+/** `htmlStructure.closedEarly.lost` keeps at most this many tags (owner call O3). */
+export const HEAD_LOST_MAX = 10;
 /**
  * A link's `aria-label` (`links.aria_label`, migration 0028; owner call O1) is
  * trimmed and cut here, on a code point, through `storableCap`.
