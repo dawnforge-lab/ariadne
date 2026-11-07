@@ -17,12 +17,19 @@
 import { storableCap } from "../storable-text.js";
 
 export type SocialTag =
-  | "og:title" | "og:description" | "og:image" | "og:url" | "og:type" | "og:site_name"
+  | "og:title" | "og:description" | "og:image" | "og:image:secure_url" | "og:url" | "og:type"
+  | "og:site_name"
   | "twitter:card" | "twitter:title" | "twitter:description" | "twitter:image";
 
 export type SocialFacts = {
-  /** First value of each Open Graph tag, raw, capped. */
-  og: Partial<Record<"title" | "description" | "image" | "url" | "type" | "site_name", string>>;
+  /**
+   * First value of each Open Graph tag, raw, capped. `image:secure_url`
+   * (Phase 26c) is `og:image:secure_url`, the https address of the share image;
+   * it is a structured property beside `og:image`, never resolved or fetched.
+   */
+  og: Partial<
+    Record<"title" | "description" | "image" | "image:secure_url" | "url" | "type" | "site_name", string>
+  >;
   /** First value of each X (twitter:) tag, raw, capped. */
   x: Partial<Record<"card" | "title" | "description" | "image", string>>;
   /** Elements seen per tag. */

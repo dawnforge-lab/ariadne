@@ -2110,7 +2110,7 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
   reads the recorded fetch of the image. These facts exist only for crawls written by
   extraction version 2 or later: on an older crawl `extraction.not-recorded` (info) is the
   NOT MEASURED marker, and silence says the crawl never measured them, not that the
-  site is clean. The remedy is a re-crawl. Seven rules answer it, all on judged pages
+  site is clean. The remedy is a re-crawl. Eight rules answer it, all on judged pages
   (indexable, self-canonical):
   - `social.og-incomplete` (info): og:title, og:type, og:image or og:url missing or
     empty; evidence `{missing, none}`, `none` true when the page has no Open Graph
@@ -2139,6 +2139,12 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
     (`fetchClass` says which): report it as NOT CHECKED for that image, never as
     broken and never as a pass. When the file check asked about nothing on the
     whole crawl, no image is listed for that reason; the marker below says it once.
+  - `social.image-insecure` (info): an https page whose `og:image` is an `http:`
+    address and whose og:image:secure_url is absent or not `https:`; evidence
+    `{ogImage, secureUrl}` (`secureUrl` only when given). It is not mixed content, as
+    no browser loads an og:image; a platform that insists on https may drop the
+    preview. Pages crawled since Phase 26c only: it reads a tag older extractions did
+    not record, so `extraction.not-recorded` speaks for an older crawl.
   - `head.tags-outside-head` (warning): `social` in its `elements` when any Open
     Graph or X tag came after the head ended.
 - **Crawl-level markers**: `extraction.not-recorded` (info) as above, and for the

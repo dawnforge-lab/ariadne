@@ -34,13 +34,19 @@ const CATEGORY = "on-page" as const;
 /**
  * The recorded `og:` tags the Open Graph protocol defines as arrays, which
  * `social.og-multiple` never reports (ruling R15). Of the tags `SocialFacts`
- * records only `og:image` is one; its structured `og:image:*` properties are
- * not recorded.
+ * records, `og:image` is one, and so is `og:image:secure_url` (Phase 26c), the
+ * https twin of each `og:image` in a gallery: repeating it is the protocol's
+ * array, not a conflict. Its other `og:image:*` properties are not recorded.
  */
-const OG_ARRAY_TAGS: ReadonlySet<SocialTag> = new Set<SocialTag>(["og:image"]);
+const OG_ARRAY_TAGS: ReadonlySet<SocialTag> = new Set<SocialTag>([
+  "og:image",
+  "og:image:secure_url",
+]);
 
 /** The extraction that measured `social`; below it a null means "not measured". */
 const SOCIAL_EXTRACTION = 2;
+/** The extraction that records `og:image:secure_url`; below it the key is absent, not empty. */
+const SECURE_URL_EXTRACTION = 3;
 
 function recordedV2(p: PageRecord): boolean {
   return p.extractionVersion !== null && p.extractionVersion >= SOCIAL_EXTRACTION;
@@ -156,6 +162,36 @@ export const socialRules: PageRule[] = [
       }
       const viaProperty = s !== null && s.xViaProperty;
       return missing.length > 0 || viaProperty ? [finding(self, p, { missing, viaProperty })] : [];
+    },
+  ),
+
+  // A share image served over http from an https page. No browser loads an
+  // og:image, so this is not mixed content; it is a share preview a platform
+  // that insists on https may drop, and `og:image:secure_url` is the tag that
+  // names the https address. It fires only on extraction 3, the first to
+  // record that tag: on an older row its absence would be "not measured", and
+  // the rule would invent a defect (hard rule 1). Both schemes are read
+  // case-insensitively, as the share image's own address is.
+  pageRule(
+    "social.image-insecure",
+    CHECKS,
+    CATEGORY,
+    "info",
+    [
+      { key: "ogImage", label: "OG Image" },
+      { key: "secureUrl", label: "OG Image Secure URL" },
+    ],
+    (p, self) => {
+      if (!isJudged(p) || p.social === null) return [];
+      if (p.extractionVersion === null || p.extractionVersion < SECURE_URL_EXTRACTION) return [];
+      if (!/^https:/i.test(p.url)) return [];
+      const ogImage = p.social.og.image;
+      if (ogImage === undefined || !/^http:/i.test(ogImage)) return [];
+      const secureUrl = p.social.og["image:secure_url"];
+      if (secureUrl !== undefined && /^https:/i.test(secureUrl)) return [];
+      return [
+        finding(self, p, secureUrl === undefined ? { ogImage } : { ogImage, secureUrl }),
+      ];
     },
   ),
 ];

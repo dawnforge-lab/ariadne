@@ -739,6 +739,15 @@ const KINDS = ["page", "query", "metric"] as const satisfies readonly AnyRule["k
 //     CSV view gains the column `shareImage` after `kind`. Migration 0030
 //     backfills the flag on every edge-less row (26b's own definition of a
 //     share image), so older crawls are judged as before. No rule change.
+//  4. (T4) `og:image:secure_url` is recorded as a social tag (`og["image:secure_url"]`,
+//     first value, count, conflict, capped at `SOCIAL_URL_MAX`) and is an
+//     array tag for `social.og-multiple` beside `og:image`, so repeating it
+//     beside a gallery stays silent as before. New page rule
+//     `social.image-insecure` (info, CHECK-87, category `on-page`): a judged
+//     https page whose `og:image` is `http:` and whose secure_url is absent or
+//     not `https:`, on extraction 3 only; evidence `{ogImage, secureUrl?}`.
+//     No browser loads an og:image, so it is a share-preview finding, not mixed
+//     content (owner decision: info). 184 rules.
 export const RULESET_VERSION = "0.22.0";
 
 /**

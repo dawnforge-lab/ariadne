@@ -507,6 +507,9 @@
  * counts are of references, not distinct URLs: deduping would mean keeping the
  * refused strings. `url.reference-too-long` reports the counts; `url-policy`'s
  * `too_long` refusal keeps the same URLs off every fetch path.
+ * Phase 26c (P26c-T4) also records `og:image:secure_url` as one more social
+ * tag (`SOCIAL_SLOTS`: first value, count, conflict, capped at
+ * `SOCIAL_URL_MAX`); it is a plain fact, not a judged share image.
  */
 import { createHash } from "node:crypto";
 import { Parser } from "htmlparser2";
@@ -1168,6 +1171,7 @@ const SOCIAL_SLOTS: Record<SocialTag, SocialSlot> = {
   "og:title": { group: "og", key: "title", cap: SOCIAL_TEXT_MAX },
   "og:description": { group: "og", key: "description", cap: SOCIAL_TEXT_MAX },
   "og:image": { group: "og", key: "image", cap: SOCIAL_URL_MAX },
+  "og:image:secure_url": { group: "og", key: "image:secure_url", cap: SOCIAL_URL_MAX },
   "og:url": { group: "og", key: "url", cap: SOCIAL_URL_MAX },
   "og:type": { group: "og", key: "type", cap: SOCIAL_TEXT_MAX },
   "og:site_name": { group: "og", key: "site_name", cap: SOCIAL_TEXT_MAX },

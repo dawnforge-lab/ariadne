@@ -496,10 +496,17 @@ describe("checklist coverage", () => {
   //   page    70 + 1 = 71
   //   query   98
   //   total   182 + 1 = 183
-  it("pins the ruleset split: 183 rules = 71 page + 98 query + 14 metric", () => {
+  //
+  // Phase 26c Task 4 adds ONE page rule, `social.image-insecure` (CHECK-87,
+  // already claimed), in `src/rules/page/social.ts`.
+  //
+  //   page    71 + 1 = 72
+  //   query   98
+  //   total   183 + 1 = 184
+  it("pins the ruleset split: 184 rules = 72 page + 98 query + 14 metric", () => {
     const registry = buildRegistry();
-    expect(registry.all()).toHaveLength(183);
-    expect(registry.byKind("page")).toHaveLength(71);
+    expect(registry.all()).toHaveLength(184);
+    expect(registry.byKind("page")).toHaveLength(72);
     expect(registry.byKind("query")).toHaveLength(98);
     // The link-graph five, the two content metrics and hreflang coverage, plus
     // the URL-parameter, redirect-volume and sitemap-structure metrics, plus

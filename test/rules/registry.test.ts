@@ -601,15 +601,17 @@ describe("check annotations", () => {
  *
  * Phase 26c (0.22.0) Task 2 adds `url.reference-too-long` (warning): 64
  * warnings. The critical list does not move.
+ *
+ * Phase 26c (0.22.0) Task 4 adds `social.image-insecure` (info): 87 info.
  */
 describe("severity shape of the ruleset", () => {
   const all = buildRegistry().all();
 
-  it("holds 33 critical, 64 warning and 86 info rules", () => {
+  it("holds 33 critical, 64 warning and 87 info rules", () => {
     const counts = { critical: 0, warning: 0, info: 0 };
     for (const r of all) counts[r.severity] += 1;
-    expect(counts).toEqual({ critical: 33, warning: 64, info: 86 });
-    expect(all).toHaveLength(183);
+    expect(counts).toEqual({ critical: 33, warning: 64, info: 87 });
+    expect(all).toHaveLength(184);
   });
 
   it("names exactly the rules that are critical", () => {

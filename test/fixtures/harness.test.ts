@@ -357,6 +357,15 @@ const SKIP_HARNESS_CLAIMS: string[] = [
   // row with no counts) and end to end through the analyzer and the writer by
   // test/crawl/page-analyzer.test.ts and test/crawl/persist.test.ts.
   "url.reference-too-long",
+  // Phase 26c Task 4. `social.image-insecure` is provokable by an ordinary page
+  // (an `http:` og:image on an https page), but the fixture server speaks plain
+  // http on 127.0.0.1 (test/fixtures/fixture.ts), so no fixture page is an
+  // https page and the rule's condition cannot be produced here. TEMPORARY in
+  // the same way as the entry above: Task 11 decides its fixture or rewrites
+  // this paragraph. Until then the rule is proven by test/rules/social.test.ts
+  // (fires; silent on an http page, an https og:image, an https secure_url, a v2
+  // row; analyzer end to end) and test/crawl/analyzer-extensions.test.ts.
+  "social.image-insecure",
 ];
 
 /**

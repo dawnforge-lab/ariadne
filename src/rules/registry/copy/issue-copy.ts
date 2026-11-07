@@ -355,6 +355,13 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
     howToFix:
       "Add <meta name=\"twitter:card\" content=\"summary_large_image\"> and a title to the template, and write every twitter: tag with name= rather than property=.",
   },
+  "social.image-insecure": {
+    title: "Social: Share image served over http on an https page",
+    explanation:
+      "Indexable, self-canonical https pages whose og:image is an http address and which declare no https og:image:secure_url; the OG Image column shows the address and OG Image Secure URL the secure one if given. Browsers never load an og:image, so this is not mixed content, but a platform that insists on https may show the shared link with no image.",
+    howToFix:
+      "Serve the share image over https and use that address in og:image, or add an og:image:secure_url tag that names the https address.",
+  },
   "social.og-duplicate": {
     title: "Social: Open Graph title or description duplicate",
     explanation:

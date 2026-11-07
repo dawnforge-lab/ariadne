@@ -144,6 +144,10 @@
  * both written from the fields' contracts with the shared constant. The new
  * `overlongUrls` counts are stripped (see `EXTENSION_FIELDS`).
  *
+ * Phase 26c (P26c-T4) adds `og:image:secure_url` to the social tags the oracle
+ * reads (first value, count, conflict, capped as a URL), written from the
+ * field's contract.
+ *
  * Cheerio is a devDependency and appears here only: it is the parity oracle,
  * never a crawl-path parser.
  */
@@ -243,9 +247,10 @@ const EXTENSION_FIELDS = [
   "overlongUrls",
 ] as const;
 
-/** The ten social tags `PageAnalysis.social` reads, as the oracle lists them. */
+/** The eleven social tags `PageAnalysis.social` reads, as the oracle lists them. */
 const SOCIAL_TAG_NAMES: readonly string[] = [
-  "og:title", "og:description", "og:image", "og:url", "og:type", "og:site_name",
+  "og:title", "og:description", "og:image", "og:image:secure_url", "og:url", "og:type",
+  "og:site_name",
   "twitter:card", "twitter:title", "twitter:description", "twitter:image",
 ] satisfies SocialTag[];
 
@@ -790,8 +795,13 @@ function analyzeHtmlWithCheerio(html: string, pageUrl: string): UpstreamShape {
     const counts: Record<string, number> = {};
     const conflicting: string[] = [];
     for (const [tag, values] of socialValues) {
-      const [group, key] = tag.split(":") as [string, string];
-      const isUrl = tag === "og:url" || tag === "og:image" || tag === "twitter:image";
+      // The key is everything after the first colon (`og:image:secure_url`).
+      const colon = tag.indexOf(":");
+      const group = tag.slice(0, colon);
+      const key = tag.slice(colon + 1);
+      const isUrl =
+        tag === "og:url" || tag === "og:image" || tag === "og:image:secure_url" ||
+        tag === "twitter:image";
       const first = storableCap(values[0]!, isUrl ? SOCIAL_URL_MAX : SOCIAL_TEXT_MAX);
       (group === "og" ? og : x)[key] = first;
       counts[tag] = values.length;
@@ -1479,6 +1489,15 @@ describe("the Phase 26b head facts and social set, against the DOM", () => {
       <meta property="og:title" content="b"><meta property="twitter:card" content="summary">
       <meta name="twitter:title" property="og:title" content="c">
       <meta property="og:image"><meta property="OG:IMAGE" content="/i.png">
+      </head><body><p>x</p></body></html>`);
+  });
+
+  it("agrees on og:image:secure_url: first value, conflict, count, cap", () => {
+    expectParity(`<html><head>
+      <meta property="og:image" content="http://x/a.jpg">
+      <meta property="og:image:secure_url" content="https://x/a.jpg">
+      <meta property="og:image:secure_url" content="https://x/b.jpg">
+      <meta property="og:image:secure_url" content="https://x/${"s".repeat(1_500)}.jpg">
       </head><body><p>x</p></body></html>`);
   });
 
