@@ -770,6 +770,15 @@ const KINDS = ["page", "query", "metric"] as const satisfies readonly AnyRule["k
 //     carries `{links: 0, resources: 0, hreflang: n}` (null only where no
 //     response was classified), so `url.reference-too-long` reports a PDF's
 //     header too. No rule change. 184 rules.
+//  7. (T7) A streaming sitemap parser (src/crawl/sitemap-stream.ts), not yet
+//     wired into discovery: gunzip by magic bytes (two rounds), a streaming
+//     `TextDecoder`, htmlparser2 in XML mode, each `<url>` / `<sitemap>`
+//     emitted as it closes, memory O(chunk + one entry). The cap is the
+//     protocol's 50 MB uncompressed (`SITEMAP_MAX_BYTES`); at the cap the
+//     stream stops `oversized` and keeps the entries read (deviation 3). Up to
+//     `MAX_HREFLANG_PAIRS` `xhtml:link` alternates per `<url>`. DOCTYPE and
+//     wrong-root refusals keep discovery's reason text; an unknown charset is
+//     refused. No rule change. 184 rules.
 export const RULESET_VERSION = "0.22.0";
 
 /**
