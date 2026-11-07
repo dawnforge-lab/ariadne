@@ -959,10 +959,12 @@ function structurePage(
 const beforeHeadEnd = (fragment: string) => (html: string) =>
   html.replace("</head>", `${fragment}\n</head>`);
 
+// Owner call O3: the noscript iframe is the LAST thing before `</head>`, so no
+// head tag follows it and nothing is lost: the info note, not the warning.
 const headClosedNoscriptIframe = structurePage(
   "/p26b/head-closed-noscript-iframe",
   "A tag-manager noscript iframe left in the head",
-  ["html.head-closed-early"],
+  ["html.head-closed-early-harmless"],
   {
     title: "A head that ends where the tag manager noscript begins",
     description:
@@ -986,7 +988,9 @@ const headClosedDiv = structurePage(
     lede: "A banner plugin injects its container at the end of the head. The title and other tags above it are safe, but the head closes there.",
     topic: "head div",
   },
-  beforeHeadEnd('<div class="promo-banner"></div>'),
+  // Owner call O3: a head-only tag after the div (a favicon link, which no
+  // other rule reads) is what the early close loses, so this stays the warning.
+  beforeHeadEnd('<div class="promo-banner"></div><link rel="icon" href="/favicon.ico">'),
 );
 
 const noHeadTag = structurePage(

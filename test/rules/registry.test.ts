@@ -595,16 +595,18 @@ describe("check annotations", () => {
  * rationale is in the registry's 0.21.0 note): `links.no-anchor-text` moves
  * info to warning, since it now fires only on a link nothing names (no text, no
  * alt, no aria-label), and `links.aria-label-only` (info) takes the links named
- * only by aria-label. The critical list does not move.
+ * only by aria-label. `html.head-closed-early-harmless` (info) takes the early
+ * head close that loses no head tag, and `html.head-closed-early` stays a
+ * warning for the one that does. The critical list does not move.
  */
 describe("severity shape of the ruleset", () => {
   const all = buildRegistry().all();
 
-  it("holds 33 critical, 63 warning and 85 info rules", () => {
+  it("holds 33 critical, 63 warning and 86 info rules", () => {
     const counts = { critical: 0, warning: 0, info: 0 };
     for (const r of all) counts[r.severity] += 1;
-    expect(counts).toEqual({ critical: 33, warning: 63, info: 85 });
-    expect(all).toHaveLength(181);
+    expect(counts).toEqual({ critical: 33, warning: 63, info: 86 });
+    expect(all).toHaveLength(182);
   });
 
   it("names exactly the rules that are critical", () => {

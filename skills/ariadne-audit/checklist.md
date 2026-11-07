@@ -789,7 +789,12 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
      - `head.directives-outside-head` (critical) — a robots meta (or canonical, or
        hreflang) after the `<head>` ended, where search engines may not read it.
      - `html.head-closed-early` (warning) — names the element or text that ended the
-       head early, so the robots meta after it is read as body content.
+       head early and the head tags after it (Head Tags Lost), so a robots meta among
+       them is read as body content.
+     - `html.head-closed-early-harmless` (info) — the same early close with no head
+       tag after it, so nothing is lost today (typically a tracking pixel's
+       `<noscript><img>` last in the head). Not a FAIL: record it as a risk for tags
+       added later.
      - `directives.bot-conflict` (warning) — a bot-specific robots meta (`googlebot`,
        `bingbot`, ...) that contradicts the generic `robots` meta (absent means
        index, follow). Engines combine the two and obey the most restrictive, so a
@@ -1365,7 +1370,12 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
     CHECK-24.
   - `html.head-closed-early` (warning) — the same early close seen from the document:
     the element or text that ended the head (Closing Element, Element Snippet, Inside
-    noscript), reported when head tags followed it. Shared with CHECK-04 and CHECK-24.
+    noscript), reported when head tags followed it, which Head Tags Lost lists (`base`,
+    `title`, `meta`, `link rel=…`). Shared with CHECK-04 and CHECK-24.
+  - `html.head-closed-early-harmless` (info) — an early close with no head tag after
+    it (an explicit `</head>` or `<body>` is the next head-relevant tag), so nothing is
+    lost today; a canonical added after it later would be. Typically a tracking
+    pixel's `<noscript><img>` last in the head. Shared with CHECK-04 and CHECK-24.
   - `render.canonical-changed` (critical) — a rendered page whose canonical the
     JavaScript added, removed or pointed elsewhere (rendered pages only; see CHECK-01
     step 6).
@@ -1549,7 +1559,8 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
      `head.directives-outside-head` (critical) also claims this check: hreflang links
      after the `<head>` ended, with their count.
      `html.head-closed-early` (warning) also claims it: the element that ended the head
-     before those links.
+     before those links, with the head tags lost. `html.head-closed-early-harmless`
+     (info) is the early close that lost nothing.
   4. `issues_list` with `checkId: "CHECK-24"` — `hreflang.alternates-not-crawled`
      (info) is a NOT MEASURED marker, not a finding about the site: it fires once
      when declared alternates have no page in this crawl, with the count of
@@ -2141,11 +2152,13 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
 
 ### CHECK-88: HTML document structure
 - **Priority**: Medium | **Requires**: Engine
-- **Engine**: `issues_list` with `checkId: "CHECK-88"` — two rules:
-  `html.structure-invalid` (info: not exactly one `<head>` or one `<body>` tag, or a
-  `<head>` tag after the `<body>`; Problems lists which) and `html.head-closed-early`
-  (warning: an element or text the head does not allow ended it while head tags
-  followed; Closing Element names it). The check asks whether the
+- **Engine**: `issues_list` with `checkId: "CHECK-88"` — `html.structure-invalid`
+  (info: not exactly one `<head>` or one `<body>` tag, or a `<head>` tag after the
+  `<body>`; Problems lists which), read beside the early-close pair filed under
+  CHECK-18: `html.head-closed-early` (warning: an element or text the head does not
+  allow ended it while head tags followed; Closing Element names it and Head Tags
+  Lost lists them) and `html.head-closed-early-harmless` (info: the same early close
+  with no head tag after it, so nothing is lost today). The check asks whether the
   HTML document is shaped so a parser reads it as written: one `<html>`, one `<head>`
   before one `<body>`, and a `<head>` that is not closed early by an element that does
   not belong in it (which pushes the tags after it, including the title, canonical and
@@ -2163,7 +2176,9 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
     body-missing (tags left out, which HTML allows) passes; record the explicit-tag
     recommendation beside it
   - FAIL if `html.head-closed-early` fired, or `html.structure-invalid` fired with a
-    repeated or misplaced tag (head-repeated, body-repeated, head-after-body)
+    repeated or misplaced tag (head-repeated, body-repeated, head-after-body).
+    `html.head-closed-early-harmless` alone is not a FAIL: record the element and
+    recommend moving it into the `<body>`
   - NOT MEASURED if `extraction.not-recorded` (info) fired
   - Record: the pages, the structural fault and, for an early close, the tag that
     ended the head

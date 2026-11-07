@@ -13,6 +13,7 @@ import { expectSilentOnNonOkFetches, mkPage, mkV1Page, ruleLookup } from "./mk-p
 
 const rule = ruleLookup(htmlStructureRules, "htmlStructureRules");
 const early = rule("html.head-closed-early");
+const harmless = rule("html.head-closed-early-harmless");
 const invalid = rule("html.structure-invalid");
 
 const OK: HtmlStructure = {
@@ -21,6 +22,11 @@ const OK: HtmlStructure = {
 const structureOf = (html: string): HtmlStructure =>
   analyzePage(html, "https://x.test/").htmlStructure;
 const earlyOn = (html: string) => early.run(mkPage({ htmlStructure: structureOf(html) }));
+const harmlessOn = (html: string) => harmless.run(mkPage({ htmlStructure: structureOf(html) }));
+/** The standard Meta pixel fallback (owner call O3). */
+const PIXEL =
+  `<noscript><img height="1" width="1" style="display:none" ` +
+  `src="https://www.facebook.com/tr?id=1&ev=PageView&noscript=1"></noscript>`;
 
 describe("metadata", () => {
   it("declares severities, categories, checks and columns", () => {
@@ -28,6 +34,17 @@ describe("metadata", () => {
       "page", "warning", "technical", ["CHECK-18", "CHECK-04", "CHECK-24"],
     ]);
     expect(early.columns).toEqual([
+      { key: "tag", label: "Closing Element" },
+      { key: "snippet", label: "Element Snippet" },
+      { key: "inNoscript", label: "Inside noscript" },
+      { key: "lost", label: "Head Tags Lost" },
+    ]);
+    // Owner call O3: the early close that loses nothing, as an info note with
+    // the same checks and category.
+    expect([harmless.kind, harmless.severity, harmless.category, harmless.checkIds]).toEqual([
+      "page", "info", "technical", ["CHECK-18", "CHECK-04", "CHECK-24"],
+    ]);
+    expect(harmless.columns).toEqual([
       { key: "tag", label: "Closing Element" },
       { key: "snippet", label: "Element Snippet" },
       { key: "inNoscript", label: "Inside noscript" },
@@ -48,15 +65,17 @@ describe("html.head-closed-early (Review Focus 3 boundaries)", () => {
     expect(earlyOn(`<!doctype html><title>x</title><div>a</div>`)).toHaveLength(0);
   });
 
-  it("fires on the GTM shape: a noscript iframe in the head, confirmed by </head>", () => {
+  it("fires on the GTM shape when head tags follow it, listing what is lost", () => {
     const out = earlyOn(
-      `<head><meta charset=utf-8><noscript><iframe src="https://gtm/x"></iframe></noscript></head><body>`,
+      `<head><meta charset=utf-8><noscript><iframe src="https://gtm/x"></iframe></noscript>` +
+        `<link rel="canonical" href="/c"></head><body>`,
     );
     expect(out).toHaveLength(1);
     expect(out[0]!.evidence).toEqual({
       tag: "iframe",
       snippet: '<iframe src="https://gtm/x">',
       inNoscript: true,
+      lost: ["link rel=canonical"],
     });
     expect(out[0]!.severity).toBe("warning");
   });
@@ -64,12 +83,16 @@ describe("html.head-closed-early (Review Focus 3 boundaries)", () => {
   it("fires on a div before the title", () => {
     const out = earlyOn(`<head><div>x</div><title>t</title>`);
     expect(out).toHaveLength(1);
-    expect(out[0]!.evidence).toMatchObject({ tag: "div", inNoscript: false });
+    expect(out[0]!.evidence).toMatchObject({ tag: "div", inNoscript: false, lost: ["title"] });
   });
 
-  it("fires on text in the head, recorded as #text with the text as the snippet", () => {
-    const out = earlyOn(`<head>hello</head>`);
-    expect(out[0]!.evidence).toEqual({ tag: "#text", snippet: "hello", inNoscript: false });
+  it("text in the head with nothing after it but </head> is the harmless note, not this", () => {
+    expect(earlyOn(`<head>hello</head>`)).toHaveLength(0);
+    expect(harmlessOn(`<head>hello</head>`)[0]!.evidence).toEqual({
+      tag: "#text",
+      snippet: "hello",
+      inNoscript: false,
+    });
   });
 
   it("caps a 500-character start tag's snippet at 200", () => {
@@ -109,6 +132,64 @@ describe("html.head-closed-early (Review Focus 3 boundaries)", () => {
         },
       },
     ]);
+  });
+});
+
+describe("html.head-closed-early-harmless (owner call O3)", () => {
+  it("the Meta pixel last in the head is the info note, and not the warning", () => {
+    const html =
+      `<html><head><title>t</title><meta name="description" content="d">` +
+      `<link rel="canonical" href="/c">${PIXEL}</head><body><p>x</p></body></html>`;
+    expect(earlyOn(html)).toHaveLength(0);
+    const out = harmlessOn(html);
+    expect(out).toHaveLength(1);
+    expect(out[0]!.severity).toBe("info");
+    expect(out[0]!.evidence).toMatchObject({ tag: "img", inNoscript: true });
+    expect(out[0]!.evidence).not.toHaveProperty("lost");
+  });
+
+  it("a pixel followed by a description and a canonical is the warning, with both lost", () => {
+    const html =
+      `<html><head><title>t</title>${PIXEL}<meta name="description" content="d">` +
+      `<link rel="canonical" href="/c"></head><body><p>x</p></body></html>`;
+    expect(harmlessOn(html)).toHaveLength(0);
+    expect(earlyOn(html)[0]!.evidence).toMatchObject({
+      tag: "img",
+      inNoscript: true,
+      lost: ["meta", "link rel=canonical"],
+    });
+  });
+
+  it("a stylesheet link after the pixel is body-ok: nothing is lost", () => {
+    const html =
+      `<html><head><title>t</title>${PIXEL}<link rel="stylesheet" href="/a.css">` +
+      `</head><body><p>x</p></body></html>`;
+    expect(earlyOn(html)).toHaveLength(0);
+    expect(harmlessOn(html)).toHaveLength(1);
+  });
+
+  it("is silent with no early close, on a v1 row and on every non-OK fetch", () => {
+    expect(harmlessOn(`<html><head><title>t</title></head><body></body></html>`)).toHaveLength(0);
+    expect(harmless.run(mkV1Page())).toHaveLength(0);
+    expectSilentOnNonOkFetches([harmless], [
+      {
+        htmlStructure: {
+          ...OK,
+          closedEarly: { tag: "img", snippet: "<img>", inNoscript: true, lost: [] },
+        },
+      },
+    ]);
+  });
+
+  it("a v2 row written before `lost` was recorded makes both rules throw, re-crawl", () => {
+    // jsonb is not checked against the type: a pre-O3 row has no `lost` key.
+    const stale = {
+      ...OK,
+      closedEarly: { tag: "img", snippet: "<img>", inNoscript: true },
+    } as unknown as HtmlStructure;
+    const page = mkPage({ htmlStructure: stale });
+    expect(() => early.run(page)).toThrow(/re-crawl/);
+    expect(() => harmless.run(page)).toThrow(/re-crawl/);
   });
 });
 

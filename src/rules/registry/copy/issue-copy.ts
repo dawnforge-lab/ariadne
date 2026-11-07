@@ -626,9 +626,16 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
   "html.head-closed-early": {
     title: "HTML: Head closed early",
     explanation:
-      "Pages where the browser ends the <head> at an element it does not allow there (an iframe, an image, a div or visible text), while the document goes on to write head tags such as the title, meta tags or links after it. The row names the closing element, quotes it and says whether it sat inside a noscript. Everything after that point is read as body content, so the canonical, robots, hreflang, title and description may be ignored.",
+      "Pages where the browser ends the <head> at an element it does not allow there (an iframe, an image, a div or visible text), while the document goes on to write head tags such as the title, meta tags or links after it. The row names the closing element, quotes it, says whether it sat inside a noscript and lists the head tags written after it. Those tags are read as body content, so a canonical, robots, hreflang, title or description among them may be ignored.",
     howToFix:
       "Remove or move the element named in the row out of the <head>; a tracking noscript iframe belongs at the top of the <body>. Keep only title, meta, link, base, style, script and noscript with those elements in the head.",
+  },
+  "html.head-closed-early-harmless": {
+    title: "HTML: Head closed early, nothing lost yet",
+    explanation:
+      "Pages where an element the <head> does not allow, named and quoted in the row (often a tracking pixel's <noscript><img>), ends the head under the HTML parsing rules, but no head tag comes after it, so nothing is lost today. Anything added after it later, such as a canonical, hreflang or robots tag, would be ignored by a parser that closes the head there.",
+    howToFix:
+      "Move the element into the <body>; a tracking pixel's <noscript><img> belongs at the top of the body, so head tags added later stay in the head.",
   },
   "html.structure-invalid": {
     title: "HTML: Head or body tag missing, repeated or out of order",

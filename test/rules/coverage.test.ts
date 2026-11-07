@@ -481,10 +481,18 @@ describe("checklist coverage", () => {
   //   page    69
   //   query   97 + 1 = 98
   //   total   180 + 1 = 181
-  it("pins the ruleset split: 181 rules = 69 page + 98 query + 14 metric", () => {
+  //
+  // Owner call O3 (2026-11-07) adds ONE page rule,
+  // `html.head-closed-early-harmless` (CHECK-18 / CHECK-04 / CHECK-24, already
+  // claimed), in `src/rules/page/html-structure.ts`.
+  //
+  //   page    69 + 1 = 70
+  //   query   98
+  //   total   181 + 1 = 182
+  it("pins the ruleset split: 182 rules = 70 page + 98 query + 14 metric", () => {
     const registry = buildRegistry();
-    expect(registry.all()).toHaveLength(181);
-    expect(registry.byKind("page")).toHaveLength(69);
+    expect(registry.all()).toHaveLength(182);
+    expect(registry.byKind("page")).toHaveLength(70);
     expect(registry.byKind("query")).toHaveLength(98);
     // The link-graph five, the two content metrics and hreflang coverage, plus
     // the URL-parameter, redirect-volume and sitemap-structure metrics, plus

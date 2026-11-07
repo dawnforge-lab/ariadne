@@ -1941,6 +1941,27 @@ describe("the fixture site end to end", () => {
     });
   });
 
+  it("the owner-call fixtures carry the evidence their markup produces (O1, O3)", () => {
+    // O1: an icon link named only by its aria-label, with the label it carries.
+    expect(detailsByPath.get("/p26b/aria-label-link\nlinks.aria-label-only")).toEqual({
+      pageUrl: `${app.base}/p26b/aria-label-link`,
+      count: 1,
+      targets: [`${app.base}/p26b/empty-href`],
+      labels: ["The empty address example"],
+    });
+    // O3: the noscript iframe is the last thing in the head, so nothing is lost;
+    // the banner div is followed by a favicon link, which is.
+    expect(detailsByPath.get("/p26b/head-closed-noscript-iframe\nhtml.head-closed-early-harmless")).toMatchObject({
+      tag: "iframe",
+      inNoscript: true,
+    });
+    expect(detailsByPath.get("/p26b/head-closed-div\nhtml.head-closed-early")).toMatchObject({
+      tag: "div",
+      inNoscript: false,
+      lost: ["link rel=icon"],
+    });
+  });
+
   it("the field-level duplicates find the site's repeated titles, descriptions and headings", async () => {
     // P7-T2, end to end: three rules, each grouping ONE column of `pages` over
     // the indexable 200s, on a site that carries a deliberately different pair

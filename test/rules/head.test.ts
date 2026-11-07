@@ -209,6 +209,29 @@ describe("the head rules name the closing element (26b)", () => {
     });
   });
 
+  // Owner call O3: an early close that loses nothing is not why anything is
+  // outside the head (a tag after the explicit <body> is in the body whatever
+  // closed the head), so it is not offered as the explanation.
+  it("omits the key when the early close lost nothing, and throws on a pre-O3 row", () => {
+    const row = {
+      htmlStructure: { ...structure, closedEarly: { ...closedEarly, lost: [] } },
+      headClosedBy: "div",
+      canonicalOutsideHead: true,
+      titleOutsideHead: true,
+    };
+    expect(directives.run(mkPage(row))[0]?.evidence).not.toHaveProperty("headClosedEarly");
+    expect(tags.run(mkPage(row))[0]?.evidence).not.toHaveProperty("headClosedEarly");
+    const stale = mkPage({
+      ...row,
+      htmlStructure: {
+        ...structure,
+        closedEarly: { tag: "div", snippet: "<div>", inNoscript: false },
+      } as unknown as typeof structure,
+    });
+    expect(() => directives.run(stale)).toThrow(/re-crawl/);
+    expect(() => tags.run(stale)).toThrow(/re-crawl/);
+  });
+
   it("omits the key on a v1 row and on a v2 row with no early close", () => {
     const v1 = mkV1Page({ headClosedBy: "div", canonicalOutsideHead: true, titleOutsideHead: true });
     expect(directives.run(v1)[0]?.evidence).not.toHaveProperty("headClosedEarly");

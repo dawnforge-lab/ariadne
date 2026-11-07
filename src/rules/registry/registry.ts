@@ -691,6 +691,22 @@ const KINDS = ["page", "query", "metric"] as const satisfies readonly AnyRule["k
 //     an empty anchor and a non-blank aria-label, with `labels` in its evidence.
 //     Search engines document visible text and image alt as anchor text, not
 //     aria-label (O1). 181 rules.
+//     Owner calls 2026-11-07: `htmlStructure.closedEarly` gains `lost`, the
+//     head-only tags (`base`, a non-svg `title`, `meta` without `itemprop`,
+//     `link rel=<first head-only token>`) after the closer and before the first
+//     explicit `<body>`, deduped, capped at `HEAD_LOST_MAX` (10); `<body>` and
+//     `</head>` still confirm the close and are never lost.
+//     `html.head-closed-early` (warning) fires only when `lost` is non-empty
+//     and carries it; new page rule `html.head-closed-early-harmless` (info,
+//     CHECK-18 / CHECK-04 / CHECK-24, category `technical`) fires when nothing
+//     is lost, such as a tracking pixel's `<noscript><img>` last in the head.
+//     `head.directives-outside-head` and `head.tags-outside-head` carry
+//     `headClosedEarly` only when `lost` is non-empty. A version-2 row with an
+//     early close and no `lost` key makes all four throw "re-crawl" (O3).
+//     182 rules.
+//     Owner calls 2026-11-07: `html.structure-invalid` is kept as it is, and
+//     an `http:` share image on an `https:` page waits for Phase 26c, which
+//     must record `og:image:secure_url` first.
 export const RULESET_VERSION = "0.21.0";
 
 /**
