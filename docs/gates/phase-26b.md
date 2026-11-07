@@ -392,6 +392,31 @@ The final whole-branch review's fixes, each in the shipped code and in the re-ru
 - **I3** CHECK-87's Evaluate step keeps relative and invalid share images as FAIL when the
   resource markers fire; only the status and size half is NOT MEASURED.
 
+The PR #23 review's fixes, made after the gate re-run (`3ba7b3d`..`f369a34`):
+
+- **R17** `directives.bot-conflict` reports only a contradiction: a bot meta that adds
+  `noindex` / `nofollow` (stricter), or one that explicitly permits what `robots` restricts
+  (overridden; Google combines the two and applies the stricter). A bot meta silent on a
+  directive is no conflict.
+- **R18** `RENDER_CAPTURE_VERSION` 2 (`rendered_robots_meta` is every robots meta joined);
+  `render.noindex-changed` compares only rows whose two readings share a definition. A
+  version-1 page re-rendered at capture 2 is left out, and `extraction.not-recorded` (CHECK-04)
+  speaks for its crawl.
+- **R19** (replaces R5's URL clause) `parseRefresh` follows the HTML Standard's shared
+  declarative refresh steps exactly: `0; urlpage.html` and `1.5.3; url=/x` are redirects,
+  `5abc` is no refresh at all.
+- The insecure-ref sample is capped per kind; `hreflang.html-lang-mismatch` splits the
+  primary subtag on `_` too; `storableDeep` is copy-on-write; a relative or non-http(s) share
+  image gets no `resources` row (nothing fetched); `security.mixed-content` aggregates only the
+  HTTPS cohort's edges; `og_title` / `og_description` / `og_image` read the first element whose
+  `property` or `name` is the tag, as the social set does.
+
+**They change no gate figure.** On the re-run's crawl (`crawl_1311e8c2-…`) no page has a bot
+robots meta, a relative or non-http(s) share image, an og tag the legacy columns missed, an
+underscore `lang`, an insecure reference or a meta refresh (one query, 2026-11-07), and the
+mixed-content and `storableDeep` changes return identical results by construction. The crawl
+was therefore not repeated.
+
 
 ## 8. Parked and deferred
 
