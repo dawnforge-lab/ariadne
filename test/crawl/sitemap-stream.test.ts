@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto";
 import { gzipSync } from "node:zlib";
 import { describe, expect, it } from "vitest";
 import {
@@ -259,14 +260,120 @@ describe("parseSitemapStream", () => {
   });
 
   it("refuses an unknown charset label rather than guessing one", async () => {
-    let pulled = false;
-    async function* source(): AsyncGenerator<Uint8Array> {
-      pulled = true;
-      yield encoder.encode("<urlset></urlset>");
-    }
-    const { result } = await run(source(), { charset: "x-not-a-charset" });
+    const { result, urls } = await run(
+      chunked("<urlset><url><loc>https://site.example/</loc></url></urlset>", 8),
+      { charset: "x-not-a-charset" },
+    );
     expect(result).toEqual({ kind: "refused", reason: 'refused: unknown charset label "x-not-a-charset"' });
-    expect(pulled).toBe(false);
+    expect(urls).toEqual([]);
+  });
+
+  it("never emits an entry the end of the stream cut off, and counts it malformed", async () => {
+    const cases = [
+      // Cut inside a <loc>: the URL is half-written.
+      "<urlset><url><loc>https://x.example/a</loc></url><url><loc>https://x.example/pro",
+      // Cut after </loc> but before </url>: still not a finished entry.
+      "<urlset><url><loc>https://x.example/a</loc></url><url><loc>https://x.example/b</loc>",
+    ];
+    for (const doc of cases) {
+      for (const body of [chunked(doc, 5), chunked(gzipSync(doc), 5)]) {
+        const { result, urls } = await run(body);
+        expect(urls.map((u) => u.loc)).toEqual(["https://x.example/a"]);
+        expect(result).toEqual({
+          kind: "urlset",
+          bytes: encoder.encode(doc).byteLength,
+          oversized: false,
+          malformedEntries: 1,
+        });
+      }
+    }
+    const index = "<sitemapindex><sitemap><loc>https://x.example/s1.xml</loc></sitemap><sitemap><loc>https://x.example/s2";
+    const { result, sitemaps } = await run(chunked(index, 5));
+    expect(sitemaps).toEqual([{ loc: "https://x.example/s1.xml", lastmod: null }]);
+    expect(result).toMatchObject({ kind: "index", malformedEntries: 1 });
+  });
+
+  describe("owns the body and releases it on every exit", () => {
+    /** A body whose generator records how much was pulled and whether it was closed. */
+    function tracked(bytes: string | Uint8Array, size: number) {
+      const state = { released: false, pulledChunks: 0, totalChunks: 0 };
+      const all = typeof bytes === "string" ? encoder.encode(bytes) : bytes;
+      state.totalChunks = Math.ceil(all.byteLength / size);
+      async function* source(): AsyncGenerator<Uint8Array> {
+        try {
+          for await (const chunk of chunked(all, size)) {
+            state.pulledChunks++;
+            yield chunk;
+          }
+        } finally {
+          state.released = true;
+        }
+      }
+      return { state, body: source() };
+    }
+    // Long enough that every early exit leaves most of the body unread, even
+    // gzipped: random paths (144 KB of entropy) keep the gzip well past the
+    // inflater pipeline's 64 KiB read-ahead, which would otherwise swallow it
+    // whole. Kept small (~0.4 MB) so the memory tests below measure no leftovers.
+    const ENTRIES = 6_000;
+    const ENTRY_XML = Array.from(
+      { length: ENTRIES },
+      () => `<url><loc>https://site.example/${randomBytes(24).toString("base64url")}</loc></url>`,
+    ).join("");
+    const LONG = `<urlset>${ENTRY_XML}</urlset>`;
+    const LONG_GZ = gzipSync(LONG);
+    const WRONG_ROOT_GZ = gzipSync(`<html>${ENTRY_XML}</html>`);
+
+    it("on an unknown-charset refusal", async () => {
+      const { state, body } = tracked(LONG, 1024);
+      const { result } = await run(body, { charset: "x-not-a-charset" });
+      expect(result.kind).toBe("refused");
+      expect(state.released).toBe(true);
+      expect(state.pulledChunks).toBeLessThanOrEqual(1);
+    });
+
+    it("on a DOCTYPE refusal", async () => {
+      const { state, body } = tracked(`<!DOCTYPE urlset>${LONG}`, 1024);
+      const { result } = await run(body);
+      expect(result).toMatchObject({ kind: "refused", reason: expect.stringMatching(/DOCTYPE/) });
+      expect(state.released).toBe(true);
+      expect(state.pulledChunks).toBeLessThan(state.totalChunks);
+    });
+
+    it("on a wrong-root refusal", async () => {
+      const { state, body } = tracked(`<html>${LONG}</html>`, 1024);
+      const { result } = await run(body);
+      expect(result).toEqual({ kind: "refused", reason: "no <urlset> or <sitemapindex> root element" });
+      expect(state.released).toBe(true);
+      expect(state.pulledChunks).toBeLessThan(state.totalChunks);
+    });
+
+    it("at the cap, plain and gzipped", async () => {
+      for (const bytes of [encoder.encode(LONG), LONG_GZ]) {
+        const { state, body } = tracked(bytes, 1024);
+        const { result } = await run(body, { maxBytes: 8 * 1024 });
+        expect(result).toMatchObject({ kind: "urlset", oversized: true, bytes: 8 * 1024 });
+        expect(state.released).toBe(true);
+        expect(state.pulledChunks).toBeLessThan(state.totalChunks);
+      }
+    });
+
+    it("on a wrong root inside a gzip", async () => {
+      const { state, body } = tracked(WRONG_ROOT_GZ, 1024);
+      const { result } = await run(body);
+      expect(result.kind).toBe("refused");
+      expect(state.released).toBe(true);
+      expect(state.pulledChunks).toBeLessThan(state.totalChunks);
+    });
+
+    it("on normal completion", async () => {
+      const { state, body } = tracked(LONG, 1024);
+      const { result, urls } = await run(body);
+      expect(result).toMatchObject({ kind: "urlset", oversized: false });
+      expect(urls).toHaveLength(ENTRIES);
+      expect(state.released).toBe(true);
+      expect(state.pulledChunks).toBe(state.totalChunks);
+    });
   });
 
   /**

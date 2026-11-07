@@ -23,7 +23,18 @@
  *  - a `<loc>` / `<lastmod>` value is its text (CDATA included, entities
  *    decoded), trimmed; a blank one, a repeated one, or one holding an element
  *    is no value — the cases where fast-xml-parser gave a non-string;
- *  - an entry with no `<loc>` value is counted in `malformedEntries`.
+ *  - an entry with no `<loc>` value is counted in `malformedEntries`;
+ *  - an entry still open when the stream ends (a document cut off mid-entry,
+ *    even after its `</loc>`) is counted in `malformedEntries` and never
+ *    emitted: a half-written URL is not one the site declared.
+ *
+ * THE STREAM OWNS THE BODY. Every exit releases it — normal completion, every
+ * refusal (the charset one included), the cap, and a thrown error — by
+ * closing its iterator (`return()`), which for a network body destroys the
+ * socket's stream. The caller never has to drain or destroy it. An async
+ * generator, and a Node `Readable`'s iterator, run their cleanup only once
+ * started, so a body refused before reading (unknown charset) has one chunk
+ * pulled and is then closed.
  *
  * Three readings differ from the buffered parser, deliberately:
  *  - an empty `<urlset></urlset>` is a urlset with no entries (fast-xml-parser
@@ -152,6 +163,22 @@ async function* gunzipped(source: AsyncIterable<Uint8Array>): AsyncGenerator<Uin
   }
 }
 
+/**
+ * Close a body that will not be read. `return()` alone does not release an
+ * iterator that never started (an async generator's `finally`, and a Node
+ * `Readable` iterator's destroy, run only once it has), so one chunk is
+ * pulled first.
+ */
+async function release(body: AsyncIterable<Uint8Array>): Promise<void> {
+  const iterator = body[Symbol.asyncIterator]();
+  let finished = false;
+  try {
+    finished = (await iterator.next()).done === true;
+  } finally {
+    if (!finished) await iterator.return?.();
+  }
+}
+
 /** Undo up to two rounds of gzip, each chosen by the magic bytes. */
 async function decompressed(body: AsyncIterable<Uint8Array>): Promise<AsyncIterable<Uint8Array>> {
   let source = body;
@@ -201,6 +228,7 @@ export async function parseSitemapStream(
     decoder = new TextDecoder(opts.charset ?? "utf-8", { fatal: false });
   } catch (error) {
     if (error instanceof RangeError) {
+      await release(body);
       return { kind: "refused", reason: `refused: unknown charset label "${opts.charset}"` };
     }
     throw error;
@@ -209,6 +237,10 @@ export async function parseSitemapStream(
   let kind: "urlset" | "index" | null = null;
   let refusal: string | null = null;
   let rootClosed = false;
+  // Set once the stream has ended: whatever `end()` closes was cut off.
+  // (htmlparser2's `isImplied` cannot tell this apart: in XML mode it is also
+  // true for every self-closing tag.)
+  let ended = false;
   let malformedEntries = 0;
 
   // Open elements, the root counting as 1: an entry is depth 2, its fields 3.
@@ -274,7 +306,7 @@ export async function parseSitemapStream(
           field = null;
         } else if (depth === 2 && inEntry) {
           inEntry = false;
-          const locValue = fieldValue(loc);
+          const locValue = ended ? null : fieldValue(loc);
           if (locValue === null) {
             malformedEntries++;
           } else if (kind === "urlset") {
@@ -326,8 +358,10 @@ export async function parseSitemapStream(
   if (!oversized) {
     feed(decoder.decode(), true);
     if (refusal !== null) return { kind: "refused", reason: refusal };
-    // Not on the oversized path: end() closes every open element, which would
-    // emit the entry the cap cut through.
+    // end() closes every open element. An entry it closes was cut off by the
+    // end of the stream: malformed, never emitted (see `ended`). Not called on
+    // the oversized path, where the cut entry is simply left unread.
+    ended = true;
     parser.end();
     if (refusal !== null) return { kind: "refused", reason: refusal };
     await opts.drain();
