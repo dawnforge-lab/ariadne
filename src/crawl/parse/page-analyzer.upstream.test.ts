@@ -433,13 +433,19 @@ function analyzeHtmlWithCheerio(html: string, pageUrl: string): UpstreamShape {
     .filter((content, i, all) => all.findIndex((c) => c.trim() === content.trim()) === i);
   const robotsMeta =
     robotsContents.length === 0 ? null : storableCap(robotsContents.join(", "));
-  const ogTitle =
-    byAttr("meta", "property", "og:title").first().attr("content") ?? null;
-  const ogDescription =
-    byAttr("meta", "property", "og:description").first().attr("content") ??
-    null;
-  const ogImage =
-    byAttr("meta", "property", "og:image").first().attr("content") ?? null;
+  // The legacy og columns (PR #23 review): the first `meta` whose folded
+  // `property` OR `name` is the tag, its content untrimmed, null without one.
+  const ogFirst = (tag: string): string | null =>
+    $("meta")
+      .filter(
+        (_, el) =>
+          fold($(el).attr("property")) === tag || fold($(el).attr("name")) === tag,
+      )
+      .first()
+      .attr("content") ?? null;
+  const ogTitle = ogFirst("og:title");
+  const ogDescription = ogFirst("og:description");
+  const ogImage = ogFirst("og:image");
 
   const h1s: string[] = [];
   $("h1").each((_, el) => {

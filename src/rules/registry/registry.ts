@@ -671,6 +671,11 @@ const KINDS = ["page", "query", "metric"] as const satisfies readonly AnyRule["k
 //     PR #23 review: `security.mixed-content` groups only the HTTPS cohort's
 //     `http:` edges (the 0.20.0 join, inside the CTE), not every `http:`
 //     edge of the crawl; findings are identical.
+//     PR #23 review: on an extraction-2 row `og_title`, `og_description` and
+//     `og_image` hold the first `meta` whose `property` OR `name` is the tag,
+//     as the `social` set reads it, so `social.og-duplicate` groups
+//     `<meta name="og:title">` pages and a `name=description
+//     property=og:description` element fills both columns.
 export const RULESET_VERSION = "0.21.0";
 
 /**

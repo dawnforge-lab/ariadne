@@ -1103,6 +1103,26 @@ describe("social: the Open Graph and X set", () => {
     });
   });
 
+  it("fills the legacy og columns from the element the social set reads (PR #23 P9)", () => {
+    // `name=` as well as `property=`, the FIRST element naming the tag, the
+    // value untrimmed as the column always stored it, null with no content.
+    const a = headPage(
+      `<meta name="og:title" content=" Named title ">` +
+        `<meta property="og:title" content="Second title">` +
+        `<meta name="description" property="og:description" content=" Both ">` +
+        `<meta name="og:image">` +
+        `<meta property="og:image" content="https://ex.com/later.png">`,
+    );
+    expect(a.ogTitle).toBe(" Named title ");
+    expect(a.metaDescription).toBe("Both");
+    expect(a.ogDescription).toBe(" Both ");
+    expect(a.ogImage).toBeNull();
+    expect(a.social?.og).toMatchObject({ title: "Named title", description: "Both", image: "" });
+    // The property= form is unchanged.
+    const b = headPage(`<meta property="og:title" content="T"><meta property="og:image" content="/i.png">`);
+    expect([b.ogTitle, b.ogDescription, b.ogImage]).toEqual(["T", null, "/i.png"]);
+  });
+
   it("does not call a repeated tag with one trimmed value conflicting", () => {
     const a = headPage(
       `<meta property="og:url" content="https://ex.com/a">` +
@@ -1259,13 +1279,14 @@ describe("social: the Open Graph and X set", () => {
     expect(headPage(`<noscript><meta property="og:title" content="x"></noscript>`).social).toBeNull();
   });
 
-  it("leaves ogTitle / ogDescription / ogImage exactly as before: first property= value, raw", () => {
+  it("reads ogTitle / ogDescription / ogImage from the first element naming the tag, raw", () => {
+    // PR #23 review: `name=` counts as `property=` does, as in the social set.
     const a = headPage(
       `<meta name="og:title" content="by name">` +
         `<meta property="og:title" content=" raw ">` +
         `<meta property="og:image" content="/i.png">`,
     );
-    expect(a.ogTitle).toBe(" raw ");
+    expect(a.ogTitle).toBe("by name");
     expect(a.ogImage).toBe("/i.png");
     expect(a.ogDescription).toBeNull();
   });

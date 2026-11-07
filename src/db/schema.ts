@@ -393,6 +393,10 @@ export const pages = pgTable("pages", {
   robotsMeta: text("robots_meta"),
   xRobotsTag: text("x_robots_tag"),
   isIndexable: boolean("is_indexable"),
+  // The first og:title / og:description / og:image `content`, untrimmed, null
+  // when that element has none. Extraction 2 (PR #23 review): the first `meta`
+  // whose `property` OR `name` is the tag, as the `social` set reads it.
+  // Extraction 1 rows: the first `property=` element only.
   ogTitle: text("og_title"),
   ogDescription: text("og_description"),
   ogImage: text("og_image"),

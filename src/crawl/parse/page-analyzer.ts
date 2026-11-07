@@ -364,7 +364,14 @@
  *    distinct trimmed values is `conflicting` (compared uncapped, capped once
  *    at the end); `outsideHead` is any social tag met in body mode. Null only
  *    when the page has no social tag. `ogTitle` / `ogDescription` / `ogImage`
- *    are untouched: first `property=` value, raw, for their existing readers.
+ *    (the legacy `og_*` columns) are filled from the same path (PR #23
+ *    review): the FIRST element whose `property` OR `name` is the tag, its
+ *    `content` untrimmed (null when it has none), as before. Before, they read
+ *    `property=` only from the meta else-if chain, so `<meta name=og:title>`
+ *    and `<meta name=description property=og:description>` (the chain matched
+ *    `description` first) left them null while `social.og` had them, and
+ *    `social.og-duplicate`, which groups those columns, missed the groups the
+ *    page rules saw. On an extraction-1 row they keep the old meaning.
  *  - `socialImageRefs`: the two JUDGED share images only, the first `og:image`
  *    and the first `twitter:image`, each resolved once (`shareImageRef`:
  *    `normalizeUrl` of the whole value, only when it is absolute http(s)) and
@@ -1862,6 +1869,13 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
     const first = socialFirst.get(tag);
     if (first === undefined) {
       socialFirst.set(tag, value);
+      // The legacy og columns read the element the social set reads: the
+      // first whose `property` OR `name` is the tag, the value untrimmed as
+      // the columns always stored it, null when there is no `content`
+      // (PR #23 review; the module header's Phase 26b block).
+      if (tag === "og:title") ogTitle = content ?? null;
+      if (tag === "og:description") ogDescription = content ?? null;
+      if (tag === "og:image") ogImage = content ?? null;
       // Only the FIRST value of each image tag is judged, so only it is
       // resolved: into a slot of its own, never a resource ref (deviation 3,
       // and the header).
@@ -1922,12 +1936,6 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
       // Presence is the whole signal; the content string is the agent's
       // business, not the evidence layer's.
       hasViewport = true;
-    } else if (property === "og:title") {
-      if (ogTitle === undefined) ogTitle = content ?? null;
-    } else if (property === "og:description") {
-      if (ogDescription === undefined) ogDescription = content ?? null;
-    } else if (property === "og:image") {
-      if (ogImage === undefined) ogImage = content ?? null;
     }
   };
 

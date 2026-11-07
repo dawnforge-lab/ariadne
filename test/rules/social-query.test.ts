@@ -230,6 +230,29 @@ describe("social query rules against the database", () => {
       expect(f[0]?.dedupeKey).toMatch(/^og:title:[0-9a-f]{64}$/);
     });
 
+    it("groups pages whose og:title is written with name= (PR #23 P9)", async () => {
+      // End to end through the analyzer: the og_title column now reads what
+      // the social set reads, `name=` included.
+      const head = (title: string) =>
+        analyzePage(
+          `<html><head><title>${title}</title><meta name="og:title" content="Shared by name">` +
+            `<meta name="description" property="og:description" content="Shared description">` +
+            `</head><body><p>x</p></body></html>`,
+          `${SITE}/x`,
+        );
+      const a = head("Alpha");
+      const b = head("Beta");
+      const { crawlId } = await seed([
+        { path: "/a", title: "Alpha", ogTitle: a.ogTitle, ogDescription: a.ogDescription },
+        { path: "/b", title: "Beta", ogTitle: b.ogTitle, ogDescription: b.ogDescription },
+      ]);
+      const f = await duplicate.run(db, crawlId);
+      expect(f.map((x) => [x.evidence.field, x.evidence.value, x.evidence.pages])).toEqual([
+        ["og:title", "Shared by name", [`${SITE}/a`, `${SITE}/b`]],
+        ["og:description", "Shared description", [`${SITE}/a`, `${SITE}/b`]],
+      ]);
+    });
+
     it("reports title groups, then description groups; one text in both is two findings", async () => {
       const { crawlId } = await seed([
         { path: "/a", ogTitle: "Same words", ogDescription: "Same words" },
