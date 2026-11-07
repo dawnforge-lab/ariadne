@@ -383,7 +383,7 @@
  *  - `titleCount` (non-svg `<title>` elements) and `metaDescriptionCount`.
  *  - `robotsMetas`: the bot-specific robots metas (`ROBOTS_META_BOTS`), in
  *    document order, capped.
- *  - `metaRefresh`: the first `<meta http-equiv=refresh content>`, through
+ *  - `metaRefresh`: the `<meta http-equiv=refresh>` a browser acts on (the first non-empty one that parses; failing that, the first refused one), through
  *    `parseRefresh`.
  * ONE EXISTING FIELD CHANGES MEANING (deviation 4): `robotsMeta` is now every
  * `<meta name=robots>` content joined with ", ", not the first one's. Google
@@ -786,7 +786,7 @@ export interface PageAnalysis {
    * `ROBOTS_META_CONTENT_MAX`. Plain `robots` is `robotsMeta`'s.
    */
   robotsMetas: RobotsMetaEntry[];
-  /** The first `<meta http-equiv=refresh content>`, through `parseRefresh`. */
+  /** The `<meta http-equiv=refresh>` a browser acts on (first non-empty one that parses, else the first refused one), through `parseRefresh`. */
   metaRefresh: RefreshFact | null;
   /**
    * The `<a>` start tags outside `<noscript>` that fall into each link-hygiene
@@ -1359,7 +1359,7 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
   const robotsSeen = new Set<string>();
   let sawRobotsMeta = false;
   const robotsMetas: RobotsMetaEntry[] = [];
-  let metaRefresh: RefreshFact | null | undefined;
+  let metaRefresh: RefreshFact | undefined;
   // The social set. `socialFirst` holds each tag's first TRIMMED value
   // UNCAPPED while the parse runs — at most ten strings the tokenizer already
   // allocated — so a later value that differs only past the cap is still
@@ -1893,12 +1893,18 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
     // `property=og:description` is both, and the chain's first match must not
     // hide the second.
     handleSocialTag(name, property, content);
+    // The refresh a browser acts on (HTML Standard, meta refresh): an empty
+    // `content` returns before the steps, and a value the steps refuse leaves
+    // the document free to refresh, so a LATER valid one wins. The first refused
+    // value is kept until one parses, as evidence that the page tried.
     if (
-      metaRefresh === undefined &&
+      (metaRefresh === undefined || metaRefresh.delaySeconds === null) &&
       content !== undefined &&
+      content !== "" &&
       attribs["http-equiv"]?.trim().toLowerCase() === "refresh"
     ) {
-      metaRefresh = parseRefresh(content, pageUrl);
+      const parsed = parseRefresh(content, pageUrl);
+      if (metaRefresh === undefined || parsed.delaySeconds !== null) metaRefresh = parsed;
     }
     if (name === "description") {
       metaDescriptionCount += 1;

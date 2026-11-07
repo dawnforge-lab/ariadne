@@ -404,7 +404,8 @@ The PR #23 review's fixes, made after the gate re-run (`3ba7b3d`..`f369a34`):
   speaks for its crawl.
 - **R19** (replaces R5's URL clause) `parseRefresh` follows the HTML Standard's shared
   declarative refresh steps exactly: `0; urlpage.html` and `1.5.3; url=/x` are redirects,
-  `5abc` is no refresh at all.
+  `5abc` is no refresh at all; an empty or refused first meta refresh gives way to a later
+  valid one, as in a browser.
 - The insecure-ref sample is capped per kind; `hreflang.html-lang-mismatch` splits the
   primary subtag on `_` too; `storableDeep` is copy-on-write; a relative or non-http(s) share
   image gets no `resources` row (nothing fetched); `security.mixed-content` aggregates only the

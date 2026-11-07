@@ -1424,7 +1424,7 @@ describe("the fixture site's default social set reads as complete and consistent
   });
 });
 
-describe("metaRefresh: the first <meta http-equiv=refresh>", () => {
+describe("metaRefresh: the <meta http-equiv=refresh> a browser acts on", () => {
   it("parses the delay and resolves the target", () => {
     const a = headPage(`<meta http-equiv="Refresh" content="0;url=/x">`);
     expect(a.metaRefresh).toEqual({ raw: "0;url=/x", delaySeconds: 0, target: "https://ex.com/x" });
@@ -1439,6 +1439,31 @@ describe("metaRefresh: the first <meta http-equiv=refresh>", () => {
 
   it("is null when there is none", () => {
     expect(headPage(`<meta http-equiv="content-type" content="text/html">`).metaRefresh).toBeNull();
+  });
+
+  // HTML Standard: an empty content returns before the refresh steps, and a
+  // value the steps refuse leaves "will declaratively refresh" false, so the
+  // browser acts on a LATER valid refresh (PR #23 re-review, minor 1).
+  it("skips a first refresh that is not a refresh and takes the later valid one", () => {
+    const a = headPage(
+      `<meta http-equiv="refresh" content="5abc"><meta http-equiv="refresh" content="0;url=/next">`,
+    );
+    expect(a.metaRefresh).toEqual({ raw: "0;url=/next", delaySeconds: 0, target: "https://ex.com/next" });
+  });
+
+  it("skips an empty content", () => {
+    const a = headPage(
+      `<meta http-equiv="refresh" content=""><meta http-equiv="refresh" content="0;url=/next">`,
+    );
+    expect(a.metaRefresh).toEqual({ raw: "0;url=/next", delaySeconds: 0, target: "https://ex.com/next" });
+    expect(headPage(`<meta http-equiv="refresh" content="">`).metaRefresh).toBeNull();
+  });
+
+  it("keeps the first refused value as evidence when no refresh parses", () => {
+    const a = headPage(
+      `<meta http-equiv="refresh" content="abc"><meta http-equiv="refresh" content="5xyz">`,
+    );
+    expect(a.metaRefresh).toEqual({ raw: "abc", delaySeconds: null, target: null });
   });
 });
 

@@ -468,14 +468,18 @@ function analyzeHtmlWithCheerio(html: string, pageUrl: string): UpstreamShape {
       return [{ name, content: storableCap($(el).attr("content") ?? "", ROBOTS_META_CONTENT_MAX) }];
     })
     .slice(0, ROBOTS_METAS_MAX);
-  const refreshEl = $("meta[http-equiv][content]")
-    .filter((_, el) => fold($(el).attr("http-equiv")) === "refresh")
-    .first();
-  const refreshContent = refreshEl.attr("content");
   // `parseRefresh` is shared rather than re-derived, on the `simhash64`
   // precedent: it is arithmetic over the attribute, not a reading of the tree.
+  // The HTML Standard's choice of element: empty contents are skipped, the first
+  // that parses wins, and with none parsing the first refused value is kept.
+  const refreshes = $("meta[http-equiv][content]")
+    .filter((_, el) => fold($(el).attr("http-equiv")) === "refresh")
+    .toArray()
+    .map((el) => $(el).attr("content")!)
+    .filter((content) => content !== "")
+    .map((content) => parseRefresh(content, pageUrl));
   const metaRefresh =
-    refreshContent === undefined ? null : parseRefresh(refreshContent, pageUrl);
+    refreshes.find((r) => r.delaySeconds !== null) ?? refreshes[0] ?? null;
   const h2El = $("h2").first();
   const h2Text = h2El.length
     ? storableCap(h2El.text().replace(/\s+/g, " ").trim(), H2_TEXT_MAX)
@@ -1468,6 +1472,14 @@ describe("the Phase 26b head facts and social set, against the DOM", () => {
     expectParity(`<html><head><meta http-equiv="REFRESH">
       <meta http-equiv="Refresh" content="3; URL='/next'"><meta http-equiv="refresh" content="0">
       </head><body><p>x</p></body></html>`);
+  });
+
+  it("agrees on a refused or empty first refresh giving way to a later valid one", () => {
+    expectParity(`<html><head><meta http-equiv="refresh" content="">
+      <meta http-equiv="refresh" content="5abc"><meta http-equiv="refresh" content="1; url=/b">
+      <meta http-equiv="refresh" content="0; url=/c"></head><body><p>x</p></body></html>`);
+    expectParity(`<html><head><meta http-equiv="refresh" content="abc">
+      <meta http-equiv="refresh" content="x1"></head><body><p>x</p></body></html>`);
   });
 
   it("agrees on lang, counts and the first h2", () => {
