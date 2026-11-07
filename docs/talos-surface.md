@@ -622,7 +622,7 @@ argument nobody allowed, naming it").
 
 **Not paginated, on purpose:** `rules_catalog` and `crawl_compare`. Both are
 bounded by the **ruleset** (180 rows at 0.21.0) rather than by the crawl. The
-catalog is ~176 KB (**180,444 bytes**, re-measured 2026-11-06 at the end of
+catalog is ~176 KB (**180,545 bytes**, re-measured 2026-11-07 at the end of
 Phase 26b over all 180 rows of ruleset 0.21.0 by serialising what
 `rulesCatalog` answers with no crawl id — 15 markers at 2,274 bytes, the
 `marker` values JSON-serialised as one array, and the fourteen tables at 5,239
