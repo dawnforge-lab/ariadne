@@ -154,6 +154,8 @@ describe("resourceRules against the database", () => {
     expires?: string | null;
     /** Paths of the pages that reference it. */
     on: string[];
+    /** The row names a share image. Defaults to true for a row no page loads. */
+    shareImage?: boolean;
   }
 
   async function newCrawl(): Promise<string> {
@@ -200,6 +202,7 @@ describe("resourceRules against the database", () => {
           crawlId,
           url: abs(s.url),
           kind: s.kind ?? "image",
+          shareImage: s.shareImage ?? s.on.length === 0,
           fetchClass: s.fetchClass === undefined ? "ok" : s.fetchClass,
           fetchReason: s.fetchReason ?? null,
           statusCode: s.statusCode === undefined ? 200 : s.statusCode,
@@ -1587,6 +1590,16 @@ describe("resourceRules against the database", () => {
           expect.objectContaining({ reason, resourcesSeen: 1, resourcesSkipped: 1 }),
         ]);
       }
+    });
+
+    it("R13 (26c): the share-only census counts rows marked share_image, not every row without an edge", async () => {
+      // An edge-less row that no share tag named is in neither population, so
+      // it cannot speak for the share images.
+      const { crawlId } = await seed(
+        [{ path: "/a" }],
+        [{ ...unasked(RESOURCE_OFF_REASON), shareImage: false }],
+      );
+      expect(await run("resources.not-fetched", crawlId)).toEqual([]);
     });
 
     it("R13: not-recorded keeps the og-only crawl whose pages count images, and the two never both fire", async () => {

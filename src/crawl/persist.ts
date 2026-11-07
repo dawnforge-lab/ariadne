@@ -93,6 +93,7 @@
  * `onConflictDoNothing` race, its children still carry the minted id.
  */
 import { randomUUID } from "node:crypto";
+import { sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import {
   hreflang,
@@ -222,6 +223,7 @@ export class PageWriter {
   private readonly hreflangBuffer: HreflangRow[] = [];
   private readonly structuredDataBuffer: StructuredDataRow[] = [];
   private readonly resourceBuffer: ResourceRow[] = [];
+  private readonly shareImageBuffer: string[] = [];
   private readonly pageResourceBuffer: PageResourceRow[] = [];
 
   private readonly counts: PageWriterStats = {
@@ -359,15 +361,14 @@ export class PageWriter {
       // status and bytes — and NEVER `page_resources` edges. A browser does not
       // load a share image, so it is no part of page weight, mixed content or
       // `resources.broken`; every rule in that family judges only URLs with an
-      // edge. A URL the page also loads through a resource ref already has its
-      // row from the push above (with that ref's kind) and is not repeated.
-      const pageRefs = new Set(analysis.resourceRefs.map((ref) => ref.url));
+      // edge.
+      // Phase 26c: the row is marked `share_image` at the source. A URL that
+      // this page or another loads keeps its row from the push above, and the
+      // flag is set on conflict, so it is never lost to ordering.
       await this.push(
-        this.resourceBuffer,
-        analysis.socialImageRefs
-          .filter((url) => !pageRefs.has(url))
-          .map((url) => ({ crawlId: this.crawlId, url, kind: "image" as const })),
-        () => this.flushResources(),
+        this.shareImageBuffer,
+        analysis.socialImageRefs,
+        () => this.flushShareImages(),
       );
     }
 
@@ -406,6 +407,7 @@ export class PageWriter {
       // about. Neither is a foreign key (see schema.ts) — this is about which
       // half of the pair is the more useful survivor.
       ["resources", () => this.flushResources()],
+      ["resources (share images)", () => this.flushShareImages()],
       ["page_resources", () => this.flushPageResources()],
     ];
     const failed: string[] = [];
@@ -657,6 +659,45 @@ export class PageWriter {
         .returning({ url: resources.url });
       return inserted.length;
     });
+  }
+
+  /**
+   * Share images: insert-or-mark. The row is created if no page named the URL
+   * yet; a row that exists (a page loads it too, or another page shares it)
+   * gets `share_image = true` and nothing else touched.
+   *
+   * Buffered page-loaded refs are written first, so a URL both loaded and
+   * shared keeps the loading ref's kind. The batch is deduped here because
+   * `on conflict do update` refuses a statement that touches one row twice,
+   * and one default og:image across many pages is the common case.
+   *
+   * The count is the rows this statement INSERTED (`xmax = 0`), not the rows it
+   * marked, so `stats().resources` stays files discovered.
+   */
+  private async flushShareImages(): Promise<void> {
+    await this.flushResources();
+    await this.drain(
+      "resources (share images)",
+      "resources",
+      this.shareImageBuffer,
+      async (batch) => {
+        const rows = [...new Set(batch)].map((url) => ({
+          crawlId: this.crawlId,
+          url,
+          kind: "image" as const,
+          shareImage: true,
+        }));
+        const written = await this.db
+          .insert(resources)
+          .values(rows)
+          .onConflictDoUpdate({
+            target: [resources.crawlId, resources.url],
+            set: { shareImage: true },
+          })
+          .returning({ inserted: sql<boolean>`(xmax = 0)` });
+        return written.filter((row) => row.inserted).length;
+      },
+    );
   }
 
   private async flushPageResources(): Promise<void> {

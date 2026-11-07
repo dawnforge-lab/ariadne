@@ -176,6 +176,9 @@ describe("social query rules against the database", () => {
           crawlId,
           url: r.url,
           kind: "image",
+          // Every row here is named by a share tag (an edge, where a spec has
+          // one, only says a page also loads it).
+          shareImage: true,
           fetchClass: r.fetchClass === undefined ? "ok" : r.fetchClass,
           fetchReason: r.fetchReason ?? null,
           statusCode: r.statusCode === undefined ? 200 : r.statusCode,

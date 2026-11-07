@@ -2468,6 +2468,11 @@ export class ApiService {
    * The crawl's resource census, counted live off the `resources` table —
    * `CrawlDetail.resources`.
    *
+   * EVERY `resources` ROW IS COUNTED, share images included (Phase 26c). The
+   * resource pass fetches an `og:image` / `twitter:image` file like any page
+   * file, so it is seen and fetched or failed here; `resources.share_image`
+   * (the CSV `shareImage` column) is how a reader tells those rows apart.
+   *
    * ONE STATEMENT, and that is the whole reason this is not four counts in a
    * `Promise.all`. The four numbers are a PARTITION of the rows
    * (`fetched + failed + skipped == seen`), the pass writes those rows while a

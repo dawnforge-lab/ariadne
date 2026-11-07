@@ -730,6 +730,13 @@ const KINDS = ["page", "query", "metric"] as const satisfies readonly AnyRule["k
 //     `social.image-broken` gains the problem `too-long` on extraction-3 rows
 //     only, and a v3 social set without `imageRefTooLong` throws "re-crawl";
 //     a v2 row is judged as in 26b (ruling R3). 183 rules.
+//  3. (T3) A share image is named at the source: `resources.share_image` is
+//     set when an `og:image` / `twitter:image` URL is written, and set on
+//     conflict when a page also loads it. The census behind
+//     `resources.not-fetched` counts share-only rows as `share_image and not
+//     loaded by a page`. `crawl_status.resources` still counts every row, share
+//     images included, because the resource pass fetches them; the `resources`
+//     CSV view gains the column `shareImage` after `kind`. No rule change.
 export const RULESET_VERSION = "0.22.0";
 
 /**

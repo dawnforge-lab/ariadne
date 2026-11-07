@@ -210,7 +210,8 @@ const LOADED_BY_A_PAGE = sql`exists (
 
 /**
  * Which `resources` rows a census counts: the files a page loads (the family's
- * population), the og/X share images with no edge (deviation 3), or both.
+ * population), the og/X share images no page loads (deviation 3; since 26c the row says so
+ * itself with `share_image`), or both.
  */
 type CensusRows = "loaded" | "share-only" | "all";
 
@@ -241,7 +242,7 @@ async function unaskedCensus(
     rows === "loaded"
       ? LOADED_BY_A_PAGE
       : rows === "share-only"
-        ? sql`not ${LOADED_BY_A_PAGE}`
+        ? sql`r.share_image and not ${LOADED_BY_A_PAGE}`
         : sql`true`;
   const result = await db.execute<{
     seen: number;

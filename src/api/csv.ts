@@ -903,10 +903,15 @@ export const CSV_VIEW_DEFS: Record<CsvQueryViewName, CsvView> = {
    * reason: `header` is a claim the server made and `counted` is a measurement
    * we took, and a page-weight sum built from the two without distinguishing
    * them is a number with two different provenances in it.
+   *
+   * `shareImage` is `true` for a file an `og:image` / `twitter:image` tag named.
+   * Such a file is fetched, so it has a row, but a browser does not load it:
+   * `referencingPages` is 0 unless a page also loads it as an asset.
    */
   resources: defineCsvView<{
     url: string;
     kind: string;
+    share_image: boolean;
     fetch_class: string | null;
     status_code: number | null;
     bytes: number | null;
@@ -917,13 +922,14 @@ export const CSV_VIEW_DEFS: Record<CsvQueryViewName, CsvView> = {
     referencing_pages: number;
   }>({
     header: [
-      "url", "kind", "fetchClass", "status", "bytes", "bytesSource",
+      "url", "kind", "shareImage", "fetchClass", "status", "bytes", "bytesSource",
       "contentType", "cacheControl", "fetchReason", "referencingPages",
     ],
     keyset: ["url"],
     start: [""],
     query: (crawlId, cursor, limit) => sql`
-      select r.url, r.kind, r.fetch_class, r.status_code, r.bytes, r.bytes_source,
+      select r.url, r.kind, r.share_image, r.fetch_class, r.status_code, r.bytes,
+             r.bytes_source,
              r.content_type, r.cache_control, r.fetch_reason,
              (select count(*)::int from page_resources pr
                where pr.crawl_id = r.crawl_id and pr.resource_url = r.url)
@@ -936,6 +942,7 @@ export const CSV_VIEW_DEFS: Record<CsvQueryViewName, CsvView> = {
     cells: (row) => [
       row.url,
       row.kind,
+      String(row.share_image),
       orEmpty(row.fetch_class),
       orEmpty(row.status_code),
       orEmpty(row.bytes),

@@ -1700,6 +1700,76 @@ describe("PageWriter", () => {
       expect(writer.stats().pageResources).toBe(1);
     });
 
+    /**
+     * Task 3 (Phase 26c): the row says it is a share image, by itself. The flag
+     * is set on conflict, so it holds whichever page named the URL first and
+     * whether or not any page also loads it.
+     */
+    it("marks a share-image row share_image = true and a page-only row false", async () => {
+      const crawlId = await newCrawl();
+      const writer = new PageWriter(db, crawlId);
+      const url = `${SITE}/flagged`;
+      const analysis = analyzePage(
+        `<html><head><meta property="og:image" content="${SITE}/og/only.png"></head>` +
+          `<body><img src="/img/page-only.png" alt="x"></body></html>`,
+        url,
+      );
+      await writer.addPage(item(url), makeFetch(url), analysis, { complete: true });
+      await writer.flush();
+      const rows = await db
+        .select({ url: resources.url, shareImage: resources.shareImage })
+        .from(resources)
+        .where(eq(resources.crawlId, crawlId))
+        .orderBy(resources.url);
+      expect(rows).toEqual([
+        { url: `${SITE}/img/page-only.png`, shareImage: false },
+        { url: `${SITE}/og/only.png`, shareImage: true },
+      ]);
+    });
+
+    it("sets share_image on a URL one page loads as an <img> and another uses as og:image", async () => {
+      for (const order of [["loads", "shares"], ["shares", "loads"]] as const) {
+        const crawlId = await newCrawl();
+        const writer = new PageWriter(db, crawlId, { batchSize: 1 });
+        const shared = `${SITE}/img/both.png`;
+        for (const role of order) {
+          const url = `${SITE}/${role}`;
+          const analysis =
+            role === "loads"
+              ? makeAnalysis({ resourceRefs: [{ url: shared, kind: "image" }] })
+              : makeAnalysis({ resourceRefs: [], socialImageRefs: [shared] });
+          await writer.addPage(item(url), makeFetch(url), analysis, { complete: true });
+        }
+        await writer.flush();
+        const rows = await db
+          .select({ url: resources.url, shareImage: resources.shareImage })
+          .from(resources)
+          .where(eq(resources.crawlId, crawlId));
+        expect(rows, order.join(">")).toEqual([{ url: shared, shareImage: true }]);
+        expect(await countOf(pageResources, crawlId), order.join(">")).toBe(1);
+        expect(writer.stats().resources, order.join(">")).toBe(1);
+      }
+    });
+
+    it("writes one row when many pages in one batch name the same share image", async () => {
+      const crawlId = await newCrawl();
+      const writer = new PageWriter(db, crawlId, { batchSize: 100 });
+      const shared = `${SITE}/og/default.png`;
+      for (const path of ["/p1", "/p2", "/p3"]) {
+        const url = `${SITE}${path}`;
+        await writer.addPage(item(url), makeFetch(url), makeAnalysis({ resourceRefs: [], socialImageRefs: [shared] }), {
+          complete: true,
+        });
+      }
+      await writer.flush();
+      const rows = await db
+        .select({ url: resources.url, shareImage: resources.shareImage })
+        .from(resources)
+        .where(eq(resources.crawlId, crawlId));
+      expect(rows).toEqual([{ url: shared, shareImage: true }]);
+      expect(writer.stats().resources).toBe(1);
+    });
+
     it("writes no resources row for a relative or non-http(s) share image", async () => {
       const crawlId = await newCrawl();
       const writer = new PageWriter(db, crawlId);

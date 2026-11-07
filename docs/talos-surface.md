@@ -29,7 +29,7 @@ By family:
   `social.og-duplicate` (info), and `social.image-broken` (warning). A share image
   is stored as a `resources` row with no page reference, because no page loads it: it
   is counted in `crawl_status.resources` and listed on the `resources` CSV view with
-  `referencingPages` 0, and it never counts toward page weight, mixed content or
+  `shareImage` `true` and `referencingPages` 0, and it never counts toward page weight, mixed content or
   `resources.broken`. On a `fetchResources: false` crawl `social.image-broken` judges
   only relative or malformed addresses and `resources.not-fetched` speaks for the rest.
 - **Headings and titles** (CHECK-35, CHECK-36, CHECK-37): `title.multiple` and
@@ -964,8 +964,10 @@ which it is, is `resources.not-recorded` (§5.3).
 
 - `seen` — distinct files the SERVED HTML points at, images, stylesheets and
   scripts, and since Phase 26b its first `og:image` and first `twitter:image`, the
-  two share images judged (no page loads those; `referencingPages` 0 on the CSV
-  view). Recorded
+  two share images judged (no page loads those; `shareImage` `true` and
+  `referencingPages` 0 on the CSV view). Share images are counted here, and in
+  `fetched` / `failed` / `skipped`, because the resource pass fetches them like
+  any page file. Recorded
   even when `fetchResources` is false; a file a script injects at runtime is not in
   it at all.
 - `fetched` — a server answered about the file.
@@ -2535,7 +2537,7 @@ rows**; the header is always written and never counted.
 | `links_to_5xx` | Source, Destination, Anchor, Status Code | one internal link to a 5xx page | — (added P20-T1) |
 | `anchor_texts` | source, target, text | one link, internal or external | 35,145 rows / 4,664,393 B |
 | `redirects` | source, chain, target, hops | one **redirecting page** | 10 rows |
-| `resources` | url, kind, fetchClass, status, bytes, bytesSource, contentType, cacheControl, fetchReason, referencingPages | one **file** the served HTML points at | 0 rows (this crawl predates the pass) |
+| `resources` | url, kind, shareImage, fetchClass, status, bytes, bytesSource, contentType, cacheControl, fetchReason, referencingPages | one **file** the served HTML points at | 0 rows (this crawl predates the pass) |
 | `metric_table` (needs `metricId`) | **the metric's own** — its `summary` labels, then its `columns` labels | one row of one metric's table | 40 rows (`inlinks.extremes`) |
 
 Semantics a consumer must repeat to its own users:
@@ -2577,8 +2579,10 @@ Semantics a consumer must repeat to its own users:
 - **`resources` is one row per FILE, off the SERVED HTML.** An image four
   hundred pages carry is one row with `referencingPages: 400`, not four hundred
   rows — the file is the unit of work, and the fix is made once. A share image
-  (`og:image`, `twitter:image`) is a row with `referencingPages: 0`, because the
-  tag names it and no page loads it (Phase 26b). Two absences
+  (`og:image`, `twitter:image`) is a row with `shareImage: true` and
+  `referencingPages: 0`, because the tag names it and no page loads it (Phase
+  26b; the `shareImage` column is Phase 26c). A file that is both a share image
+  and a page asset carries `shareImage: true` and its page count. Two absences
   follow, on exactly the `links_to_4xx` pattern: a file that JAVASCRIPT injects
   at runtime was never in the served HTML and is **absent from this file rather
   than clean**, so an empty export says "the server sent no references" and never
