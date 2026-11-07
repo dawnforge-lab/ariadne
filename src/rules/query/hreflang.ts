@@ -122,6 +122,11 @@ function isXDefault(code: string): boolean {
  * `targets` is the distinct, sorted comparison keys — two codes naming one URL
  * are one member of the cluster and one relationship to judge, so the rules
  * work from this rather than from the raw declaration rows.
+ *
+ * Every source is read (HTML, `Link` header, sitemap): the set is their union,
+ * which is what a search engine reads. Where each declaration came from is
+ * kept beside it, because a finding about a declaration is fixed where the
+ * declaration lives (Phase 26c).
  */
 interface DeclarationSet {
   pageId: string;
@@ -131,6 +136,10 @@ interface DeclarationSet {
   targets: string[];
   /** The distinct declared codes, trimmed and sorted — the evidence's `codes`. */
   codes: string[];
+  /** The distinct sources of every declaration in the set, sorted. */
+  sources: string[];
+  /** Per target key, the distinct sources that name it, sorted. */
+  sourcesByTarget: ReadonlyMap<string, string[]>;
   hasXDefault: boolean;
   /** `isAuditable` for the DECLARING page: fetched OK as HTML with a 200. */
   auditable: boolean;
@@ -210,17 +219,18 @@ async function eachDeclarationSet(
       canonical_header: string | null;
       hreflang_code: string;
       target_url: string;
+      source: string;
     }>(sql`
       select h.page_id, p.url as page_url, p.fetch_class, p.status_code,
              p.canonical_html, p.canonical_header,
-             h.hreflang_code, h.target_url
+             h.hreflang_code, h.target_url, h.source
       from hreflang h
       join pages p on p.id = h.page_id
       where h.crawl_id = ${crawlId}
         and h.page_id = any(${sql.param(pageIds)}::text[])`);
 
     const sets = new Map<string, DeclarationSet>();
-    const members = new Map<string, Set<string>>();
+    const members = new Map<string, Map<string, Set<string>>>();
     const codes = new Map<string, Set<string>>();
     /** Declaring pages dropped as canonicalised elsewhere, so the test runs once each. */
     const invisible = new Set<string>();
@@ -251,6 +261,8 @@ async function eachDeclarationSet(
           pageKey: targetKey(pageUrl),
           targets: [],
           codes: [],
+          sources: [],
+          sourcesByTarget: new Map(),
           hasXDefault: false,
           auditable: isAuditable({
             fetchClass: String(row.fetch_class),
@@ -258,16 +270,25 @@ async function eachDeclarationSet(
           }),
         };
         sets.set(pageId, set);
-        members.set(pageId, new Set<string>());
+        members.set(pageId, new Map<string, Set<string>>());
         codes.set(pageId, new Set<string>());
       }
-      members.get(pageId)!.add(targetKey(String(row.target_url)));
+      const member = targetKey(String(row.target_url));
+      const memberSources = members.get(pageId)!;
+      const named = memberSources.get(member) ?? new Set<string>();
+      named.add(String(row.source));
+      memberSources.set(member, named);
       codes.get(pageId)!.add(String(row.hreflang_code).trim());
       if (isXDefault(String(row.hreflang_code))) set.hasXDefault = true;
     }
     for (const set of sets.values()) {
-      set.targets = [...members.get(set.pageId)!].sort();
+      const memberSources = members.get(set.pageId)!;
+      set.targets = [...memberSources.keys()].sort();
       set.codes = [...codes.get(set.pageId)!].sort();
+      set.sourcesByTarget = new Map(
+        [...memberSources].map(([member, named]) => [member, [...named].sort()]),
+      );
+      set.sources = [...new Set([...memberSources.values()].flatMap((named) => [...named]))].sort();
     }
 
     const context = opts.withTargets
@@ -373,6 +394,9 @@ async function targetContext(
  * about it grows with what is kept — so the count behind the cap is exact
  * (`noteTruncation`): only the LISTING stops at the cap, never the counting.
  * An uncapped run keeps every pair and writes no note.
+ *
+ * Every finding's evidence ends with `sources`: where the page declared that
+ * member (HTML, `Link` header, sitemap), which is where the annotation is fixed.
  */
 async function declarationFindings(
   self: RuleIdentity,
@@ -391,8 +415,9 @@ async function declarationFindings(
     for (const member of set.targets) {
       const target = context.page(member);
       if (target === undefined) continue;
-      const evidence = fires(set, target, context);
-      if (evidence === null) continue;
+      const fired = fires(set, target, context);
+      if (fired === null) continue;
+      const evidence = { ...fired, sources: set.sourcesByTarget.get(member)! };
       total += 1;
       if (caps.listing !== null && findings.length >= caps.listing) continue;
       findings.push(
@@ -546,7 +571,10 @@ async function missingSelfReferenceFindings(
         // language, and the crawl stores no language for a page (`pages` has no
         // `lang` column), so the field would be a guess. The copy says so rather
         // than the evidence carrying a null nobody can read.
-        evidence: { codes: set.codes, targets: set.targets },
+        //
+        // `sources` is every source that annotated the page: the fix is to add
+        // the self-reference wherever the set is generated.
+        evidence: { codes: set.codes, targets: set.targets, sources: set.sources },
         dedupeKey: set.pageUrl,
       }),
     );
@@ -676,7 +704,7 @@ export const hreflangRules: QueryRule[] = [
       { key: "targetUrl", label: "Alternate URL" },
       { key: "occurrences", label: "Occurrences" },
       { key: "targetUrls", label: "Alternate URLs", optional: true },
-      { key: "sources", label: "Declaration Source", optional: true },
+      { key: "sources", label: "Declaration Source" },
     ],
     ...copyFor(INVALID_CODE.id),
     rulesetVersion: RULESET_VERSION,
@@ -776,11 +804,13 @@ export const hreflangRules: QueryRule[] = [
             targetUrl: targets[0]!,
             // The multiplicity, carried rather than dropped: a code declared
             // three times is three lines of template to fix, and the report
-            // would otherwise say "one". The extra lists appear only when they
-            // hold something the single fields do not.
+            // would otherwise say "one". `targetUrls` appears only when it
+            // holds something `targetUrl` does not.
             occurrences: group.occurrences,
             ...(targets.length > 1 ? { targetUrls: targets } : {}),
-            ...(sources.length > 1 ? { sources } : {}),
+            // Always, since Phase 26c: a code only the sitemap or a Link
+            // header declares is fixed there, not in the template.
+            sources,
           },
           dedupeKey,
         });
@@ -821,6 +851,7 @@ export const hreflangRules: QueryRule[] = [
     columns: [
       { key: "target", label: "URL Not Returning Link" },
       { key: "targetHasHreflang", label: "Target Declares hreflang" },
+      { key: "sources", label: "Declaration Source" },
     ],
     ...copyFor(RETURN_LINK.id),
     rulesetVersion: RULESET_VERSION,
@@ -866,6 +897,7 @@ export const hreflangRules: QueryRule[] = [
       { key: "target", label: "URL Not Returning Link" },
       { key: "targetFetchClass", label: "Target Fetch Class" },
       { key: "targetIndexable", label: "Target Indexable" },
+      { key: "sources", label: "Declaration Source" },
     ],
     ...copyFor(NON_INDEXABLE.id),
     rulesetVersion: RULESET_VERSION,
@@ -899,6 +931,7 @@ export const hreflangRules: QueryRule[] = [
     columns: [
       { key: "codes", label: "hreflang" },
       { key: "targets", label: "Alternate URLs" },
+      { key: "sources", label: "Declaration Source" },
     ],
     ...copyFor(SELF_REFERENCE.id),
     rulesetVersion: RULESET_VERSION,

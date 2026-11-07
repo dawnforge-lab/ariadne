@@ -380,6 +380,15 @@ const SKIP_HARNESS_CLAIMS: string[] = [
   // (fires; silent on an http page, an https og:image, an https secure_url, a v2
   // row; analyzer end to end) and test/crawl/analyzer-extensions.test.ts.
   "social.image-insecure",
+  // Phase 26c Task 10. `hreflang.source-conflict` is provokable by an ordinary
+  // page whose `Link` header names a different URL for a code than its HTML
+  // does, so this entry is TEMPORARY like the two above: Task 11 adds that
+  // fixture page and removes it. Until then the rule is proven by
+  // test/rules/hreflang-integrity-query.test.ts (fires; silent on equal sets, a
+  // code one source omits, a single source, a v2 crawl and a crawl without
+  // sitemap facts) and the sitemap source end to end by
+  // test/rules/derive-sitemap-hreflang.test.ts.
+  "hreflang.source-conflict",
 ];
 
 /**
@@ -1626,6 +1635,7 @@ describe("the fixture site end to end", () => {
         pageUrl: `${app.base}/authored/hreflang-bad-code`,
         codes: ["english-uk"],
         targets: ["https://en-gb.example/opening-hours"],
+        sources: ["html"],
       },
     ]);
 
@@ -1654,11 +1664,13 @@ describe("the fixture site end to end", () => {
         pageUrl: `${app.base}/authored3/hreflang-noindex`,
         target: `${app.base}/index/noindex-meta`,
         targetHasHreflang: false,
+        sources: ["html"],
       },
       {
         pageUrl: `${app.base}/authored3/hreflang-one-way`,
         target: `${app.base}/authored3/hreflang-mute`,
         targetHasHreflang: false,
+        sources: ["html"],
       },
     ]);
     // The reciprocated pair is absent from that list, which is the whole point
@@ -1670,6 +1682,7 @@ describe("the fixture site end to end", () => {
         target: `${app.base}/index/noindex-meta`,
         targetFetchClass: "ok",
         targetIndexable: false,
+        sources: ["html"],
       },
     ]);
 
@@ -1687,6 +1700,7 @@ describe("the fixture site end to end", () => {
         target: `${app.base}/authored26/hreflang-code-b`,
         returnCode: ["en-gb"],
         selfCode: ["en"],
+        sources: ["html"],
       },
     ]);
     // Both duplicate pages share one template, so each lists the same two URLs.
@@ -1695,11 +1709,15 @@ describe("the fixture site end to end", () => {
       `${app.base}/authored26/hreflang-dup-b`,
     ];
     expect(await findingSet("hreflang.multiple-entries")).toEqual([
-      { pageUrl: dupTargets[0], hreflang: "en", targets: dupTargets },
-      { pageUrl: dupTargets[1], hreflang: "en", targets: dupTargets },
+      { pageUrl: dupTargets[0], hreflang: "en", targets: dupTargets, sources: ["html"] },
+      { pageUrl: dupTargets[1], hreflang: "en", targets: dupTargets, sources: ["html"] },
     ]);
     expect(await findingSet("hreflang.self-only")).toEqual([
-      { pageUrl: `${app.base}/authored26/hreflang-self-only`, hreflang: ["en", "x-default"] },
+      {
+        pageUrl: `${app.base}/authored26/hreflang-self-only`,
+        hreflang: ["en", "x-default"],
+        sources: ["html"],
+      },
     ]);
     // Filed on the alternate nothing links to, with the one page that names it
     // (its own self-reference is not a source).

@@ -1589,18 +1589,32 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
      alternates that were fetched** — mark this check SKIP for the rest rather than
      reading the silence as reciprocal.
   5. `issues_list` with `checkId: "CHECK-24"` — four integrity rules over the
-     declarations in the page's HTML, each filed with the evidence that names the
-     fix:
+     page's declarations from every source (its HTML, its HTTP `Link` header and its
+     sitemap entry, read together as search engines read them), each filed with the
+     evidence that names the fix. Every hreflang finding that lists a declaration
+     carries `sources` (`html`, `header`, `sitemap`): where the annotation lives, and
+     so where it is fixed. `hreflang.unlinked-target` is the exception; its `sources`
+     are the declaring pages.
      - `hreflang.inconsistent-return-code` (warning) — page A lists B, B links back to
        A, and the code B uses for A differs from the code A uses for itself.
        `x-default` is not read as a language; a page with no self-reference is
        left to `hreflang.missing-self-reference`.
      - `hreflang.multiple-entries` (warning) — one page gives one code to two or
-       more different URLs (spellings of one URL are not different).
+       more different URLs within ONE source (spellings of one URL are not
+       different); `sources` names the source(s) at fault.
      - `hreflang.self-only` (info) — every declaration names the page itself, so no
        alternate is named.
      - `hreflang.unlinked-target` (info) — a crawled alternate no other page links
        to, filed on the alternate with up to 10 declaring pages and the exact count.
+  6. `issues_list` with `checkId: "CHECK-24"` — `hreflang.source-conflict` (warning):
+     a page annotated in two or more places where one code points to different URLs
+     in two of them (the HTML says `de` is `/de/`, the sitemap says `/de-de/`).
+     Evidence: the first such `code` with each source's targets (`bySource`), the
+     number of disagreeing codes (`conflictingCodes`), and `onlyIn`, the codes only
+     one source lists, per source (at most 20 each, `onlyInTruncated` when cut). A
+     code one source omits is not a conflict, because search engines union the
+     sources. It needs a crawl from Phase 26c on; on an older one
+     `extraction.not-recorded` is on file instead.
 - **Important**: Don't just check for hreflang errors — also assess **coverage**:
   1. How many internal indexable URLs have hreflang tags vs how many should?
   2. If the site has multiple language/market versions, ALL equivalent pages should have hreflang
@@ -1611,12 +1625,18 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
   real one, and search engines read hreflang on the canonical, so an inherited
   alternates block on a tracking-parameter variant is not judged at all. Its
   canonical is reported by CHECK-17 where it belongs.
-- **Crawl-level marker**: `extraction.not-recorded` (info) is the NOT MEASURED marker for the page facts this check reads from extraction version 2: on a crawl extracted before them (or one mixing old and new pages) the rules that read those facts did not run, so their part of this check is NOT MEASURED, never a pass. The remedy is a re-crawl.
+- **Crawl-level marker**: `extraction.not-recorded` (info) is the NOT MEASURED marker for the page facts this check reads from extraction version 2 (version 3, and the recorded sitemap facts, for `hreflang.source-conflict`, which compares the HTML with the `Link` header and the sitemap): on a crawl extracted before them (or one mixing old and new pages) the rules that read those facts did not run, so their part of this check is NOT MEASURED, never a pass. The remedy is a re-crawl.
 - **Evaluate**:
   - FAIL if missing return links > 0
   - FAIL if pages missing their own self-reference > 0
   - FAIL if significant coverage gap (many pages that should have hreflang don't)
-  - WARN if hreflang only in sitemap (not in HTML)
+  - WARN if hreflang only in sitemap (not in HTML): read the `sources` evidence on
+    the hreflang findings (a declaration whose `sources` is `["sitemap"]`) and the
+    `onlyIn` of `hreflang.source-conflict`. A page whose sitemap-only hreflang breaks
+    no rule produces no finding, so this is a floor: say so rather than reporting
+    "none"
+  - WARN if `hreflang.source-conflict` (warning) > 0: the sources disagree about
+    where a language lives, and the set may be ignored
   - WARN if `hreflang.inconsistent-return-code` (warning) or `hreflang.multiple-entries`
     (warning) > 0: the cluster disagrees with itself and a search engine may discard it
   - INFO if `hreflang.self-only` (info) or `hreflang.unlinked-target` (info) > 0:

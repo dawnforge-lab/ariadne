@@ -466,7 +466,7 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
   "hreflang.multiple-entries": {
     title: "Hreflang: Same code listed for different URLs",
     explanation:
-      "Pages whose hreflang block gives one language code to two or more different URLs; spellings of one URL that differ only by fragment, host case or query order count as one. Search engines cannot tell which URL the code stands for and may ignore both. Only the block on the page is read, and the alternates are not fetched.",
+      "Pages whose HTML, HTTP Link header or sitemap entry gives one language code to two or more different URLs, each source read on its own; spellings of one URL that differ only by fragment, host case or query order count as one. Search engines cannot tell which URL the code stands for and may ignore both. Two sources giving the code one different URL each are reported as Hreflang: Sources disagree on an alternate URL, and the alternates are not fetched.",
     howToFix:
       "Keep one URL per code and remove the stale or duplicate entry. Generate the block from one mapping so a code cannot be added twice.",
   },
@@ -480,9 +480,16 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
   "hreflang.self-only": {
     title: "Hreflang: Block names only the page itself",
     explanation:
-      "Pages whose hreflang block lists only the page's own URL, so no other version is named; pages canonicalised to another URL are ignored. The block is valid but connects nothing, which usually means the other versions were left out of the template.",
+      "Pages whose hreflang annotations, in the HTML, the HTTP Link header and the sitemap together, list only the page's own URL, so no other version is named; pages canonicalised to another URL are ignored. The annotation is valid but connects nothing, which usually means the other versions were left out of the template or the sitemap.",
     howToFix:
       "Add the other language versions to the block, or remove the block if the page has no alternate versions.",
+  },
+  "hreflang.source-conflict": {
+    title: "Hreflang: Sources disagree on an alternate URL",
+    explanation:
+      "Pages annotated in more than one place (the HTML, the HTTP Link header, the sitemap) where one language code points to different URLs in two of them; the columns show the first such code with each source's URLs, how many codes disagree, and the codes only one source lists, which is not a fault because search engines combine the sources. Search engines read every source, so the page claims two versions of one language and the set may be ignored. Pages canonicalised to another URL are ignored, and the alternates are not fetched.",
+    howToFix:
+      "Generate the HTML, header and sitemap annotations from one language-to-URL mapping, or keep hreflang in one place only and remove it from the others.",
   },
   "hreflang.unlinked-target": {
     title: "Hreflang: Alternate has no internal links",

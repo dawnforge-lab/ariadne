@@ -1,6 +1,7 @@
 /**
  * The hreflang integrity rules (`hreflang.inconsistent-return-code`,
- * `hreflang.multiple-entries`, `hreflang.self-only`, `hreflang.unlinked-target`),
+ * `hreflang.multiple-entries`, `hreflang.self-only`, `hreflang.unlinked-target`,
+ * `hreflang.html-lang-mismatch` and, from Phase 26c, `hreflang.source-conflict`),
  * against a real database.
  *
  * Rows are inserted directly, as in hreflang-query.test.ts: what is under test
@@ -14,10 +15,15 @@ import { eq } from "drizzle-orm";
 import { closeDb, createDb, type Db } from "../../src/db/client.js";
 import { runMigrations } from "../../src/db/migrate.js";
 import { crawls, hreflang, links, pages } from "../../src/db/schema.js";
+import type { DiscoveryEvidence } from "../../src/crawl/loop.js";
 import { URL_FINDING_CAP } from "../../src/rules/query/crawl-evidence.js";
-import { hreflangIntegrityRules } from "../../src/rules/query/hreflang-integrity.js";
+import {
+  hreflangIntegrityRules,
+  ONLY_IN_CODES_CAP,
+} from "../../src/rules/query/hreflang-integrity.js";
 import { SAMPLE_SOURCES } from "../../src/rules/query/link-targets.js";
 import type { Finding, QueryRule } from "../../src/rules/registry/types.js";
+import { mkDiscovery } from "./mk-discovery.js";
 import { writerIndexable, type IndexabilitySpec } from "./mk-page.js";
 
 function databaseUrl(): string {
@@ -37,12 +43,13 @@ function rule(id: string): QueryRule {
 }
 
 describe("hreflangIntegrityRules metadata", () => {
-  it("defines exactly the five integrity rules", () => {
+  it("defines exactly the six integrity rules", () => {
     expect(hreflangIntegrityRules.map((r) => r.id).sort()).toEqual([
       "hreflang.html-lang-mismatch",
       "hreflang.inconsistent-return-code",
       "hreflang.multiple-entries",
       "hreflang.self-only",
+      "hreflang.source-conflict",
       "hreflang.unlinked-target",
     ]);
   });
@@ -57,6 +64,7 @@ describe("hreflangIntegrityRules metadata", () => {
       "hreflang.inconsistent-return-code": [["CHECK-24"], "warning", "hreflang"],
       "hreflang.multiple-entries": [["CHECK-24"], "warning", "hreflang"],
       "hreflang.self-only": [["CHECK-24"], "info", "hreflang"],
+      "hreflang.source-conflict": [["CHECK-24"], "warning", "hreflang"],
       "hreflang.unlinked-target": [["CHECK-24"], "info", "hreflang"],
     });
   });
@@ -82,9 +90,19 @@ describe("hreflangIntegrityRules against the database", () => {
     extractionVersion?: number | null;
   }
 
-  async function newCrawl(): Promise<string> {
+  /**
+   * A crawl row. Without `discovery` it carries none, as these tests always
+   * have; `source-conflict` needs the Phase 26c `sitemapFacts` to judge at all.
+   */
+  async function newCrawl(discovery: DiscoveryEvidence | null = null): Promise<string> {
     const id = `crawl_${randomUUID()}`;
-    await db.insert(crawls).values({ id, siteUrl: SITE, config: {}, rulesetVersion: "test" });
+    await db.insert(crawls).values({
+      id,
+      siteUrl: SITE,
+      config: {},
+      rulesetVersion: "test",
+      discovery,
+    });
     createdCrawls.push(id);
     return id;
   }
@@ -220,6 +238,7 @@ describe("hreflangIntegrityRules against the database", () => {
         target: url("/b"),
         returnCode: ["en-gb"],
         selfCode: ["en"],
+        sources: ["html"],
       });
       expect(f.dedupeKey).toBe(`${url("/a")}→${url("/b")}`);
     });
@@ -311,11 +330,29 @@ describe("hreflangIntegrityRules against the database", () => {
       expect(await findings("hreflang.inconsistent-return-code", crawlId)).toHaveLength(0);
     });
 
-    it("reads only HTML declarations", async () => {
+    it("reads every source: a return code stated in the sitemap or a header counts", async () => {
       const crawlId = await newCrawl();
       const ids = await addPages(crawlId, ["/a", "/b"]);
-      await declare(crawlId, ids, "/a", [["en", "/a"], ["fr", "/b"]], "sitemap");
+      await declare(crawlId, ids, "/a", [["en", "/a"]], "header");
+      await declare(crawlId, ids, "/a", [["fr", "/b"]], "sitemap");
       await declare(crawlId, ids, "/b", [["en-gb", "/a"], ["fr", "/b"]], "sitemap");
+      const found = await findings("hreflang.inconsistent-return-code", crawlId);
+      expect(found.map((f) => f.evidence)).toEqual([
+        {
+          hreflang: ["fr"],
+          target: url("/b"),
+          returnCode: ["en-gb"],
+          selfCode: ["en"],
+          sources: ["sitemap"],
+        },
+      ]);
+    });
+
+    it("reads en_GB and en-gb as one code", async () => {
+      const crawlId = await newCrawl();
+      const ids = await addPages(crawlId, ["/a", "/b"]);
+      await declare(crawlId, ids, "/a", [["en_GB", "/a"], ["fr", "/b"]]);
+      await declare(crawlId, ids, "/b", [["en-gb", "/a"], ["fr", "/b"]]);
       expect(await findings("hreflang.inconsistent-return-code", crawlId)).toHaveLength(0);
     });
 
@@ -362,7 +399,11 @@ describe("hreflangIntegrityRules against the database", () => {
       const f = found[0]!;
       expect(f.severity).toBe("warning");
       expect(f.pageId).toBe(ids.get("/a"));
-      expect(f.evidence).toEqual({ hreflang: "en", targets: [url("/a"), url("/b")] });
+      expect(f.evidence).toEqual({
+        hreflang: "en",
+        targets: [url("/a"), url("/b")],
+        sources: ["html"],
+      });
       expect(f.dedupeKey).toBe(`${url("/a")}#en`);
     });
 
@@ -420,12 +461,38 @@ describe("hreflangIntegrityRules against the database", () => {
       expect(await findings("hreflang.multiple-entries", crawlId)).toHaveLength(0);
     });
 
-    it("reads only HTML declarations", async () => {
+    // Deviation 5: one source giving a code two URLs is this rule's finding;
+    // two sources giving it one URL each disagree with each other, and that is
+    // `hreflang.source-conflict`'s, so one defect never fires both.
+    it("counts targets within one source: one target in each of two sources does not fire", async () => {
       const crawlId = await newCrawl();
       const ids = await addPages(crawlId, ["/a"]);
-      await declare(crawlId, ids, "/a", [["en", "/x"]], "html");
-      await declare(crawlId, ids, "/a", [["en", "/y"]], "sitemap");
+      await declare(crawlId, ids, "/a", [["de", "/x"]], "html");
+      await declare(crawlId, ids, "/a", [["de", "/y"]], "sitemap");
+      await declare(crawlId, ids, "/a", [["de", "/z"]], "header");
       expect(await findings("hreflang.multiple-entries", crawlId)).toHaveLength(0);
+    });
+
+    it("fires on two targets for one code in one non-HTML source, naming that source", async () => {
+      const crawlId = await newCrawl();
+      const ids = await addPages(crawlId, ["/a"]);
+      await declare(crawlId, ids, "/a", [["de", "/x"]], "html");
+      await declare(crawlId, ids, "/a", [["de", "/x"], ["DE", "/y"], ["de ", "/y#top"]], "sitemap");
+      const found = await findings("hreflang.multiple-entries", crawlId);
+      expect(found.map((f) => [f.dedupeKey, f.evidence])).toEqual([
+        [`${url("/a")}#de`, { hreflang: "de", targets: [url("/x"), url("/y")], sources: ["sitemap"] }],
+      ]);
+    });
+
+    it("files one finding per (page, code) when two sources each list two targets", async () => {
+      const crawlId = await newCrawl();
+      const ids = await addPages(crawlId, ["/a"]);
+      await declare(crawlId, ids, "/a", [["de", "/x"], ["de", "/y"]], "html");
+      await declare(crawlId, ids, "/a", [["de", "/y"], ["de", "/z"]], "header");
+      const found = await findings("hreflang.multiple-entries", crawlId);
+      expect(found.map((f) => f.evidence)).toEqual([
+        { hreflang: "de", targets: [url("/x"), url("/y"), url("/z")], sources: ["header", "html"] },
+      ]);
     });
 
     it("caps what it lists and reports the exact total", async () => {
@@ -461,7 +528,7 @@ describe("hreflangIntegrityRules against the database", () => {
       const f = found[0]!;
       expect(f.severity).toBe("info");
       expect(f.pageId).toBe(ids.get("/solo"));
-      expect(f.evidence).toEqual({ hreflang: ["en", "x-default"] });
+      expect(f.evidence).toEqual({ hreflang: ["en", "x-default"], sources: ["html"] });
       expect(f.dedupeKey).toBe(url("/solo"));
     });
 
@@ -493,12 +560,21 @@ describe("hreflangIntegrityRules against the database", () => {
       expect(await findings("hreflang.self-only", crawlId)).toHaveLength(0);
     });
 
-    it("judges only HTML rows: a sitemap row naming another page does not rescue it", async () => {
+    it("reads every source: a sitemap row naming another page means the page names one", async () => {
       const crawlId = await newCrawl();
       const ids = await addPages(crawlId, ["/a"]);
       await declare(crawlId, ids, "/a", [["en", "/a"]], "html");
       await declare(crawlId, ids, "/a", [["fr", "/b"]], "sitemap");
-      expect(await findings("hreflang.self-only", crawlId)).toHaveLength(1);
+      expect(await findings("hreflang.self-only", crawlId)).toHaveLength(0);
+    });
+
+    it("names every source that declared only the page itself", async () => {
+      const crawlId = await newCrawl();
+      const ids = await addPages(crawlId, ["/a"]);
+      await declare(crawlId, ids, "/a", [["en", "/a"]], "html");
+      await declare(crawlId, ids, "/a", [["en", "/a"]], "sitemap");
+      const found = await findings("hreflang.self-only", crawlId);
+      expect(found.map((f) => f.evidence)).toEqual([{ hreflang: ["en"], sources: ["html", "sitemap"] }]);
     });
 
     it("caps what it lists and reports the exact total", async () => {
@@ -684,6 +760,234 @@ describe("hreflangIntegrityRules against the database", () => {
     });
   });
 
+  describe("hreflang.source-conflict", () => {
+    const run = (crawlId: string) => findings("hreflang.source-conflict", crawlId);
+    const V3 = { extractionVersion: 3 };
+    /** A Phase 26c crawl: v3 pages and a discovery that recorded `sitemapFacts`. */
+    const newV3Crawl = () => newCrawl(mkDiscovery());
+
+    it("fires when the HTML and the sitemap give one code different URLs", async () => {
+      const crawlId = await newV3Crawl();
+      const ids = await addPages(crawlId, [{ path: "/en/", ...V3 }]);
+      await declare(crawlId, ids, "/en/", [["en", "/en/"], ["de", "/de/"]], "html");
+      await declare(crawlId, ids, "/en/", [["en", "/en/"], ["de", "/de-de/"]], "sitemap");
+      const found = await run(crawlId);
+      expect(found).toHaveLength(1);
+      const f = found[0]!;
+      expect(f.ruleId).toBe("hreflang.source-conflict");
+      expect(f.severity).toBe("warning");
+      expect(f.pageId).toBe(ids.get("/en/"));
+      expect(f.pageUrl).toBe(url("/en/"));
+      expect(f.evidence).toEqual({
+        code: "de",
+        bySource: [
+          { source: "html", targets: [url("/de/")] },
+          { source: "sitemap", targets: [url("/de-de/")] },
+        ],
+        conflictingCodes: 1,
+        onlyIn: [],
+      });
+      expect(f.dedupeKey).toBe(url("/en/"));
+    });
+
+    it("is silent when the header and the HTML name the same targets, however spelled", async () => {
+      const crawlId = await newV3Crawl();
+      const ids = await addPages(crawlId, [{ path: "/en", ...V3 }]);
+      await declare(crawlId, ids, "/en", [["en", "/en"], ["de", "/de"]], "html");
+      await declare(
+        crawlId,
+        ids,
+        "/en",
+        [["EN", "/en#top"], ["de", "https://INTEGRITY.example/de"]],
+        "header",
+      );
+      expect(await run(crawlId)).toHaveLength(0);
+    });
+
+    // Deviation 4: Google unions the sources, so a code one source lists and
+    // another omits is not a disagreement.
+    it("is silent when the sitemap lists a code the HTML lacks", async () => {
+      const crawlId = await newV3Crawl();
+      const ids = await addPages(crawlId, [{ path: "/en", ...V3 }]);
+      await declare(crawlId, ids, "/en", [["en", "/en"], ["de", "/de"]], "html");
+      await declare(crawlId, ids, "/en", [["en", "/en"], ["de", "/de"], ["fr", "/fr"]], "sitemap");
+      expect(await run(crawlId)).toHaveLength(0);
+    });
+
+    it("is silent on a page annotated by one source, whatever it says", async () => {
+      const crawlId = await newV3Crawl();
+      const ids = await addPages(crawlId, [{ path: "/en", ...V3 }]);
+      await declare(crawlId, ids, "/en", [["en", "/en"], ["de", "/de"], ["de", "/de-de"]], "sitemap");
+      expect(await run(crawlId)).toHaveLength(0);
+    });
+
+    it("lists the codes only one source gives, with the first conflicting code and the count", async () => {
+      const crawlId = await newV3Crawl();
+      const ids = await addPages(crawlId, [{ path: "/en", ...V3 }]);
+      await declare(
+        crawlId,
+        ids,
+        "/en",
+        [["en", "/en"], ["de", "/de"], ["fr", "/fr"], ["es", "/es"]],
+        "html",
+      );
+      await declare(
+        crawlId,
+        ids,
+        "/en",
+        [["en", "/en"], ["de", "/de-de"], ["fr", "/fr-fr"], ["it", "/it"]],
+        "sitemap",
+      );
+      await declare(crawlId, ids, "/en", [["fr", "/fr"], ["nl", "/nl"]], "header");
+      const found = await run(crawlId);
+      expect(found.map((f) => f.evidence)).toEqual([
+        {
+          code: "de",
+          bySource: [
+            { source: "html", targets: [url("/de")] },
+            { source: "sitemap", targets: [url("/de-de")] },
+          ],
+          conflictingCodes: 2,
+          onlyIn: [
+            { source: "header", codes: ["nl"] },
+            { source: "html", codes: ["es"] },
+            { source: "sitemap", codes: ["it"] },
+          ],
+        },
+      ]);
+    });
+
+    it("compares whole target sets, codes normalised, x-default included", async () => {
+      const crawlId = await newV3Crawl();
+      const ids = await addPages(crawlId, [
+        { path: "/a", ...V3 },
+        { path: "/b", ...V3 },
+      ]);
+      // /a: de_DE and de-de are one code; the HTML gives it two URLs and the
+      // sitemap one of them, so the two sources' sets differ.
+      await declare(crawlId, ids, "/a", [["de_DE", "/de"], ["de-de", "/de-2"]], "html");
+      await declare(crawlId, ids, "/a", [["DE-DE", "/de"]], "sitemap");
+      // /b: the fallback disagrees and nothing else does.
+      await declare(crawlId, ids, "/b", [["x-default", "/b"]], "html");
+      await declare(crawlId, ids, "/b", [["x-default", "/"]], "header");
+      const found = await run(crawlId);
+      expect(found.map((f) => [f.pageUrl, f.evidence])).toEqual([
+        [
+          url("/a"),
+          {
+            code: "de-de",
+            bySource: [
+              { source: "html", targets: [url("/de"), url("/de-2")] },
+              { source: "sitemap", targets: [url("/de")] },
+            ],
+            conflictingCodes: 1,
+            onlyIn: [],
+          },
+        ],
+        [
+          url("/b"),
+          {
+            code: "x-default",
+            bySource: [
+              { source: "header", targets: [url("/")] },
+              { source: "html", targets: [url("/b")] },
+            ],
+            conflictingCodes: 1,
+            onlyIn: [],
+          },
+        ],
+      ]);
+    });
+
+    it("never counts a row stored twice as a second source or a second target", async () => {
+      const crawlId = await newV3Crawl();
+      const ids = await addPages(crawlId, [{ path: "/en", ...V3 }]);
+      await declare(crawlId, ids, "/en", [["de", "/de"], ["de", "/de"]], "html");
+      await declare(crawlId, ids, "/en", [["de", "/de"], ["de", "/de"]], "sitemap");
+      expect(await run(crawlId)).toHaveLength(0);
+    });
+
+    it("caps the codes it lists per source and says how many there were", async () => {
+      const crawlId = await newV3Crawl();
+      const ids = await addPages(crawlId, [{ path: "/en", ...V3 }]);
+      const extra = Array.from(
+        { length: ONLY_IN_CODES_CAP + 2 },
+        (_, i) =>
+          `x${String.fromCharCode(97 + Math.floor(i / 26))}${String.fromCharCode(97 + (i % 26))}`,
+      );
+      await declare(crawlId, ids, "/en", [["de", "/de"]], "html");
+      await declare(
+        crawlId,
+        ids,
+        "/en",
+        [["de", "/de-de"], ...extra.map((c) => [c, `/${c}`] as [string, string])],
+        "sitemap",
+      );
+      const [f] = await run(crawlId);
+      expect(f!.evidence.onlyIn).toEqual([
+        { source: "sitemap", codes: [...extra].sort().slice(0, ONLY_IN_CODES_CAP) },
+      ]);
+      expect(f!.evidence.onlyInTruncated).toEqual({
+        reported: ONLY_IN_CODES_CAP,
+        total: ONLY_IN_CODES_CAP + 2,
+      });
+    });
+
+    it("skips a page canonicalised elsewhere and one that did not answer 200", async () => {
+      const crawlId = await newV3Crawl();
+      const ids = await addPages(crawlId, [
+        { path: "/a", canonicalHtml: url("/elsewhere"), ...V3 },
+        { path: "/b", fetchClass: "client_error", statusCode: 404, ...V3 },
+      ]);
+      for (const from of ["/a", "/b"]) {
+        await declare(crawlId, ids, from, [["de", "/de"]], "html");
+        await declare(crawlId, ids, from, [["de", "/de-de"]], "sitemap");
+      }
+      expect(await run(crawlId)).toHaveLength(0);
+    });
+
+    it("is silent on a crawl with any page below extraction 3 (the marker speaks)", async () => {
+      const crawlId = await newV3Crawl();
+      const ids = await addPages(crawlId, [
+        { path: "/en", ...V3 },
+        { path: "/old", extractionVersion: 2 },
+      ]);
+      await declare(crawlId, ids, "/en", [["de", "/de"]], "html");
+      await declare(crawlId, ids, "/en", [["de", "/de-de"]], "sitemap");
+      expect(await run(crawlId)).toHaveLength(0);
+    });
+
+    it("is silent on a crawl whose discovery recorded no sitemap facts (the marker speaks)", async () => {
+      for (const discovery of [null, mkDiscovery({ sitemapFacts: null })]) {
+        const crawlId = await newCrawl(discovery);
+        const ids = await addPages(crawlId, [{ path: "/en", ...V3 }]);
+        await declare(crawlId, ids, "/en", [["de", "/de"]], "html");
+        await declare(crawlId, ids, "/en", [["de", "/de-de"]], "header");
+        expect(await run(crawlId)).toHaveLength(0);
+      }
+    });
+
+    it("caps what it lists and reports the exact total", async () => {
+      const crawlId = await newV3Crawl();
+      const total = URL_FINDING_CAP + 2;
+      const specs: PageSpec[] = [];
+      for (let i = 0; i < total; i += 1) {
+        specs.push({ path: `/c-${String(i).padStart(4, "0")}`, ...V3 });
+      }
+      const ids = await addPages(crawlId, specs);
+      for (const { path } of specs) {
+        await declare(crawlId, ids, path, [["de", "/de"]], "html");
+        await declare(crawlId, ids, path, [["de", "/de-de"]], "sitemap");
+      }
+      const found = await run(crawlId);
+      expect(found).toHaveLength(URL_FINDING_CAP);
+      expect(found[found.length - 1]!.evidence).toMatchObject({
+        truncated: { reported: URL_FINDING_CAP, total },
+      });
+      expect(found[0]!.evidence).not.toHaveProperty("truncated");
+    });
+  });
+
   describe("hreflang.html-lang-mismatch", () => {
     const run = (crawlId: string) => findings("hreflang.html-lang-mismatch", crawlId);
     const V2 = { extractionVersion: 2 };
@@ -694,7 +998,11 @@ describe("hreflangIntegrityRules against the database", () => {
       await declare(crawlId, ids, "/a", [["en", "/a"], ["x-default", "/a"]]);
       const found = await run(crawlId);
       expect(found).toHaveLength(1);
-      expect(found[0]!.evidence).toEqual({ htmlLang: "de", hreflangCodes: ["en"] });
+      expect(found[0]!.evidence).toEqual({
+        htmlLang: "de",
+        hreflangCodes: ["en"],
+        sources: ["html"],
+      });
     });
 
     it("is silent when only the region differs (en-US against en-gb)", async () => {
@@ -716,7 +1024,7 @@ describe("hreflangIntegrityRules against the database", () => {
       await declare(crawlId, ids, "/c", [["en_GB", "/c"]]);
       const found = await run(crawlId);
       expect(found.map((f) => f.evidence)).toEqual([
-        { htmlLang: "de_DE", hreflangCodes: ["en_gb"] },
+        { htmlLang: "de_DE", hreflangCodes: ["en-gb"], sources: ["html"] },
       ]);
     });
 
@@ -741,15 +1049,32 @@ describe("hreflangIntegrityRules against the database", () => {
       expect(await run(crawlId)).toHaveLength(0);
     });
 
-    it("ignores another page's code and sitemap-source declarations", async () => {
+    it("ignores the code a page gives another page", async () => {
       const crawlId = await newCrawl();
       const ids = await addPages(crawlId, [
         { path: "/a", htmlLang: "de", ...V2 },
         { path: "/b", htmlLang: "de", ...V2 },
       ]);
       await declare(crawlId, ids, "/a", [["de", "/a"], ["en", "/b"]]);
-      await declare(crawlId, ids, "/b", [["en", "/b"]], "sitemap");
       expect(await run(crawlId)).toHaveLength(0);
+    });
+
+    // A self code from the sitemap or the Link header is the same claim about
+    // the page's language as one from its HTML, and search engines act on it.
+    it("reads a self code declared in the sitemap or a Link header", async () => {
+      const crawlId = await newCrawl();
+      const ids = await addPages(crawlId, [
+        { path: "/a", htmlLang: "de", ...V2 },
+        { path: "/b", htmlLang: "de", ...V2 },
+      ]);
+      await declare(crawlId, ids, "/a", [["en", "/a"]], "sitemap");
+      await declare(crawlId, ids, "/b", [["en", "/b"]], "header");
+      await declare(crawlId, ids, "/b", [["en", "/b"]], "html");
+      const found = await run(crawlId);
+      expect(found.map((f) => [f.pageUrl, f.evidence])).toEqual([
+        [url("/a"), { htmlLang: "de", hreflangCodes: ["en"], sources: ["sitemap"] }],
+        [url("/b"), { htmlLang: "de", hreflangCodes: ["en"], sources: ["header", "html"] }],
+      ]);
     });
 
     it("is silent on a crawl with any page below extraction 2 (the marker speaks)", async () => {

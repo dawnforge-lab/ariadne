@@ -511,11 +511,18 @@ describe("checklist coverage", () => {
   //   page    72
   //   query   98 + 2 = 100
   //   total   184 + 2 = 186
-  it("pins the ruleset split: 186 rules = 72 page + 100 query + 14 metric", () => {
+  //
+  // Phase 26c Task 10 adds ONE query rule, `hreflang.source-conflict`
+  // (CHECK-24, already claimed), in `src/rules/query/hreflang-integrity.ts`.
+  //
+  //   page    72
+  //   query   100 + 1 = 101
+  //   total   186 + 1 = 187
+  it("pins the ruleset split: 187 rules = 72 page + 101 query + 14 metric", () => {
     const registry = buildRegistry();
-    expect(registry.all()).toHaveLength(186);
+    expect(registry.all()).toHaveLength(187);
     expect(registry.byKind("page")).toHaveLength(72);
-    expect(registry.byKind("query")).toHaveLength(100);
+    expect(registry.byKind("query")).toHaveLength(101);
     // The link-graph five, the two content metrics and hreflang coverage, plus
     // the URL-parameter, redirect-volume and sitemap-structure metrics, plus
     // the render pass's coverage, the health rollup, and the page-weight table.

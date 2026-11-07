@@ -606,15 +606,18 @@ describe("check annotations", () => {
  *
  * Phase 26c (0.22.0) Task 9 adds `sitemap.oversized` (warning) and
  * `sitemap.url-in-multiple` (info): 65 warnings, 88 info.
+ *
+ * Phase 26c (0.22.0) Task 10 adds `hreflang.source-conflict` (warning): 66
+ * warnings.
  */
 describe("severity shape of the ruleset", () => {
   const all = buildRegistry().all();
 
-  it("holds 33 critical, 65 warning and 88 info rules", () => {
+  it("holds 33 critical, 66 warning and 88 info rules", () => {
     const counts = { critical: 0, warning: 0, info: 0 };
     for (const r of all) counts[r.severity] += 1;
-    expect(counts).toEqual({ critical: 33, warning: 65, info: 88 });
-    expect(all).toHaveLength(186);
+    expect(counts).toEqual({ critical: 33, warning: 66, info: 88 });
+    expect(all).toHaveLength(187);
   });
 
   it("names exactly the rules that are critical", () => {

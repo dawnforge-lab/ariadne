@@ -3,7 +3,8 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { eq } from "drizzle-orm";
 import { closeDb, createDb, type Db } from "../../src/db/client.js";
 import { runMigrations } from "../../src/db/migrate.js";
-import { crawls, hreflang, pages } from "../../src/db/schema.js";
+import { crawls, hreflang, pages, sitemapHreflang } from "../../src/db/schema.js";
+import { deriveSitemapHreflang } from "../../src/rules/derive/sitemap-hreflang.js";
 import { URL_FINDING_CAP } from "../../src/rules/query/crawl-evidence.js";
 import { ALTERNATE_HOST_CAP, hreflangRules } from "../../src/rules/query/hreflang.js";
 import type { Finding, QueryRule } from "../../src/rules/registry/types.js";
@@ -147,6 +148,7 @@ describe("hreflangRules against the database", () => {
     crawlId: string,
     pageId: string,
     declarations: Array<[code: string, target: string]>,
+    source = "html",
   ): Promise<void> {
     await db.insert(hreflang).values(
       declarations.map(([code, target]) => ({
@@ -155,7 +157,7 @@ describe("hreflangRules against the database", () => {
         hreflangCode: code,
         targetUrl: target,
         targetPageId: null,
-        source: "html",
+        source,
       })),
     );
   }
@@ -224,9 +226,11 @@ describe("hreflangRules against the database", () => {
       expect(one.severity).toBe(rule("hreflang.invalid-code").severity);
       expect(one.pageId).toBe(ids.get("/one"));
       expect(one.pageUrl).toBe(`${SITE}/one`);
-      expect(one.evidence).toMatchObject({
+      expect(one.evidence).toEqual({
         code: "english-uk",
         targetUrl: `${SITE}/uk`,
+        occurrences: 1,
+        sources: ["html"],
       });
       expect(one.dedupeKey).toBe(`${SITE}/one#english-uk`);
       expect(found.find((f) => f.evidence.code === "zz-qqqq")!.dedupeKey).toBe(
@@ -312,6 +316,17 @@ describe("hreflangRules against the database", () => {
       // One target, declared twice: no `targetUrls` list, because there is no
       // second URL for it to hold.
       expect(found[0]!.evidence["targetUrls"]).toBeUndefined();
+    });
+
+    // Phase 26c: `sources` is written on every finding, so a code that only
+    // the sitemap or a Link header declares says where to fix it.
+    it("names the one source when a code arrives from the sitemap alone", async () => {
+      const crawlId = await newCrawl();
+      const ids = await addPages(crawlId, ["/sitemap-only"]);
+      await addHreflang(crawlId, ids.get("/sitemap-only")!, [["en_GB", url("/en-gb")]], "sitemap");
+
+      const found = await findings("hreflang.invalid-code", crawlId);
+      expect(found.map((f) => f.evidence.sources)).toEqual([["sitemap"]]);
     });
 
     it("reads only its own crawl", async () => {
@@ -533,6 +548,7 @@ describe("hreflangRules against the database", () => {
       expect(found[0]!.evidence).toEqual({
         target: url("/fr"),
         targetHasHreflang: true,
+        sources: ["html"],
       });
     });
 
@@ -546,7 +562,56 @@ describe("hreflangRules against the database", () => {
 
       const found = await findings("hreflang.missing-return-link", crawlId);
       expect(found).toHaveLength(1);
-      expect(found[0]!.evidence).toEqual({ target: url("/fr"), targetHasHreflang: false });
+      expect(found[0]!.evidence).toEqual({
+        target: url("/fr"),
+        targetHasHreflang: false,
+        sources: ["html"],
+      });
+    });
+
+    // Phase 26c: every source counts both ways. The return link may be stated
+    // only in the sitemap (the derivation ties it to the page), and the
+    // declaration the finding is about names the sources that made it.
+    it("is satisfied by a return link the sitemap states", async () => {
+      const crawlId = await newCrawl();
+      const ids = await addPages(crawlId, ["/en", "/fr"]);
+      await addHreflang(crawlId, ids.get("/en")!, [
+        ["en", url("/en")],
+        ["fr", url("/fr")],
+      ]);
+      // The French page's own HTML names only itself; its sitemap entry names
+      // the English page back.
+      await addHreflang(crawlId, ids.get("/fr")!, [["fr", url("/fr")]]);
+      await db.insert(sitemapHreflang).values(
+        [
+          ["en", url("/en")],
+          ["fr", url("/fr")],
+        ].map(([code, target]) => ({
+          crawlId,
+          url: url("/fr"),
+          urlNormalised: url("/fr"),
+          hreflangCode: code!,
+          targetUrl: target!,
+          sitemapSource: url("/sitemap.xml"),
+        })),
+      );
+      expect(await findings("hreflang.missing-return-link", crawlId)).toHaveLength(1);
+
+      await deriveSitemapHreflang(db, crawlId);
+      expect(await findings("hreflang.missing-return-link", crawlId)).toHaveLength(0);
+    });
+
+    it("names every source that declared the one-way alternate", async () => {
+      const crawlId = await newCrawl();
+      const ids = await addPages(crawlId, ["/en", "/fr"]);
+      await addHreflang(crawlId, ids.get("/en")!, [["fr", url("/fr")]], "html");
+      await addHreflang(crawlId, ids.get("/en")!, [["fr", `${url("/fr")}#top`]], "header");
+      await addHreflang(crawlId, ids.get("/en")!, [["en", url("/en")]], "sitemap");
+
+      const found = await findings("hreflang.missing-return-link", crawlId);
+      expect(found.map((f) => f.evidence)).toEqual([
+        { target: url("/fr"), targetHasHreflang: false, sources: ["header", "html"] },
+      ]);
     });
 
     // Unknown is not evidence: a target this crawl never fetched says nothing
@@ -626,6 +691,7 @@ describe("hreflangRules against the database", () => {
         target: url("/fr"),
         targetFetchClass: "redirect",
         targetIndexable: false,
+        sources: ["html"],
       });
     });
 
@@ -640,6 +706,7 @@ describe("hreflangRules against the database", () => {
         target: url("/fr"),
         targetFetchClass: "ok",
         targetIndexable: false,
+        sources: ["html"],
       });
     });
 
@@ -802,7 +869,21 @@ describe("hreflangRules against the database", () => {
       expect(found[0]!.evidence).toEqual({
         codes: ["en-gb", "fr"],
         targets: [url("/en-gb"), url("/fr")],
+        sources: ["html"],
       });
+    });
+
+    it("reads every source: a self-reference the sitemap states is one", async () => {
+      const crawlId = await newCrawl();
+      const ids = await addPages(crawlId, ["/en", "/fr"]);
+      await addHreflang(crawlId, ids.get("/en")!, [["fr", url("/fr")]], "html");
+      await addHreflang(crawlId, ids.get("/en")!, [["en", url("/en")]], "sitemap");
+      await addHreflang(crawlId, ids.get("/fr")!, [["en", url("/en")]], "header");
+
+      const found = await findings("hreflang.missing-self-reference", crawlId);
+      expect(found.map((f) => [f.pageUrl, f.evidence])).toEqual([
+        [url("/fr"), { codes: ["en"], targets: [url("/en")], sources: ["header"] }],
+      ]);
     });
 
     it("is silent on a page that names itself among its alternates", async () => {

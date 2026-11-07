@@ -811,6 +811,23 @@ const KINDS = ["page", "query", "metric"] as const satisfies readonly AnyRule["k
 //     `sitemap_doc` rows count memberships when the crawl recorded them and
 //     `sitemap_urls` otherwise (Deviation 7; the three cap fields are null on
 //     an older crawl). 186 rules.
+// 10. (T10) Every hreflang rule reads all three sources. A fourth derivation,
+//     `deriveSitemapHreflang`, replaces a crawl's `source = 'sitemap'`
+//     `hreflang` rows from `sitemap_hreflang` (distinct, joined on
+//     `url_normalised = pages.url`; uncrawled locs stay staged). The integrity
+//     cohort (`DECLARATIONS`) drops its `source = 'html'` filter and groups on
+//     (page, `replace(lower(btrim(code)), '_', '-')`, target) with
+//     `sources`, so `en_GB` and `en-gb` are one code there.
+//     `hreflang.multiple-entries` counts targets within one source (deviation
+//     5); `self-only`, `inconsistent-return-code` and `html-lang-mismatch`
+//     read the union. Evidence gains `sources` on every rule that lists a
+//     declaration: those four, `missing-return-link`,
+//     `non-indexable-target`, `missing-self-reference`, and `invalid-code`
+//     (now always, not only when two sources). New query rule
+//     `hreflang.source-conflict` (warning, CHECK-24): one code, different
+//     target sets in two sources (deviation 4), evidence `{code, bySource,
+//     conflictingCodes, onlyIn, onlyInTruncated?}`, gated on `v3Gate` and
+//     `sitemapFactsRecorded`. 187 rules.
 export const RULESET_VERSION = "0.22.0";
 
 /**
