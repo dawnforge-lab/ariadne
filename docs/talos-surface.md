@@ -1,11 +1,68 @@
 # The Ariadne surface Talos codes against
 
-**Status:** the contract as of Phase 26b (ruleset 0.21.0, migrations 0000–0028,
+**Status:** the contract as of Phase 26c (ruleset 0.22.0, migrations 0000–0030,
 18 MCP tools / 18 HTTP routes; every column label in this document is served
 under the ruleset version the engine reports — `rules_catalog`'s
 `rulesetVersion`, which the metric-table pass moves).
 `docs/talos-integration.md` says *why* the seam exists and what obligations bind
 it; this document says *what the seam is*.
+
+**What Phase 26c changed here: five rule ids, every hreflang source, one CSV
+column, and a re-crawl.** Ruleset 0.22.0, migration 0029 (the nullable
+`links.name_hint` / `name_hint_source`, `resources.share_image`,
+`pages.overlong_urls`, and the tables `sitemap_memberships` and
+`sitemap_hreflang`) and migration 0030 (it backfills `resources.share_image` on
+older crawls), extraction version 3. No tool, route or response field is added;
+the one addition is the `shareImage` column on the `resources` CSV view (§12).
+`rules_catalog` now answers 187 rows (72 page, 101 query, 14 metric; 15 of them
+markers), and the finding rules split 33 critical / 66 warning / 74 info (88
+info counting the fourteen metric rules). The new ids:
+- `url.reference-too-long` (warning, CHECK-28, category `url`): the page
+  carries a link, file or hreflang target whose address is over 2,500
+  characters, too long to index. Such an address is counted, not stored, so it
+  is in no `links`, `resources` or `hreflang` row; the evidence is the counts
+  `{links, resources, hreflang, max}`. A supplied or redirected-to URL that long
+  is refused before any fetch with the reason `too_long`.
+- `social.image-insecure` (info, CHECK-87): an `https:` page whose `og:image` is
+  `http:` and whose `og:image:secure_url` is absent or not `https:`. No browser
+  loads a share image, so this is a share-preview finding, not mixed content.
+- `sitemap.oversized` (warning, CHECK-08): a sitemap over the protocol's 50 MB
+  uncompressed. The URLs read before the limit are kept and crawled; the
+  finding names the document with `{sitemapUrl, bytesRead, urlsKept, max}`,
+  and `sitemap.invalid` no longer reports it.
+- `sitemap.url-in-multiple` (info, CHECK-08): a URL listed in more than one
+  sitemap document (`{url, sitemaps, count}`; a repeat inside one document is
+  not a second listing). It is crawled once.
+- `hreflang.source-conflict` (warning, CHECK-24): one language code whose
+  target differs between two of a page's sources (`{code, bySource,
+  conflictingCodes, onlyIn, onlyInTruncated?}`). A code one source lists and
+  another omits is not a conflict, because search engines union the sources;
+  those codes are listed under `onlyIn`.
+
+What changed under existing ids. **Hreflang is read from all three sources**: the
+page's HTML, its HTTP `Link` header (read whole at fetch, a PDF's included) and
+the `xhtml:link` alternates of its sitemap entry. Every hreflang rule judges the
+union, and the eight that list a declaration carry `sources` in their evidence
+(`html`, `header`, `sitemap`); `hreflang.multiple-entries` counts targets within
+ONE source, so a disagreement between sources is `source-conflict`'s finding and
+never both. **Sitemaps are streamed** to the 50 MB limit (a 10–50 MB sitemap was
+dropped before and is read whole now), and every listing is recorded:
+`sitemap.over-50k-urls` is now an exact count, and `sitemap.structure` gains
+`totalMemberships`, `docCountsExact`, `membershipLimited`, `hreflangLimited` and
+`overlongLocsSkipped` on its site row. `sitemap.url-too-long` adds one site
+finding `{skipped, max}` for the `<loc>`s over 2,500 characters that were never
+stored. `social.image-broken` gains the problem `too-long`. The two links rules
+read a link's wider name ("Links" under Phase 26b below).
+
+**The re-crawl.** `url.reference-too-long`, `social.image-insecure`,
+`hreflang.source-conflict`, `links.no-anchor-text` and `links.aria-label-only` read
+facts recorded from extraction version 3; `sitemap.oversized`,
+`sitemap.url-in-multiple`, `sitemap.over-50k-urls` and `source-conflict` read the
+sitemap facts a 26c discovery records. On a crawl without either, the marker
+`extraction.not-recorded` fires once with `requiredVersion: 3` and
+`sitemapFactsRecorded`, and those rules are silent (it now claims CHECK-08 and
+CHECK-28 as well). A crawl judged before 0.22.0 and re-judged gains that marker,
+not clean results (§11).
 
 **What Phase 26b changed here: twenty-eight rule ids, which need a re-crawl.**
 Ruleset 0.21.0, migrations 0026, 0027 and 0028 (fifteen nullable `pages` columns, four
@@ -129,7 +186,8 @@ produces them without a re-crawl (§11). By family:
   `url.multiple-slashes` and `url.repetitive-path` (warning), and
   `url.internal-search` (warning, an indexable internal search result).
 - **Sitemap entries** (CHECK-07, CHECK-08): `sitemap.over-50k-urls` (warning; the
-  count is a lower bound, because a URL listed in two documents is stored once),
+  count was a lower bound at 0.20.0, because a URL listed in two documents was
+  stored once, and is exact from 0.22.0 on a crawl that recorded its listings),
   `sitemap.url-too-long` (info), `sitemap.cross-host-loc` (warning; silent for a
   document on another host that lists the crawled site's own URLs, a cross-submission)
   and `sitemap.lastmod-invalid` (info; `future` means dated after the crawl ended, so
@@ -642,12 +700,16 @@ validator before the handler runs (`test/api/mcp.test.ts:825` "refuses an
 argument nobody allowed, naming it").
 
 **Not paginated, on purpose:** `rules_catalog` and `crawl_compare`. Both are
-bounded by the **ruleset** (182 rows at 0.21.0) rather than by the crawl. The
-catalog is ~179 KB (**183,585 bytes**, re-measured 2026-11-07 after the owner calls
-over all 182 rows of ruleset 0.21.0 by serialising what
-`rulesCatalog` answers with no crawl id — 15 markers at 2,274 bytes, the
-`marker` values JSON-serialised as one array, and the fourteen tables at 5,239
-the same way, unchanged; the 180,545 before it was measured the same day at the end
+bounded by the **ruleset** (187 rows at 0.22.0) rather than by the crawl. The
+catalog is ~187 KB (**191,474 bytes**, measured 2026-11-07 at the end of Phase 26c
+over all 187 rows of ruleset 0.22.0 by serialising what `rulesCatalog` answers
+with no crawl id — 15 markers at 2,286 bytes, the `marker` values JSON-serialised
+as one array, and the fourteen tables at 5,559 the same way, `sitemap.structure`'s
+five new columns among them; the same measurement over the Phase 26b code
+reproduces its 183,585 to the byte; the 183,585 before it was re-measured
+2026-11-07 after the owner calls
+over all 182 rows of ruleset 0.21.0 the same way — 15 markers at 2,274 bytes and
+the fourteen tables at 5,239; the 180,545 before it was measured the same day at the end
 of Phase 26b over the 180 rows before the owner calls, the same way; the 154,237 before it was measured 2026-11-05 at the end of
 Phase 26a over all 154 rows of ruleset 0.20.0 the same way — 14 markers at 2,157
 bytes and the fourteen tables at 5,239; the
@@ -1226,7 +1288,7 @@ not name", `test/api/query.test.ts:1456` "carries a finding with no page as a
 null url", `test/rules/helpers.test.ts:697` "maps each fetch class to the status
 a reader acts on", `test/rules/helpers.test.ts:717` "names a block a block,
 whatever status the challenge was served with",
-`test/fixtures/harness.test.ts:1275` "declares a column for every evidence key it
+`test/fixtures/harness.test.ts:1261` "declares a column for every evidence key it
 writes, and writes every column it declares",
 `test/rules/registry.test.ts:752` "finds one defining file per rule, and the key
 spelled inside it".
@@ -1328,8 +1390,10 @@ which one is visible in the header rather than in the payload:
 **A null cell is a value this metric did not write for that row — an empty cell,
 never a zero** (§5, at table level). `sitemap.structure` is the table where that
 is load-bearing: its site row counts the documents and its per-document rows
-count their own entries, under one set of headings, so the three site-only
-columns are null on every document row by design. Numbers cross as numbers (the
+count their own entries, under one set of headings, so the eight site-only
+columns (three until Phase 26c added five) are null on every document row by
+design, and the three cap columns are null on the site row of a crawl whose
+discovery predates 26c. Numbers cross as numbers (the
 client formats), percentages as numbers under a label ending `(%)`, booleans as
 `true`/`false`.
 
@@ -1376,7 +1440,7 @@ header on the catalog, and only on metric rules",
 and one row per scope",
 `test/rules/metric-table.test.ts:377` "gives every metric rule a table whose
 columns are the catalog's",
-`test/fixtures/harness.test.ts:2277` "renders every metric's table, with no
+`test/fixtures/harness.test.ts:2357` "renders every metric's table, with no
 empty column and no unmapped key".
 
 ### 4.5 `metrics_get` → `{items: MetricRow[], nextCursor}`
@@ -1990,7 +2054,7 @@ threshold";
 `test/rules/coverage.test.ts:599` "site.health is filed under the
 engine-coverage check, and CHECK-32 lost no claimant" (the re-file in both
 directions, and CHECK-83 outside the crawl-derived universe);
-`test/fixtures/harness.test.ts:3121` "the health rollup agrees with a
+`test/fixtures/harness.test.ts:3250` "the health rollup agrees with a
 page-by-page recount" — an independent recount in JavaScript over the end-to-end
 fixture crawl.
 
@@ -2302,7 +2366,7 @@ Four postures a Talos integrator should know about rather than discover:
 
 ## 11. Versioning, and what a ruleset change does to a served crawl
 
-`RULESET_VERSION` (**0.21.0** as of Phase 26b) stamps **judgement**: bump it when
+`RULESET_VERSION` (**0.22.0** as of Phase 26c) stamps **judgement**: bump it when
 a rule's verdict or copy changes. Adding a rule or a metric family adds rows
 without changing a verdict — `metrics` rows carry no version column at all —
 which is the argument Phase 10 held 0.7.0 on.
@@ -2360,6 +2424,24 @@ should, and `site.health`'s `urlsCritical` changes meaning (from "mechanically
 broken" to "carrying a first-fix SEO defect"), so a health gauge drawn from it
 must show the ruleset version beside the number. Stored findings keep the
 severity their ruleset stamped; nothing is backfilled.
+
+**Phase 26c bumped to 0.22.0, once: five ids, every hreflang rule widened to
+three sources, and a re-crawl attached.** The ids and the widened readings are
+listed at the top of this document; no existing rule's severity moved. The phase
+also moves `EXTRACTION_VERSION` to 3 (migration 0029), and its discovery records
+every sitemap listing and alternate (`discovery.sitemapFacts`), so the marker
+`extraction.not-recorded` now fires on any crawl with a page below version 3 or
+without those facts — every crawl written before 26c, including a 26b one — with
+`requiredVersion: 3` and `sitemapFactsRecorded`. The v3 and sitemap-fact rules
+are silent on such a crawl rather than clean. Rules that read only older facts
+judge it as before, with two differences: `sitemap.over-50k-urls` now refuses a
+crawl without listings (the marker speaks) where it used to give a lower bound,
+and the hreflang integrity rules read a code case- and separator-blind (`en_GB`
+and `en-gb` are one code), with `sources` added to their evidence.
+Migration 0030 backfills `resources.share_image` on older crawls, so the
+resource rules judge them exactly as 0.21.0 did. A crawl compared across the
+boundary differs because there is more to see, and `crawl_compare` raises
+`ruleset-mismatch` across it.
 
 **Phase 26b bumped to 0.21.0, once: new ids, three widened readings, and a
 re-crawl attached.** Twenty-eight ids joined (listed by family at the top of this document)

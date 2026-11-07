@@ -282,6 +282,32 @@ never as clean. Grouped by the problem a client reads:
   findings. `hreflang.html-lang-mismatch` and `pagination.multiple` compound with the
   older hreflang and pagination findings.
 
+**Ruleset 0.22.0 added five rule ids, and all five need a crawl from Phase 26c on.**
+On an older crawl, a 26b crawl included, `extraction.not-recorded` carries
+`requiredVersion: 3` (and `sitemapFactsRecorded: false` when the sitemaps were read
+the old way): the checks it claims, CHECK-08 and CHECK-28 now among them, go under
+"Not audited" with a re-crawl as the next step. Grouped by the problem a client reads:
+
+- **Hreflang** (CHECK-24): every hreflang finding now names its `sources`, the page's
+  HTML, its HTTP `Link` header or its sitemap entry. Tell the client which one to fix:
+  a sitemap plugin and a theme template are usually different people.
+  `hreflang.source-conflict` is two of those sources giving one language different
+  addresses, which leaves search engines with two candidates; rank it with the other
+  hreflang integrity findings and report the cluster once.
+- **Sitemaps** (CHECK-08): `sitemap.oversized` is a sitemap over 50 MB, which search
+  engines reject whole, so every URL in it is unsubmitted: rank it with the
+  sitemap-coverage findings, high where the file carries the product or article URLs.
+  `sitemap.url-in-multiple` is the same URL in two sitemaps, usually two generators;
+  it is hygiene (P4) unless the two files disagree about the page.
+- **Long addresses** (CHECK-28): `url.reference-too-long` is a link, file or hreflang
+  target over 2,500 characters. The crawler could not follow it, so anything behind it
+  went unaudited; say so beside the finding, and report it with the URL-structure
+  findings.
+- **Social sharing** (CHECK-87): `social.image-insecure` is a share image served over
+  `http:` from an `https:` page. A platform that insists on https may show no picture.
+  Rank it with the other social findings, by how much traffic arrives through shared
+  links.
+
 **Write both numbers.** Every finding in the report shows the engine's severity as
 it came and the report's priority as you argue it. When they differ, the reason
 goes in the finding, in one sentence: *"The engine grades this `warning`; on this

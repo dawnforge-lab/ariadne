@@ -948,8 +948,7 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
 ### CHECK-08: Sitemap structure (large sites)
 - **Priority**: Medium | **Requires**: Engine (metric and rule)
 - **Engine**: `metrics_get` with `metricId: "sitemap.structure"` for the shape, and
-  `issues_list` with `checkId: "CHECK-08"` for one finding rule:
-  three finding rules:
+  `issues_list` with `checkId: "CHECK-08"` for three finding rules:
   - `sitemap.over-50k-urls` (warning) — one site-scoped finding per sitemap document
     with more than 50,000 entries. The count is EXACT: it counts the document's own
     membership rows, so a URL listed in two documents counts once in each
@@ -1588,7 +1587,7 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
      of them. **When it is present, the return-link answer above covers only the
      alternates that were fetched** — mark this check SKIP for the rest rather than
      reading the silence as reciprocal.
-  5. `issues_list` with `checkId: "CHECK-24"` — four integrity rules over the
+  5. `issues_list` with `checkId: "CHECK-24"` — five integrity rules over the
      page's declarations from every source (its HTML, its HTTP `Link` header and its
      sitemap entry, read together as search engines read them), each filed with the
      evidence that names the fix. Every hreflang finding that lists a declaration
@@ -1606,15 +1605,16 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
        alternate is named.
      - `hreflang.unlinked-target` (info) — a crawled alternate no other page links
        to, filed on the alternate with up to 10 declaring pages and the exact count.
-  6. `issues_list` with `checkId: "CHECK-24"` — `hreflang.source-conflict` (warning):
-     a page annotated in two or more places where one code points to different URLs
-     in two of them (the HTML says `de` is `/de/`, the sitemap says `/de-de/`).
-     Evidence: the first such `code` with each source's targets (`bySource`), the
-     number of disagreeing codes (`conflictingCodes`), and `onlyIn`, the codes only
-     one source lists, per source (at most 20 each, `onlyInTruncated` when cut). A
-     code one source omits is not a conflict, because search engines union the
-     sources. It needs a crawl from Phase 26c on; on an older one
-     `extraction.not-recorded` is on file instead.
+     - `hreflang.source-conflict` (warning) — a page annotated in two or more places
+       where one code points to different URLs in two of them (the HTML says `de` is
+       `/de/`, the sitemap says `/de-de/`). The disagreement BETWEEN sources is this
+       rule's and the ambiguity WITHIN one is `hreflang.multiple-entries`', so one
+       defect never fires both. Evidence: the first such `code` with each source's
+       targets (`bySource`), the number of disagreeing codes (`conflictingCodes`),
+       and `onlyIn`, the codes only one source lists, per source (at most 20 each,
+       `onlyInTruncated` when cut). A code one source omits is not a conflict,
+       because search engines union the sources. It needs a crawl from Phase 26c
+       on; on an older one `extraction.not-recorded` is on file instead.
 - **Important**: Don't just check for hreflang errors — also assess **coverage**:
   1. How many internal indexable URLs have hreflang tags vs how many should?
   2. If the site has multiple language/market versions, ALL equivalent pages should have hreflang

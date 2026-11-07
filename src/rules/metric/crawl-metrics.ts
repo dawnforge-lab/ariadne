@@ -455,7 +455,7 @@ export const crawlMetrics: MetricRule[] = [
   // counts the whole sitemap set (`totalUrls`, `urlCapBreaches` — how many
   // documents went over the 50,000-entry limit) and a document row counts itself
   // (`urls`, `breaches50k` — whether THIS one did). Two stored keys, one heading
-  // each, declared with `from`; the three site-only columns are empty on a
+  // each, declared with `from`; the eight site-only columns are empty on a
   // document row, which is what an absent key prints.
   metricRule(
     "sitemap.structure",

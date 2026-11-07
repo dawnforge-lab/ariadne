@@ -552,8 +552,9 @@ every one of them. The checklist names each at its check, with its severity. By 
   rule's fix says to leave it on pages that are meant to be closed off.
 - **CHECK-07 and CHECK-08, sitemap entries:** `sitemap.url-too-long`,
   `sitemap.cross-host-loc`, `sitemap.lastmod-invalid` and `sitemap.over-50k-urls`.
-  CHECK-08 is no longer metric-only. `sitemap.over-50k-urls`'s count is a lower bound,
-  because a URL listed in two documents is stored once. `sitemap.cross-host-loc` stays
+  CHECK-08 is no longer metric-only. `sitemap.over-50k-urls`'s count is exact from
+  ruleset 0.22.0 (it counts each document's listings); on a crawl from before Phase
+  26c it is silent and `extraction.not-recorded` speaks. `sitemap.cross-host-loc` stays
   silent when a sitemap on another host lists the crawled site's own URLs, because that
   is a cross-submission the protocol allows. `sitemap.lastmod-invalid`'s `future` means
   dated after the crawl ENDED, so the value was already in the future when the sitemap
@@ -671,6 +672,46 @@ check:
   toward page weight, mixed content or `resources.broken`. On a `fetchResources: false`
   crawl `social.image-broken` judges only relative or malformed image addresses, and
   `resources.not-fetched` says the images' status was not asked.
+
+**Five rules joined at ruleset 0.22.0, and every one needs a crawl from Phase 26c
+on.** The crawler now records extraction version 3 (over-long addresses, the
+og:image:secure_url tag, a link's wider name, hreflang from the HTTP `Link` header)
+and every sitemap listing and `xhtml:link` alternate. On an older crawl, a 26b crawl
+included, `extraction.not-recorded` fires with `requiredVersion: 3` and
+`sitemapFactsRecorded`, and every check it claims (CHECK-08 and CHECK-28 among them
+now) is NOT MEASURED, never a PASS. The remedy is a re-crawl. By check:
+
+- **CHECK-08, sitemap structure:** `sitemap.oversized` (warning) is a sitemap over the
+  protocol's 50 MB uncompressed. The URLs read before the limit are kept and crawled,
+  but search engines reject the whole file, so the fix is to split it.
+  `sitemap.url-in-multiple` (info) is a URL listed in more than one sitemap document
+  (a repeat inside one document does not count). It is crawled once; the finding is
+  the redundancy, usually two generators, so report it once with the documents it
+  names. `sitemap.structure` now carries `totalMemberships` beside `totalUrls`, and
+  `docCountsExact`, `membershipLimited`, `hreflangLimited` and `overlongLocsSkipped`.
+  If any cap is `true`, say the sitemap counts are a floor.
+- **CHECK-24, hreflang:** every hreflang rule now reads three sources, the page's
+  HTML, its `Link` header and its sitemap entry's alternates, and judges what they say
+  together, the way search engines do. Each finding that lists a declaration names
+  its `sources`, so you can tell the client which file to fix.
+  `hreflang.source-conflict` (warning) is one language code with different targets in
+  two sources: the HTML says `de` is `/de/`, the sitemap says `/de-de/`. A code one
+  source lists and another omits is not a conflict, because search engines union the
+  sources; such codes are listed in `onlyIn` for context. `hreflang.multiple-entries`
+  is now one code with several targets inside ONE source, so the two rules never
+  report one defect twice.
+- **CHECK-28, URL length:** `url.reference-too-long` (warning) is a page carrying a
+  link, file or hreflang target whose address is over 2,500 characters. The crawler
+  cannot index such an address, so it counts it on the page and stores it nowhere:
+  it is in no link, resource or hreflang listing, and the finding's counts are the
+  only trace. A sitemap `<loc>` that long is counted by `sitemap.url-too-long` as one
+  site finding with `skipped`.
+- **CHECK-87, social sharing tags:** `social.image-insecure` (info) is an `https:`
+  page whose `og:image` is `http:` with no `https:` og:image:secure_url. No browser
+  loads a share image, so it is not mixed content: a platform that insists on https
+  may drop the preview. `social.image-broken` gains the problem `too-long`.
+- **CHECK-86, link hygiene:** `links.no-anchor-text` and `links.aria-label-only` read
+  a link's wider name (above), so they too need a 26c crawl.
 
 ---
 
@@ -879,7 +920,7 @@ broken there.
           "metricId": "sitemap.structure",
           "scope": "site",
           "scopeValue": "",
-          "value": { "docs": 6, "totalUrls": 4102, "totalMemberships": 4102, "urlCapBreaches": 0, "entryCapReached": false, "oversizedDocsSkipped": 0 }
+          "value": { "docs": 6, "totalUrls": 4102, "totalMemberships": 4102, "urlCapBreaches": 0, "entryCapReached": false, "oversizedDocsSkipped": 0, "docCountsExact": true, "membershipLimited": false, "hreflangLimited": false, "overlongLocsSkipped": 0 }
         }
       ]
     },

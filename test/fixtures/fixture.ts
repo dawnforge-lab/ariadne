@@ -18,6 +18,7 @@ import { authoredP23Fixtures } from "./pages/authored-p23.js";
 import { authoredP25Fixtures } from "./pages/authored-p25.js";
 import { authoredP26Fixtures } from "./pages/authored-p26.js";
 import { authoredP26bFixtures } from "./pages/authored-p26b.js";
+import { authoredP26cFixtures } from "./pages/authored-p26c.js";
 import { controlFixture } from "./pages/control.js";
 import { renderFixtures } from "./pages/render-p5.js";
 
@@ -105,6 +106,21 @@ export interface Fixture {
    */
   sitemapLastmod?: string;
   /**
+   * `xhtml:link rel="alternate"` entries `/sitemap.xml` writes inside this
+   * fixture's `<url>`, each target a fixture path made absolute on the
+   * sitemap's own origin (Phase 26c). Default: none. This is the sitemap source
+   * of hreflang, end to end (`/p26c/header-en`, `/p26c/header-de`).
+   */
+  sitemapAlternates?: ReadonlyArray<{ hreflang: string; path: string }>;
+  /**
+   * How many times `/sitemap-extra.xml`, the site's third declared sitemap,
+   * lists this fixture's URL (Phase 26c). Default 0: the document lists only
+   * the fixtures that ask. Listed there AND in `/sitemap.xml` (the default) is
+   * a URL in two sitemaps, `sitemap.url-in-multiple`; a count above one is a
+   * repeat inside one document, which is still one membership.
+   */
+  extraSitemapListings?: number;
+  /**
    * Whether the hub links this fixture. Default true.
    *
    * The hub is what makes one crawl from the seed reach the whole collection, so
@@ -160,6 +176,9 @@ export function allFixtures(): Fixture[] {
     ...authoredP26Fixtures,
     // P26b: the parser-wave rules' fixture pages, added task by task.
     ...authoredP26bFixtures,
+    // P26c: the hreflang-and-sitemaps wave's fixture pages, and the two
+    // sitemap knobs they need (`sitemapAlternates`, `extraSitemapListings`).
+    ...authoredP26cFixtures,
     controlFixture,
   ];
 }

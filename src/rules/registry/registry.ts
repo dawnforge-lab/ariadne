@@ -828,6 +828,12 @@ const KINDS = ["page", "query", "metric"] as const satisfies readonly AnyRule["k
 //     target sets in two sources (deviation 4), evidence `{code, bySource,
 //     conflictingCodes, onlyIn, onlyInTruncated?}`, gated on `v3Gate` and
 //     `sitemapFactsRecorded`. 187 rules.
+// 11. (T11) No rule change. The surface docs, both skills and the checklist
+//     name the five new ids; the fixture site gains five `/p26c/` pages, a
+//     third declared sitemap (`/sitemap-extra.xml`) and `xhtml:link`
+//     alternates, so every new rule but `sitemap.oversized` (a 50 MB fixture)
+//     and `social.image-insecure` (an https page) fires end to end in the
+//     harness. `rules_catalog` re-measured at 191,474 bytes. 187 rules.
 export const RULESET_VERSION = "0.22.0";
 
 /**
