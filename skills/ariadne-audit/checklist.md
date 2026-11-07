@@ -955,6 +955,7 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
     `{urls, breaches50k}` — the largest 50 are listed
   - `entryCapReached: true` means every count here is a FLOOR, not a total: say so
     rather than quoting the numbers flat
+- **Crawl-level marker**: `extraction.not-recorded` (info) is the NOT MEASURED marker for the facts this check reads from extraction version 3: on a crawl extracted before them (or one mixing old and new pages) the rules that read those facts did not run, so their part of this check is NOT MEASURED, never a pass. The remedy is a re-crawl.
 - **Evaluate**:
   - PASS if sitemaps split logically by type (products, collections, blog, pages)
   - WARN if single flat sitemap on site >5k URLs
@@ -1667,6 +1668,7 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
   URL-length check of its own: it is the one URL-shape rule, an indexable,
   self-canonical page whose stored URL is over 115 characters, which is usually a
   tracking or session parameter or a repeated folder.
+- **Crawl-level marker**: `extraction.not-recorded` (info) is the NOT MEASURED marker for the facts this check reads from extraction version 3: on a crawl extracted before them (or one mixing old and new pages) the rules that read those facts did not run, so their part of this check is NOT MEASURED, never a pass. The remedy is a re-crawl.
 - **Evaluate**:
   - FAIL if tracking param URLs are indexable without canonical to clean URL
   - Record: count, sample URLs

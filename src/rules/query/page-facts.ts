@@ -1,5 +1,5 @@
 /**
- * The v2 page-fact gate and its NOT MEASURED marker (Phase 26b).
+ * The page-fact gates and their NOT MEASURED marker (Phase 26b, widened in 26c).
  *
  * Extraction version 2 records page facts the crawler did not extract before
  * (social tags, `<html lang>`, anchor counts, document structure, ...). A crawl
@@ -28,6 +28,12 @@ import { assertCrawl } from "./crawl-evidence.js";
 
 /** The extraction version that introduced the 26b page facts. */
 const V2 = 2;
+/**
+ * The extraction version that introduced the 26c facts (overlong-reference
+ * counts, link name hints, share-image flags, header hreflang). The marker
+ * demands it of every page.
+ */
+const V3 = 3;
 
 const NOT_RECORDED: RuleIdentity = { id: "extraction.not-recorded", severity: "info" };
 
@@ -44,13 +50,28 @@ export async function v2Gate(
   return { recorded: below === 0, atOrAbove, below };
 }
 
+/**
+ * `v2Gate`'s sibling for the Phase 26c facts: whether every page of the crawl
+ * was written by extraction version 3 or later. A v2-only or mixed crawl is
+ * closed; the rule that called it returns `[]` and the marker speaks.
+ */
+export async function v3Gate(
+  db: Db,
+  crawlId: string,
+): Promise<{ recorded: boolean; atOrAbove: number; below: number }> {
+  const { atOrAbove, below } = await extractionCoverage(db, crawlId, V3);
+  return { recorded: below === 0, atOrAbove, below };
+}
+
 async function notRecordedFindings(
   self: RuleIdentity,
   db: Db,
   crawlId: string,
 ): Promise<Finding[]> {
   await assertCrawl(db, crawlId, self.id);
-  const gate = await v2Gate(db, crawlId);
+  // The marker's bar is the newest extraction: a v2-only crawl is complete for
+  // the 26b rules and still lacks the 26c facts, so it speaks for both.
+  const gate = await v3Gate(db, crawlId);
   if (gate.recorded) return [];
   const cohort = await db.execute<{ n: number }>(sql`
     select count(*)::int as n from pages p
@@ -64,7 +85,11 @@ async function notRecordedFindings(
     queryFinding(self, {
       pageId: null,
       pageUrl: null,
-      evidence: { pagesNotRecorded: gate.below, pagesRecorded: gate.atOrAbove },
+      evidence: {
+        pagesNotRecorded: gate.below,
+        pagesRecorded: gate.atOrAbove,
+        requiredVersion: V3,
+      },
       dedupeKey: "site",
     }),
   ];
@@ -75,15 +100,16 @@ export const pageFactsRules: QueryRule[] = [
     kind: "query",
     id: NOT_RECORDED.id,
     checkIds: [
-      "CHECK-04", "CHECK-10", "CHECK-18", "CHECK-22", "CHECK-24", "CHECK-25", "CHECK-34",
-      "CHECK-35", "CHECK-36", "CHECK-37", "CHECK-49", "CHECK-85", "CHECK-86", "CHECK-87",
-      "CHECK-88",
+      "CHECK-04", "CHECK-08", "CHECK-10", "CHECK-18", "CHECK-22", "CHECK-24", "CHECK-25",
+      "CHECK-28", "CHECK-34", "CHECK-35", "CHECK-36", "CHECK-37", "CHECK-49", "CHECK-85",
+      "CHECK-86", "CHECK-87", "CHECK-88",
     ],
     category: "crawl",
     severity: NOT_RECORDED.severity,
     columns: [
-      { key: "pagesNotRecorded", label: "Pages Without Version 2 Facts" },
-      { key: "pagesRecorded", label: "Pages With Version 2 Facts" },
+      { key: "pagesNotRecorded", label: "Pages Without Current Facts" },
+      { key: "pagesRecorded", label: "Pages With Current Facts" },
+      { key: "requiredVersion", label: "Required Extraction Version" },
     ],
     ...copyFor(NOT_RECORDED.id),
     rulesetVersion: RULESET_VERSION,

@@ -166,7 +166,7 @@ export function mkPage(overrides: Partial<PageRecord> = {}): PageRecord {
     // Extraction 2 (Phase 26b): a clean v2 page carries a clean value for every
     // new fact, so no later rule fires on it. A v1 row (every new column null) is
     // `mkV1Page`.
-    extractionVersion: 2,
+    extractionVersion: 3,
     htmlLang: "en",
     social: {
       og: {
@@ -200,6 +200,7 @@ export function mkPage(overrides: Partial<PageRecord> = {}): PageRecord {
     htmlStructure: {
       htmlTags: 1, headTags: 1, bodyTags: 1, headBeforeBody: true, closedEarly: null,
     },
+    overlongUrls: null,
     renderVersion: null,
     renderConsole: null,
     ...overrides,
@@ -228,6 +229,7 @@ export function mkV1Page(overrides: Partial<PageRecord> = {}): PageRecord {
     relNextCount: null,
     relPrevCount: null,
     htmlStructure: null,
+    overlongUrls: null,
     ...overrides,
   });
 }

@@ -11,7 +11,7 @@ import { eq } from "drizzle-orm";
 import { closeDb, createDb, type Db } from "../../src/db/client.js";
 import { runMigrations } from "../../src/db/migrate.js";
 import { crawls, pages } from "../../src/db/schema.js";
-import { pageFactsRules, v2Gate } from "../../src/rules/query/page-facts.js";
+import { pageFactsRules, v2Gate, v3Gate } from "../../src/rules/query/page-facts.js";
 import type { QueryRule } from "../../src/rules/registry/types.js";
 
 function databaseUrl(): string {
@@ -81,9 +81,9 @@ describe("extraction.not-recorded and v2Gate", () => {
       "This crawl was extracted before the page facts these checks read existed, so they were not run; re-crawl the site.",
     );
     expect(r.checkIds).toEqual([
-      "CHECK-04", "CHECK-10", "CHECK-18", "CHECK-22", "CHECK-24", "CHECK-25", "CHECK-34",
-      "CHECK-35", "CHECK-36", "CHECK-37", "CHECK-49", "CHECK-85", "CHECK-86", "CHECK-87",
-      "CHECK-88",
+      "CHECK-04", "CHECK-08", "CHECK-10", "CHECK-18", "CHECK-22", "CHECK-24", "CHECK-25",
+      "CHECK-28", "CHECK-34", "CHECK-35", "CHECK-36", "CHECK-37", "CHECK-49", "CHECK-85",
+      "CHECK-86", "CHECK-87", "CHECK-88",
     ]);
   });
 
@@ -102,7 +102,7 @@ describe("extraction.not-recorded and v2Gate", () => {
       pageId: null,
       pageUrl: null,
       dedupeKey: "site",
-      evidence: { pagesNotRecorded: 2, pagesRecorded: 0 },
+      evidence: { pagesNotRecorded: 2, pagesRecorded: 0, requiredVersion: 3 },
     });
   });
 
@@ -110,11 +110,11 @@ describe("extraction.not-recorded and v2Gate", () => {
     const crawl = await newCrawl();
     await addPages(crawl, [{ url: `${SITE}/a`, extractionVersion: null }]);
     expect((await marker().run(db, crawl)).map((f) => f.evidence)).toEqual([
-      { pagesNotRecorded: 1, pagesRecorded: 0 },
+      { pagesNotRecorded: 1, pagesRecorded: 0, requiredVersion: 3 },
     ]);
   });
 
-  it("a mixed crawl fires with one page on each side", async () => {
+  it("a mixed v1/v2 crawl closes v2Gate with one page on each side; the marker counts against 3", async () => {
     const crawl = await newCrawl();
     await addPages(crawl, [
       { url: `${SITE}/old`, extractionVersion: 1 },
@@ -122,23 +122,50 @@ describe("extraction.not-recorded and v2Gate", () => {
     ]);
     expect(await v2Gate(db, crawl)).toEqual({ recorded: false, atOrAbove: 1, below: 1 });
     expect((await marker().run(db, crawl)).map((f) => f.evidence)).toEqual([
-      { pagesNotRecorded: 1, pagesRecorded: 1 },
+      { pagesNotRecorded: 2, pagesRecorded: 0, requiredVersion: 3 },
     ]);
   });
 
-  it("an all-v2 crawl is silent and the gate is open", async () => {
+  it("a v2-only crawl keeps v2Gate open, closes v3Gate and fires the marker", async () => {
     const crawl = await newCrawl();
     await addPages(crawl, [
       { url: `${SITE}/a`, extractionVersion: 2 },
       { url: `${SITE}/b`, extractionVersion: 2 },
     ]);
     expect(await v2Gate(db, crawl)).toEqual({ recorded: true, atOrAbove: 2, below: 0 });
+    expect(await v3Gate(db, crawl)).toEqual({ recorded: false, atOrAbove: 0, below: 2 });
+    expect((await marker().run(db, crawl)).map((f) => f.evidence)).toEqual([
+      { pagesNotRecorded: 2, pagesRecorded: 0, requiredVersion: 3 },
+    ]);
+  });
+
+  it("an all-v3 crawl is silent and both gates are open", async () => {
+    const crawl = await newCrawl();
+    await addPages(crawl, [
+      { url: `${SITE}/a`, extractionVersion: 3 },
+      { url: `${SITE}/b`, extractionVersion: 3 },
+    ]);
+    expect(await v2Gate(db, crawl)).toEqual({ recorded: true, atOrAbove: 2, below: 0 });
+    expect(await v3Gate(db, crawl)).toEqual({ recorded: true, atOrAbove: 2, below: 0 });
     expect(await marker().run(db, crawl)).toEqual([]);
+  });
+
+  it("a mixed v2/v3 crawl fires and v3Gate is closed", async () => {
+    const crawl = await newCrawl();
+    await addPages(crawl, [
+      { url: `${SITE}/old`, extractionVersion: 2 },
+      { url: `${SITE}/new`, extractionVersion: 3 },
+    ]);
+    expect(await v3Gate(db, crawl)).toEqual({ recorded: false, atOrAbove: 1, below: 1 });
+    expect((await marker().run(db, crawl)).map((f) => f.evidence)).toEqual([
+      { pagesNotRecorded: 1, pagesRecorded: 1, requiredVersion: 3 },
+    ]);
   });
 
   it("an empty crawl is silent", async () => {
     const crawl = await newCrawl();
     expect(await v2Gate(db, crawl)).toEqual({ recorded: true, atOrAbove: 0, below: 0 });
+    expect(await v3Gate(db, crawl)).toEqual({ recorded: true, atOrAbove: 0, below: 0 });
     expect(await marker().run(db, crawl)).toEqual([]);
   });
 

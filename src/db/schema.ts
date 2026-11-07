@@ -8,7 +8,7 @@ import type { StoredPlatformProfile } from "../crawl/platform.js";
 import type { RenderConsole } from "../crawl/render/console-capture.js";
 import type { StoredResponseHeaders } from "../crawl/response-headers.js";
 import type {
-  AnchorCounts, HtmlStructure, InsecureRefs, RefreshFact, RobotsMetaEntry, SocialFacts,
+  AnchorCounts, HtmlStructure, InsecureRefs, OverlongUrls, RefreshFact, RobotsMetaEntry, SocialFacts,
 } from "../crawl/parse/page-facts.js";
 
 export const crawls = pgTable("crawls", {
@@ -895,6 +895,11 @@ export const pages = pgTable("pages", {
   relNextCount: integer("rel_next_count"),
   relPrevCount: integer("rel_prev_count"),
   htmlStructure: jsonb("html_structure").$type<HtmlStructure>(),
+  // PHASE 26c (migration 0029, extraction version 3). References this page made
+  // that were over `INDEXED_URL_MAX` and so were counted, never stored (a btree
+  // entry that large crashes the insert). Null on a row written before
+  // extraction 3: "not measured", never "none".
+  overlongUrls: jsonb("overlong_urls").$type<OverlongUrls>(),
   // WHICH RENDER CAPTURE WROTE THE RENDERED COLUMNS (migration 0025;
   // `RENDER_CAPTURE_VERSION`, src/crawl/versions.ts). Stamped by the render writer
   // only, so it is independent of `extraction_version`: re-rendering a pre-25 crawl
@@ -1022,6 +1027,11 @@ export const links = pgTable("links", {
   // capped at ARIA_LABEL_MAX; null when absent or blank, and on a row written
   // before 0028.
   ariaLabel: text("aria_label"),
+  // Phase 26c (migration 0029): the link's wider accessible name when the
+  // anchor text and aria-label are both empty, and where it came from. Both
+  // null when no hint was recorded, and on a row written before 0029.
+  nameHint: text("name_hint"),
+  nameHintSource: text("name_hint_source"),
   rel: text("rel"),
   isInternal: boolean("is_internal").notNull(),
   isNofollow: boolean("is_nofollow").notNull().default(false),
@@ -1149,6 +1159,10 @@ export const resources = pgTable("resources", {
   // 3,990 ms at a 2,000 ms spacing). `pages.response_time_ms` is the other
   // shape — the request alone.
   fetchMs: integer("fetch_ms"),
+  // Phase 26c (migration 0029): true when this URL is a page's og:image or
+  // twitter:image. The resource pass fetches share images too, so the row
+  // keeps counting in `crawl_status.resources`; this flag tells them apart.
+  shareImage: boolean("share_image").notNull().default(false),
 }, (t) => [
   // The dedup, and the upsert target. One row per URL per crawl: the writer
   // inserts with `on conflict do nothing`, so the second page to reference an
@@ -1245,6 +1259,32 @@ export const sitemapUrls = pgTable("sitemap_urls", {
   // is what keeps a 50k-entry sitemap off a sequential scan now that they match
   // on the normalised spelling.
   index("sitemap_urls_crawl_normalised").on(t.crawlId, t.urlNormalised),
+]);
+
+// Phase 26c (migration 0029): one row per (sitemap document, URL) membership.
+// `sitemap_urls` keeps one row per URL (first source wins, as it always has);
+// this table keeps every document that listed it.
+export const sitemapMemberships = pgTable("sitemap_memberships", {
+  crawlId: text("crawl_id").notNull().references(() => crawls.id, { onDelete: "cascade" }),
+  url: text("url").notNull(),
+  urlNormalised: text("url_normalised").notNull(),
+  sitemapSource: text("sitemap_source").notNull(),
+}, (t) => [
+  primaryKey({ columns: [t.crawlId, t.url, t.sitemapSource] }),
+  index("sitemap_memberships_crawl_normalised").on(t.crawlId, t.urlNormalised),
+]);
+
+// Phase 26c (migration 0029): the `xhtml:link rel=alternate` entries of a
+// sitemap `<url>`. No unique key: two documents may state the same pair.
+export const sitemapHreflang = pgTable("sitemap_hreflang", {
+  crawlId: text("crawl_id").notNull().references(() => crawls.id, { onDelete: "cascade" }),
+  url: text("url").notNull(),
+  urlNormalised: text("url_normalised").notNull(),
+  hreflangCode: text("hreflang_code").notNull(),
+  targetUrl: text("target_url").notNull(),
+  sitemapSource: text("sitemap_source").notNull(),
+}, (t) => [
+  index("sitemap_hreflang_crawl_normalised").on(t.crawlId, t.urlNormalised),
 ]);
 
 export const urlParams = pgTable("url_params", {

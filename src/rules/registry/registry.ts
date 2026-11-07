@@ -708,7 +708,17 @@ const KINDS = ["page", "query", "metric"] as const satisfies readonly AnyRule["k
 //     `html.structure-invalid` is kept as it is, and
 //     an `http:` share image on an `https:` page waits for Phase 26c, which
 //     must record `og:image:secure_url` first.
-export const RULESET_VERSION = "0.21.0";
+// 0.22.0: Phase 26c, multi-source hreflang, streamed sitemaps and the parked 26b
+//     items. Items are added task by task.
+//  1. (T1) `EXTRACTION_VERSION` moves 2 to 3 and migration 0029 lands every
+//     column and table the phase writes (`links.name_hint*`,
+//     `resources.share_image`, `pages.overlong_urls`, `sitemap_memberships`,
+//     `sitemap_hreflang`). `v3Gate` sits beside `v2Gate`. The marker
+//     `extraction.not-recorded` now demands version 3: it fires on any page
+//     below it, carries `requiredVersion: 3`, and claims CHECK-08 and CHECK-28
+//     as well. `INDEXED_URL_MAX` (2,500) and `fitsIndex` are the one URL length
+//     limit for every indexed column. 182 rules.
+export const RULESET_VERSION = "0.22.0";
 
 /**
  * The 47 crawl-derived checks (sf-audit checklist, Pre-Crawl + sections 1–11):

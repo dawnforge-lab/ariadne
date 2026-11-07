@@ -21,7 +21,7 @@ import { readFileSync } from "node:fs";
  * first one only. `render.noindex-changed` compares a row only when its two
  * readings have the same definition (both stamps at least 2, or both below).
  */
-export const EXTRACTION_VERSION = 2;
+export const EXTRACTION_VERSION = 3;
 export const RENDER_CAPTURE_VERSION = 2;
 
 const REDACTED_REQUEST_HEADERS = new Set(["authorization", "cookie", "proxy-authorization"]);

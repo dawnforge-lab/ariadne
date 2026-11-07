@@ -3885,7 +3885,7 @@ describe("the evidence layer on the fixture crawl (Phase 25)", () => {
   });
 
   it("stamps the current extraction version on every row", async () => {
-    expect(EXTRACTION_VERSION).toBe(2);
+    expect(EXTRACTION_VERSION).toBe(3);
     const res = await db.execute<{ url: string; extraction_version: number | null }>(sql`
       select url, extraction_version from pages
       where crawl_id = ${summary.crawlId}

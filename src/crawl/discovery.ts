@@ -247,6 +247,20 @@ export interface DiscoveryTruncation {
   failures: { url: string; reason: string }[];
 }
 
+/**
+ * What the sitemap walk recorded beyond the entries (Phase 26c): written to
+ * `crawls.discovery_jsonb.sitemapFacts`. A crawl without the key predates it.
+ */
+export type DiscoverySitemapFacts = {
+  memberships: number;
+  membershipLimited: boolean;
+  hreflangRows: number;
+  hreflangLimited: boolean;
+  overlongLocsSkipped: number;
+  /** Capped at 50. */
+  oversizedDocs: { url: string; bytesRead: number; urlsKept: number }[];
+};
+
 export interface DiscoveryResult {
   robots: RobotsInfo;
   /** Deduped by url, first source wins. */

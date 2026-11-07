@@ -461,7 +461,7 @@ describe("PageWriter", () => {
     expect(row?.h2Count).toBe(2);
   });
 
-  it("stamps extraction_version 2 on every row it writes, a robots-blocked row included", async () => {
+  it("stamps the current extraction_version (3) on every row it writes, a robots-blocked row included", async () => {
     const crawlId = await newCrawl();
     const writer = new PageWriter(db, crawlId);
     await writer.addPage(item(`${SITE}/a`), makeFetch(`${SITE}/a`), makeAnalysis(), {
@@ -477,8 +477,8 @@ describe("PageWriter", () => {
 
     const rows = await db.select().from(pages).where(eq(pages.crawlId, crawlId));
     expect(rows).toHaveLength(3);
-    expect(EXTRACTION_VERSION).toBe(2);
-    for (const row of rows) expect(row.extractionVersion, row.url).toBe(2);
+    expect(EXTRACTION_VERSION).toBe(3);
+    for (const row of rows) expect(row.extractionVersion, row.url).toBe(3);
     const blocked = rows.find((r) => r.url === `${SITE}/blocked`);
     expect(blocked?.fetchClass).toBe("disallowed");
     expect(blocked?.responseHeaders).toBeNull();

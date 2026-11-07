@@ -79,6 +79,12 @@ export type InsecureRefs = {
   sample: { kind: InsecureRefKind; url: string }[];
 };
 
+/**
+ * References a page made that were over `INDEXED_URL_MAX` (extraction 3):
+ * counted per kind, never stored. `pages.overlong_urls`.
+ */
+export type OverlongUrls = { links: number; resources: number; hreflang: number };
+
 export type HtmlStructure = {
   htmlTags: number;
   headTags: number;
