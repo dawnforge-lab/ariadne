@@ -15,10 +15,14 @@ import { readFileSync } from "node:fs";
  *
  * `RENDER_CAPTURE_VERSION` is the render writer's own stamp
  * (`pages.render_version`), separate so re-rendering an older crawl never claims
- * its page-writer columns were extracted by newer code.
+ * its page-writer columns were extracted by newer code. Version 2 (Phase 26b,
+ * ruling R18): `rendered_robots_meta` holds EVERY post-JS robots meta joined
+ * with ", ", as `robots_meta` does from extraction 2; at version 1 it held the
+ * first one only. `render.noindex-changed` compares a row only when its two
+ * readings have the same definition (both stamps at least 2, or both below).
  */
 export const EXTRACTION_VERSION = 2;
-export const RENDER_CAPTURE_VERSION = 1;
+export const RENDER_CAPTURE_VERSION = 2;
 
 const REDACTED_REQUEST_HEADERS = new Set(["authorization", "cookie", "proxy-authorization"]);
 

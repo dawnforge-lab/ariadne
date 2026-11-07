@@ -216,6 +216,10 @@ describe("the render diff rules against the database", () => {
     /** Defaults to true on a rendered row: null is a pre-0022 render. */
     renderedTagsRead?: boolean | null;
     renderedRedirectUrl?: string | null;
+    /** `pages.extraction_version`; defaults to null, a pre-25 row. */
+    extractionVersion?: number | null;
+    /** `pages.render_version`; defaults to null, a pre-25 render. */
+    renderVersion?: number | null;
   }
 
   async function newCrawl(): Promise<string> {
@@ -319,6 +323,8 @@ describe("the render diff rules against the database", () => {
             : s.renderedFilterLinkCount
           : null,
         renderError: s.renderError ?? null,
+        extractionVersion: s.extractionVersion ?? null,
+        renderVersion: s.renderVersion ?? null,
       };
     });
     await db.insert(pages).values(rows);
@@ -873,6 +879,47 @@ describe("the render diff rules against the database", () => {
     ]);
     expect(findings[0]!.severity).toBe("critical");
     expect(findings[0]!.dedupeKey).toBe(url("/noindex-added"));
+  });
+
+  it("render.noindex-changed compares robots readings only when both have the same definition (ruling R18)", async () => {
+    // From extraction 2 `robots_meta` joins every robots meta; from render
+    // capture 2 `rendered_robots_meta` does too. Before either, each holds the
+    // FIRST meta only. A row whose two readings differ in definition is left
+    // out: a second robots meta saying noindex is not JavaScript adding one.
+    const crawlId = await newCrawl();
+    await addPages(crawlId, [
+      // A v1 page re-rendered by capture 2: first-only against joined. Silent.
+      {
+        path: "/v1-render2",
+        extractionVersion: 1,
+        renderVersion: 2,
+        robotsMeta: "index",
+        renderedRobotsMeta: "index, noindex",
+      },
+      // A v1 page rendered by capture 1: both first-only. Fires, unchanged.
+      {
+        path: "/v1-render1",
+        extractionVersion: 1,
+        renderVersion: 1,
+        robotsMeta: "index",
+        renderedRobotsMeta: "noindex",
+      },
+      // A v2 page rendered by capture 2: both joined. Fires as before.
+      {
+        path: "/v2-render2",
+        extractionVersion: 2,
+        renderVersion: 2,
+        robotsMeta: "index",
+        renderedRobotsMeta: "index, noindex",
+      },
+      // A pre-25 row: both stamps null, both readings first-only. Compared.
+      { path: "/pre25", robotsMeta: null, renderedRobotsMeta: "noindex" },
+    ]);
+    expect(await firedPaths("render.noindex-changed", crawlId)).toEqual([
+      "/pre25",
+      "/v1-render1",
+      "/v2-render2",
+    ]);
   });
 
   it("render.canonical-changed compares canonicals resolved against the page URL", async () => {

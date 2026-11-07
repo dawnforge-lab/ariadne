@@ -642,6 +642,12 @@ const KINDS = ["page", "query", "metric"] as const satisfies readonly AnyRule["k
 //     not) or `overridden` (it permits what the generic one restricts, to no
 //     effect); one that is silent on or repeats a generic directive is not
 //     reported. `differs` entries become `{directive, direction}`.
+//     PR #23 review: `RENDER_CAPTURE_VERSION` moves 1 to 2, because
+//     `rendered_robots_meta` now joins every robots meta, and
+//     `render.noindex-changed` compares a row only when its extraction and
+//     render stamps are both at least 2 or both below (nulls as 0), so a
+//     re-rendered version-1 crawl no longer reports a second robots meta as a
+//     JavaScript noindex (ruling R18).
 export const RULESET_VERSION = "0.21.0";
 
 /**

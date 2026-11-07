@@ -339,7 +339,12 @@ export interface RenderResult {
   h1Count: number | null;
   /** The first post-JS `<link rel=canonical>` href, or null if there is none. */
   canonical: string | null;
-  /** The first post-JS `<meta name=robots>` content, verbatim, or null if there is none (P23-T6). */
+  /**
+   * Every post-JS `<meta name=robots>` content joined with ", ", as the
+   * analyzer's `robotsMeta` joins them (deviation 4), or null if there is none
+   * (P23-T6). Joined from render capture 2 (`RENDER_CAPTURE_VERSION`); a row
+   * stamped 1 holds the first meta only.
+   */
   robotsMeta: string | null;
   /** The first post-JS meta description, trimmed, or null if there is none (P23-T6). */
   metaDescription: string | null;

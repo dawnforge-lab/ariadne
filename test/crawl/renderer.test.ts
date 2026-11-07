@@ -2569,14 +2569,14 @@ describe("runRenderPass", () => {
   // Phase 25: render_console and render_version on the page row.
   // -------------------------------------------------------------------------
 
-  it("writes render_console and render_version 1", async () => {
+  it("writes render_console and render_version 2", async () => {
     const crawlId = await newCrawl(["/console-errors", "/console-clean"]);
 
     const summary = await runRenderPass(db, crawlId, passConfig());
 
     expect(summary.failures).toBe(0);
     const errors = await pageRow(crawlId, "/console-errors");
-    expect(errors.renderVersion).toBe(1);
+    expect(errors.renderVersion).toBe(2);
     const stored = errors.renderConsole as RenderConsole;
     expect(stored.exceptionsTotal).toBeGreaterThanOrEqual(1);
     expect(stored.console).toContainEqual({ level: "error", text: "site says no", cut: false });
@@ -2589,7 +2589,7 @@ describe("runRenderPass", () => {
     expect(stored.blockedByRenderer.thirdParty).toBeGreaterThanOrEqual(1);
 
     const clean = await pageRow(crawlId, "/console-clean");
-    expect(clean.renderVersion).toBe(1);
+    expect(clean.renderVersion).toBe(2);
     expect(clean.renderConsole).toEqual({
       console: [],
       consoleTotal: 0,
@@ -2610,7 +2610,7 @@ describe("runRenderPass", () => {
 
     expect(summary.rendered).toBe(1);
     const row = await pageRow(crawlId, "/console-hostile");
-    expect(row.renderVersion).toBe(1);
+    expect(row.renderVersion).toBe(2);
     const stored = row.renderConsole as RenderConsole;
     // The NUL is marked as U+2400 (␀), never dropped; the lone surrogate is U+FFFD.
     expect(stored.console).toEqual([
@@ -2620,7 +2620,7 @@ describe("runRenderPass", () => {
     expect(stored.exceptions[0]!.text).toContain("thrown nul:\u2400 lone:\uFFFD");
   });
 
-  it("a pre-browser policy refusal writes render_version 1 with render_console null", async () => {
+  it("a pre-browser policy refusal writes render_version 2 with render_console null", async () => {
     // `www.` answers a metadata address, so it is left out of the pin at
     // launch and a page on it is refused before any browser page opens.
     const port = new URL(site.base).port;
@@ -2649,7 +2649,7 @@ describe("runRenderPass", () => {
     expect(row.renderError).toMatch(/^policy refusal: www\.shop\.test was not approved/);
     // The render writer wrote this row (its stamp says so), and nothing was
     // looked at: null, which `render_version` tells apart from a pre-25 null.
-    expect(row.renderVersion).toBe(1);
+    expect(row.renderVersion).toBe(2);
     expect(row.renderConsole).toBeNull();
   });
 });
