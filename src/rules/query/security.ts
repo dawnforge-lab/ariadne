@@ -388,12 +388,17 @@ async function mixedContentFindings(
     n_media: number;
   }>(sql`
     with res as (
-      select pr.page_id,
+      -- Only the HTTPS cohort's edges are grouped: an http page's http edges
+      -- are not mixed content, and grouping them would aggregate the whole
+      -- crawl's http edges before the join below threw them away.
+      select p.id as page_id,
              count(*)::int as n,
              (array_agg(pr.resource_url order by pr.resource_url))[1:${BROKEN_SAMPLE_RESOURCES}] as sample
-      from page_resources pr
-      where pr.crawl_id = ${crawlId} and starts_with(pr.resource_url, 'http:')
-      group by pr.page_id
+      from pages p
+      join page_resources pr on pr.crawl_id = p.crawl_id and pr.page_id = p.id
+      where p.crawl_id = ${crawlId} and ${HTTPS_COHORT}
+        and starts_with(pr.resource_url, 'http:')
+      group by p.id
     ),
     counted as (
       select p.id, p.url,

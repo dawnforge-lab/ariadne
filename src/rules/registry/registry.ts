@@ -668,6 +668,9 @@ const KINDS = ["page", "query", "metric"] as const satisfies readonly AnyRule["k
 //     is no longer written as a `resources` row and fetched for nothing;
 //     `social.image-broken` still reports it `relative` / `invalid` from the
 //     stored value.
+//     PR #23 review: `security.mixed-content` groups only the HTTPS cohort's
+//     `http:` edges (the 0.20.0 join, inside the CTE), not every `http:`
+//     edge of the crawl; findings are identical.
 export const RULESET_VERSION = "0.21.0";
 
 /**

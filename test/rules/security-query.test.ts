@@ -637,6 +637,30 @@ describe("securityRules against the database", () => {
       });
     });
 
+    it("mixed-content leaves out an http page, its http edges and http iframes included", async () => {
+      // Pages of one crawl on both schemes: only the https page is the cohort.
+      const crawl = await newCrawl(HTTPS_SITE);
+      const ids = await addPages(crawl, [
+        { url: `${HTTPS_SITE}/secure` },
+        {
+          url: `${HTTP_SITE}/plain`,
+          extractionVersion: 2,
+          insecureRefs: refs({ iframe: 1, sample: [{ kind: "iframe", url: "http://x.example/f" }] }),
+        },
+      ]);
+      const secure = ids.get(`${HTTPS_SITE}/secure`)!;
+      const plain = ids.get(`${HTTP_SITE}/plain`)!;
+      await db.insert(pageResources).values([
+        { crawlId: crawl, pageId: secure, resourceUrl: "http://x.example/s.js" },
+        { crawlId: crawl, pageId: plain, resourceUrl: "http://x.example/a.jpg" },
+        { crawlId: crawl, pageId: plain, resourceUrl: "http://x.example/b.jpg" },
+      ]);
+      const found = await run("security.mixed-content", crawl);
+      expect(found.map((f) => [f.pageUrl, f.evidence])).toEqual([
+        [`${HTTPS_SITE}/secure`, { insecureCount: 1, sample: ["http://x.example/s.js"] }],
+      ]);
+    });
+
     it("mixed-content samples at most the broken-resource limit, ordered", async () => {
       const crawl = await newCrawl(HTTPS_SITE);
       const ids = await addPages(crawl, [{ url: `${HTTPS_SITE}/many` }]);
