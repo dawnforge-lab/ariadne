@@ -374,8 +374,23 @@ describe("heading rules", () => {
       r.run(mkPage({ extractionVersion: 2, overlongUrls: { links: 4, resources: 0, hreflang: 0 } })),
     ).toHaveLength(0);
     expect(r.run(mkV1Page())).toHaveLength(0);
-    // A v3 row with no analysis (a 404, a redirect) has no counts either.
+    // A v3 row with no classified response (a timeout, a refused URL) has no
+    // counts either.
     expect(r.run(mkPage({ overlongUrls: null }))).toHaveLength(0);
+  });
+
+  it("url.reference-too-long reports a PDF row whose Link header named an over-long hreflang target (Task 6)", () => {
+    const r = rule("url.reference-too-long");
+    const pdf = mkPage({
+      fetchClass: "non_html",
+      contentType: "application/pdf",
+      isIndexable: false,
+      title: null,
+      overlongUrls: { links: 0, resources: 0, hreflang: 1 },
+    });
+    const f = r.run(pdf);
+    expect(f).toHaveLength(1);
+    expect(f[0]!.evidence).toEqual({ links: 0, resources: 0, hreflang: 1, max: INDEXED_URL_MAX });
   });
 
   it("url.reference-too-long reports a page that is not judged: the reference was still never followed", () => {

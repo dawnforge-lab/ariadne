@@ -105,7 +105,8 @@ import {
 } from "../db/schema.js";
 import type { FetchResult } from "./fetch-page.js";
 import { hreflangTarget, type PageAnalysis } from "./parse/page-analyzer.js";
-import { isSameOrigin, normalizeUrl } from "./parse/url-utils.js";
+import type { OverlongUrls } from "./parse/page-facts.js";
+import { fitsIndex, isSameOrigin, normalizeUrl } from "./parse/url-utils.js";
 import { completeUrls } from "./frontier.js";
 import { derivePageType, type PageTypePattern } from "./page-type.js";
 import { EXTRACTION_VERSION } from "./versions.js";
@@ -155,8 +156,9 @@ export interface PageWriterStats {
   /** Page→resource edges written: one per reference, not per file. */
   pageResources: number;
   /**
-   * `<link rel=alternate hreflang>` hrefs that would not resolve against
-   * their page URL. `hreflang.target_url` is NOT NULL, so such a pair has no
+   * `<link rel=alternate hreflang>` hrefs, and `Link` header hreflang URIs
+   * (Phase 26c), that would not resolve against their page URL.
+   * `hreflang.target_url` is NOT NULL, so such a pair has no
    * row to be in — it is counted here instead of vanishing.
    */
   hreflangUnresolved: number;
@@ -277,11 +279,25 @@ export class PageWriter {
   ): Promise<string> {
     const pageId = `page_${randomUUID()}`;
 
+    // Shaped before the page row, which carries their over-long count.
+    const header = this.headerHreflangRows(pageId, item.url, fetch);
+
     await this.push(
       this.pageBuffer,
-      [{ row: this.pageRow(pageId, item, fetch, analysis), complete: opts.complete }],
+      [
+        {
+          row: this.pageRow(pageId, item, fetch, analysis, header.overlong),
+          complete: opts.complete,
+        },
+      ],
       () => this.flushPages(),
     );
+
+    // Phase 26c: the `Link` header's hreflang, on EVERY row a response was
+    // classified for — a PDF, a redirect and a 404 included. The declaration is
+    // the response's whatever its body; the hreflang rules judge the declaring
+    // page's status themselves (`isAuditable`).
+    await this.push(this.hreflangBuffer, header.rows, () => this.flushHreflang());
 
     if (analysis !== null) {
       // The truncation flag, counted before anything is buffered: it is a fact
@@ -591,9 +607,11 @@ export class PageWriter {
           platformHint: null,
           // Never requested, so no response and no headers.
           responseHeaders: null,
+          headerHreflang: [],
           disallowedReason: reason,
         },
         null,
+        0,
       ),
       responseTimeMs: null,
       htmlBytes: null,
@@ -719,6 +737,8 @@ export class PageWriter {
     item: PageWriterItem,
     fetch: FetchResult,
     analysis: PageAnalysis | null,
+    /** `Link` header hreflang targets over `INDEXED_URL_MAX` (headerHreflangRows). */
+    headerOverlongHreflang: number,
   ): PageRow {
     const normalised = normalizeUrl(item.url);
     if (normalised === null) {
@@ -856,10 +876,15 @@ export class PageWriter {
       relNextCount: analysis === null ? null : analysis.relNextCount,
       relPrevCount: analysis === null ? null : analysis.relPrevCount,
       htmlStructure: analysis === null ? null : analysis.htmlStructure,
-      // Phase 26c (migration 0029): the references the analyzer refused for
-      // being over `INDEXED_URL_MAX`. Null exactly when no analysis ran; with
-      // one, always an object, zeros included.
-      overlongUrls: analysis === null ? null : analysis.overlongUrls,
+      // Phase 26c (migration 0029): the references refused for being over
+      // `INDEXED_URL_MAX` — the analyzer's counts, plus the `Link` header's
+      // hreflang targets in `.hreflang` (Task 6). The header is read on every
+      // classified response, so a row with a status and no analysis (a PDF, a
+      // redirect, a 404) measured it: `{links: 0, resources: 0, hreflang: n}`,
+      // and `url.reference-too-long` judges it too. Null exactly when no
+      // response was classified (no status: a refusal, a robots-blocked URL, a
+      // timeout, a network error): nothing was measured.
+      overlongUrls: overlongUrls(fetch, analysis, headerOverlongHreflang),
       htmlBytes: fetch.htmlBytes,
       domSize: analysis?.domSize ?? null,
       imagesTotal: analysis?.imagesTotal ?? 0,
@@ -914,6 +939,59 @@ export class PageWriter {
     }
     return rows;
   }
+
+  /**
+   * The `Link` header's hreflang pairs as `source = 'header'` rows (Phase 26c).
+   * Resolved with `hreflangTarget` against the page URL, as the HTML pairs are,
+   * so the length measured against `INDEXED_URL_MAX` is the length the row
+   * would hold (ruling R5). Unresolvable hrefs count in `hreflangUnresolved`;
+   * over-long ones are returned as a count for `overlong_urls.hreflang`.
+   * Neither is stored.
+   */
+  private headerHreflangRows(
+    pageId: string,
+    pageUrl: string,
+    fetch: FetchResult,
+  ): { rows: HreflangRow[]; overlong: number } {
+    const rows: HreflangRow[] = [];
+    let overlong = 0;
+    for (const pair of fetch.headerHreflang) {
+      const target = hreflangTarget(pair.href, pageUrl);
+      if (target === null) {
+        this.counts.hreflangUnresolved += 1;
+        continue;
+      }
+      if (!fitsIndex(target)) {
+        overlong += 1;
+        continue;
+      }
+      rows.push({
+        crawlId: this.crawlId,
+        pageId,
+        hreflangCode: pair.code,
+        targetUrl: target,
+        targetPageId: null,
+        source: "header",
+      });
+    }
+    return { rows, overlong };
+  }
+}
+
+/** `pages.overlong_urls`; see the comment at its column in `pageRow`. */
+function overlongUrls(
+  fetch: FetchResult,
+  analysis: PageAnalysis | null,
+  headerOverlongHreflang: number,
+): OverlongUrls | null {
+  if (analysis !== null) {
+    return {
+      ...analysis.overlongUrls,
+      hreflang: analysis.overlongUrls.hreflang + headerOverlongHreflang,
+    };
+  }
+  if (fetch.statusCode === null) return null;
+  return { links: 0, resources: 0, hreflang: headerOverlongHreflang };
 }
 
 /**

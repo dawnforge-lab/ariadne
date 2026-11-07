@@ -501,6 +501,7 @@ describe("securityRules against the database", () => {
           xRobotsTag: null,
           platformHint: null,
           responseHeaders: null,
+          headerHreflang: [],
           disallowedReason: null,
           ...fetch,
         };

@@ -757,6 +757,19 @@ const KINDS = ["page", "query", "metric"] as const satisfies readonly AnyRule["k
 //     aria-label OR a hint, is titled "Links: Named Only by Attributes" (id
 //     unchanged), and its evidence `labels` becomes `names: {source, value}[]`.
 //     Both open with `v3Gate` instead of `v2Gate`. 184 rules.
+//  6. (T6) Hreflang from the HTTP `Link` header. An RFC 8288 tokenizer
+//     (src/crawl/link-header.ts: commas inside `<…>` and quoted values,
+//     escaped quotes, malformed entries skipped and counted) reads the FULL
+//     header at fetch, not the stored copy cut at 2,048 characters (deviation
+//     2); `parseCanonicalLinkHeader` runs on it, `rel` now read as tokens.
+//     `alternate` entries with a non-empty `hreflang`, at most
+//     `MAX_HREFLANG_PAIRS`, become `hreflang` rows with `source = 'header'` on
+//     every classified page row, a PDF and a redirect included, resolved by
+//     `hreflangTarget` against the page URL. An over-long target is counted in
+//     `pages.overlong_urls.hreflang`; a classified row with no analysis now
+//     carries `{links: 0, resources: 0, hreflang: n}` (null only where no
+//     response was classified), so `url.reference-too-long` reports a PDF's
+//     header too. No rule change. 184 rules.
 export const RULESET_VERSION = "0.22.0";
 
 /**

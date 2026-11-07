@@ -23,6 +23,7 @@ import {
 import type { FetchResult } from "../../src/crawl/fetch-page.js";
 import { analyzePage, type PageAnalysis, type PageLink } from "../../src/crawl/parse/page-analyzer.js";
 import { HEAD_SNIPPET_MAX } from "../../src/crawl/parse/page-facts.js";
+import { fitsIndex, INDEXED_URL_MAX } from "../../src/crawl/parse/url-utils.js";
 
 function databaseUrl(): string {
   const url = process.env.DATABASE_URL;
@@ -165,6 +166,7 @@ function makeFetch(url: string, overrides: Partial<FetchResult> = {}): FetchResu
     xRobotsTag: null,
     platformHint: null,
     responseHeaders: null,
+    headerHreflang: [],
     disallowedReason: null,
     ...overrides,
   };
@@ -1026,16 +1028,148 @@ describe("PageWriter", () => {
     expect(await countOf(pageResources, crawlId)).toBe(0);
   });
 
-  it("writes a null overlong_urls on a row with no analysis", async () => {
+  // Phase 26c (Task 6): the Link header is read on every classified response,
+  // so a row with a status and no analysis measured its header hreflang.
+  it("writes zero counts on a classified row with no analysis, and null where no response was classified", async () => {
     const crawlId = await newCrawl();
     const writer = new PageWriter(db, crawlId);
-    const url = `${SITE}/no-analysis-overlong`;
-    await writer.addPage(item(url), makeFetch(url, { fetchClass: "client_error", statusCode: 404, body: null }), null, {
+    const gone = `${SITE}/no-analysis-overlong`;
+    const hung = `${SITE}/no-response-overlong`;
+    await writer.addPage(item(gone), makeFetch(gone, { fetchClass: "client_error", statusCode: 404, body: null }), null, {
+      complete: true,
+    });
+    await writer.addPage(item(hung), makeFetch(hung, { fetchClass: "timeout", statusCode: null, body: null }), null, {
       complete: true,
     });
     await writer.flush();
-    const [row] = await db.select().from(pages).where(eq(pages.crawlId, crawlId));
-    expect(row?.overlongUrls).toBeNull();
+    const rows = await db
+      .select({ url: pages.url, overlongUrls: pages.overlongUrls })
+      .from(pages)
+      .where(eq(pages.crawlId, crawlId));
+    const byUrl = new Map(rows.map((r) => [r.url, r.overlongUrls]));
+    expect(byUrl.get(gone)).toEqual({ links: 0, resources: 0, hreflang: 0 });
+    expect(byUrl.get(hung)).toBeNull();
+  });
+
+  describe("hreflang from the Link header (Phase 26c, Task 6)", () => {
+    const LINK_PAIRS = [
+      { code: "de", href: "https://s.example/de/doc.pdf" },
+      { code: "en", href: "https://s.example/en/doc.pdf" },
+    ];
+
+    async function headerRows(crawlId: string) {
+      return db
+        .select({ code: hreflang.hreflangCode, target: hreflang.targetUrl, source: hreflang.source })
+        .from(hreflang)
+        .where(eq(hreflang.crawlId, crawlId));
+    }
+
+    it("writes two source='header' rows for a non_html PDF page", async () => {
+      const crawlId = await newCrawl();
+      const writer = new PageWriter(db, crawlId);
+      const url = `${SITE}/en/doc.pdf`;
+      await writer.addPage(
+        item(url),
+        makeFetch(url, {
+          fetchClass: "non_html",
+          contentType: "application/pdf",
+          body: null,
+          headerHreflang: LINK_PAIRS,
+        }),
+        null,
+        { complete: true },
+      );
+      await writer.flush();
+
+      const rows = await headerRows(crawlId);
+      expect(rows.sort((a, b) => a.code.localeCompare(b.code))).toEqual([
+        { code: "de", target: "https://s.example/de/doc.pdf", source: "header" },
+        { code: "en", target: "https://s.example/en/doc.pdf", source: "header" },
+      ]);
+      expect(writer.stats().hreflang).toBe(2);
+      const [row] = await db.select().from(pages).where(eq(pages.crawlId, crawlId));
+      expect(row?.overlongUrls).toEqual({ links: 0, resources: 0, hreflang: 0 });
+    });
+
+    it("counts an over-long header target on a PDF row, after resolving, and stores none", async () => {
+      const crawlId = await newCrawl();
+      const writer = new PageWriter(db, crawlId);
+      const url = `${SITE}/en/doc.pdf`;
+      // Under the limit as written, over it once resolved against the page:
+      // the length measured is the length the row would hold (ruling R5).
+      const relative = `/${"z".repeat(INDEXED_URL_MAX - 1)}`;
+      expect(fitsIndex(relative)).toBe(true);
+      await writer.addPage(
+        item(url),
+        makeFetch(url, {
+          fetchClass: "non_html",
+          contentType: "application/pdf",
+          body: null,
+          headerHreflang: [{ code: "de", href: relative }, LINK_PAIRS[1]!],
+        }),
+        null,
+        { complete: true },
+      );
+      await writer.flush();
+
+      expect(await headerRows(crawlId)).toEqual([
+        { code: "en", target: "https://s.example/en/doc.pdf", source: "header" },
+      ]);
+      const [row] = await db.select().from(pages).where(eq(pages.crawlId, crawlId));
+      expect(row?.overlongUrls).toEqual({ links: 0, resources: 0, hreflang: 1 });
+      expect(writer.stats().hreflangUnresolved).toBe(0);
+    });
+
+    it("writes header rows beside html rows, resolved against the page, adding to the analyzer's counts", async () => {
+      const crawlId = await newCrawl();
+      const writer = new PageWriter(db, crawlId);
+      const url = `${SITE}/de/seite`;
+      await writer.addPage(
+        item(url),
+        makeFetch(url, {
+          headerHreflang: [
+            { code: "fr", href: "../fr/page" },
+            { code: "es", href: "http://[bad" },
+            { code: "it", href: `${SITE}/${"z".repeat(3000)}` },
+          ],
+        }),
+        makeAnalysis({
+          hreflang: [{ code: "en", href: "/en/page" }],
+          overlongUrls: { links: 2, resources: 1, hreflang: 1 },
+        }),
+        { complete: true },
+      );
+      await writer.flush();
+
+      const rows = await headerRows(crawlId);
+      expect(rows.sort((a, b) => a.code.localeCompare(b.code))).toEqual([
+        { code: "en", target: `${SITE}/en/page`, source: "html" },
+        { code: "fr", target: `${SITE}/fr/page`, source: "header" },
+      ]);
+      expect(writer.stats().hreflangUnresolved).toBe(1);
+      const [row] = await db.select().from(pages).where(eq(pages.crawlId, crawlId));
+      expect(row?.overlongUrls).toEqual({ links: 2, resources: 1, hreflang: 2 });
+    });
+
+    it("writes header rows on a redirect row too: the declaration is the response's", async () => {
+      const crawlId = await newCrawl();
+      const writer = new PageWriter(db, crawlId);
+      const url = `${SITE}/old`;
+      await writer.addPage(
+        item(url),
+        makeFetch(url, {
+          statusCode: 301,
+          fetchClass: "redirect",
+          body: null,
+          redirectUrl: `${SITE}/new`,
+          headerHreflang: LINK_PAIRS,
+        }),
+        null,
+        { complete: true },
+      );
+      await writer.flush();
+      expect(await headerRows(crawlId)).toHaveLength(2);
+    });
   });
 
   it("persists hostile 26b strings: a NUL, a pair cut at a cap, a lone surrogate", async () => {

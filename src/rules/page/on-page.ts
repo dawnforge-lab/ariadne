@@ -327,8 +327,10 @@ export const onPageRules: PageRule[] = [
    *
    * THE ONE RULE IN THIS FILE NOT GATED ON `isJudged`. An over-long reference
    * was never followed whatever the page's index status, and the column says
-   * itself when there is something to judge: it is written only on a page the
-   * crawler analysed, null on every other row. A v2 row (null, never measured)
+   * itself when there is something to judge: it is written on every row whose
+   * response was classified (the analyzer's counts, plus the `Link` header's
+   * hreflang targets on any row, a PDF included: Task 6), null where no
+   * response was classified. A v2 row (null, never measured)
    * is silent; `extraction.not-recorded` speaks for it. A v3 count object
    * missing a key is a defect in the write, and loud: re-crawl.
    */

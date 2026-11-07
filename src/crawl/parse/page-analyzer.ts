@@ -510,6 +510,9 @@
  * counts are of references, not distinct URLs: deduping would mean keeping the
  * refused strings. `url.reference-too-long` reports the counts; `url-policy`'s
  * `too_long` refusal keeps the same URLs off every fetch path.
+ * Phase 26c (P26c-T6) exports `MAX_HREFLANG_PAIRS` so the hreflang pairs of a
+ * `Link` header (fetch-page.ts) are capped at the same 200; nothing here reads
+ * the header.
  * Phase 26c (P26c-T4) also records `og:image:secure_url` as one more social
  * tag (`SOCIAL_SLOTS`: first value, count, conflict, capped at
  * `SOCIAL_URL_MAX`); it is a plain fact, not a judged share image.
@@ -1215,7 +1218,8 @@ const isSocialTag = (value: string | undefined): value is SocialTag =>
   value !== undefined && Object.hasOwn(SOCIAL_SLOTS, value);
 const ROBOTS_META_BOT_NAMES: ReadonlySet<string> = new Set(ROBOTS_META_BOTS);
 const MAX_HEADING_ORDER = 500;
-const MAX_HREFLANG_PAIRS = 200;
+/** Exported (P26c-T6): fetch-page.ts caps the `Link` header's pairs at the same number. */
+export const MAX_HREFLANG_PAIRS = 200;
 const MAX_STRUCTURED_DATA_BLOCKS = 50;
 /**
  * Per-block buffer cap for JSON-LD text, in characters. A block over this is

@@ -190,6 +190,13 @@ export function headerValue(headers: HeaderBag, name: string): string | null {
   return Array.isArray(raw) ? raw.join(", ") : raw;
 }
 
+/** Every occurrence of a header, in arrival order, unjoined; `[]` when absent. */
+export function headerValues(headers: HeaderBag, name: string): string[] {
+  const raw = headers[name];
+  if (raw === undefined) return [];
+  return Array.isArray(raw) ? raw : [raw];
+}
+
 export function mimeType(contentType: string | null): string | null {
   if (contentType === null) return null;
   const value = contentType.split(";")[0]?.trim().toLowerCase();

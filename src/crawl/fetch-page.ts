@@ -32,6 +32,7 @@ import {
   blockedAddressMessage,
   decodeBody,
   headerValue,
+  headerValues,
   isProgrammerError,
   isTimeout,
   mimeType,
@@ -42,6 +43,8 @@ import {
   type HeaderBag,
 } from "./http.js";
 import { captureResponseHeaders, type StoredResponseHeaders } from "./response-headers.js";
+import { parseLinkHeader, relTokens, type LinkHeaderEntry } from "./link-header.js";
+import { MAX_HREFLANG_PAIRS, type HreflangPair } from "./parse/page-analyzer.js";
 
 /**
  * The body cap, spent on **decompressed** bytes (see readCappedDecoded). It
@@ -199,6 +202,17 @@ export interface FetchResult {
    */
   responseHeaders: StoredResponseHeaders | null;
   /**
+   * Hreflang pairs from the `Link` header (Phase 26c): entries whose `rel`
+   * tokens include `alternate` with a non-empty `hreflang`, hrefs as written,
+   * at most `MAX_HREFLANG_PAIRS`. Read on every classified response, HTML or
+   * not and redirect or not, from the FULL header — never from
+   * `responseHeaders`, whose values are cut at `RESPONSE_HEADER_VALUE_CAP`
+   * (deviation 2). Empty wherever `canonicalHeader` is null for want of a
+   * classified response (no status: a refusal, a timeout, a network error).
+   * Persist writes them as `source = 'header'` rows.
+   */
+  headerHreflang: HreflangPair[];
+  /**
    * Why this row has no usable body or target, in plain words. Set on
    * `disallowed` (the URL or the address it resolved to), on `redirect` when
    * the Location was dropped rather than passed on, on `unsupported_encoding`
@@ -245,14 +259,30 @@ export interface FetchOpts {
  */
 export function parseCanonicalLinkHeader(value: string | null): string | null {
   if (value === null) return null;
-  for (const part of value.split(",")) {
-    const match = part.match(/<([^>]+)>\s*;([^]*)/);
-    if (match === null) continue;
-    if (/rel\s*=\s*"?canonical"?/i.test(match[2] ?? "")) {
-      return (match[1] ?? "").trim() || null;
-    }
+  return canonicalOf(parseLinkHeader([value]).entries);
+}
+
+/** The first entry whose `rel` tokens include `canonical`, its URI verbatim. */
+function canonicalOf(entries: LinkHeaderEntry[]): string | null {
+  const canonical = entries.find((entry) => relTokens(entry).includes("canonical"));
+  return canonical === undefined ? null : canonical.uri || null;
+}
+
+/**
+ * `Link: <…>; rel="alternate"; hreflang="de"` -> the hreflang pairs (Phase
+ * 26c), as the analyzer reads `<link rel=alternate hreflang>`: `rel` taken as
+ * tokens, a non-empty `hreflang` required, the URI left as written (persist
+ * resolves it against the page URL and measures it against
+ * `INDEXED_URL_MAX`), at most `MAX_HREFLANG_PAIRS`.
+ */
+function hreflangOf(entries: LinkHeaderEntry[]): HreflangPair[] {
+  const pairs: HreflangPair[] = [];
+  for (const entry of entries) {
+    if (pairs.length >= MAX_HREFLANG_PAIRS) break;
+    const code = entry.params["hreflang"];
+    if (code && relTokens(entry).includes("alternate")) pairs.push({ code, href: entry.uri });
   }
-  return null;
+  return pairs;
 }
 
 /**
@@ -433,6 +463,7 @@ function emptyResult(
     xRobotsTag: null,
     platformHint: null,
     responseHeaders,
+    headerHreflang: [],
     disallowedReason,
   };
 }
@@ -522,7 +553,11 @@ export async function fetchPage(url: string, opts: FetchOpts): Promise<FetchResu
     const statusCode = response.statusCode;
     const contentType = headerValue(headers, "content-type");
     const xRobotsTag = headerValue(headers, "x-robots-tag");
-    const canonicalHeader = parseCanonicalLinkHeader(headerValue(headers, "link"));
+    // Parsed once, from the full header values (repeated `Link` fields arrive
+    // as an array), for both the canonical and the hreflang pairs.
+    const link = parseLinkHeader(headerValues(headers, "link")).entries;
+    const canonicalHeader = canonicalOf(link);
+    const headerHreflang = hreflangOf(link);
     const platformHint = detectPlatform(headers);
     const mime = mimeType(contentType);
     const isHtml = mime !== null && HTML_MIME_TYPES.has(mime);
@@ -563,6 +598,7 @@ export async function fetchPage(url: string, opts: FetchOpts): Promise<FetchResu
         xRobotsTag,
         platformHint,
         responseHeaders,
+        headerHreflang,
         disallowedReason: target.droppedReason,
       };
     }
@@ -615,6 +651,7 @@ export async function fetchPage(url: string, opts: FetchOpts): Promise<FetchResu
       xRobotsTag,
       platformHint,
       responseHeaders,
+      headerHreflang,
       // Two reasons can want this field, and they never co-occur: an
       // unsupported coding is an `ok`-turned-`unsupported_encoding`, a refused
       // Retry-After is a throttle. The coding wins if that ever changes,
