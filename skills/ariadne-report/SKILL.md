@@ -254,7 +254,8 @@ never as clean. Grouped by the problem a client reads:
   head-missing and body-missing describes a page that leaves out optional tags. It is
   valid HTML: write it as a hardening recommendation (P4), never as a broken page.
 - **Directives and refresh** (CHECK-04, CHECK-10): `directives.bot-conflict` means one
-  search engine is told something the others are not. Rank it with the indexability
+  search engine is told something the others are not (`stricter`), or a bot tag
+  tries to lift a generic restriction it cannot lift (`overridden`). Rank it with the indexability
   findings. `redirect.meta-refresh` is a redirect done the slow way. Rank it with the
   redirect findings.
 - **Social sharing** (CHECK-87): `social.og-incomplete`, `social.x-incomplete`,

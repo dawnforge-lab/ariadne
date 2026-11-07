@@ -619,7 +619,10 @@ the marker fired with `pagesNotRecorded` 602 and only those three added findings
 check:
 
 - **CHECK-04, directives:** `directives.bot-conflict` (a `googlebot`-style robots meta
-  whose noindex or nofollow differs from the generic one; `none` counts as both). On a
+  that contradicts the generic one: `stricter` when it says noindex or nofollow the
+  generic one does not, `overridden` when it permits what the generic one restricts,
+  which has no effect because engines obey the most restrictive; `none` counts as
+  both noindex and nofollow). On a
   re-crawled page the generic robots value now joins every `<meta name="robots">`, so a
   `noindex` in a second robots meta makes the page non-indexable for every rule.
 - **CHECK-10, redirects:** `redirect.meta-refresh`, a meta refresh or `Refresh` header

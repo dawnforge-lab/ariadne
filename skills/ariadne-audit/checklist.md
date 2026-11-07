@@ -791,10 +791,14 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
      - `html.head-closed-early` (warning) — names the element or text that ended the
        head early, so the robots meta after it is read as body content.
      - `directives.bot-conflict` (warning) — a bot-specific robots meta (`googlebot`,
-       `bingbot`, ...) whose noindex or nofollow state differs from the generic
-       `robots` meta (absent means index, follow), so engines treat the page
-       differently. Needs extraction version 2; `extraction.not-recorded` marks it
-       NOT MEASURED.
+       `bingbot`, ...) that contradicts the generic `robots` meta (absent means
+       index, follow). Engines combine the two and obey the most restrictive, so a
+       contradiction is either `stricter` (the bot meta says noindex or nofollow
+       where the generic one does not: that engine is kept out) or `overridden`
+       (the bot meta permits with `index` / `follow` / `all` what the generic one
+       restricts: the permission has no effect). A bot meta that is silent on, or
+       repeats, a generic directive is not one. Needs extraction version 2;
+       `extraction.not-recorded` marks it NOT MEASURED.
      - `render.noindex-changed` (critical) — a rendered page whose noindex the
        JavaScript added or removed (rendered pages only; see CHECK-01 step 6).
   2. `issue_urls` with `ruleId: "indexability.noindex"` for the FULL list — this is

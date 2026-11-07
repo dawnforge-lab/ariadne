@@ -243,7 +243,7 @@ describe("directives.bot-conflict", () => {
   const metas = (...entries: [string, string][]) =>
     entries.map(([name, content]) => ({ name, content }));
 
-  it("fires when googlebot says noindex and robots says index", () => {
+  it("fires stricter when googlebot says noindex and robots says index (the spec example)", () => {
     const out = r.run(
       mkPage({ robotsMeta: "index", robotsMetas: metas(["googlebot", "noindex"]) }),
     );
@@ -252,7 +252,7 @@ describe("directives.bot-conflict", () => {
       conflicts: [
         {
           bot: "googlebot",
-          differs: ["noindex"],
+          differs: [{ directive: "noindex", direction: "stricter" }],
           botDirectives: "noindex",
           robotsDirectives: "index",
         },
@@ -260,22 +260,61 @@ describe("directives.bot-conflict", () => {
     });
   });
 
-  it("with no robots meta, a bot nofollow differs from the index, follow default", () => {
+  it("with no robots meta, a bot nofollow is stricter than the index, follow default", () => {
     const out = r.run(mkPage({ robotsMeta: null, robotsMetas: metas(["bingbot", "nofollow"]) }));
     expect(out).toHaveLength(1);
     expect(out[0]!.evidence).toMatchObject({
-      conflicts: [{ bot: "bingbot", differs: ["nofollow"], robotsDirectives: null }],
+      conflicts: [
+        {
+          bot: "bingbot",
+          differs: [{ directive: "nofollow", direction: "stricter" }],
+          robotsDirectives: null,
+        },
+      ],
     });
   });
 
-  it("googlebot noindex against robots noindex, nofollow differs on nofollow only", () => {
+  it("is silent when the bot meta is merely silent on a directive robots carries", () => {
+    // Google combines the bot meta with the generic one: googlebot still gets
+    // noindex here, and nofollow below, from the generic meta.
+    expect(
+      r.run(
+        mkPage({ robotsMeta: "noindex, follow", robotsMetas: metas(["googlebot", "noarchive"]) }),
+      ),
+    ).toHaveLength(0);
+    expect(
+      r.run(
+        mkPage({ robotsMeta: "noindex, nofollow", robotsMetas: metas(["googlebot", "noindex"]) }),
+      ),
+    ).toHaveLength(0);
+  });
+
+  it("fires overridden when the bot meta permits what robots restricts", () => {
     const out = r.run(
-      mkPage({
-        robotsMeta: "noindex, nofollow",
-        robotsMetas: metas(["googlebot", "noindex"]),
-      }),
+      mkPage({ robotsMeta: "noindex", robotsMetas: metas(["googlebot", "index"]) }),
     );
-    expect(out[0]!.evidence).toMatchObject({ conflicts: [{ differs: ["nofollow"] }] });
+    expect(out).toHaveLength(1);
+    expect(out[0]!.evidence).toMatchObject({
+      conflicts: [
+        { bot: "googlebot", differs: [{ directive: "noindex", direction: "overridden" }] },
+      ],
+    });
+  });
+
+  it("all overrides follow only where robots restricts it", () => {
+    const out = r.run(mkPage({ robotsMeta: "nofollow", robotsMetas: metas(["bingbot", "all"]) }));
+    expect(out).toHaveLength(1);
+    expect(out[0]!.evidence).toMatchObject({
+      conflicts: [
+        { bot: "bingbot", differs: [{ directive: "nofollow", direction: "overridden" }] },
+      ],
+    });
+  });
+
+  it("a bot meta that permits and restricts the same directive is not an override", () => {
+    expect(
+      r.run(mkPage({ robotsMeta: "noindex", robotsMetas: metas(["googlebot", "index, noindex"]) })),
+    ).toHaveLength(0);
   });
 
   it("counts none as noindex and nofollow, and is one finding per page", () => {
@@ -288,8 +327,14 @@ describe("directives.bot-conflict", () => {
     expect(out).toHaveLength(1);
     expect(out[0]!.evidence).toMatchObject({
       conflicts: [
-        { bot: "googlebot", differs: ["noindex", "nofollow"] },
-        { bot: "bingbot", differs: ["noindex"] },
+        {
+          bot: "googlebot",
+          differs: [
+            { directive: "noindex", direction: "stricter" },
+            { directive: "nofollow", direction: "stricter" },
+          ],
+        },
+        { bot: "bingbot", differs: [{ directive: "noindex", direction: "stricter" }] },
       ],
     });
     expect(
@@ -297,7 +342,7 @@ describe("directives.bot-conflict", () => {
     ).toHaveLength(0);
   });
 
-  it("is silent when the states agree, or there is no bot meta", () => {
+  it("is silent when the bot meta repeats robots, or there is no bot meta", () => {
     expect(
       r.run(mkPage({ robotsMeta: "noindex", robotsMetas: metas(["googlebot", "noindex"]) })),
     ).toHaveLength(0);

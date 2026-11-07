@@ -42,13 +42,24 @@ function stateOf(tokens: string[]): { noindex: boolean; nofollow: boolean } {
 }
 
 export const directiveRules: PageRule[] = [
-  // A bot-specific robots meta (`googlebot`, `bingbot`, ...) whose index or
-  // follow state differs from the combined generic `robots` meta. Engines obey
-  // the most specific meta for themselves, so the page behaves differently per
-  // engine. An absent generic meta means index, follow. Entries naming one bot
-  // are combined (engines combine repeated metas). Only the meta channel is
-  // compared; the header is `indexability.meta-header-conflict`'s. A null
-  // `robotsMetas` is a row extraction 2 never wrote: silent, the marker speaks.
+  // A bot-specific robots meta (`googlebot`, `bingbot`, ...) that contradicts
+  // the combined generic `robots` meta (ruling R17). An engine COMBINES the
+  // meta naming it with the generic one and applies the most restrictive set;
+  // the bot meta does not replace the generic one. So, for each of index and
+  // follow, two things are a contradiction:
+  //   - stricter: the bot meta says noindex (or nofollow; `none` is both) and
+  //     the generic meta does not. That engine is kept out (or does not
+  //     follow) while the rest index (or follow) the page.
+  //   - overridden: the bot meta explicitly permits (`index` / `all`, or
+  //     `follow` / `all`) what the generic meta restricts, and does not itself
+  //     restrict it. The permission has no effect: the generic restriction
+  //     still applies to that engine.
+  // A bot meta that is silent on a directive the generic meta carries, or that
+  // repeats it, is not a conflict. An absent generic meta means index, follow.
+  // Entries naming one bot are combined (engines combine repeated metas). Only
+  // the meta channel is compared; the header is
+  // `indexability.meta-header-conflict`'s. A null `robotsMetas` is a row
+  // extraction 2 never wrote: silent, the marker speaks.
   pageRule(
     "directives.bot-conflict",
     ["CHECK-04"],
@@ -64,18 +75,29 @@ export const directiveRules: PageRule[] = [
         if (list === undefined) byBot.set(entry.name, [entry.content]);
         else list.push(entry.content);
       }
+      type Differs = { directive: "noindex" | "nofollow"; direction: "stricter" | "overridden" };
       const conflicts: {
         bot: string;
-        differs: ("noindex" | "nofollow")[];
+        differs: Differs[];
         botDirectives: string;
         robotsDirectives: string | null;
       }[] = [];
       for (const [bot, contents] of byBot) {
         const botDirectives = contents.join(", ");
-        const state = stateOf(robotsTokens(botDirectives));
-        const differs: ("noindex" | "nofollow")[] = [];
-        if (state.noindex !== generic.noindex) differs.push("noindex");
-        if (state.nofollow !== generic.nofollow) differs.push("nofollow");
+        const tokens = robotsTokens(botDirectives);
+        const restricts = stateOf(tokens);
+        const permits = {
+          noindex: says(tokens, "index", "all"),
+          nofollow: says(tokens, "follow", "all"),
+        };
+        const differs: Differs[] = [];
+        for (const directive of ["noindex", "nofollow"] as const) {
+          if (restricts[directive] && !generic[directive]) {
+            differs.push({ directive, direction: "stricter" });
+          } else if (permits[directive] && !restricts[directive] && generic[directive]) {
+            differs.push({ directive, direction: "overridden" });
+          }
+        }
         if (differs.length > 0) {
           conflicts.push({ bot, differs, botDirectives, robotsDirectives: p.robotsMeta });
         }

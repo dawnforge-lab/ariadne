@@ -522,11 +522,11 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
       "Remove nofollow from the robots meta tag and the header so the page's links are followed. Leave it only if the page is deliberately closed off, such as a login or user-generated page.",
   },
   "directives.bot-conflict": {
-    title: "Directives: Bot meta differs from robots meta",
+    title: "Directives: Bot meta contradicts robots meta",
     explanation:
-      "Pages with a bot-specific robots meta tag (googlebot, bingbot and so on) whose noindex or nofollow state differs from the generic robots meta tag; the Bot Conflicts column names the bot and what differs. A search engine follows the tag that names it, so the page is indexed or followed by some engines and not by others. A page with no generic robots tag counts as index, follow.",
+      "Pages with a bot-specific robots meta tag (googlebot, bingbot and so on) that contradicts the generic robots meta tag, which counts as index, follow when absent; the Bot Conflicts column names the bot, the directive and the case. A search engine combines the tag that names it with the generic tag and obeys the most restrictive of the two: a stricter bot tag (noindex or nofollow, none being both, where the generic tag has neither) keeps that engine out while the others index or follow the page, and an overridden one (index, follow or all where the generic tag restricts) has no effect, because the generic restriction still applies. A bot tag that leaves out or repeats a directive of the generic tag is not reported.",
     howToFix:
-      "Decide the intended behaviour per engine and make the tags agree, usually by removing the bot-specific tag. Keep a bot-specific tag only where the difference is deliberate.",
+      "Stricter: remove the bot-specific noindex or nofollow unless keeping that one engine out is deliberate. Overridden: the bot tag cannot lift a generic restriction; if that engine should index or follow the page, remove the restriction from the generic tag and restrict the other engines by name instead.",
   },
   "directives.restrictive": {
     title: "Directives: Snippet or image preview restricted",

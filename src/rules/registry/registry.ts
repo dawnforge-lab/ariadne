@@ -635,6 +635,13 @@ const KINDS = ["page", "query", "metric"] as const satisfies readonly AnyRule["k
 //     never lists `og:image`, an Open Graph array (R15); `metaRefresh.target`
 //     is cut at `REFRESH_TARGET_MAX` (R16); CHECK-87's Evaluate keeps relative
 //     and invalid share images FAIL when the file-check markers fire (I3).
+// 14. PR #23 review (no bump; 0.21.0 is still unreleased):
+//     PR #23 review: `directives.bot-conflict` reports only a real
+//     contradiction (ruling R17). Engines combine a bot meta with the generic
+//     one, so a bot meta is `stricter` (it restricts what the generic one does
+//     not) or `overridden` (it permits what the generic one restricts, to no
+//     effect); one that is silent on or repeats a generic directive is not
+//     reported. `differs` entries become `{directive, direction}`.
 export const RULESET_VERSION = "0.21.0";
 
 /**
