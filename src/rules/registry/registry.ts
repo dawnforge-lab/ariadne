@@ -660,6 +660,9 @@ const KINDS = ["page", "query", "metric"] as const satisfies readonly AnyRule["k
 //     refresh at all, and a `url` prefix without `=` is part of the URL
 //     (`0; urlredirect.html` names `urlredirect.html`). Only ASCII whitespace
 //     is skipped.
+//     PR #23 review: `storableDeep` is copy-on-write: a clean string, array or
+//     plain object comes back as the same reference, and a dirty leaf rebuilds
+//     only its path. No stored value changes.
 export const RULESET_VERSION = "0.21.0";
 
 /**

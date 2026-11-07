@@ -80,6 +80,51 @@ describe("storableDeep: the writer's boundary (ruling R10)", () => {
     expect(JSON.stringify(out)).toBe(JSON.stringify(parsed));
   });
 
+  it("keeps a `__proto__` key when a dirty sibling makes the object rebuild", () => {
+    const parsed = JSON.parse(
+      `{"@type":"X","__proto__":{"a":1},"name":"n\\u0000"}`,
+    ) as Record<string, unknown>;
+    const out = storableDeep(parsed);
+    expect(out).not.toBe(parsed);
+    expect(Object.hasOwn(out, "__proto__")).toBe(true);
+    expect(Object.getPrototypeOf(out)).toBe(Object.prototype);
+    expect(Object.keys(out)).toEqual(["@type", "__proto__", "name"]);
+    expect(out["name"]).toBe(`n${NUL_MARK}`);
+  });
+
+  it("copy-on-write: a clean nested value comes back as the same reference", () => {
+    const clean = {
+      title: "Grüße 😀 ␀",
+      list: ["Zürich 🚋", { k: "“quotes”", n: 1 }],
+      raw: { "@type": "Product", name: "Ä 😀", when: new Date(0) },
+    };
+    const out = storableDeep(clean);
+    expect(out).toBe(clean);
+    expect(out.list).toBe(clean.list);
+    expect(out.raw).toBe(clean.raw);
+  });
+
+  it("copy-on-write: a dirty leaf rebuilds only its own path", () => {
+    const value = {
+      clean: { a: ["x", { b: "y" }] },
+      dirty: { keep: { c: "z" }, list: ["ok", { leaf: "bad\u0000" }] },
+    };
+    const out = storableDeep(value);
+    expect(out).not.toBe(value);
+    expect(out.clean).toBe(value.clean);
+    expect(out.dirty).not.toBe(value.dirty);
+    expect(out.dirty.keep).toBe(value.dirty.keep);
+    expect(out.dirty.list).not.toBe(value.dirty.list);
+    expect(out.dirty.list[1]).toEqual({ leaf: `bad${NUL_MARK}` });
+    // The input is never mutated.
+    expect((value.dirty.list[1] as { leaf: string }).leaf).toBe("bad\u0000");
+    // A dirty key rebuilds its object too.
+    const keyed = { inner: { "k\uD800": 1 } };
+    const keyedOut = storableDeep(keyed);
+    expect(keyedOut).not.toBe(keyed);
+    expect(Object.keys(keyedOut.inner)).toEqual(["k�"]);
+  });
+
   it("throws past STORABLE_MAX_DEPTH: a producer lost its cap (ruling R11)", () => {
     const nest = (levels: number): unknown => {
       let v: unknown = "leaf";
