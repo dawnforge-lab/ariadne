@@ -663,6 +663,11 @@ const KINDS = ["page", "query", "metric"] as const satisfies readonly AnyRule["k
 //     PR #23 review: `storableDeep` is copy-on-write: a clean string, array or
 //     plain object comes back as the same reference, and a dirty leaf rebuilds
 //     only its path. No stored value changes.
+//     PR #23 review: `shareImageRef` gives a ref only to a value starting
+//     `http:` or `https:` (any case), so a relative or non-http(s) share image
+//     is no longer written as a `resources` row and fetched for nothing;
+//     `social.image-broken` still reports it `relative` / `invalid` from the
+//     stored value.
 export const RULESET_VERSION = "0.21.0";
 
 /**

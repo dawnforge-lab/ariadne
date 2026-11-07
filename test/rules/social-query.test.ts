@@ -389,6 +389,27 @@ describe("social query rules against the database", () => {
       ]);
     });
 
+    it("judges a relative and an ftp share image from the stored value, with no ref (PR #23 P7)", async () => {
+      // End to end through the analyzer: neither value gets a ref (so no
+      // `resources` row is queued), and the rule still names each problem.
+      const pageUrl = `${SITE}/a`;
+      const analysis = analyzePage(
+        `<html><head><meta property="og:image" content="/og.png">` +
+          `<meta name="twitter:image" content="ftp://x/a.png"></head><body><p>x</p></body></html>`,
+        pageUrl,
+      );
+      expect(analysis.social?.imageRefs).toEqual({ og: null, x: null });
+      expect(analysis.socialImageRefs).toEqual([]);
+      const { crawlId } = await seed([{ path: "/a", social: analysis.social }]);
+      const f = await imageBroken.run(db, crawlId);
+      expect(f.map((x) => x.evidence.images)).toEqual([
+        [
+          { tag: "og:image", url: "/og.png", problem: "relative" },
+          { tag: "twitter:image", url: "ftp://x/a.png", problem: "invalid" },
+        ],
+      ]);
+    });
+
     it("throws on a v2 row whose social set predates imageRefs, never re-resolving the capped value", async () => {
       const legacy: Partial<SocialFacts> = { ...images(OK) };
       delete legacy.imageRefs;

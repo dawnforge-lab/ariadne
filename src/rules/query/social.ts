@@ -119,7 +119,12 @@ const HTTP_SCHEME = /^https?:/i;
  * fetched by the platform from the address as written, so it must be absolute
  * http(s): a value with no scheme at all (`/og.png`, `//cdn/og.png`) is
  * `relative`; one with another scheme, one `new URL` refuses, or one the
- * analyzer could not resolve (`ref` null) is `invalid`.
+ * analyzer could not resolve (`ref` null) is `invalid`. The analyzer gives a
+ * ref only to a value starting `http:` / `https:` (`shareImageRef`), and the
+ * stored value is the same trimmed value capped, so the first two tests have
+ * already taken every value without one: `ref === null` is reached only for
+ * an http(s) value `normalizeUrl` refused. Neither a relative nor an invalid
+ * image has a `resources` row.
  *
  * Otherwise its `resources` row is looked up by `ref`: the string the analyzer
  * resolved from the WHOLE value and wrote as that row's key

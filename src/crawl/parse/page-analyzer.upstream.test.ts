@@ -751,13 +751,14 @@ function analyzeHtmlWithCheerio(html: string, pageUrl: string): UpstreamShape {
       if (new Set(values).size > 1) conflicting.push(tag);
     }
     // The judged share images' `resources` keys, from each tag's first value
-    // WHOLE (never the capped one): `normalizeUrl` against the page, except a
-    // value that names no fetchable file (empty, `data:`, `javascript:`, a
-    // bare fragment), which has none. Written from `SocialFacts.imageRefs`'
-    // contract, not by calling the port's `shareImageRef`.
+    // WHOLE (never the capped one): `normalizeUrl` against the page, and only
+    // for a value that starts with `http:` or `https:` (any case); a relative
+    // value, another scheme or an empty one has none. Written from
+    // `SocialFacts.imageRefs`' contract, not by calling the port's
+    // `shareImageRef`.
     const imageRef = (tag: string): string | null => {
       const first = socialValues.get(tag)?.[0];
-      if (first === undefined || first === "" || /^(data:|javascript:|#)/i.test(first)) return null;
+      if (first === undefined || !/^https?:/i.test(first)) return null;
       return normalizeUrl(first, pageUrl);
     };
     social = {

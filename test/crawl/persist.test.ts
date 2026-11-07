@@ -1606,8 +1606,8 @@ describe("PageWriter", () => {
       const writer = new PageWriter(db, crawlId);
       const url = `${SITE}/shared`;
       const analysis = analyzePage(
-        `<html><head><meta property="og:image" content="/og/share.png">` +
-          `<meta name="twitter:image" content="/img/logo.png"></head>` +
+        `<html><head><meta property="og:image" content="${SITE}/og/share.png">` +
+          `<meta name="twitter:image" content="${SITE}/img/logo.png"></head>` +
           `<body><img src="/img/logo.png" alt="logo"></body></html>`,
         url,
       );
@@ -1632,6 +1632,24 @@ describe("PageWriter", () => {
       expect(edges).toEqual([{ url: `${SITE}/img/logo.png` }]);
       expect(writer.stats().resources).toBe(2);
       expect(writer.stats().pageResources).toBe(1);
+    });
+
+    it("writes no resources row for a relative or non-http(s) share image", async () => {
+      const crawlId = await newCrawl();
+      const writer = new PageWriter(db, crawlId);
+      const url = `${SITE}/shared-relative`;
+      const analysis = analyzePage(
+        `<html><head><meta property="og:image" content="/og.png">` +
+          `<meta name="twitter:image" content="ftp://x/a.png"></head>` +
+          `<body><p>x</p></body></html>`,
+        url,
+      );
+      expect(analysis.social?.imageRefs).toEqual({ og: null, x: null });
+      expect(analysis.socialImageRefs).toEqual([]);
+      await writer.addPage(item(url), makeFetch(url), analysis, { complete: true });
+      await writer.flush();
+      expect(await countOf(resources, crawlId)).toBe(0);
+      expect(writer.stats().resources).toBe(0);
     });
 
     /**

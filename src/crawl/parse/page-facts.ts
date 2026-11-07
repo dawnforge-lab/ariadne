@@ -37,8 +37,11 @@ export type SocialFacts = {
    * The address of each JUDGED share image (the first `og:image`, the first
    * `twitter:image`), resolved once, at analysis, from its WHOLE value: the
    * exact key of the `resources` row the crawler wrote for it. Null when the
-   * tag is absent or its first value names no fetchable file (empty, `data:`,
-   * `javascript:`, `#`, or one `normalizeUrl` refuses). `social.image-broken`
+   * tag is absent or its first value does not start with `http:` or `https:`
+   * (any case: a relative value, another scheme, empty), or is one
+   * `normalizeUrl` refuses; no `resources` row is written for it, and
+   * `social.image-broken` judges it `relative` / `invalid` from the stored
+   * value (PR #23 review). `social.image-broken`
    * looks rows up by this string and never re-resolves the capped `og.image` /
    * `x.image`, so a share image over `SOCIAL_URL_MAX` still finds its row and
    * the two sides cannot drift (final review I1).

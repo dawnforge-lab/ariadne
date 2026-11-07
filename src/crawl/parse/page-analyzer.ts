@@ -367,7 +367,7 @@
  *    are untouched: first `property=` value, raw, for their existing readers.
  *  - `socialImageRefs`: the two JUDGED share images only, the first `og:image`
  *    and the first `twitter:image`, each resolved once (`shareImageRef`:
- *    `normalizeUrl` of the whole value under `addResource`'s skip rules) and
+ *    `normalizeUrl` of the whole value, only when it is absolute http(s)) and
  *    stored as `social.imageRefs`; deduped, at most two (final review I1) —
  *    and deliberately NOT through `addResource`. A browser never loads a share
  *    image, so these become `resources` rows with no `page_resources` edge
@@ -762,8 +762,9 @@ export interface PageAnalysis {
    * `twitter:image`, each resolved by `shareImageRef`), deduped, so at most
    * `MAX_SOCIAL_IMAGE_REFS`. NOT resource refs: a browser
    * never loads them, so they become `resources` rows with no `page_resources`
-   * edge (deviation 3). A value that names no fetchable file is skipped here
-   * and stays, raw, in `social`.
+   * edge (deviation 3). A value that is not absolute http(s) (relative, another
+   * scheme, empty) or that `normalizeUrl` refuses is skipped here and stays,
+   * raw, in `social`.
    */
   socialImageRefs: string[];
   /** The first `<h2>`'s text, collected exactly as `h1Text` is; capped at `H2_TEXT_MAX`. */
@@ -847,17 +848,25 @@ const SKIPPED_LINK_PROTOCOLS = /^(javascript:|mailto:|tel:|#)/;
  * `normalizeUrl`, which returns null for any other scheme.
  */
 const SKIPPED_RESOURCE_PROTOCOLS = /^(data:|javascript:|#)/i;
+/** An absolute http(s) address, any case: the only share image a platform can fetch. */
+const ABSOLUTE_HTTP = /^https?:/i;
 /**
  * The `resources` key of one share image (Phase 26b): its trimmed, UNCAPPED
- * value resolved by `normalizeUrl` under `addResource`'s skip rules, or null
- * when it names no fetchable file. The one place a share image is resolved:
- * the analyzer stores the result in `SocialFacts.imageRefs` and queues it as
- * a `resources` row, and `social.image-broken` reads the stored string back
- * rather than resolving again (final review I1). Exported so a test can seed
- * exactly what the analyzer would have stored.
+ * value resolved by `normalizeUrl`, or null unless the value starts with
+ * `http:` or `https:` (any case). A platform fetches a share image from the
+ * address as written, so `social.image-broken` reports a value with no scheme
+ * as `relative` and any other scheme as `invalid` from the stored value and
+ * never reads a fetch of it; resolving and fetching it would spend politeness
+ * and the resource cap on a row no rule reads (PR #23 review). An http(s)
+ * value `normalizeUrl` refuses is null too, and the rule calls it `invalid`.
+ * The one place a share image is resolved: the analyzer stores the result in
+ * `SocialFacts.imageRefs` and queues it as a `resources` row, and
+ * `social.image-broken` reads the stored string back rather than resolving
+ * again (final review I1). Exported so a test can seed exactly what the
+ * analyzer would have stored.
  */
 export function shareImageRef(value: string, pageUrl: string): string | null {
-  if (value === "" || SKIPPED_RESOURCE_PROTOCOLS.test(value)) return null;
+  if (!ABSOLUTE_HTTP.test(value)) return null;
   return normalizeUrl(value, pageUrl);
 }
 /**

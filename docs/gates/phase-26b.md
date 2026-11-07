@@ -408,9 +408,6 @@ wording, §7); they are no longer here.
   (`addResource` never capped a URL); 26b's `imageRefs` take the same path. Proposal: one
   shared resource-URL length limit at `addResource` and `shareImageRef`, refused as a
   classified skip, with the rule reporting such an image.
-- A relative `og:image` is still fetched as a resource although no rule reads the fetch (the
-  rule's `relative` branch never reads the ref). It costs one request per crawl, not per page.
-  The fix is for `shareImageRef` to return null on a value with no scheme.
 
 **Owner calls (true per the spec, §4.3).** `links.no-anchor-text` ignores `aria-label`;
 `links.unsafe-target-blank` counts same-origin links; nothing judges an `http:` og:image on

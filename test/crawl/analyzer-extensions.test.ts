@@ -3,6 +3,7 @@ import {
   analyzePage,
   MAX_LD_JSON_NESTING,
   MAX_SOCIAL_IMAGE_REFS,
+  shareImageRef,
   SOFT_404_PHRASES,
 } from "../../src/crawl/parse/page-analyzer.js";
 import { simhash64, hammingDistance } from "../../src/crawl/parse/simhash.js";
@@ -1160,10 +1161,27 @@ describe("social: the Open Graph and X set", () => {
     expect(headPage(`<meta property="og:title" content="t">`).social?.outsideHead).toBe(false);
   });
 
-  it("resolves a relative og:image into socialImageRefs and keeps the raw value in social", () => {
-    const a = headPage(`<meta property="og:image" content="/img/share.png">`);
-    expect(a.social?.og.image).toBe("/img/share.png");
+  it("resolves an absolute http(s) og:image into socialImageRefs", () => {
+    const a = headPage(`<meta property="og:image" content=" HTTPS://Ex.com/img/share.png ">`);
+    expect(a.social?.og.image).toBe("HTTPS://Ex.com/img/share.png");
     expect(a.socialImageRefs).toEqual(["https://ex.com/img/share.png"]);
+  });
+
+  it("refs no relative or non-http(s) share image, keeping the raw value in social", () => {
+    // `social.image-broken` reports these as relative / invalid from the stored
+    // value and never reads a fetch, so no `resources` row is spent on them.
+    const a = headPage(
+      `<meta property="og:image" content="/og.png">` +
+        `<meta name="twitter:image" content="ftp://x/a.png">`,
+    );
+    expect(a.social?.og.image).toBe("/og.png");
+    expect(a.social?.x.image).toBe("ftp://x/a.png");
+    expect(a.social?.imageRefs).toEqual({ og: null, x: null });
+    expect(a.socialImageRefs).toEqual([]);
+    for (const value of ["//cdn.ex.com/a.png", "og.png", "mailto:a@b.c", "httpx://a/b.png"]) {
+      expect(shareImageRef(value, "https://ex.com/"), value).toBeNull();
+    }
+    expect(shareImageRef("Http://ex.com/a.png", "https://ex.com/")).toBe("http://ex.com/a.png");
   });
 
   it("refs only the two judged images: the FIRST og:image and the FIRST twitter:image", () => {
@@ -1171,11 +1189,11 @@ describe("social: the Open Graph and X set", () => {
     // the twitter:image `social.image-broken` judges, nor spend fetches on
     // alternates no rule reads.
     const a = headPage(
-      `<meta property="og:image" content="/1.png">` +
-        `<meta property="og:image" content="/2.png">` +
-        `<meta property="og:image" content="/3.png">` +
-        `<meta property="og:image" content="/4.png">` +
-        `<meta name="twitter:image" content="/x.png">`,
+      `<meta property="og:image" content="https://ex.com/1.png">` +
+        `<meta property="og:image" content="https://ex.com/2.png">` +
+        `<meta property="og:image" content="https://ex.com/3.png">` +
+        `<meta property="og:image" content="https://ex.com/4.png">` +
+        `<meta name="twitter:image" content="https://ex.com/x.png">`,
     );
     expect(a.socialImageRefs).toEqual(["https://ex.com/1.png", "https://ex.com/x.png"]);
     expect(a.social?.imageRefs).toEqual({ og: "https://ex.com/1.png", x: "https://ex.com/x.png" });
@@ -1185,7 +1203,7 @@ describe("social: the Open Graph and X set", () => {
 
   it("dedupes the two refs when both tags name one file", () => {
     const a = headPage(
-      `<meta property="og:image" content="/1.png">` +
+      `<meta property="og:image" content="https://ex.com/1.png">` +
         `<meta name="twitter:image" content="https://ex.com/1.png#frag">`,
     );
     expect(a.socialImageRefs).toEqual(["https://ex.com/1.png"]);
@@ -1194,7 +1212,7 @@ describe("social: the Open Graph and X set", () => {
 
   it("refs nothing for a tag whose FIRST value is empty, even if a later one is not", () => {
     const a = headPage(
-      `<meta property="og:image" content=""><meta property="og:image" content="/later.png">`,
+      `<meta property="og:image" content=""><meta property="og:image" content="https://ex.com/later.png">`,
     );
     expect(a.social?.og.image).toBe("");
     expect(a.social?.imageRefs).toEqual({ og: null, x: null });
