@@ -2493,6 +2493,10 @@ describe("crawl stamps (Phase 25)", () => {
   });
 });
 
+// Imported here, not at the top, for the reason given above `pageRequestHeaders`.
+const { randomBytes } = await import("node:crypto");
+const { INDEXED_URL_MAX } = await import("../../src/crawl/parse/url-utils.js");
+
 /**
  * Phase 26c (Task 8): the walk's memberships and staged alternates reach their
  * tables through the loop's sink, and `discovery_jsonb.sitemapFacts` is written
@@ -2666,6 +2670,39 @@ describe("sitemap memberships and staged hreflang (Phase 26c)", () => {
       overlongLocsSkipped: 0,
       oversizedDocs: [],
     });
+  });
+
+  // Ruling R10a, end to end: a pair that would overflow the membership key's
+  // btree entry (random hex, which Postgres cannot compress) once failed the
+  // insert and with it the crawl.
+  it("a long loc in a sitemap behind a long URL is counted, not a failed insert", async () => {
+    const sig = randomBytes(165).toString("hex");
+    const longPath = `/${randomBytes(1_150).toString("hex")}`;
+    const source = `${table}/signed.xml?sig=${sig}`;
+    tableBodies = {
+      "/robots.txt": `User-agent: *\nSitemap: ${source}\n`,
+      [`/signed.xml?sig=${sig}`]: locs([longPath, "/a"]),
+      "/": html("<p>home</p>"),
+      "/a": html("<p>a</p>"),
+    };
+    expect(`${table}${longPath}`.length + source.length).toBeGreaterThan(INDEXED_URL_MAX);
+    const summary = await crawl(tableConfig());
+    expect(summary.status).toBe("finished");
+    expect(await sitemapFactsOf(summary.crawlId)).toMatchObject({
+      memberships: 1,
+      overlongLocsSkipped: 1,
+    });
+    const members = await db
+      .select({ url: sitemapMemberships.url })
+      .from(sitemapMemberships)
+      .where(eq(sitemapMemberships.crawlId, summary.crawlId));
+    expect(members.map((r) => r.url)).toEqual([`${table}/a`]);
+    // The entry itself is listed: `sitemap_urls` keys on the URL alone.
+    const listed = await db
+      .select({ url: sitemapUrls.url })
+      .from(sitemapUrls)
+      .where(eq(sitemapUrls.crawlId, summary.crawlId));
+    expect(listed.map((r) => r.url).sort()).toEqual([`${table}${longPath}`, `${table}/a`].sort());
   });
 
   it("a 3,000-character <loc> is counted, never inserted, and the crawl finishes", async () => {

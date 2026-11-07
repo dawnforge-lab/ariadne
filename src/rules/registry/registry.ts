@@ -788,8 +788,11 @@ const KINDS = ["page", "query", "metric"] as const satisfies readonly AnyRule["k
 //     `sitemap_memberships` row (one per URL and document) and each alternate
 //     a `sitemap_hreflang` row (href resolved against the document), written
 //     through a sink the stream flushes after every chunk, capped at 800,000 and
-//     1,000,000 per crawl. A `<loc>` or alternate target over `INDEXED_URL_MAX`
-//     is counted in `sitemapFacts.overlongLocsSkipped` and stored nowhere.
+//     1,000,000 rows and 256 MB of stored strings each per crawl. A `<loc>` or
+//     alternate target over `INDEXED_URL_MAX`, or a membership whose URL and
+//     document URL together are over it (one primary-key entry), is counted in
+//     `sitemapFacts.overlongLocsSkipped` and stored nowhere; an `hreflang` code
+//     over 35 characters is a malformed entry (ruling R10).
 //     `discovery_jsonb.sitemapFacts` is written on every crawl. The marker
 //     `extraction.not-recorded` also fires when it is absent, with the new
 //     evidence key `sitemapFactsRecorded` (ruling R1). 184 rules.

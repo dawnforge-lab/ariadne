@@ -51,9 +51,11 @@
  *  - sitemap index recursion: 3 levels below the first document.
  *  - 300 documents per crawl, and a cap on the entries kept in memory (the
  *    memory contract is RAM O(concurrency), and 300 × 50k entries is not).
- *  - memberships and staged alternates: MAX_SITEMAP_MEMBERSHIPS and
- *    MAX_SITEMAP_HREFLANG_ROWS per crawl; a URL over the index limit
- *    (`INDEXED_URL_MAX`) is never handed over, only counted.
+ *  - memberships and staged alternates: a row cap and a byte budget per crawl
+ *    for each (MAX_SITEMAP_MEMBERSHIPS, MAX_SITEMAP_HREFLANG_ROWS,
+ *    MAX_SITEMAP_*_BYTES); a URL over the index limit (`INDEXED_URL_MAX`), or a
+ *    membership whose URL and document URL together are, is never handed
+ *    over, only counted; an `hreflang` code over 35 characters is malformed.
  * Every cap that bites is counted in `truncation` or `sitemapFacts`; none of
  * them is silent.
  *
@@ -66,7 +68,13 @@ import { promisify } from "node:util";
 import robotsParserImport from "robots-parser";
 import { request, type Dispatcher } from "undici";
 import { isUrlAllowed } from "./url-policy.js";
-import { fitsIndex, isSameOrigin, normalizeUrl, onRulesOrigin } from "./parse/url-utils.js";
+import {
+  fitsIndex,
+  INDEXED_URL_MAX,
+  isSameOrigin,
+  normalizeUrl,
+  onRulesOrigin,
+} from "./parse/url-utils.js";
 import { hreflangTarget } from "./parse/page-analyzer.js";
 import {
   parseSitemapStream,
@@ -123,6 +131,32 @@ const MAX_SITEMAP_DOCS = 300;
  */
 export const MAX_SITEMAP_MEMBERSHIPS = 800_000;
 export const MAX_SITEMAP_HREFLANG_ROWS = 1_000_000;
+
+/**
+ * Per-crawl byte budgets on the same rows (ruling R10c): the row caps alone
+ * would let 800,000 memberships of 7,500 characters each stage gigabytes. A
+ * row's bytes are the summed lengths of the strings it stores — `url`,
+ * `url_normalised` and `sitemap_source` for a membership; those and
+ * `hreflang_code` and `target_url` for an alternate. Reaching one sets the same
+ * `*Limited` flag as the row cap.
+ */
+export const MAX_SITEMAP_MEMBERSHIP_BYTES = 256 * 1024 * 1024;
+export const MAX_SITEMAP_HREFLANG_BYTES = 256 * 1024 * 1024;
+
+/**
+ * The longest `hreflang` code an alternate may carry (ruling R10b). BCP 47's
+ * longest well-formed tags in practice run to about 35 characters; a longer
+ * value is not a language code, and an uncapped one is a storage lever.
+ */
+export const MAX_HREFLANG_CODE_CHARS = 35;
+
+/** The four staging limits, as `discover` applies them. */
+export interface SitemapStagingCaps {
+  memberships: number;
+  hreflangRows: number;
+  membershipBytes: number;
+  hreflangBytes: number;
+}
 
 /** `sitemapFacts.oversizedDocs` names at most this many documents. */
 const MAX_OVERSIZED_DOCS_NAMED = 50;
@@ -280,7 +314,8 @@ export interface DiscoveryTruncation {
   entryLimited: boolean;
   /**
    * `<loc>` values that were empty, unparseable, or refused by the policy, and
-   * (Phase 26c) alternate `href`s that do not resolve against the document.
+   * (Phase 26c) alternates whose `href` does not resolve against the document
+   * or whose `hreflang` code is over MAX_HREFLANG_CODE_CHARS.
    */
   malformedEntriesSkipped: number;
   /** One line per document that was pointed at and could not be read. */
@@ -298,15 +333,22 @@ export type DiscoverySitemapFacts = {
    * URL and document) stores it once, so the table can hold fewer.
    */
   memberships: number;
-  /** MAX_SITEMAP_MEMBERSHIPS was reached and later memberships were dropped. */
+  /**
+   * MAX_SITEMAP_MEMBERSHIPS or MAX_SITEMAP_MEMBERSHIP_BYTES was reached and
+   * every later membership was dropped.
+   */
   membershipLimited: boolean;
   /** Alternates handed to the sink (`sitemap_hreflang` rows). */
   hreflangRows: number;
-  /** MAX_SITEMAP_HREFLANG_ROWS was reached and later alternates were dropped. */
+  /**
+   * MAX_SITEMAP_HREFLANG_ROWS or MAX_SITEMAP_HREFLANG_BYTES was reached and
+   * every later alternate was dropped.
+   */
   hreflangLimited: boolean;
   /**
    * `<loc>`s, and alternate targets, over `INDEXED_URL_MAX` in the spelling a
-   * row would store: counted here, handed to nobody.
+   * row would store, and memberships whose URL and document URL together are
+   * over it (they share one primary-key entry): counted here, handed to nobody.
    */
   overlongLocsSkipped: number;
   /**
@@ -369,6 +411,12 @@ export interface DiscoverOpts extends DiscoveryOpts {
    * 50 MB fixture per case.
    */
   maxSitemapBytes?: number;
+  /**
+   * TEST ONLY overrides of the staging caps (MAX_SITEMAP_MEMBERSHIPS,
+   * MAX_SITEMAP_HREFLANG_ROWS and the two byte budgets), so a fixture of a few
+   * rows can reach them. Never wire this to config, an API field or an env var.
+   */
+  stagingCaps?: Partial<SitemapStagingCaps>;
 }
 
 export interface DiscoveryOpts {
@@ -1095,6 +1143,18 @@ export async function discover(
   if (!Number.isInteger(maxSitemapBytes) || maxSitemapBytes <= 0) {
     throw new RangeError(`discover: maxSitemapBytes must be a positive integer, got ${maxSitemapBytes}`);
   }
+  const caps: SitemapStagingCaps = {
+    memberships: MAX_SITEMAP_MEMBERSHIPS,
+    hreflangRows: MAX_SITEMAP_HREFLANG_ROWS,
+    membershipBytes: MAX_SITEMAP_MEMBERSHIP_BYTES,
+    hreflangBytes: MAX_SITEMAP_HREFLANG_BYTES,
+    ...opts.stagingCaps,
+  };
+  for (const [name, value] of Object.entries(caps)) {
+    if (!Number.isInteger(value) || value < 0) {
+      throw new RangeError(`discover: stagingCaps.${name} must be an integer ≥ 0, got ${value}`);
+    }
+  }
   const allowPrivate = opts.allowPrivate === true;
   const maxEntries = opts.maxEntries ?? MAX_SITEMAP_ENTRIES;
   const unreachableMode = opts.onUnreachableRobots ?? "disallow";
@@ -1144,6 +1204,9 @@ export async function discover(
 
   const seen = new Set<string>();
   const entries = new Map<string, SitemapEntry>();
+  // Bytes staged so far against the R10c budgets.
+  let membershipBytes = 0;
+  let hreflangBytes = 0;
 
   /**
    * One `<url>` of a urlset, read from `source` (the document's URL after
@@ -1189,11 +1252,24 @@ export async function discover(
     }
     doc.urlsKept++;
 
-    if (sitemapFacts.memberships >= MAX_SITEMAP_MEMBERSHIPS) {
-      sitemapFacts.membershipLimited = true;
-    } else {
-      sink.membership(resolved, source);
-      sitemapFacts.memberships++;
+    // The membership's primary key holds the URL AND the document's URL in one
+    // btree entry, so the pair, not each, must fit (ruling R10a). A long loc
+    // in a sitemap behind a long (say, presigned) URL is skipped and counted;
+    // the entry itself is unaffected — `sitemap_urls` keys on the URL alone.
+    if (resolved.length + source.length > INDEXED_URL_MAX) {
+      sitemapFacts.overlongLocsSkipped++;
+    } else if (!sitemapFacts.membershipLimited) {
+      const rowBytes = resolved.length + normalised.length + source.length;
+      if (
+        sitemapFacts.memberships >= caps.memberships ||
+        membershipBytes + rowBytes > caps.membershipBytes
+      ) {
+        sitemapFacts.membershipLimited = true;
+      } else {
+        sink.membership(resolved, source);
+        sitemapFacts.memberships++;
+        membershipBytes += rowBytes;
+      }
     }
 
     // The entry list is unchanged: first source wins, and a full list stops the
@@ -1208,6 +1284,11 @@ export async function discover(
     }
 
     for (const alternate of entry.alternates) {
+      // Not a language code, and an uncapped one is a storage lever (R10b).
+      if (alternate.hreflang.length > MAX_HREFLANG_CODE_CHARS) {
+        truncation.malformedEntriesSkipped++;
+        continue;
+      }
       // Resolved as the page analyzer resolves an HTML alternate, against the
       // document that states it, so the length checked is the length stored.
       const target = hreflangTarget(alternate.href, source);
@@ -1219,12 +1300,20 @@ export async function discover(
         sitemapFacts.overlongLocsSkipped++;
         continue;
       }
-      if (sitemapFacts.hreflangRows >= MAX_SITEMAP_HREFLANG_ROWS) {
+      if (sitemapFacts.hreflangLimited) continue;
+      const rowBytes =
+        resolved.length + normalised.length + alternate.hreflang.length + target.length +
+        source.length;
+      if (
+        sitemapFacts.hreflangRows >= caps.hreflangRows ||
+        hreflangBytes + rowBytes > caps.hreflangBytes
+      ) {
         sitemapFacts.hreflangLimited = true;
-        break;
+        continue;
       }
       sink.alternate(resolved, { hreflang: alternate.hreflang, href: target }, source);
       sitemapFacts.hreflangRows++;
+      hreflangBytes += rowBytes;
     }
   };
 

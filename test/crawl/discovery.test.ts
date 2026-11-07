@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createServer, type Server, type ServerResponse } from "node:http";
 import { gzipSync } from "node:zlib";
+import { randomBytes } from "node:crypto";
 import {
   discover,
   ROBOTS_BLOCKED_REASON_PREFIX,
@@ -65,6 +66,16 @@ const NO_SITEMAP_FACTS = {
   overlongLocsSkipped: 0,
   oversizedDocs: [],
 };
+
+/**
+ * Ruling R10a's fixture: a sitemap URL with a 330-character signature and a
+ * 2,300-character loc, both random hex (nothing for Postgres to compress), so
+ * each fits `INDEXED_URL_MAX` alone and the pair does not.
+ */
+const LONG_SIG = randomBytes(165).toString("hex");
+const LONG_PATH = randomBytes(1_150).toString("hex");
+const LONG_PAIR_LOC = (): string => `${bare}/${LONG_PATH}`;
+const LONG_SOURCE = (): string => `${bare}/long-source.xml?sig=${LONG_SIG}`;
 
 /** The 12 MB fixture: over the old 10 MB cap, well under the protocol's 50 MB. */
 const BIG_ENTRIES = 11_000;
@@ -241,6 +252,22 @@ beforeAll(async () => {
           '<xhtml:link rel="alternate" hreflang="de" href="/de/a"/>' +
           `<xhtml:link rel="alternate" hreflang="en" href="${bare}/en/a"/>` +
           "</url></urlset>",
+      );
+    } else if (path.startsWith("/long-source.xml?")) {
+      // A document behind a long (presigned-style) URL listing one long loc
+      // and one short one: each fits the index alone, the long pair does not.
+      xml(res, urlset([{ loc: LONG_PAIR_LOC() }, { loc: `${bare}/fine-member` }]));
+    } else if (path === "/codes.xml") {
+      xml(
+        res,
+        '<?xml version="1.0" encoding="UTF-8"?>' +
+          '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9" ' +
+          'xmlns:xhtml="http://www.w3.org/1999/xhtml">' +
+          `<url><loc>${bare}/coded</loc>` +
+          `<xhtml:link rel="alternate" hreflang="${"x".repeat(36)}" href="/long-code"/>` +
+          `<xhtml:link rel="alternate" hreflang="${"y".repeat(35)}" href="/max-code"/>` +
+          '<xhtml:link rel="alternate" hreflang="de" href="/de/coded"/></url>' +
+          "</urlset>",
       );
     } else if (path === "/long.xml") {
       const longLoc = `${bare}/${"l".repeat(3_000)}`;
@@ -934,6 +961,134 @@ describe("discover: memberships, alternates and sitemapFacts", () => {
   it("writes sitemapFacts with zeros when robots.txt is unreachable", async () => {
     const d = await discover(flaky, { ...OPTS, extraSitemaps: [`${flaky}/s.xml`] });
     expect(d.sitemapFacts).toEqual(NO_SITEMAP_FACTS);
+  });
+
+  // Ruling R10a: the membership key holds the URL and the document URL in one
+  // btree entry, so a pair over INDEXED_URL_MAX is skipped and counted.
+  it("skips a membership whose URL and document URL together are over the index limit", async () => {
+    const sink = recordingSink();
+    const loc = LONG_PAIR_LOC();
+    const source = LONG_SOURCE();
+    expect(loc.length).toBeLessThanOrEqual(INDEXED_URL_MAX);
+    expect(source.length).toBeLessThanOrEqual(INDEXED_URL_MAX);
+    expect(loc.length + source.length).toBeGreaterThan(INDEXED_URL_MAX);
+
+    const d = await discover(bare, { ...OPTS, sink, extraSitemaps: [source] });
+    expect(sink.memberships).toEqual([{ url: `${bare}/fine-member`, source }]);
+    expect(d.sitemapFacts.overlongLocsSkipped).toBe(1);
+    expect(d.sitemapFacts.memberships).toBe(1);
+    // The entry is unaffected: `sitemap_urls` keys on the URL alone.
+    expect(d.sitemapEntries.map((e) => e.url)).toEqual([loc, `${bare}/fine-member`]);
+  });
+
+  // Ruling R10b.
+  it("refuses an alternate whose hreflang code is over 35 characters, as malformed", async () => {
+    const sink = recordingSink();
+    const d = await discover(bare, { ...OPTS, sink, extraSitemaps: [`${bare}/codes.xml`] });
+    expect(sink.alternates.map((a) => a.hreflang)).toEqual(["y".repeat(35), "de"]);
+    expect(d.truncation.malformedEntriesSkipped).toBe(1);
+    expect(d.sitemapFacts.hreflangRows).toBe(2);
+  });
+
+  // Ruling R10c, row caps and byte budgets, through the test-only overrides.
+  it("stops memberships at the row cap and says so, the walk going on", async () => {
+    const sink = recordingSink();
+    const d = await discover(bare, {
+      ...OPTS,
+      sink,
+      stagingCaps: { memberships: 1 },
+      extraSitemaps: [`${bare}/dupes.xml`, `${bare}/dupes-2.xml`],
+    });
+    expect(sink.memberships).toEqual([{ url: `${bare}/same`, source: `${bare}/dupes.xml` }]);
+    expect(d.sitemapFacts).toMatchObject({ memberships: 1, membershipLimited: true });
+    expect(d.truncation.docsFetched).toBe(2);
+  });
+
+  it("stops memberships at the byte budget and says so", async () => {
+    const sink = recordingSink();
+    const url = `${bare}/same`;
+    // url + url_normalised + sitemap_source of the first row, exactly.
+    const firstRow = url.length * 2 + `${bare}/dupes.xml`.length;
+    const d = await discover(bare, {
+      ...OPTS,
+      sink,
+      stagingCaps: { membershipBytes: firstRow },
+      extraSitemaps: [`${bare}/dupes.xml`, `${bare}/dupes-2.xml`],
+    });
+    expect(sink.memberships).toHaveLength(1);
+    expect(d.sitemapFacts).toMatchObject({ memberships: 1, membershipLimited: true });
+  });
+
+  it("stops staged alternates at the row cap and says so", async () => {
+    const sink = recordingSink();
+    const d = await discover(bare, {
+      ...OPTS,
+      sink,
+      stagingCaps: { hreflangRows: 1 },
+      extraSitemaps: [`${bare}/alts.xml`],
+    });
+    expect(sink.alternates.map((a) => a.hreflang)).toEqual(["de"]);
+    expect(d.sitemapFacts).toMatchObject({ hreflangRows: 1, hreflangLimited: true });
+    // The membership table is a separate budget.
+    expect(d.sitemapFacts.membershipLimited).toBe(false);
+  });
+
+  it("stops staged alternates at the byte budget and says so", async () => {
+    const sink = recordingSink();
+    const url = `${bare}/en/a`;
+    // url + url_normalised + hreflang_code + target_url + sitemap_source.
+    const firstRow = url.length * 2 + "de".length + `${bare}/de/a`.length + `${bare}/alts.xml`.length;
+    const d = await discover(bare, {
+      ...OPTS,
+      sink,
+      stagingCaps: { hreflangBytes: firstRow },
+      extraSitemaps: [`${bare}/alts.xml`],
+    });
+    expect(sink.alternates.map((a) => a.hreflang)).toEqual(["de"]);
+    expect(d.sitemapFacts).toMatchObject({ hreflangRows: 1, hreflangLimited: true });
+  });
+
+  it("refuses a staging cap that is not an integer ≥ 0", async () => {
+    await expect(
+      discover(bare, { ...OPTS, stagingCaps: { hreflangBytes: -1 } }),
+    ).rejects.toThrow(RangeError);
+  });
+
+  // The pausable deadline: time spent in our own flush is not the site's.
+  it("does not time a document out for the time its sink spends flushing", async () => {
+    let flushes = 0;
+    const slow: SitemapSink = {
+      membership() {},
+      alternate() {},
+      async flush() {
+        flushes++;
+        await new Promise((r) => setTimeout(r, 150));
+      },
+    };
+    const d = await discover(bare, {
+      ...OPTS,
+      sink: slow,
+      timeoutMs: 100,
+      extraSitemaps: [`${bare}/cut.xml`],
+    });
+    // Several flushes, each longer than the whole deadline.
+    expect(flushes).toBeGreaterThanOrEqual(2);
+    expect(d.truncation.failures).toEqual([]);
+    expect(d.sitemapEntries).toHaveLength(2_000);
+  });
+
+  // Ruling R10d: an insert that fails is the engine's failure, loudly.
+  it("fails the walk loudly when the sink cannot flush", async () => {
+    const broken: SitemapSink = {
+      membership() {},
+      alternate() {},
+      async flush() {
+        throw new Error("sink insert refused");
+      },
+    };
+    await expect(
+      discover(bare, { ...OPTS, sink: broken, extraSitemaps: [`${bare}/alts.xml`] }),
+    ).rejects.toThrow("sink insert refused");
   });
 
   it("counts every oversized document and names the first 50", async () => {
