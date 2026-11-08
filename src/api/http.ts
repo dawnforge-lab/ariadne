@@ -66,6 +66,10 @@
  *                                      the crawl's judgement applied, `?includeZero=true`
  *                                      adds the rules that found nothing. 409 on a
  *                                      crawl no rules run has judged
+ *   GET  /crawls/:id/overview/crawl    the Crawl Overview: sectioned counts that
+ *                                      describe the crawl, with what it could not
+ *                                      measure named in `notMeasured`; answered on
+ *                                      an unjudged crawl too
  *   GET  /crawls/:id/metrics           the measured numbers, with their copy
  *   GET  /crawls/:id/metrics/:metricId one metric as a table: {metricId, title,
  *                                      explanation, howToFix, summary, columns,
@@ -454,6 +458,15 @@ function buildRoutes(): Route[] {
         body: await service.issuesOverview(param(ctx, "id"), {
           ...optionalBoolean(ctx.query, "includeZero"),
         }),
+      }),
+    },
+    {
+      method: "GET",
+      pattern: ["crawls", id, "overview", "crawl"],
+      query: [],
+      handler: async (service, ctx) => ({
+        status: 200,
+        body: await service.crawlOverview(param(ctx, "id")),
       }),
     },
     // ONE METRIC AS A TABLE. `/metrics` is the raw rows an agent quotes;

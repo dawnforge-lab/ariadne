@@ -949,6 +949,13 @@ const KINDS = ["page", "query", "metric"] as const satisfies readonly AnyRule["k
 //     judgement applied, from one `GROUP BY rule_id` and the stored
 //     `site.health` Pages Judged. A new read surface; no finding moves.
 //     188 rules.
+//  8. (T9) The Crawl Overview: `crawl_overview` / `GET /crawls/:id/overview/crawl`
+//     and the `crawl_overview` CSV view serve sectioned counts that describe
+//     the crawl (urls from `crawl_status`'s fields; fetch class, status class,
+//     content, indexability, click depth, discovery, response time, render, and
+//     the type x priority issues grid after overrides), each one bounded
+//     aggregate. What a crawl could not measure is named in `notMeasured`,
+//     never zero. A new read surface; no finding moves. 188 rules.
 export const RULESET_VERSION = "0.23.0";
 
 /**

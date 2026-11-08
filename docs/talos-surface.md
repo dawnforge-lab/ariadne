@@ -827,6 +827,7 @@ webhooks**: polling `crawl_status` is the contract until Talos asks otherwise.
 | `robots_get` | `GET /crawls/:id/robots` | — |
 | `issues_list` | `GET /crawls/:id/issues` | `severity`, `checkId`, `ruleId`, `category`, `pageType`, `limit`, `cursor` |
 | `issues_overview` | `GET /crawls/:id/overview/issues` | `includeZero` (one row per rule with the crawl's judgement applied; also `view=issues_overview` on `export_crawl`) |
+| `crawl_overview` | `GET /crawls/:id/overview/crawl` | — (sectioned counts that describe the crawl; what it could not measure is named in `notMeasured`, never zero; also `view=crawl_overview` on `export_crawl`) |
 | `issue_urls` | `GET /crawls/:id/issues/:ruleId/urls` | `ruleId` (required), `limit`, `cursor` |
 | `issue_inlinks` | `GET /crawls/:id/issues/:ruleId/inlinks` | `ruleId` (required — **only** `links.broken-internal`, `links.to-server-error` or `robots.blocks-internal-urls`), `limit`, `cursor` |
 | `metrics_get` | `GET /crawls/:id/metrics` | `metricId`, `scope`, `scopeValue`, `limit`, `cursor` |
@@ -838,7 +839,7 @@ webhooks**: polling `crawl_status` is the contract until Talos asks otherwise.
 | `export_crawl` | `GET /crawls/:id/export` | `format` (`jsonl.gz` \| `csv`), `dataset` (jsonl.gz only), `view` + `ruleId` \| `metricId` (csv only) |
 
 Pinned: the tool list and every schema — `test/api/mcp.test.ts:668`
-("advertises exactly the twenty-one tools of the agent surface"),
+("advertises exactly the twenty-two tools of the agent surface"),
 `test/api/mcp.test.ts:695` ("closes every input schema and describes every
 field"), `test/api/mcp.test.ts:727` ("names every member of the closed
 vocabulary each field enumerates"), `test/api/mcp.test.ts:756` ("advertises
@@ -2771,7 +2772,7 @@ Semantics a consumer must repeat to its own users:
 
 Pinned: `test/api/csv.test.ts` (the writer, the guard, the
 flattening, the SQL keyset pins, and the eight-view vocabulary — including
-`test/api/csv.test.ts:243` "heads the issue_urls view with the rule's own
+`test/api/csv.test.ts:248` "heads the issue_urls view with the rule's own
 columns, in the rule's own order");
 `test/api/query.test.ts:2903` "writes each view's header, always, and the row a
 caller came for" (including the three recheck columns, empty on a page nobody

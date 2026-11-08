@@ -80,17 +80,24 @@ export const CSV_VIEWS = [
   "resources",
   "metric_table",
   "issues_overview",
+  "crawl_overview",
 ] as const;
 export type CsvViewName = (typeof CSV_VIEWS)[number];
 
+/** The views that are not a keyset read of a table (see `CSV_QUERY_VIEWS`). */
+type NonKeysetView = "metric_table" | "issues_overview" | "crawl_overview";
+
 /**
- * THE EIGHT VIEWS THAT ARE A KEYSET READ OF A TABLE — every view but two.
+ * THE EIGHT VIEWS THAT ARE A KEYSET READ OF A TABLE — every view but three.
  *
- * `metric_table` and `issues_overview` are the exceptions and they are a
- * different KIND of view. `issues_overview` is one `GROUP BY rule_id` aggregate
- * (one row per rule, at most 174, ordered by type, priority, count), built by
- * `buildIssuesOverview` — the same function the JSON tool calls, so the two
- * cannot disagree — and an aggregate has no keyset. `metric_table`'s rows
+ * `metric_table`, `issues_overview` and `crawl_overview` are the exceptions and
+ * they are a different KIND of view. `issues_overview` is one `GROUP BY rule_id`
+ * aggregate (one row per rule, at most 174, ordered by type, priority, count),
+ * built by `buildIssuesOverview` — the same function the JSON tool calls, so the
+ * two cannot disagree — and an aggregate has no keyset. `crawl_overview` is the
+ * same kind: a fixed set of sectioned aggregates (`buildCrawlOverview`, shared
+ * with the `crawl_overview` tool), bounded by its sections and their
+ * vocabularies, never by the site. `metric_table`'s rows
  * are not rows of a table at all. One metric's stored rows become a table
  * through the rule's own `table` declaration (`shapeMetricTable`), which turns
  * one stored row into three (a measure each), or a stored list into twenty rows,
@@ -106,8 +113,8 @@ export type CsvViewName = (typeof CSV_VIEWS)[number];
  * `ApiService.metricTable`, which is the one place those rows are read.
  */
 export const CSV_QUERY_VIEWS = CSV_VIEWS.filter(
-  (view): view is Exclude<CsvViewName, "metric_table" | "issues_overview"> =>
-    view !== "metric_table" && view !== "issues_overview",
+  (view): view is Exclude<CsvViewName, NonKeysetView> =>
+    view !== "metric_table" && view !== "issues_overview" && view !== "crawl_overview",
 );
 export type CsvQueryViewName = (typeof CSV_QUERY_VIEWS)[number];
 
@@ -1111,4 +1118,30 @@ export function issuesOverviewCells(
     row.ruleId,
     row.checkIds.join(LIST_SEPARATOR),
   ];
+}
+
+/** The Crawl Overview's header. `Section` is the section's (or entry's) id. */
+export const CRAWL_OVERVIEW_HEADER = ["Section", "Label", "Value", "Percent"];
+
+/**
+ * The Crawl Overview as CSV records, in `CRAWL_OVERVIEW_HEADER` order: one per
+ * entry, in the JSON's order, then one per `notMeasured` item with
+ * `Not measured: <reason>` as its label and EMPTY Value and Percent cells
+ * (this file's one meaning for "no value"), never a zero.
+ */
+export function crawlOverviewRecords(overview: {
+  sections: readonly {
+    id: string;
+    entries: readonly { label: string; value: number; percent: number | null }[];
+  }[];
+  notMeasured: readonly { id: string; reason: string }[];
+}): string[][] {
+  const out: string[][] = [];
+  for (const section of overview.sections) {
+    for (const e of section.entries) {
+      out.push([section.id, e.label, String(e.value), orEmpty(e.percent)]);
+    }
+  }
+  for (const n of overview.notMeasured) out.push([n.id, `Not measured: ${n.reason}`, "", ""]);
+  return out;
 }

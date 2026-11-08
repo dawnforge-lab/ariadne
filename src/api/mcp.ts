@@ -111,6 +111,7 @@ export const TOOL_NAMES = [
   "robots_get",
   "issues_list",
   "issues_overview",
+  "crawl_overview",
   "issue_urls",
   "issue_inlinks",
   "metrics_get",
@@ -876,6 +877,56 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
   );
 
   server.registerTool(
+    named("crawl_overview"),
+    {
+      title: "Crawl Overview: counts that describe the crawl",
+      description:
+        "THE CRAWL OVERVIEW: counts that describe the crawl, not the site's quality: " +
+        "{crawlId, sections, notMeasured, judgementStale}. Each section is " +
+        "{id, entries: [{label, value, percent}]}; percent is value over the section's " +
+        "total to one decimal place, null when that total is 0. Sections, in order:\n" +
+        "  urls: Encountered, Fetched, Not fetched (frontier), Blocked by robots.txt " +
+        "(stored), Blocked by robots.txt (dropped), each taken from crawl_status's own " +
+        "fields. Encountered is every frontier row (pending + leased + done + failed + " +
+        "renderPending) plus robotsBlocked.recorded, and the percents are against it. " +
+        "The dropped entry counts DISCOVERIES turned away, is not a subset of " +
+        "Encountered, and its percent is null. The entries do not sum.\n" +
+        "  fetch-class, status-class (2xx, 3xx, 4xx, 5xx, No response; Other status " +
+        "only when a code outside 200-599 was stored), indexability (Indexable, then " +
+        "each non-indexable reason), click-depth (0-9, 10+, Unreachable), discovery " +
+        "(per discovered_via, then In a sitemap / Not in a sitemap), response-time: " +
+        "each a partition of the crawl's pages, percent against the page count. " +
+        "Indexability's Canonicalised reason uses the SQL rules' canonical predicate, " +
+        "which counts a page with a relative, non-ASCII or dot-segment canonical as " +
+        "Indexable. response-time buckets every page: Under 250 ms, 250–500 ms, " +
+        "500–1000 ms, 1000–2000 ms, 2000+ ms (each [lo, hi)), and No response time; " +
+        "then Over SLOW_MS (<n> ms), pages strictly over the crawl's SLOW_MS across " +
+        "all pages, so it can exceed performance.slow-response's findings, which " +
+        "count only judged pages.\n" +
+        "  content: HTML: <page_type> (fetch class ok), Non-HTML: PDF|Image|CSS|" +
+        "JavaScript|Other (fetch class non_html), Resource: Image|CSS|JavaScript. " +
+        "Each percent is against its own group's subtotal. too_large and " +
+        "unsupported_encoding pages are in neither page group.\n" +
+        "  render: Pages rendered (live), then Render coverage (<ran|none|failed>) " +
+        "from the stored render.coverage metric.\n" +
+        "  issues-grid: finding rows by type/priority (issue/high … opportunity/low), " +
+        "the crawl's overrides applied and the disabled rules' findings left out.\n\n" +
+        "NOT MEASURED IS NAMED, NEVER ZERO. A section the crawl could not measure is " +
+        "absent from sections and listed in notMeasured as {id, reason}: click-depth " +
+        "and issues-grid on a crawl no rules run has judged, render on a crawl that " +
+        "never rendered. notMeasured MAY ALSO NAME ONE ENTRY of a measured section: " +
+        "render-coverage (a rendered crawl not yet judged) and robots-blocked-dropped " +
+        "(a crawl that predates the counter). An unjudged crawl is answered, not " +
+        "refused. The same answer is a spreadsheet through export_crawl (format=csv, " +
+        "view=crawl_overview).",
+      inputSchema: z.strictObject({
+        crawlId: crawlIdField(),
+      }),
+    },
+    async ({ crawlId }) => run("crawl_overview", () => service.crawlOverview(crawlId)),
+  );
+
+  server.registerTool(
     named("issue_urls"),
     {
       title: "One rule's findings, as a table",
@@ -1535,7 +1586,8 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         `  format=csv writes a spreadsheet of one VIEW: ${CSV_VIEWS.join(", ")} ` +
         "(default issues). issue_urls is one rule's findings and needs a ruleId; " +
         "metric_table is one metric's table and needs a metricId; issues_overview is " +
-        "the issues_overview tool's one-row-per-rule table; the other six " +
+        "the issues_overview tool's one-row-per-rule table; crawl_overview is the " +
+        "crawl_overview tool's sections as Section,Label,Value,Percent rows; the other six " +
         "refuse both. Answers {format, view, path, rows, bytes}.\n" +
         "  metric_table is the spreadsheet of the metric_table tool's table: the " +
         "header is the column LABELS, one row per table row, and the metric's " +

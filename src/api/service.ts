@@ -149,7 +149,9 @@ import { isHostAllowed, type ServiceConfig } from "./config.js";
 import {
   CSV_VIEWS,
   CSV_VIEW_DEFS,
+  CRAWL_OVERVIEW_HEADER,
   ISSUES_OVERVIEW_HEADER,
+  crawlOverviewRecords,
   issuesOverviewCells,
   metricTableCells,
   metricTableHeader,
@@ -161,7 +163,12 @@ import {
   type ExportFormat,
 } from "./csv.js";
 import { ServiceError, clip } from "./errors.js";
-import { buildIssuesOverview, type IssuesOverview } from "./overview.js";
+import {
+  buildCrawlOverview,
+  buildIssuesOverview,
+  type CrawlOverview,
+  type IssuesOverview,
+} from "./overview.js";
 import {
   copyRenderer,
   isPlainObject,
@@ -3972,6 +3979,21 @@ export class ApiService {
   }
 
   /**
+   * The Crawl Overview: sectioned counts that describe the crawl
+   * (`buildCrawlOverview`). `crawl_overview` and the `crawl_overview` CSV view
+   * are both this one answer. The `urls` section is `getCrawl`'s own fields, so
+   * it reconciles with `crawl_status` by construction; an unknown crawl is the
+   * `NOT_FOUND` `getCrawl` answers.
+   */
+  async crawlOverview(crawlId: string): Promise<CrawlOverview> {
+    const detail = await this.getCrawl(crawlId);
+    const view = await this.judgementView(crawlId);
+    return await buildCrawlOverview(this.db, crawlId, detail, view, (id) =>
+      this.ruleFor(id, crawlId, "issues"),
+    );
+  }
+
+  /**
    * One rule's findings, URL by URL — the action-plan tab feed.
    *
    * Ordered by URL, with `dedupe_key` breaking ties. That pair is a TOTAL order
@@ -4980,6 +5002,7 @@ export class ApiService {
       return await this.metricTableStream(crawlId, metricId);
     }
     if (view === "issues_overview") return await this.issuesOverviewStream(crawlId);
+    if (view === "crawl_overview") return await this.crawlOverviewStream(crawlId);
     // The two findings views apply the crawl's judgement, read once before the
     // header (a refusal after it is a torn socket): a disabled rule's findings
     // are left out in SQL, `issue_urls` of a disabled rule is refused outright
@@ -5065,6 +5088,26 @@ export class ApiService {
         for (const row of overview.rows) {
           yield csvRecord(issuesOverviewCells(row, copy(row.ruleId)));
         }
+      },
+    };
+  }
+
+  /**
+   * `crawl_overview` as a stream: header, one row per entry, then one row per
+   * not-measured section or entry. Built whole before the first byte, for
+   * `issuesOverviewStream`'s reason (its refusals must be a clean status, not a
+   * torn socket); bounded by the sections, not by the site.
+   */
+  private async crawlOverviewStream(crawlId: string): Promise<CsvStream> {
+    const overview = await this.crawlOverview(crawlId);
+    return {
+      view: "crawl_overview",
+      ruleId: null,
+      metricId: null,
+      filename: csvFilename(slug(crawlId), "crawl_overview", null),
+      async *records(): AsyncGenerator<string> {
+        yield csvRecord(CRAWL_OVERVIEW_HEADER);
+        for (const cells of crawlOverviewRecords(overview)) yield csvRecord(cells);
       },
     };
   }
@@ -6954,6 +6997,16 @@ function parseExportRequest(
       throw new ServiceError(
         "VALIDATION",
         "the issues_overview view is one row per rule over the whole crawl; it takes no " +
+          "'ruleId' or 'metricId'",
+      );
+    }
+    return { format, view, ruleId: null, metricId: null };
+  }
+  if (view === "crawl_overview") {
+    if (opts.ruleId !== undefined || opts.metricId !== undefined) {
+      throw new ServiceError(
+        "VALIDATION",
+        "the crawl_overview view is the whole crawl's overview sections; it takes no " +
           "'ruleId' or 'metricId'",
       );
     }
