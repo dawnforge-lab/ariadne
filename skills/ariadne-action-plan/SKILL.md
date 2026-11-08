@@ -41,6 +41,23 @@ Whether an issue earns a tab is judgement, made here, from the severity, the
 counts, the page-type cohorts and the commercial context the audit's Phase 0
 established. The engine will not make it for you and should not.
 
+**The engine's `type` and `priority` are an input to this plan's priority, not a
+replacement for it.** Since ruleset 0.23.0 each group carries `type` (`issue`,
+`warning`, `opportunity`) and `priority` (`high`, `medium`, `low`, lowercase): the
+rule's default reading, or the auditor's per-crawl override of it when
+`typeOverridden` / `priorityOverridden` is present. Like `severity`, it was formed
+about the rule, not about this site's traffic, templates and roadmap, and an override
+is still a call about one rule in isolation. The plan's ordering is the site-level
+priority the audit argued — the findings file's `priority` (`Critical`, `High`,
+`Medium`, `Low`; Step 5) — and the gates below. Use the engine's two fields as
+evidence when you weigh a candidate (an `issue` / `high` the audit graded `Low` is
+worth a second look, and a sentence if it stays `Low`), show them beside engine
+severity on the tab if the client wants them, and never sort tabs by them or let
+them stand in for the findings file's `priority`. A rule named in the answer's
+`disabledRules` was ruled out of this crawl by the auditor: it is not a work item,
+and the Summary says which rules were disabled so nobody reads their absence as
+clean.
+
 **The fix text is not on the wire either.** `issues_list` returns a rule's `title`
 and no remediation copy — the registry's explanation and how-to-fix text do not
 cross this surface. The fix comes from the findings file's `recommendation` field,

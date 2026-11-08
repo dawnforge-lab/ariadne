@@ -292,7 +292,9 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "into an empty findings or metrics answer: findingsCount 0 with rulesRunAt " +
         "null is 'nobody has looked', and findingsCount 0 with a timestamp is " +
         "'looked, found nothing'. findingsCount is the live number of issue rows, " +
-        "which is what issues_list's groups sum to.\n\n" +
+        "which is what issues_list's groups sum to when the crawl's judgement " +
+        "disables no rule: a disabled rule's stored findings are counted here and " +
+        "left out there (issues_list names them in disabledRules).\n\n" +
         "judgementStale {stale, reasons} says whether the crawl's judgement " +
         "(crawl_config_set) has changed since that pass: reasons are overrides " +
         "(the disabled set), thresholds and findingCap. Stale means the stored " +

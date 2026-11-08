@@ -41,6 +41,19 @@ Two failures to avoid, and they are opposites:
 Every finding in the report carries both numbers, and the difference between them
 is a sentence, not a silence.
 
+**The engine's `type` and `priority` are the same kind of fact, one step closer.**
+Since ruleset 0.23.0 every finding rule carries `type` (`issue`, `warning`,
+`opportunity`) and `priority` (`high`, `medium`, `low`) beside its severity: the
+rule's default guess at what such a finding is and what fixing it is worth, or the
+auditor's per-crawl override of it (`typeOverridden` / `priorityOverridden` on
+`issues_list` and `issues_overview` say which). They are an input to the report's
+P1–P4, not a replacement for it: P1–P4 is argued from this site's traffic, templates
+and costs, and an engine `high` on a page type nobody visits can still be P4. Do not
+transcribe them into the priority column any more than you would severity. When the
+crawl's judgement disabled a rule (`disabledRules` on the listings), the report says
+which rules were ruled out and why — the audit's `notes` carry the reason — so a
+client never reads a disabled check as a clean one.
+
 ## Prerequisites
 
 Three, and a missing one stops the work rather than shrinking it.

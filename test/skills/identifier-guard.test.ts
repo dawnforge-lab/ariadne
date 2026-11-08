@@ -81,6 +81,7 @@
  *  |--------------------------------|----------------------|----------------------------------------|
  *  | `CHECK-31`, `CHECK-33b`        | checklist id         | the checklist's own `###` headings      |
  *  | `ARIADNE_API_TOKEN`            | environment variable | the `env[...]` reads under `src/`       |
+ *  | `SLOW_MS`                      | overridable threshold| `THRESHOLD_NAMES` (Phase 27a)           |
  *  | `crawl_status`                 | MCP tool / scope     | `TOOL_NAMES`, `METRIC_SCOPES`           |
  *  | `crawl_status.pagesCrawled`    | tool's field         | `TOOL_NAMES` + the field sets           |
  *  | `crawl.caveats`                | findings-file path   | the audit skill's own Phase 4 example   |
@@ -107,6 +108,7 @@ import { PAGE_FIELDS, START_CRAWL_FIELDS } from "../../src/api/service.js";
 import { TOOL_NAMES } from "../../src/api/mcp.js";
 import { METRIC_SCOPES } from "../../src/rules/registry/types.js";
 import { buildRegistry } from "../../src/rules/index.js";
+import { THRESHOLD_NAMES } from "../../src/rules/threshold-table.js";
 
 const ROOT = resolve(fileURLToPath(import.meta.url), "../../..");
 const SKILLS = join(ROOT, "skills");
@@ -170,6 +172,17 @@ const API_FIELDS = new Set<string>([
     "MetricQuery",
     "PageQuery",
     "StartCrawlInput",
+  ]),
+  // Phase 27a: the judgement surfaces — `crawl_config_get` / `crawl_config_set`,
+  // the catalog's judgement fields, and the two overviews.
+  ...declaredFields(join(ROOT, "src/api/service.ts"), ["CrawlConfigOut", "CatalogRule", "RulesCatalog"]),
+  ...declaredFields(join(ROOT, "src/api/judgement-view.ts"), ["JudgementStale"]),
+  ...declaredFields(join(ROOT, "src/api/overview.ts"), [
+    "IssuesOverviewRow",
+    "IssuesOverview",
+    "OverviewEntry",
+    "OverviewSection",
+    "CrawlOverview",
   ]),
   ...declaredFields(join(ROOT, "src/crawl/frontier.ts"), ["FrontierCounts"]),
   // `crawl_status.throttle`'s per-host record (Phase 24a).
@@ -385,6 +398,12 @@ function classify(token: string): Verdict {
     return ENV_READS.has(token)
       ? found("environment variable")
       : missing("environment variable", "nothing under src/ reads this variable");
+  }
+  if (/^[A-Z][A-Z0-9]*(_[A-Z0-9]+)+$/.test(token)) {
+    // The judgement block's threshold names (`crawl_config_set`), Phase 27a.
+    return (THRESHOLD_NAMES as readonly string[]).includes(token)
+      ? found("overridable threshold")
+      : missing("overridable threshold", "not one of the thresholds crawl_config_set accepts");
   }
   if (/^[a-z][a-z0-9]*(_[a-z0-9]+)+$/.test(token)) {
     return TOOL_VOCABULARY.has(token)

@@ -956,6 +956,16 @@ const KINDS = ["page", "query", "metric"] as const satisfies readonly AnyRule["k
 //     the type x priority issues grid after overrides), each one bounded
 //     aggregate. What a crawl could not measure is named in `notMeasured`,
 //     never zero. A new read surface; no finding moves. 188 rules.
+//  9. (T10) Surface docs, skills and the gate (docs/gates/phase-27a.md). No
+//     rule, verdict or copy moves; `crawl_status`'s description now says that
+//     `findingsCount` counts a disabled rule's stored rows, which `issues_list`
+//     leaves out. `rules_catalog` re-measured at 200,260 bytes with no crawl
+//     id (16 markers at 2,487 bytes, the 14 metric tables at 5,620), by
+//     serialising what `rulesCatalog` answers as 26c did; the same measurement
+//     over the 0.22.0 code (cb63104) reproduces its 194,186 to the byte. The
+//     6,074 bytes between them are `type` and `priority` on the 174 finding
+//     rules (T1). T6–T9 add none: their fields ride only a catalog read WITH a
+//     crawl id. 188 rules: 72 page / 102 query / 14 metric.
 export const RULESET_VERSION = "0.23.0";
 
 /**

@@ -736,9 +736,11 @@ export interface CrawlDetail extends CrawlListItem {
   /**
    * Rows in the `issues` table for this crawl, counted live.
    *
-   * The same number the issues listing's groups sum to, so a reader can tell
-   * at a glance whether the judgement produced anything at all without paging
-   * a listing. Read with `rulesRunAt`, never alone.
+   * The same number the issues listing's groups sum to when the crawl's
+   * judgement disables no rule (a disabled rule's stored rows are counted
+   * here and filtered out of the listing), so a reader can tell at a glance
+   * whether the judgement produced anything at all without paging a listing.
+   * Read with `rulesRunAt`, never alone.
    */
   findingsCount: number;
   /**

@@ -1,11 +1,59 @@
 # The Ariadne surface Talos codes against
 
-**Status:** the contract as of Phase 26c (ruleset 0.22.0, migrations 0000–0030,
-18 MCP tools / 18 HTTP routes; every column label in this document is served
+**Status:** the contract as of Phase 27a (ruleset 0.23.0, migrations 0000–0032,
+22 MCP tools / 22 HTTP routes; every column label in this document is served
 under the ruleset version the engine reports — `rules_catalog`'s
 `rulesetVersion`, which the metric-table pass moves).
 `docs/talos-integration.md` says *why* the seam exists and what obligations bind
 it; this document says *what the seam is*.
+
+**What Phase 27a changed here: every finding rule has a type and a priority, a
+crawl has a judgement an agent can change, and two overviews.** Ruleset 0.23.0,
+migrations 0031 (the nullable `crawls.judgement_jsonb` and
+`crawls.rules_judged_with_jsonb`) and 0032 (it backfills the run stamp on every
+crawl already judged). No rule is added, removed or re-worded at the defaults;
+no finding moves. Four tools and four routes are new:
+- **`type` and `priority` beside `severity`.** Every page and query rule (174 of
+  the 188) carries `type` (`issue` | `warning` | `opportunity`) and `priority`
+  (`high` | `medium` | `low`): the rule's DEFAULT reading of what a finding is
+  and what fixing it is worth, referenced against Screaming Frog's Issue Type and
+  Issue Priority where a rule maps to an SF issue (`docs/gates/phase-27a.md` lists
+  every divergence). Metric rules have neither. NOT MEASURED markers are always
+  `warning` / `low`. Neither is stored per finding: both are joined from the
+  registry, plus the crawl's overrides, when a surface reads them. They appear
+  on `issues_list` (§4.3), `issues_overview` (§4.3a), `rules_catalog` (§5.1) and
+  the `issues` CSV view (§12).
+- **The judgement block** (`crawl_config_get` / `crawl_config_set`, §4.9, and
+  `crawl_start`'s `judgement` argument, §4.1): per crawl, an agent can disable,
+  retype or reprioritise a rule, override 20 allowlisted thresholds, and set
+  `findingCap`. Rule overrides act on what is READ, at once: a disabled rule's
+  findings stay stored and leave every findings listing, CSV view and export,
+  each of which names it in `disabledRules`. Thresholds and `findingCap` change
+  what a rules run PRODUCES, so they act at the next `crawl_rules`. Severity is
+  never overridable.
+- **`judgementStale`** (`{stale, reasons}`, reasons `overrides` | `thresholds` |
+  `findingCap`) rides `crawl_status`, `issues_list`, `issues_overview`,
+  `crawl_overview`, `metrics_get`, `metric_table`, `rules_catalog` (with a crawl
+  id) and `crawl_config_get`. It is true when the crawl's judgement differs from
+  the one its last rules run used (the stamp). Retyping and reprioritising are
+  not part of it, because they change nothing stored.
+- **Issue copy follows the stamp.** A title, explanation or fix that names a
+  threshold quotes the value the crawl's findings were judged with: after a
+  `SLOW_MS` override of 500 and a re-run, `performance.slow-response` reads
+  "Response time over 500 ms". At the defaults every entry is byte for byte the
+  0.22.0 text.
+- **Two overviews:** `issues_overview` (§4.3a: one row per rule, Screaming
+  Frog's Issues tab with our axes) and `crawl_overview` (§4.3b: sectioned counts
+  that describe the crawl), each also a CSV view (§12).
+- **More 409s, each repairable.** A crawl whose STORED judgement overrides a rule
+  the current ruleset does not define is refused with 409 on every surface that
+  reads the judgement (`crawl_status`, `crawl_config_get`, `issues_list`, the two
+  overviews, `issue_urls`, `issue_inlinks`, `metrics_get`, `metric_table`,
+  `rules_catalog` with a crawl id, `crawl_compare`, the `issues` JSONL dataset
+  and the `issues`, `issue_urls` and two overview CSV views), naming the rule; `crawl_config_set` with `{rules: {<id>: null}}` is the repair, and is
+  the one surface that accepts the crawl in that state. `issue_urls` and
+  `issue_inlinks` of a disabled rule are a 409 too (§4.4).
+- `crawl_compare` gains the caveat code `judgement-overrides` (§7.2).
 
 **What Phase 26c changed here: six rule ids, every hreflang source, one CSV
 column, and a re-crawl.** Ruleset 0.22.0, migration 0029 (the nullable
@@ -580,7 +628,14 @@ Phase 11 additions (§4.2's `resources` block, §12's `resources` view) on
 `renderPassEvidence`) on 2026-09-02, each read back through the transport suite
 that now pins it — an MCP client over the in-memory transport and the HTTP
 routes beside it, against real crawls of the fixture site rather than against a
-type declaration.
+type declaration. The Phase 27a additions (§4.1's `judgement`, §4.3's and §5.1's
+`type` / `priority` / `disabledRules`, §4.3a `issues_overview`, §4.3b
+`crawl_overview`, §4.9 `crawl_config_get` / `crawl_config_set`, `judgementStale`
+wherever it rides, §5.7 and §12's two views) were regenerated on 2026-11-08 the
+same way — an MCP client over the in-memory transport — against the dev
+database's lavishalice crawl `crawl_4dd32709-56c9-4a62-9af4-7a843f76ff6c`
+(ruleset 0.23.0, re-judged for the Phase 27a gate, `docs/gates/phase-27a.md`),
+whose answers are quoted below as they came back.
 
 Each section names the tests that hold it. A shape claim in this file with no
 test beside it is a claim nobody is defending; if you find one, that is a
@@ -624,14 +679,23 @@ Two properties make the double-transport claim below cheap to trust:
   views.
 
   **What that equality does NOT cover**, stated so nobody reads more into it
-  than it says: the five **command** tools — `crawl_start`, `crawl_resume`,
-  `crawl_mark_failed`, `crawl_render`, `crawl_rules` — are excluded, because each
+  than it says: the six **command** tools — `crawl_start`, `crawl_resume`,
+  `crawl_mark_failed`, `crawl_render`, `crawl_rules`, `crawl_config_set` — are
+  excluded, because each
   one *changes* the database and a second identical call would be answering a
   different question (their own transport suites cover them, and for
   `crawl_resume` the second call is a refusal by design: the crawl the first one
   queued is now held by the server). And it compares **first pages only**:
   cursor behaviour is pinned per transport, by walks that page a listing to a
-  null cursor, but page two is not compared across the two.
+  null cursor, but page two is not compared across the two. The three read
+  tools Phase 27a added are not among the thirteen pairs; each has its own
+  route-equals-tool test instead (`test/api/judgement-config.test.ts:611`
+  "crawl_config_get answers what GET /crawls/:id/config answers",
+  `test/api/crawl-overview.test.ts:467` "serves the same answer at GET
+  /crawls/:id/overview/crawl"). `GET /crawls/:id/overview/issues` has no
+  route test of its own: it is the same service call as the tool, and the
+  Phase 27a gate compared the two live, with and without `includeZero`, and
+  found them equal (`docs/gates/phase-27a.md` §3).
 
 ---
 
@@ -693,7 +757,7 @@ Two properties make the double-transport claim below cheap to trust:
 | Bad argument, bad value, unknown filter, compare of an unjudged crawl (§7.5) | 400 `{error}` | tool error `{error}` |
 | Allowlist / URL policy refusal | 403 `{error}` | tool error `{error}` |
 | No such crawl / rule / route | 404 `{error}` | tool error `{error}` |
-| The row's own state forbids it (still running, retired rule id, unreadable stored evidence) | 409 `{error}` | tool error `{error}` |
+| The row's own state forbids it (still running, retired rule id, unreadable stored evidence; since Phase 27a also: a rule the crawl's judgement disables, asked for by `issue_urls` / `issue_inlinks`; a stored judgement that overrides a retired rule; `crawl_config_set` while the crawl's rules run; `issues_overview` on an unjudged crawl) | 409 `{error}` | tool error `{error}` |
 | A defect of ours | 500 `{error: "internal error", correlationId}` | `{error: "internal error", correlationId}` |
 
 `correlationId` is a UUID; the stack goes to the server log under that id and
@@ -723,10 +787,18 @@ question nobody asked"). MCP argument typos are refused by the SDK's schema
 validator before the handler runs (`test/api/mcp.test.ts:839` "refuses an
 argument nobody allowed, naming it").
 
-**Not paginated, on purpose:** `rules_catalog` and `crawl_compare`. Both are
-bounded by the **ruleset** (188 rows at 0.22.0) rather than by the crawl. The
-catalog is ~189 KB (**194,186 bytes**, measured 2026-11-08 after the PR #24
-review's R23 follow-up over all 188 rows of ruleset 0.22.0 by serialising what
+**Not paginated, on purpose:** `rules_catalog`, `crawl_compare` and (Phase 27a)
+`issues_overview`. All three are bounded by the **ruleset** (188 rows at 0.23.0,
+174 of them finding rules) rather than by the crawl; `crawl_overview` is bounded
+by its ten sections and the crawl's page types. The
+catalog is ~196 KB (**200,260 bytes**, measured 2026-11-08 at the end of Phase
+27a over all 188 rows of ruleset 0.23.0 the same way, with no crawl id — 16
+markers at 2,487 bytes and the fourteen tables at 5,620; the 6,074 bytes over the
+194,186 before it are `type` and `priority` on the 174 finding rules, and the
+same measurement over the 0.22.0 code reproduces the 194,186 to the byte; a
+catalog read WITH a crawl id is larger again by its `fired`, `thresholds`,
+`judgementStale` and override fields; the 194,186 was measured 2026-11-08 after
+the PR #24 review's R23 follow-up over all 188 rows of ruleset 0.22.0 by serialising what
 `rulesCatalog` answers with no crawl id — 16 markers at 2,487 bytes, the
 `marker` values JSON-serialised as one array, and the fourteen tables at 5,620
 the same way; the 74 bytes over the 194,112 before it are the marker's `reason`
@@ -798,10 +870,15 @@ crawl_start ──▶ crawl_status (poll until status ∉ {queued, running})
                     │
                     ├─▶ crawl_render   (optional; before the rules, if rendered evidence should be judged)
                     │
+                    ├─▶ crawl_config_get · crawl_config_set (any time but during a rules run:
+                    │                     the judgement block — rule overrides act on reads at
+                    │                     once, thresholds and findingCap at the next crawl_rules)
+                    │
                     └─▶ crawl_rules    (writes findings + metrics; refused while the crawl moves)
                             │
-                            └─▶ issues_list · issue_urls · metrics_get · pages_query · robots_get
-                                rules_catalog (with crawlId) · export_crawl
+                            └─▶ issues_list · issues_overview · issue_urls · metrics_get
+                                crawl_overview (also before the rules: what it cannot measure is named)
+                                pages_query · robots_get · rules_catalog (with crawlId) · export_crawl
                                 crawl_compare · compare_urls (two judged crawls of one site)
 ```
 
@@ -817,13 +894,15 @@ webhooks**: polling `crawl_status` is the contract until Talos asks otherwise.
 
 | MCP tool | HTTP | Arguments |
 |---|---|---|
-| `crawl_start` | `POST /crawls` | `siteUrl` (required), `maxPages`, `maxDepth`, `userAgent`, `perHostDelayMs`, `maxConcurrency`, `probeHosts`, `legacyHosts[]`, `sitemapUrls[]`, `renderBudgetPct`, `renderMaxPages`, `renderSamplePerType`, `findingCap`, `fetchResources` |
+| `crawl_start` | `POST /crawls` | `siteUrl` (required), `maxPages`, `maxDepth`, `userAgent`, `perHostDelayMs`, `maxConcurrency`, `probeHosts`, `legacyHosts[]`, `sitemapUrls[]`, `renderBudgetPct`, `renderMaxPages`, `renderSamplePerType`, `findingCap`, `fetchResources`, `judgement` (the block `crawl_config_set` changes later, §4.9) |
 | `crawl_status` | `GET /crawls/:id` | — |
 | `crawl_list` | `GET /crawls` | `siteUrl`, `limit`, `cursor` |
 | `crawl_resume` | `POST /crawls/:id/resume` | — |
 | `crawl_mark_failed` | `POST /crawls/:id/fail` | — |
 | `crawl_render` | `POST /crawls/:id/render` | `urls[]` (optional; replaces the automatic selection) |
 | `crawl_rules` | `POST /crawls/:id/rules` | — |
+| `crawl_config_get` | `GET /crawls/:id/config` | — (the judgement block, every overridable threshold, the last run's stamp and `judgementStale`, §4.9) |
+| `crawl_config_set` | `PATCH /crawls/:id/config` | `judgement` (required; an RFC 7396 merge-patch of the block, except `findingCap: null`, which is uncapped, §4.9) |
 | `robots_get` | `GET /crawls/:id/robots` | — |
 | `issues_list` | `GET /crawls/:id/issues` | `severity`, `checkId`, `ruleId`, `category`, `pageType`, `limit`, `cursor` |
 | `issues_overview` | `GET /crawls/:id/overview/issues` | `includeZero` (one row per rule with the crawl's judgement applied; also `view=issues_overview` on `export_crawl`) |
@@ -855,6 +934,18 @@ surface cannot see fails the suite.
 `siteUrl` that is not http(s) (400), `perHostDelayMs` under the floor (400,
 naming the floor), `allowPrivate` at any value (400 — it is not a wire field),
 an unknown field (400, naming it).
+
+**`judgement`** (Phase 27a) sets how the crawl is judged from its first rules
+run: the block §4.9 describes, `{rules?, thresholds?, findingCap?}`. It is
+checked against the ruleset before the crawl is accepted, and a block the
+ruleset cannot apply is a 400 naming the path, exactly as `crawl_config_set`
+refuses it. `judgement.findingCap` is the top-level `findingCap` by another
+name and is stored in the same place: given in both places they must agree,
+or the start is refused naming both (`test/api/judgement-config.test.ts:273`
+"is accepted, stored, and read back by GET /crawls/:id/config",
+`test/api/judgement-config.test.ts:347` "refuses findingCap at both levels when
+they disagree, naming both"; over MCP, `test/api/judgement-config.test.ts:627`
+"crawl_start takes the judgement field").
 
 ### 4.1a `crawl_resume` → `{crawlId, status, queuePosition}`
 
@@ -1045,6 +1136,30 @@ CRAWL time, which is not necessarily the one that judged it (§7):
 `renderPassCount: 14` pages were rendered under 0.6.0 and every finding on this
 crawl was written under 0.7.0.
 
+**`judgementStale`** (Phase 27a) sits after `rulesRunAt`: `{stale, reasons}`,
+reasons from `overrides` (the disabled set), `thresholds` and `findingCap`. It
+compares the crawl's CURRENT judgement block (§4.9) with the stamp its last
+completed rules run wrote of what it used, so `stale: true` means the stored
+findings and metrics were produced under settings that have since changed;
+re-running `crawl_rules` clears it. Never stale on a crawl nobody has judged.
+Retyping and reprioritising are not part of it: they change nothing stored. The
+gate crawl's answer after `title.same-as-h1` was disabled and before the rules
+re-ran, as it came back:
+
+```json
+{"judgementStale":{"stale":true,"reasons":["overrides"]}}
+```
+
+and after a `SLOW_MS` override on top of that, `{"stale":true,"reasons":["overrides","thresholds"]}`.
+A crawl whose stored judgement overrides a rule this ruleset does not define is a
+**409** here, naming the rule, as on every surface that reads the judgement;
+`crawl_config_set` removing that override is the repair (§4.9). A judged crawl
+with no stamp is a 500 (the server log names the crawl under the correlation
+id), never "not stale" (hard rule 7). Pinned:
+`test/api/judgement-config.test.ts:554` "judgementStale on crawl_status,
+metrics_get and metric_table" (three tests), `test/api/judgement-config.test.ts:469`
+"can repair a stored override naming a rule the ruleset no longer has".
+
 **`failureReason` — why a `failed` crawl failed.** One sentence, and `null` on
 every crawl that is not `failed` (as here). It is the field that turns `status:
 "failed"` from a dead end into something a caller can act on, and the three
@@ -1221,12 +1336,15 @@ robots file actually forbade". Shape regenerated live from `crawl_02ff6f7a`
 (2026-09-08, after migration 0016 — the `recheck` block above is that crawl's
 own answer, not an invented example).
 
-### 4.3 `issues_list` → `{items: IssueGroup[], nextCursor}`
+### 4.3 `issues_list` → `{items: IssueGroup[], nextCursor, disabledRules, judgementStale}`
+
+The gate crawl's first group, as it came back (2026-11-08, ruleset 0.23.0):
 
 ```json
-{"ruleId":"links.orphan","checkIds":["CHECK-32"],"severity":"warning",
- "category":"links","title":"Page has no internal links pointing to it",
- "count":243,"sampleUrls":["…","…"]}
+{"ruleId":"content.placeholder","checkIds":["CHECK-40"],"severity":"critical",
+ "type":"warning","priority":"high","category":"content",
+ "title":"Content: Lorem ipsum placeholder text","count":1,
+ "sampleUrls":["https://lavishalice.com/pages/editorial"]}
 ```
 
 `truncated: true` plus `total` **or** `atLeast` appears when that rule capped
@@ -1235,11 +1353,172 @@ the rows the rule wrote — under a `pageType` filter it is legitimately smaller
 than the note's own `reported`. `sampleUrls` is at most 5 and is a sample, never
 a slice: `issue_urls` is the slice.
 
+**`type` and `priority` (Phase 27a) are the crawl's, after its overrides.** With
+no override they are the rule's registry defaults. Where the crawl's judgement
+sets one, the group says so with `typeOverridden: true` /
+`priorityOverridden: true`; the key is absent otherwise, never `false`. On the
+gate crawl, after `crawl_config_set` retyped `images.empty-alt` to `issue` and
+reprioritised `meta-description.too-long` to `medium`, the two groups came back
+with `"type":"issue","typeOverridden":true` and
+`"priority":"medium","priorityOverridden":true`, their counts (446, 312)
+unchanged and no rules run between. **The order is still severity, then rule
+id**: an override moves no group here (`issues_overview`, §4.3a, is the listing
+ordered by type and priority).
+
+**`disabledRules`** names every rule the crawl's judgement disables, on every
+page of the listing, `[]` when none. A disabled rule still ran and its findings
+are stored, but its group is left out. The filter is SQL, so `count`,
+`nextCursor` and the other groups are exactly what they would be had the rule
+never fired. This field is how a reader tells "filtered out" from "did not
+fire". **`judgementStale`** is `crawl_status`'s flag (§4.2), carried on the
+listing so a dashboard drawing it needs no second call. Pinned:
+`test/api/judgement-surfaces.test.ts:133` "issues_list drops the disabled rule,
+names it, and carries the overrides".
+
 Pinned: `test/api/query.test.ts:1080` "groups by rule, orders by severity then
 rule id", `test/api/query.test.ts:1223` "says so when a rule's listing was capped"
 (the capped shape); `test/api/mcp.test.ts:1802` "groups findings by rule, orders
 them by severity" and `test/api/mcp.test.ts:1816` "carries a capped rule's real
 magnitude".
+
+### 4.3a `issues_overview` → one row per rule, with the judgement applied
+
+`GET /crawls/:id/overview/issues` (`?includeZero=true`). Screaming Frog's Issues
+tab with our axes, and the one listing ordered by what the agent's judgement says
+matters: **type** (issue, warning, opportunity), then **priority** (high, medium,
+low), then `urls` descending, then `ruleId`. The gate crawl's header and two of
+its 46 rows, as they came back (2026-11-08):
+
+```json
+{"crawlId":"crawl_4dd32709-56c9-4a62-9af4-7a843f76ff6c","rulesetVersion":"0.23.0",
+ "pagesJudged":446,
+ "rows":[{"ruleId":"hreflang.non-indexable-target",
+          "title":"Hreflang: Alternate points to a redirect or noindex URL",
+          "type":"issue","priority":"high","severity":"critical",
+          "category":"hreflang","checkIds":["CHECK-26"],
+          "urls":4,"percentOfJudged":0.9},
+         "…",
+         {"ruleId":"extraction.not-recorded",
+          "title":"Crawl: Page or sitemap facts not recorded on this crawl",
+          "type":"warning","priority":"low","severity":"info","category":"crawl",
+          "checkIds":["CHECK-04","CHECK-08","…"],
+          "urls":1,"percentOfJudged":0.2,"marker":true},
+         "…"],
+ "disabledRules":[],"judgementStale":{"stale":false,"reasons":[]}}
+```
+
+- **`urls` is the number of distinct URLs `issue_urls` lists for the rule**, and
+  a finding that names no URL counts as ONE site-wide entry (Phase 27a ruling 9,
+  `docs/gates/phase-27a.md` §6). It is not `issues_list`'s `count`, which counts
+  FINDINGS: a rule that fires more than once on a URL has more findings than
+  URLs. On the gate crawl the two agree for all 46 rules. On a capped rule both
+  stop at what the rule wrote.
+- **`pagesJudged`** is `site.health`'s Pages Judged (`urlsTotal`) as the last
+  rules run stored it, and **`percentOfJudged`** is `urls` over it, to one
+  decimal place. §5.7 says when each is `null`.
+- `typeOverridden`, `priorityOverridden` and `marker` behave as on the listings:
+  present (`true`) or absent. A marker that fired is always a row, because "not
+  measured" has to stay visible. Severity is the stored reading and is never
+  overridable.
+- **Rows included:** the rules that fired. `includeZero` adds every ENABLED page
+  and query rule that ran and found nothing, at `urls: 0` (174 rows on the gate
+  crawl, 128 of them zero). A rule the judgement disables is never a row, zero
+  or not, and is named in `disabledRules`. Metric rules never appear.
+- **Not paginated:** at most one row per finding rule (174). It is an aggregate
+  rather than an export, which is how it meets obligation 1. It is one
+  `GROUP BY rule_id` plus the stored `site.health` row, read with the judgement
+  inside one repeatable-read snapshot (ruling 14), so a concurrent `crawl_rules`
+  cannot make it disagree with itself.
+- **Refused (409):** an unjudged crawl, because an empty overview would read as
+  a clean site; a crawl holding findings of a rule this ruleset lacks, as
+  `issues_list` refuses it; a stored judgement overriding such a rule (§4.2).
+
+Pinned: `test/api/issues-overview.test.ts:155` "issues_overview rows" (8 tests:
+the distinct-URL count against `issue_urls` for every rule, a site-wide rule's
+URLs, the ordering, the disabled rule, `includeZero`) and
+`test/api/issues-overview.test.ts:257` "issues_overview refusals" (4 tests,
+including the null `pagesJudged`).
+
+### 4.3b `crawl_overview` → counts that describe the crawl
+
+`GET /crawls/:id/overview/crawl`. Screaming Frog's crawl overview panel, built
+from what the engine stores: `{crawlId, sections, notMeasured, judgementStale}`,
+each section `{id, entries: [{label, value, percent}]}`, and `percent` the
+entry's value over its section's total to one decimal place (null when that
+total is 0). It describes the CRAWL, not the site's quality, so it is
+**answered on an unjudged crawl too**; what that crawl cannot measure is named,
+never zero. The gate crawl's `urls` section, as it came back (2026-11-08):
+
+```json
+{"id":"urls","entries":[{"label":"Encountered","value":602,"percent":100},
+ {"label":"Fetched","value":600,"percent":99.7},
+ {"label":"Not fetched (frontier)","value":0,"percent":0},
+ {"label":"Blocked by robots.txt (stored)","value":2,"percent":0.3},
+ {"label":"Blocked by robots.txt (dropped)","value":0,"percent":null}]}
+```
+
+Its ten sections, in this order: `urls`, `fetch-class`, `status-class`,
+`content`, `indexability`, `click-depth`, `discovery`, `response-time`,
+`render`, `issues-grid`.
+
+- **`urls` is `crawl_status`'s own fields** (ruling 10), read through the same
+  function inside the overview's snapshot. Encountered is every frontier row
+  (`pending + leased + done + failed + renderPending`) plus
+  `robotsBlocked.recorded`, because a robots-blocked URL is a `pages` row and
+  never a frontier row. Fetched is `pagesCrawled`. Not fetched (frontier) is
+  `pending + leased`. The two Blocked entries are `robotsBlocked.recorded` and
+  `robotsBlocked.dropped`. Percents are against Encountered, except the dropped
+  count: it counts DISCOVERIES turned away, is not a subset of Encountered, and
+  has a null percent. **The entries are not a partition and are never asserted
+  to sum**, because a resume reseeds `pagesCrawled`.
+- `fetch-class`, `status-class`, `indexability`, `click-depth`, `discovery` and
+  `response-time` are each a partition of the crawl's `pages` rows (each summed
+  to the gate crawl's 602), with percents against that count. `status-class` is
+  `2xx` to `5xx` and `No response`, plus `Other status` only when a code outside
+  200–599 was stored. `indexability` is `Indexable`, then each non-indexable
+  reason as `issue_urls` spells it; its Canonicalised reason uses the SQL rules'
+  canonical predicate, which counts a page whose canonical is relative,
+  non-ASCII or has dot segments as Indexable (ruling 8: the overview agrees with
+  what the rules judge). `click-depth` is `0`–`9`, `10+` and `Unreachable`.
+  `discovery` is one entry per `discovered_via`, then `In a sitemap` /
+  `Not in a sitemap`.
+- **`response-time` buckets are fixed** (Deviation 5): `Under 250 ms`,
+  `250–500 ms`, `500–1000 ms`, `1000–2000 ms`, `2000+ ms`, each `[lo, hi)`, and
+  `No response time`. Then `Over SLOW_MS (<n> ms)` counts the pages strictly over
+  the crawl's stamped `SLOW_MS`, across ALL pages, so it can exceed
+  `performance.slow-response`, which judges only indexable, self-canonical pages
+  (on the gate crawl at `SLOW_MS` 500: 6 pages over, 4 findings).
+- `content` is `HTML: <page type>` over the `ok` pages, `Non-HTML: PDF | Image |
+  CSS | JavaScript | Other` over the `non_html` ones, and `Resource: Image | CSS |
+  JavaScript` over the `resources` rows, **each percent against its own group's
+  subtotal** (ruling 13). `too_large` and `unsupported_encoding` pages are in
+  neither page group, because no body was read.
+- `render` is `Pages rendered` (counted live) and `Render coverage (<ran | none |
+  failed>)` from the stored `render.coverage` metric (ruling 12).
+- `issues-grid` is the stored findings by `type/priority` (`issue/high` to
+  `opportunity/low`), **after the crawl's overrides, with the disabled rules'
+  findings left out**. On the gate crawl it summed to `findingsCount` (3,202).
+  With `title.same-as-h1` disabled it summed to 2,864, and a retype moved
+  `images.empty-alt`'s 446 findings from `warning/low` to `issue/low` with no
+  run.
+
+**`notMeasured`** is `[{id, reason}]`. It names a whole section the crawl could
+not measure (`click-depth` and `issues-grid` on a crawl no rules run has
+judged, `render` on a crawl that never rendered), and MAY name one entry of a
+measured section (`render-coverage` on a rendered crawl not yet judged,
+`robots-blocked-dropped` on a crawl that predates the counter). The dev
+database's unjudged crawl from before migration 0020, `crawl_a696e51a`, came
+back with `click-depth`, `issues-grid`, `render` and `robots-blocked-dropped`
+named, and those sections and that entry absent rather than written as zeros
+(§5.7).
+
+Pinned: `test/api/crawl-overview.test.ts:241` "crawl_overview on a judged,
+unrendered crawl" (9 tests, among them `test/api/crawl-overview.test.ts:260`
+"takes every urls entry from the crawl_status field it names"),
+`test/api/crawl-overview.test.ts:412` "crawl_overview on other crawls" (7 tests:
+the unjudged, rendered and pre-0020 crawls, and the route), and
+`test/api/crawl-overview.test.ts:501` "the overviews read the judgement inside
+their snapshot".
 
 ### 4.4 `issue_urls` → `{columns, items, nextCursor}` — one rule as a table
 
@@ -1331,6 +1610,17 @@ whatever status the challenge was served with",
 writes, and writes every column it declares",
 `test/rules/registry.test.ts:769` "finds one defining file per rule, and the key
 spelled inside it".
+
+**A rule the crawl's judgement disables is refused, 409** (Deviation 3), and so
+is its `issue_urls` CSV view, before the first byte: the findings are stored,
+and an empty page here would read as "this rule found nothing". The gate crawl
+answered `rule 'title.same-as-h1' is disabled on crawl
+'crawl_4dd32709-56c9-4a62-9af4-7a843f76ff6c'; re-enable it with crawl_config_set
+to list its findings`. `issue_inlinks` refuses a disabled rule the same way.
+Pinned: `test/api/judgement-surfaces.test.ts:159` "issue_urls and issue_inlinks
+refuse a disabled rule with CONFLICT naming it",
+`test/api/judgement-surfaces.test.ts:214` "the issue_urls CSV of a disabled
+rule is refused before a byte".
 
 ### 4.4a `issue_inlinks` → `{columns, items, nextCursor}` — the links that point at it
 
@@ -1482,9 +1772,25 @@ columns are the catalog's",
 `test/fixtures/harness.test.ts:2383` "renders every metric's table, with no
 empty column and no unmapped key".
 
-### 4.5 `metrics_get` → `{items: MetricRow[], nextCursor}`
+**`judgementStale`** (Phase 27a) is the answer's last key, `crawl_status`'s flag
+(§4.2): the table is what the last rules run stored, so a stale judgement means
+these numbers predate the crawl's current settings. The gate crawl's
+`site.health` table came back with `"judgementStale":{"stale":false,"reasons":[]}`
+after its re-judge. Pinned with `metrics_get`'s below.
 
-`{metricId, scope, scopeValue, value, title, explanation, checkIds, category}`.
+### 4.5 `metrics_get` → `{items: MetricRow[], nextCursor, judgementStale}`
+
+`{metricId, scope, scopeValue, value, title, explanation, checkIds, category}`
+per row, and since Phase 27a `judgementStale` beside `items` and `nextCursor`
+(`crawl_status`'s flag, §4.2). A metric is a measurement the last rules run
+stored, and `site.health` counted only the findings of the rules that run left
+enabled, so a stale judgement means these numbers predate the crawl's current
+settings: a rule disabled since is still in `site.health`'s counts, and a rule
+re-enabled since is still out of them, until `crawl_rules` re-runs
+(`test/api/judgement-config.test.ts:680` "brings the group back at once while
+site.health keeps the disabled run's value"; the flag itself,
+`test/api/judgement-config.test.ts:554` "judgementStale on crawl_status,
+metrics_get and metric_table").
 `value` is the metric's own object — its shape belongs to the metric, and the
 copy travels with it. Scopes: `site | page_type | sitemap_doc` (`rule` was never
 one — corrected in P21-T1, beside §4.4b). See §6 for
@@ -1610,6 +1916,131 @@ siteUrl that is not an http(s) URL rather than dropping the filter";
 listing returns every crawl the engine holds, including other tenants'
 `siteUrl`s, to any caller holding the token.
 
+### 4.9 `crawl_config_get` / `crawl_config_set` → the crawl's judgement
+
+`GET /crawls/:id/config` and `PATCH /crawls/:id/config` (Phase 27a; Deviation 4:
+they arrive in 27a, limited to the `judgement` part, and 27b widens them to the
+crawl's other fields under the same names and routes). Both answer
+`{crawlId, judgement, thresholds, judgedWith, judgementStale}`. The gate crawl,
+as it came back after its last re-judge (2026-11-08; 18 of the 20 thresholds
+elided, every one has the same five keys):
+
+```json
+{"crawlId":"crawl_4dd32709-56c9-4a62-9af4-7a843f76ff6c","judgement":{},
+ "thresholds":{"TITLE_MIN":{"value":30,"default":30,"min":1,"max":200,"overridden":false},
+               "SLOW_MS":{"value":1500,"default":1500,"min":100,"max":60000,"overridden":false},
+               "…":"…"},
+ "judgedWith":{"disabledRules":[],"thresholds":{}},
+ "judgementStale":{"stale":false,"reasons":[]}}
+```
+
+- **`judgement`** is the crawl's block, `{}` when nothing is set:
+  `{rules?: {[ruleId]: {disabled?: true, type?, priority?}}, thresholds?:
+  {[name]: number}, findingCap?: number | null}`. `findingCap` appears when the
+  crawl's config sets one (`null` is uncapped) and is absent when the default of
+  200 applies. It is stored where it always was, `config_jsonb.findingCap`
+  (Deviation 1), so `crawl_status.findingCap`, `crawl_start`'s top-level key and
+  this block read and write one value.
+- **`thresholds`** lists ALL 20 overridable thresholds as `{value, default, min,
+  max, overridden}`: `value` is what the NEXT rules run will use, `overridden` is
+  true where the block sets it, and `min` / `max` are the inclusive bounds. The
+  names: `TITLE_MIN`, `TITLE_MAX`, `META_MIN`, `META_MAX`, `H1_MAX`, `H2_MAX`,
+  `URL_MAX`, `SLOW_MS`, `TITLE_PX_MIN`, `TITLE_PX_MAX`, `META_PX_MIN`,
+  `META_PX_MAX`, `DEEP_DEPTH`, `THIN_WORDS`, `SOFT_404_WORDS`,
+  `IMAGE_WEIGHT_WARN`, `CHAIN_HOPS`, `HIGH_INTERNAL_OUTLINKS`,
+  `HIGH_EXTERNAL_OUTLINKS`, `UNAVAILABLE_AFTER_WARN_DAYS` (20, not the 19 the
+  plan's prose counted: ruling 5). Extraction-time limits, similarity distances,
+  render heuristics, walk bounds and protocol limits are engine internals and
+  are not overridable.
+- **`judgedWith`** is the stamp the last completed rules run wrote of what it
+  used, `{disabledRules, thresholds (its overrides only), findingCap?}`, or
+  `null` on a crawl nobody has judged. **`judgementStale`** compares it with the
+  current block (§4.2).
+
+**`crawl_config_set` takes `{judgement: <merge-patch>}`, an RFC 7396
+merge-patch of the stored block,** and answers what `crawl_config_get` would
+answer next. Objects merge key by key and `null` REMOVES a key:
+`{rules: {"title.too-long": null}}` drops that rule's override,
+`{thresholds: {SLOW_MS: null}}` returns `SLOW_MS` to its default, and
+`{rules: null, thresholds: null}` clears every override (the stored block is
+then `{}`). **`findingCap` is the one exception (ruling 7): `findingCap: null`
+means UNCAPPED, exactly as at `crawl_start`, and is NOT a removal.** Reading
+null as "remove the key" would turn an agent's "make this a billed, uncapped
+audit" into the default cap of 200 without a word. To return to the default,
+send `200`, which judges exactly as an absent key does and is not stale against
+a default-cap run. The gate crawl's answer to `{judgement: {thresholds:
+{SLOW_MS: 500}}}`, sent on top of three rule overrides, began:
+
+```json
+{"judgement":{"rules":{"images.empty-alt":{"type":"issue"},
+                       "title.same-as-h1":{"disabled":true},
+                       "meta-description.too-long":{"priority":"medium"}},
+              "thresholds":{"SLOW_MS":500}},
+ "thresholds":{"SLOW_MS":{"value":500,"default":1500,"min":100,"max":60000,"overridden":true},"…":"…"},
+ "judgedWith":{"disabledRules":[],"thresholds":{}},
+ "judgementStale":{"stale":true,"reasons":["overrides","thresholds"]}}
+```
+
+**When a change takes effect.** Rule overrides act on what is READ, at once:
+`disabled` takes the rule's findings out of `issues_list`, `issues_overview`,
+the `crawl_overview` issues grid, the `issues` CSV view and the `issues` JSONL
+dataset, makes `issue_urls` / `issue_inlinks` refuse it, and marks it
+`disabled: true` in `rules_catalog`. Removing the override brings every finding
+back with no run, because a rules run executes every rule, disabled ones
+included, and stores all their findings. `type` and `priority` change the value
+every surface serves, with the `…Overridden` flag. **Thresholds and `findingCap`
+change what a rules run PRODUCES, so they act at the next `crawl_rules`**: until
+then the stored findings and their copy are the old run's, and
+`judgementStale` says so. `site.health` is the one stored aggregate a rule
+override reaches: it counted the findings of the rules enabled at the last run,
+and stays that run's number (and `stale` stays true, reason `overrides`) until
+the rules re-run.
+
+**Refused, each by name, and nothing is written when a change is refused** (as
+the gate crawl answered them, 2026-11-08):
+- severity, at any path: `rules.title.too-long.severity: severity cannot be
+  overridden: it is the engine's fact about the rule; change its priority or
+  disable it instead` (400);
+- a cross-pair violation on EFFECTIVE values: `thresholds.TITLE_MIN:
+  thresholds.TITLE_MIN (70) must be strictly below thresholds.TITLE_MAX (60, the
+  default)` (400); the pairs are `TITLE_MIN`/`TITLE_MAX`, `META_MIN`/`META_MAX`,
+  `TITLE_PX_MIN`/`TITLE_PX_MAX`, `META_PX_MIN`/`META_PX_MAX`;
+- a threshold out of its bounds or not an integer: `thresholds.SLOW_MS: Too
+  small: expected number to be >=100` (400);
+- a metric rule: `rules.site.health: 'site.health' is a metric rule; it
+  produces no findings, so it cannot be disabled, retyped or reprioritised`
+  (400);
+- a rule id the ruleset does not define: `rules.no.such-rule: no rule
+  'no.such-rule' in ruleset` (400: the REQUEST is wrong, so it is not a 409);
+- any key beside `judgement` (400; the crawl fields arrive in 27b), and a
+  missing, null or non-object `judgement` (400);
+- an override emptied by the merge, such as `{rules: {x: {disabled: null}}}` on
+  `{x: {disabled: true}}` (400: send `{x: null}` to remove it);
+- **any change while `crawl_rules` is running over the crawl: 409**, `rules are
+  running for crawl <id>: …`. Wait for the run to answer, then set it again.
+
+**The repair route.** A crawl whose STORED block overrides a rule this ruleset
+does not define (a rule removed by a later release) is a 409 on every surface
+that reads the judgement, `crawl_config_get` included, naming the rule (§4.2).
+`crawl_config_set` is the one surface that accepts the crawl in that state, so
+that `{judgement: {rules: {<id>: null}}}` can remove the override. A patch that
+leaves such an override in place is refused (400), naming its path.
+
+Pinned: `test/api/judgement-config.test.ts:378` "crawl_config_set — PATCH
+/crawls/:id/config" (11 tests: merge, removal, severity, unknown rule, repair,
+the 409 while the rules run), `test/api/judgement-config.test.ts:518`
+"findingCap through crawl_config_set" (4 tests, including
+`test/api/judgement-config.test.ts:530` "null is uncapped, as at crawl_start —
+never a silent return to the default"), over MCP `test/api/judgement-config.test.ts:611`
+"crawl_config_get answers what GET /crawls/:id/config answers" and
+`test/api/judgement-config.test.ts:617` "crawl_config_set refuses severity with
+the HTTP route's text", `test/api/judgement-config.test.ts:680` "brings the group
+back at once while site.health keeps the disabled run's value",
+`test/api/judgement-surfaces.test.ts:265` "re-enabling brings the findings back
+at once, and the judgement is no longer stale" and
+`test/api/judgement-surfaces.test.ts:278` "quotes the stamped value until the
+rules re-run, and reports the staleness".
+
 ---
 
 ## 5. Null versus zero — the surface's one hard rule, at both ends
@@ -1636,6 +2067,10 @@ partial pass's rows are real rows, and **only `rulesRunAt` says whether they
 are a finished judgement**. Read the marker before quoting any count as the
 site's.
 
+Phase 27a adds two spellings, both in §5.7: the Issues Overview's `null`
+`pagesJudged` and `percentOfJudged`, and the Crawl Overview's `notMeasured`,
+which names a section or an entry instead of writing zeros.
+
 ### 5.1 `rules_catalog` — three states of `fired`, and the `marker` flag
 
 ```json
@@ -1643,6 +2078,25 @@ site's.
  "severity":"warning","category":"links","checkIds":["CHECK-32"],
  "title":"…","explanation":"…","howToFix":"…","fired":{"count":243}}]}
 ```
+
+Since Phase 27a every rule that FINDS also carries `type` and `priority` (the
+registry's defaults; a metric rule has neither key), so the catalog with no
+crawl id is the triage table itself. **With a `crawlId` the crawl's judgement is
+applied as well:** `type` and `priority` are that crawl's, with
+`typeOverridden: true` / `priorityOverridden: true` where its judgement sets the
+value; **`disabled: true`** marks a rule the judgement disables, which is still
+listed, and whose `fired.count` still counts its stored findings (338 for the
+gate crawl's disabled `title.same-as-h1`), while every findings listing and
+export leaves them out; the answer gains `thresholds` (the 20 values, by name,
+the crawl's findings were judged with) and `judgementStale`; and the copy is
+rendered from those thresholds, so an override shows in the text only after
+`crawl_rules` re-runs (the gate crawl's `performance.slow-response` title read
+"Response time over 1500 ms" with `SLOW_MS: 500` set and stale, and "over 500
+ms" after the re-run). Pinned: `test/api/judgement-surfaces.test.ts:176`
+"rules_catalog keeps the disabled rule, flags it, and still counts its stored
+findings", `test/api/judgement-surfaces.test.ts:301` "without a crawl the
+catalog is the default rendering, with type and priority and no judgement
+fields".
 
 Every rule that FINDS carries `columns` as well — its report, column by column,
 `[{key, label, optional?}]`, the four standard ones first and then its own. It
@@ -1977,6 +2431,58 @@ accepts" (the same, over the queue's own writer and on the wire);
 `test/api/query.test.ts:4208` "tells a pre-0017 failed
 crawl apart from a crawl that did not fail" (the two nulls, on the wire).
 
+### 5.7 The overviews: `pagesJudged`, `percentOfJudged` and `notMeasured`
+
+Phase 27a's two overviews keep the doctrine, and each has its own spelling of it.
+
+**`issues_overview`: `pagesJudged` and `percentOfJudged`.**
+
+| answer | spelling | what it means |
+|---|---|---|
+| a number | `"pagesJudged": 446` | `site.health`'s Pages Judged, as the last rules run stored it; each row's `percentOfJudged` is `urls` over it, to one decimal |
+| zero | `"pagesJudged": 0` | a measurement: the run judged no page. Every `percentOfJudged` is `null`, because there is nothing to be a percentage of, never `0` |
+| null | `"pagesJudged": null` | the crawl has no `site.health` row: judged by a ruleset before the family existed, or its metric rows are gone. Every `percentOfJudged` is `null`; `urls` still counts |
+
+A `site.health` row that is there and cannot be read (a `urlsTotal` that is not
+a number) is a loud error, never `null` (hard rule 7). And the overview of a
+crawl nobody has judged is not an empty `rows`: it is **refused** (409), because
+an empty overview reads as a clean site. In the CSV view a `null`
+`percentOfJudged` is an empty `% of Judged` cell. Pinned:
+`test/api/issues-overview.test.ts:273` "answers pagesJudged null (and
+percentOfJudged null) with no site.health row",
+`test/api/issues-overview.test.ts:281` "throws on a malformed site.health row
+rather than reading it as null", `test/api/issues-overview.test.ts:258` "refuses
+an unjudged crawl with CONFLICT", `test/api/issues-overview.test.ts:305` "writes
+an empty % of Judged cell when pagesJudged is null".
+
+**`crawl_overview`: `notMeasured`.** A section the crawl could not measure is
+ABSENT from `sections` and named in `notMeasured` as `{id, reason}`; an entry
+of a measured section can be named the same way. Never a section of zeros. The
+reasons, verbatim (`NOT_MEASURED_REASONS` in `src/api/overview.ts`):
+
+| id | names | reason |
+|---|---|---|
+| `click-depth` | the section, on a crawl no rules run has judged | `click depth is derived by the rules run; run crawl_rules` |
+| `issues-grid` | the section, on a crawl no rules run has judged | `no rules run has judged this crawl; run crawl_rules` |
+| `render` | the section, on a crawl that never rendered | `no render pass ran` |
+| `render-coverage` | the `Render coverage` entry, on a rendered crawl not yet judged | `render coverage is a rules-run metric; run crawl_rules` |
+| `robots-blocked-dropped` | the `urls` section's dropped entry, on a crawl before migration 0020 | `the robots-blocked overflow was not counted on this crawl (it predates migration 0020)` |
+
+Three things in a measured section look like gaps and are not: a `0` entry is a
+count (the gate crawl's `5xx: 0`); `Unreachable` in `click-depth` is a
+measurement (pages no internal link reaches); and the dropped entry's `null`
+percent means "not a share of Encountered", not "not measured". In the CSV view
+each `notMeasured` item is a row after the entries, `<id>,Not measured:
+<reason>,,` with empty Value and Percent cells. Pinned:
+`test/api/crawl-overview.test.ts:242` "lists the measured sections in order and
+names render as not measured", `test/api/crawl-overview.test.ts:435` "names
+render coverage as not measured on a rendered crawl no rules run judged",
+`test/api/crawl-overview.test.ts:446` "names an uncounted robots overflow
+(pre-0020 crawl) instead of writing 0", `test/api/crawl-overview.test.ts:539`
+"crawl_overview names issues-grid and click-depth as not measured, never zeros",
+`test/api/crawl-overview.test.ts:560` "has the exact header and one row per JSON
+entry, then the not-measured rows".
+
 ---
 
 ## 6. `site.health` — the rollup, and everything it is not
@@ -2021,6 +2527,15 @@ an empty cell rather than a nought nobody counted.)
 - **The four buckets partition `urlsTotal` exactly.** A page is counted once, at
   the worst severity it carries. Site-level findings (no `page_id`) reach no
   bucket at all — a site-wide fault is not a share of the pages.
+- **It counts the findings of the rules ENABLED when the rules ran** (Phase
+  27a). A rule the crawl's judgement disables still runs and its findings are
+  stored, but `site.health` skips them, and it is the one stored aggregate a
+  rule override reaches. So it is that run's number until `crawl_rules` runs
+  again: disable a rule and the buckets still count it, re-enable one disabled
+  at the run and they still leave it out, and `judgementStale` reads `overrides`
+  in between (§4.2). Retyping and reprioritising never touch it: the buckets are
+  by severity, which is not overridable. `urlsTotal` is the Issues Overview's
+  `pagesJudged` (§4.3a).
 - **`pagesNotAuditable` is everything else, lumped: redirects, 4xx, 5xx, failed
   or refused fetches, non-HTML 200s, any other status.** One number for several
   unlike things, on purpose — it is a *remainder*, and its job is to stop 108
@@ -2180,6 +2695,7 @@ crawl's 200-row cap.
 | `ruleset-mixed` | one side holds findings from more than one version |
 | `finding-cap-differs` | the two ran under different effective caps |
 | `severity-changed` | a rule is recorded at different severities on the two sides |
+| `judgement-overrides` | a side's judgement (Phase 27a, §4.9) disables rules; the message names the crawl and the rules. Their stored findings ARE counted in the comparison, while that crawl's `issues_list` leaves them out. It does not change `comparable` (Deviation 6) |
 
 **Switch on the `code`, quote the `message`.** A UI that parses the sentence
 will break; a UI that renders only the code loses the reason.
@@ -2243,7 +2759,11 @@ crawl learns that it is another site and *nothing else* — not whether it has
 been judged, which is a fact about that tenant's work (obligation 6).
 
 A `crawls.site_url` that is not a URL is a **409** ("whether they are the same
-site cannot be decided"), never "different sites".
+site cannot be decided"), never "different sites". So is a side whose stored
+judgement overrides a rule this ruleset does not define (Phase 27a, §4.2), naming
+the crawl and the rule; `crawl_config_set` on that crawl is the repair. Pinned
+for the caveat: `test/api/judgement-config.test.ts:640` "adds a
+judgement-overrides caveat naming the crawl and the count".
 
 **The self-compare 400 has a UI consequence Talos should design for.** A compare
 screen that defaults both pickers to the newest crawl refuses on first render.
@@ -2285,7 +2805,8 @@ controls.
 | `probeHosts` / `legacyHosts[]` | probe on / none | Extra hosts are allowlist-checked at accept time, not mid-crawl. |
 | `sitemapUrls[]` | none | At most 50 root documents; echoed on `crawl_status` and in `robots_get`. |
 | `renderBudgetPct` / `renderMaxPages` / `renderSamplePerType` | 5% / 500 / 3 | The render pass's budget. |
-| `findingCap` | 200 | `null` = uncapped, which is what a billed audit wants. It changes what every count in §5 and §7 means. |
+| `findingCap` | 200 | `null` = uncapped, which is what a billed audit wants. It changes what every count in §5 and §7 means. Since Phase 27a it can also be changed after the crawl, through `crawl_config_set`'s `judgement.findingCap` (null = uncapped there too), and takes effect at the next `crawl_rules` (§4.9). |
+| `judgement` | none | Rule overrides, threshold overrides and `findingCap` from the first rules run (§4.1, §4.9). Not a politeness knob: it changes how the crawl is judged, never what is fetched. |
 
 Not settable over the wire at any value: `allowPrivate` (refused by name, on
 both transports).
@@ -2379,8 +2900,17 @@ Four postures a Talos integrator should know about rather than discover:
   consuming agent's job.
 - **No revenue or business judgement.** The engine has no idea what a page is
   worth. It measures.
-- **No prioritisation beyond rule severity.** The priority split a dashboard
-  renders is engine severity, which is a property of the rule, not of this site.
+- **No prioritisation of THIS site on the engine's own authority.** Since Phase
+  27a every finding rule carries a `type` and a `priority` beside its severity,
+  and they are the RULE's defaults: the engine's opening bid on what such a
+  finding usually is and what fixing it is usually worth, referenced against
+  Screaming Frog's Issue Type and Issue Priority. They are properties of the
+  rule, not of this site. The agent overrides them per crawl (`crawl_config_set`,
+  §4.9), and the agent's overrides are the judgement; a dashboard should render
+  the served values, which already carry them, and may show the
+  `…Overridden` flags as "set by the agent". Severity stays the engine's fact
+  and is never overridable. Nothing ranks one site's findings against business
+  value, traffic or revenue: that is the consumer's call.
 - **No resource fetching beyond images, CSS and JS.** Those three are fetched
   since Phase 11 — HEAD first, metadata only, under the page crawl's own
   politeness. Fonts, media, favicons and anything a stylesheet's own `@import`
@@ -2399,13 +2929,15 @@ Four postures a Talos integrator should know about rather than discover:
 - **No tenancy isolation on listing** (§9.3) and no per-tenant credentials: one
   bearer token per server.
 - **No writes from a read surface.** Every query path runs read-only; the six
-  command tools are the only things that change anything.
+  command tools (`crawl_start`, `crawl_resume`, `crawl_render`, `crawl_rules`,
+  `crawl_mark_failed`, `crawl_config_set`) are the only things that change
+  anything.
 
 ---
 
 ## 11. Versioning, and what a ruleset change does to a served crawl
 
-`RULESET_VERSION` (**0.22.0** as of Phase 26c) stamps **judgement**: bump it when
+`RULESET_VERSION` (**0.23.0** as of Phase 27a) stamps **judgement**: bump it when
 a rule's verdict or copy changes. Adding a rule or a metric family adds rows
 without changing a verdict — `metrics` rows carry no version column at all —
 which is the argument Phase 10 held 0.7.0 on.
@@ -2463,6 +2995,22 @@ should, and `site.health`'s `urlsCritical` changes meaning (from "mechanically
 broken" to "carrying a first-fix SEO defect"), so a health gauge drawn from it
 must show the ruleset version beside the number. Stored findings keep the
 severity their ruleset stamped; nothing is backfilled.
+
+**Phase 27a bumped to 0.23.0, once, on the client-facing-copy ground: no verdict
+moves.** Every finding rule gained a `type` and a `priority` (§4.3), which is
+client-facing judgement served beside every finding, and issue copy became a
+template rendered from the thresholds a crawl was judged with (§5.1): at the
+default thresholds every title, explanation and fix is byte for byte the 0.22.0
+text. No rule was added or removed and no finding, severity or metric moved.
+Re-judging the stored lavishalice crawl under 0.23.0 (`docs/gates/phase-27a.md`)
+wrote the same 3,202 findings over the same 46 rules, rule by rule, as the stored
+run it replaced.
+A crawl compared across the boundary raises `ruleset-mismatch` all the same,
+because the stamp is the version; the counts beside it do not move for this
+reason. Migrations 0031 and 0032 add the judgement block and the run stamp
+(0032 backfills the stamp on every crawl judged before them, as "no overrides,
+the cap it was judged with"), so an old judged crawl reads `judgementStale`
+false, not an error.
 
 **Phase 26c bumped to 0.22.0, once: six ids, every hreflang rule widened to
 three sources, and a re-crawl attached.** The ids and the widened readings are
@@ -2673,8 +3221,34 @@ rows**; the header is always written and never counted.
 | `redirects` | source, chain, target, hops | one **redirecting page** | 10 rows |
 | `resources` | url, kind, shareImage, fetchClass, status, bytes, bytesSource, contentType, cacheControl, fetchReason, referencingPages | one **file** the served HTML points at | 0 rows (this crawl predates the pass) |
 | `metric_table` (needs `metricId`) | **the metric's own** — its `summary` labels, then its `columns` labels | one row of one metric's table | 40 rows (`inlinks.extremes`) |
+| `issues_overview` (Phase 27a) | Issue Name, Issue Type, Issue Priority, Severity, URLs, % of Judged, Description, How To Fix, Rule Id, Check Ids | one rule, as `issues_overview` (§4.3a) answers it | 46 rows / 27,040 B on the gate crawl `crawl_4dd32709` |
+| `crawl_overview` (Phase 27a) | Section, Label, Value, Percent | one entry of one `crawl_overview` section (§4.3b), then one row per `notMeasured` item | 75 rows / 2,332 B on the gate crawl `crawl_4dd32709` |
 
 Semantics a consumer must repeat to its own users:
+
+- **The crawl's judgement is applied (Phase 27a).** The `issues` view's `type`
+  and `priority` columns are the crawl's, after its overrides, and a rule the
+  judgement disables has no rows in it; the export answer names those rules in
+  `disabledRules`, as the `issues` JSONL dataset's does. The `issue_urls` view of
+  a disabled rule is refused before the first byte (409). On the gate crawl,
+  with `title.same-as-h1` disabled, the `issues` view held 2,864 rows, its
+  3,202 findings less that rule's 338
+  (`test/api/judgement-surfaces.test.ts:203` "the issues CSV carries type and
+  priority and leaves out the disabled rule").
+- **`issues_overview` is the Issues Overview as a sheet** (Phase 27a): the
+  JSON's rows in the JSON's order, with `Issue Name` the rule's title and
+  `Description` / `How To Fix` its copy, rendered from the thresholds the crawl
+  was judged with; the JSON carries no copy beyond the title. A `null`
+  `percentOfJudged` is an empty `% of Judged` cell (§5.7). It is the rules that
+  fired: the view takes no `includeZero`. Like the JSON, it is refused on an
+  unjudged crawl, before the first byte. It is named
+  `crawl_<uuid>-issues_overview.csv`.
+- **`crawl_overview` is the Crawl Overview as a sheet** (Phase 27a): one row per
+  entry, section by section in the JSON's order, then one row per `notMeasured`
+  item, written `<id>,Not measured: <reason>,,` with empty Value and Percent
+  cells, so a sheet never shows a not-measured section as zeros. It is answered
+  on an unjudged crawl too. Both overview views, like `metric_table`, are not a
+  keyset read of a table: each is one bounded aggregate, written whole.
 
 - **The `issue_urls` file is THE RULE'S OWN TABLE** (Phase 20). Its header is
   the labels of that rule's columns — the four standard ones (`Address`,
@@ -2751,7 +3325,7 @@ Semantics a consumer must repeat to its own users:
 - **Formula injection is guarded uniformly:** a cell whose first non-whitespace
   character is `= + - @` is written with a leading apostrophe, before RFC 4180
   quoting. The trade is deliberate — a negative number would render `'-3`; no
-  column in these nine views emits one (a metric's cells are counts, bytes,
+  column in these eleven views emits one (a metric's cells are counts, bytes,
   distances and percentages, none of which go below zero). It is not a text-column guard: a
   `Cache-Control` header is the server's own string and lands in a cell exactly
   as a page title does, which is what `test/api/query.test.ts:3089` "never lets a
@@ -2771,7 +3345,7 @@ Semantics a consumer must repeat to its own users:
   ordering).
 
 Pinned: `test/api/csv.test.ts` (the writer, the guard, the
-flattening, the SQL keyset pins, and the eight-view vocabulary — including
+flattening, the SQL keyset pins, and the view vocabulary — including
 `test/api/csv.test.ts:248` "heads the issue_urls view with the rule's own
 columns, in the rule's own order");
 `test/api/query.test.ts:2903` "writes each view's header, always, and the row a
@@ -2870,6 +3444,16 @@ byte for byte, as it writes it".
   (§7.1). Nothing on the surface can un-collapse it; `issues_list` counts are
   the row-level truth.
 - No tenancy isolation on listing (§9.3).
+- `crawl_config_set`'s "rules are running" refusal (§4.9) sees only the rules
+  runs of ITS OWN server process, as `crawl_rules`' own "already being judged"
+  refusal does. A run started by another process can read the block a moment
+  before a change lands; it stamps the block it read, so `judgementStale` still
+  tells the truth afterwards, and the next run picks the change up.
+- A stored judgement block and stamp are validated against the CURRENT
+  ruleset's allowlist and ranges when read. A later release that narrows a
+  threshold's range or removes a rule makes an older crawl's block refuse to
+  load (409 for a removed rule, repairable with `crawl_config_set`; a loud error
+  otherwise), never silently "no overrides".
 
 ## Cross-references
 
@@ -2878,4 +3462,8 @@ byte for byte, as it writes it".
 - `docs/gates/phase-10.md` and `docs/gates/phase-11.md` — the measurements
   behind this file's Phase 10 and Phase 11 numbers; each number here also names
   the test or the measurement it came from directly.
+- `docs/gates/phase-27a.md` — the Phase 27a gate: the overviews reconciled with
+  `issues_list`, `issue_urls` and `crawl_status` on the stored lavishalice crawl,
+  the override round trip, and every rule whose type or priority differs from
+  Screaming Frog's.
 - `skills/ariadne-audit/checklist.md` — the checks the rules trace to.
