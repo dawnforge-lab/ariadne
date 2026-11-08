@@ -3060,6 +3060,8 @@ export class ApiService {
         // part-way — a state the surface already documents and handles — until
         // `crawl_rules` re-judges the finished crawl and rewrites them.
         rulesRunAt: null,
+        // The stamp of what that judgement used goes with it: non-null exactly when `rules_run_at` is (27a).
+        rulesJudgedWith: null,
         // AND THE FAILURE SENTENCE, by `finishedAt`'s argument again: the
         // column's contract is `failure_reason IS NOT NULL` ⟹ `status =
         // 'failed'` (migration 0017), so a queued row still carrying why the
