@@ -132,19 +132,21 @@ export async function loadJudgementView(
 }
 
 /**
- * `loadJudgementView` over a crawl row the caller already holds — for a
- * surface whose answer must come out of ONE read of the row (`crawl_status`,
- * whose `rulesRunAt` and `judgementStale` describe the same instant, and
- * `crawl_compare`, which reads both sides inside its snapshot). Same refusals.
+ * A crawl's stored judgement block as the API surfaces read it: `readStoredJudgement`,
+ * with an override of a rule this ruleset lacks (one a later ruleset removed)
+ * answered as `CONFLICT` naming the crawl and the rule, the way a stored finding
+ * of a removed rule is (`ruleFor` in service.ts). `crawl_config_set` is the way
+ * out, and the message says so. Every other refusal is the loud error the rules
+ * layer threw. Shared by the read surfaces and `crawl_rules`, which refuses with
+ * the same text before it claims the crawl or touches a row.
  */
-export function judgementViewOf(
-  row: JudgementRow,
+export function readJudgementBlock(
+  raw: unknown,
   crawlId: string,
   registry: Registry,
-): JudgementView {
-  let block: JudgementBlock | null;
+): JudgementBlock | null {
   try {
-    block = readStoredJudgement(row.judgement, crawlId, registry);
+    return readStoredJudgement(raw, crawlId, registry);
   } catch (error) {
     if (error instanceof JudgementError && error.reason === "unknown-rule") {
       const ruleId = error.path.startsWith("rules.")
@@ -159,6 +161,20 @@ export function judgementViewOf(
     }
     throw error;
   }
+}
+
+/**
+ * `loadJudgementView` over a crawl row the caller already holds — for a
+ * surface whose answer must come out of ONE read of the row (`crawl_status`,
+ * whose `rulesRunAt` and `judgementStale` describe the same instant, and
+ * `crawl_compare`, which reads both sides inside its snapshot). Same refusals.
+ */
+export function judgementViewOf(
+  row: JudgementRow,
+  crawlId: string,
+  registry: Registry,
+): JudgementView {
+  const block = readJudgementBlock(row.judgement, crawlId, registry);
 
   const rules = new Map(registry.all().map((rule) => [rule.id, rule]));
   const findingRule = (ruleId: string): Exclude<AnyRule, { kind: "metric" }> => {

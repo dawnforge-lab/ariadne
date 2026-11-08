@@ -27,7 +27,7 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 
 import { closeDb, createDb, type Db } from "../../src/db/client.js";
 import { runMigrations } from "../../src/db/migrate.js";
-import { crawls, pages } from "../../src/db/schema.js";
+import { crawls, issues, pages } from "../../src/db/schema.js";
 import { closeFetchAgents } from "../../src/crawl/http.js";
 import { createApiServer, type ApiServer } from "../../src/api/http.js";
 import { createMcpServer, TOOL_NAMES, type AriadneMcpServer } from "../../src/api/mcp.js";
@@ -474,6 +474,43 @@ describe("crawl_config_set — PATCH /crawls/:id/config", () => {
     const res = await patch(judgedId, { judgement: { rules: { "gone.rule": null } } });
     expect(res.status).toBe(200);
     expect(res.body["judgement"]).toEqual({});
+  });
+
+  it("crawl_rules 409s a stored override of a removed rule, touching nothing", async () => {
+    const judged = async () => {
+      const rows = await db
+        .select({ rulesRunAt: crawls.rulesRunAt, rulesJudgedWith: crawls.rulesJudgedWith })
+        .from(crawls)
+        .where(eq(crawls.id, judgedId));
+      const findings = await db
+        .select({ key: issues.dedupeKey, ruleId: issues.ruleId, details: issues.details })
+        .from(issues)
+        .where(eq(issues.crawlId, judgedId));
+      return { row: rows[0], findings: findings.map((f) => JSON.stringify(f)).sort() };
+    };
+    const before = await judged();
+    expect(before.row?.rulesRunAt).not.toBeNull();
+    expect(before.findings.length).toBeGreaterThan(0);
+    await db
+      .update(crawls)
+      .set({ judgement: { rules: { "gone.rule": { disabled: true } } } })
+      .where(eq(crawls.id, judgedId));
+    try {
+      const res = await call("POST", `/crawls/${judgedId}/rules`);
+      expect(res.status).toBe(409);
+      const error = String(res.body["error"]);
+      expect(error).toContain(`crawl ${judgedId}'s stored judgement overrides rule 'gone.rule'`);
+      expect(error).toContain("crawl_config_set");
+      // The read surfaces answer the same text.
+      expect((await call("GET", `/crawls/${judgedId}/config`)).body["error"]).toBe(error);
+      // Refused before anything was claimed or written: the findings, the
+      // judged marker and the stamp are exactly as they were.
+      expect(await judged()).toEqual(before);
+    } finally {
+      await db.update(crawls).set({ judgement: {} }).where(eq(crawls.id, judgedId));
+    }
+    // And the crawl is not left held: once repaired, a run goes through.
+    expect((await call("POST", `/crawls/${judgedId}/rules`)).status).toBe(200);
   });
 
   it("409s while a rules run is in flight for the crawl, and not after", async () => {

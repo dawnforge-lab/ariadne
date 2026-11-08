@@ -177,6 +177,7 @@ import {
   loadJudgementView,
   mergePatch,
   notDisabled,
+  readJudgementBlock,
   refuseIfDisabled,
   storableBlock,
   triageFields,
@@ -3505,6 +3506,15 @@ export class ApiService {
           `has stopped, or they would judge a site that is still being fetched`,
       );
     }
+    // The stored judgement block, validated before the crawl is claimed or a
+    // row is touched: an override of a rule this ruleset lacks (a later
+    // ruleset removed it) is the CONFLICT the read surfaces answer, naming the
+    // crawl and the rule and pointing at crawl_config_set — not the bare
+    // `JudgementError` `runRules` would throw, which a transport answers 500.
+    // Synchronous, like the claim below, so nothing can move between the two.
+    // `crawl_config_set` validates against this registry, so a block that
+    // passes here cannot gain an unknown rule before `runRules` reads it.
+    readJudgementBlock(row.judgement, crawlId, this.registry);
     // Check and claim in ONE synchronous step — no `await` between them — so
     // two callers that both got past the status read cannot both see an
     // unheld crawl.
