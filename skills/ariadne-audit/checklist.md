@@ -1653,7 +1653,8 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
 - **Priority**: High | **Requires**: Engine
 - **Engine**: `issues_list` with `checkId: "CHECK-25"` — three rules:
   - `hreflang.invalid-code` (critical) — a declared code that is not a valid
-    language, or language-region, value
+    language, or language-region, value, on a page that served content (a 200);
+    a redirect's or an error page's annotations are not judged, as in CHECK-24
   - `hreflang.missing-x-default` (info) — a cluster with no `x-default` member
   - `hreflang.html-lang-mismatch` (info) — a page whose `<html lang>` primary language
     differs from its own self-referencing hreflang codes (region is not compared)

@@ -719,11 +719,18 @@ export const hreflangRules: QueryRule[] = [
     ],
     ...copyFor(INVALID_CODE.id),
     rulesetVersion: RULESET_VERSION,
-    // The validity test runs in JS over the crawl's hreflang rows, streamed
-    // once — acceptable at this scale. A site with millions of declarations
-    // would want the pattern pushed into SQL.
+    // The validity test runs in JS over the crawl's hreflang rows, read in
+    // keyset batches of `HREFLANG_PAGE_BATCH` declaring pages (final review
+    // I6): Phase 26c's header and sitemap sources can triple the table, so one
+    // unbounded read is O(declarations). A page's rows all land in one batch,
+    // so its (page, code) groups are whole there; RAM is O(batch + findings).
+    //
+    // Only a declaring page that serves content is judged (`FETCHED_OK`,
+    // ruling R14), as in every other rule in this file: a 301's `Link` header,
+    // a 404's inherited block and a robots-blocked row's sitemap entry are not
+    // a version anyone ranks, and their own rows already say why.
     run: async (db, crawlId): Promise<Finding[]> => {
-      const res = await db.execute<{
+      type Row = {
         page_id: string;
         hreflang_code: string;
         target_url: string;
@@ -731,11 +738,7 @@ export const hreflangRules: QueryRule[] = [
         page_url: string;
         canonical_html: string | null;
         canonical_header: string | null;
-      }>(sql`
-        select h.page_id, h.hreflang_code, h.target_url, h.source, p.url as page_url,
-               p.canonical_html, p.canonical_header
-        from hreflang h join pages p on p.id = h.page_id
-        where h.crawl_id = ${crawlId}`);
+      };
 
       // ONE FINDING PER DISTINCT (page, trimmed code) — not per declaration
       // row, which is what this used to be.
@@ -767,10 +770,11 @@ export const hreflangRules: QueryRule[] = [
       const groups = new Map<string, Group>();
       // The canonical exclusion, per page rather than per row: this rule does
       // not use the declaration-set walk, so it applies the same test itself.
-      const canonicalised = new Map<string, boolean>();
-      for (const row of res.rows) {
+      // Reset per batch: a page id is in exactly one batch.
+      let canonicalised = new Map<string, boolean>();
+      const judge = (row: Row): void => {
         const code = String(row.hreflang_code).trim();
-        if (isXDefault(code) || HREFLANG_CODE.test(code)) continue;
+        if (isXDefault(code) || HREFLANG_CODE.test(code)) return;
         const pageUrl = String(row.page_url);
         const pageId = String(row.page_id);
         let elsewhere = canonicalised.get(pageId);
@@ -782,7 +786,7 @@ export const hreflangRules: QueryRule[] = [
           });
           canonicalised.set(pageId, elsewhere);
         }
-        if (elsewhere) continue;
+        if (elsewhere) return;
         const dedupeKey = `${pageUrl}#${code}`;
         let group = groups.get(dedupeKey);
         if (group === undefined) {
@@ -799,6 +803,31 @@ export const hreflangRules: QueryRule[] = [
         group.occurrences += 1;
         group.targets.add(String(row.target_url));
         group.sources.add(String(row.source));
+      };
+
+      // The `eachDeclarationSet` keyset: page ids first, the cursor advanced
+      // from them, then that batch's rows.
+      let cursor = "";
+      for (;;) {
+        const ids = await db.execute<{ page_id: string }>(sql`
+          select distinct h.page_id
+          from hreflang h
+          join pages p on p.id = h.page_id
+          where h.crawl_id = ${crawlId} and h.page_id > ${cursor}
+            and ${FETCHED_OK("p")}
+          order by h.page_id
+          limit ${HREFLANG_PAGE_BATCH}`);
+        if (ids.rows.length === 0) break;
+        const pageIds = ids.rows.map((r) => String(r.page_id));
+        cursor = pageIds[pageIds.length - 1]!;
+        const batch = await db.execute<Row>(sql`
+          select h.page_id, h.hreflang_code, h.target_url, h.source, p.url as page_url,
+                 p.canonical_html, p.canonical_header
+          from hreflang h join pages p on p.id = h.page_id
+          where h.crawl_id = ${crawlId}
+            and h.page_id = any(${sql.param(pageIds)}::text[])`);
+        canonicalised = new Map<string, boolean>();
+        for (const row of batch.rows) judge(row);
       }
 
       return [...groups].map(([dedupeKey, group]) => {

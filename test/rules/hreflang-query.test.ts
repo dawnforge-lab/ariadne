@@ -6,7 +6,7 @@ import { runMigrations } from "../../src/db/migrate.js";
 import { crawls, hreflang, pages, sitemapHreflang } from "../../src/db/schema.js";
 import { deriveSitemapHreflang } from "../../src/rules/derive/sitemap-hreflang.js";
 import { URL_FINDING_CAP } from "../../src/rules/query/crawl-evidence.js";
-import { ALTERNATE_HOST_CAP, hreflangRules } from "../../src/rules/query/hreflang.js";
+import { ALTERNATE_HOST_CAP, HREFLANG_PAGE_BATCH, hreflangRules } from "../../src/rules/query/hreflang.js";
 import type { Finding, QueryRule } from "../../src/rules/registry/types.js";
 import { writerIndexable, type IndexabilitySpec } from "./mk-page.js";
 
@@ -327,6 +327,57 @@ describe("hreflangRules against the database", () => {
 
       const found = await findings("hreflang.invalid-code", crawlId);
       expect(found.map((f) => f.evidence.sources)).toEqual([["sitemap"]]);
+    });
+
+    // Final review I6: the rule reads the table in page-id batches. A page's
+    // rows never split across two batches, so a crawl one page past the batch
+    // size gives the findings one unbounded read would.
+    it("reads in page batches and gives the same findings across a batch boundary", async () => {
+      const crawlId = await newCrawl();
+      const paths = Array.from({ length: HREFLANG_PAGE_BATCH + 1 }, (_, i) => `/batch-${i}`);
+      const ids = await addPages(crawlId, paths);
+      await db.insert(hreflang).values(
+        paths.flatMap((path) => [
+          // Two rows of one invalid code per page, from two sources, and a valid one.
+          { crawlId, pageId: ids.get(path)!, hreflangCode: "english-uk", targetUrl: url(`${path}/uk`), targetPageId: null, source: "html" },
+          { crawlId, pageId: ids.get(path)!, hreflangCode: "english-uk ", targetUrl: url(`${path}/uk`), targetPageId: null, source: "sitemap" },
+          { crawlId, pageId: ids.get(path)!, hreflangCode: "en", targetUrl: url(path), targetPageId: null, source: "html" },
+        ]),
+      );
+
+      const found = await findings("hreflang.invalid-code", crawlId);
+      expect(found).toHaveLength(HREFLANG_PAGE_BATCH + 1);
+      expect(found.map((f) => f.dedupeKey).sort()).toEqual(paths.map((p) => `${url(p)}#english-uk`).sort());
+      for (const f of found) {
+        expect(f.evidence).toEqual({
+          code: "english-uk",
+          targetUrl: `${f.pageUrl}/uk`,
+          occurrences: 2,
+          sources: ["html", "sitemap"],
+        });
+      }
+    });
+
+    // Ruling R14: a declaring page that serves no content is not judged.
+    it("is silent on a 301 declarer with an invalid code, and fires on a 200 one", async () => {
+      const crawlId = await newCrawl();
+      const ids = await addPages(crawlId, [
+        { path: "/moved", fetchClass: "redirect", statusCode: 301 },
+        { path: "/gone", fetchClass: "ok", statusCode: 404 },
+        "/served",
+      ]);
+      for (const path of ["/moved", "/gone", "/served"]) {
+        await addHreflang(crawlId, ids.get(path)!, [["english-uk", url("/uk")]], "header");
+      }
+
+      const found = await findings("hreflang.invalid-code", crawlId);
+      expect(found.map((f) => f.pageUrl)).toEqual([url("/served")]);
+      expect(found[0]!.evidence).toEqual({
+        code: "english-uk",
+        targetUrl: url("/uk"),
+        occurrences: 1,
+        sources: ["header"],
+      });
     });
 
     it("reads only its own crawl", async () => {
