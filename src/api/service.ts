@@ -1962,6 +1962,14 @@ export interface CsvExportResult {
   /** DATA rows. The header is always written and is never counted here. */
   rows: number;
   bytes: number;
+  /**
+   * The rules the crawl's judgement disables, whose findings the file leaves
+   * out — present on the four views that read findings (`issues`,
+   * `issue_urls`, `issues_overview`, `crawl_overview`), as on the `issues`
+   * JSONL dataset's answer, so a reader can tell "filtered out" from "did not
+   * fire". Absent on the views that read no findings.
+   */
+  disabledRules?: string[];
 }
 
 /** A prepared CSV stream: validated, not yet read. */
@@ -1972,6 +1980,11 @@ export interface CsvStream {
   metricId: string | null;
   /** Deterministic per (crawl, view, rule) — what a browser saves it as. */
   filename: string;
+  /**
+   * The disabled rules the file leaves out, read with the rows' judgement;
+   * null on a view that reads no findings (`CsvExportResult.disabledRules`).
+   */
+  disabledRules: string[] | null;
   /**
    * The file, record by record, header first.
    *
@@ -4043,6 +4056,13 @@ export class ApiService {
    * `NOT_FOUND` `getCrawl` answers.
    */
   async crawlOverview(crawlId: string): Promise<CrawlOverview> {
+    return (await this.crawlOverviewRead(crawlId)).overview;
+  }
+
+  /** `crawlOverview` with the judgement view it was built under (one snapshot). */
+  private async crawlOverviewRead(
+    crawlId: string,
+  ): Promise<{ overview: CrawlOverview; view: JudgementView }> {
     return await buildCrawlOverview(
       this.db,
       crawlId,
@@ -4864,6 +4884,7 @@ export class ApiService {
         // The header is written and is not a row. `written` counts records.
         rows: written - 1,
         bytes,
+        ...(stream.disabledRules === null ? {} : { disabledRules: stream.disabledRules }),
       };
     }
 
@@ -5103,6 +5124,7 @@ export class ApiService {
       ruleId,
       metricId: null,
       filename: csvFilename(slug(crawlId), view, ruleId === null ? null : slug(ruleId)),
+      disabledRules: judged === null ? null : judged.disabledRules,
       async *records(): AsyncGenerator<string> {
         // THE HEADER IS UNCONDITIONAL. A zero-row CSV with no header is a file
         // that cannot say what it failed to contain, and a reader would have to
@@ -5141,6 +5163,7 @@ export class ApiService {
       ruleId: null,
       metricId: null,
       filename: csvFilename(slug(crawlId), "issues_overview", null),
+      disabledRules: overview.disabledRules,
       async *records(): AsyncGenerator<string> {
         yield csvRecord(ISSUES_OVERVIEW_HEADER);
         for (const row of overview.rows) {
@@ -5157,12 +5180,14 @@ export class ApiService {
    * torn socket); bounded by the sections, not by the site.
    */
   private async crawlOverviewStream(crawlId: string): Promise<CsvStream> {
-    const overview = await this.crawlOverview(crawlId);
+    const { overview, view } = await this.crawlOverviewRead(crawlId);
     return {
       view: "crawl_overview",
       ruleId: null,
       metricId: null,
       filename: csvFilename(slug(crawlId), "crawl_overview", null),
+      // Its issues grid leaves the disabled rules' findings out.
+      disabledRules: view.disabledRules,
       async *records(): AsyncGenerator<string> {
         yield csvRecord(CRAWL_OVERVIEW_HEADER);
         for (const cells of crawlOverviewRecords(overview)) yield csvRecord(cells);
@@ -5199,6 +5224,7 @@ export class ApiService {
       ruleId: null,
       metricId,
       filename: csvFilename(slug(crawlId), "metric_table", slug(metricId)),
+      disabledRules: null,
       async *records(): AsyncGenerator<string> {
         yield csvRecord(metricTableHeader(table));
         for (const row of table.rows) yield csvRecord(metricTableCells(table, row));

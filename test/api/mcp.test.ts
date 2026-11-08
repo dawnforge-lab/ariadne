@@ -2884,8 +2884,12 @@ describe("the two transports answer with one shape", () => {
     expect(streamed.text).toBe(file);
     // Not vacuously equal: a header and the crawl's five findings.
     expect(file.trimEnd().split("\r\n")).toHaveLength(6);
-    // The MCP answer says where the file is; the HTTP answer IS the file.
-    expect(Object.keys(written).sort()).toEqual(["bytes", "format", "path", "rows", "view"]);
+    // The MCP answer says where the file is (and, on a view that reads
+    // findings, which rules the judgement left out); the HTTP answer IS the file.
+    expect(Object.keys(written).sort()).toEqual([
+      "bytes", "disabledRules", "format", "path", "rows", "view",
+    ]);
+    expect(written["disabledRules"]).toEqual([]);
     expect(streamed.body).toBeNull();
   });
 

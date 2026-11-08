@@ -22,7 +22,13 @@ import { gunzipSync } from "node:zlib";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { eq } from "drizzle-orm";
 
-import { ApiService, type ExportResult, type IssueGroup } from "../../src/api/service.js";
+import { CSV_VIEWS } from "../../src/api/csv.js";
+import {
+  ApiService,
+  type CsvExportResult,
+  type ExportResult,
+  type IssueGroup,
+} from "../../src/api/service.js";
 import { closeDb, createDb, type Db } from "../../src/db/client.js";
 import { runMigrations } from "../../src/db/migrate.js";
 import { crawls, pages } from "../../src/db/schema.js";
@@ -216,6 +222,35 @@ describe("rule overrides apply at read time", () => {
     await expect(
       service.prepareCsvExport(crawlId, { view: "issue_urls", ruleId: "title.too-long" }),
     ).rejects.toMatchObject({ code: "CONFLICT" });
+  });
+
+  it("the CSV export answer names the disabled rules on the four views that read findings", async () => {
+    await setJudgement(OVERRIDES);
+    const FINDINGS_VIEWS = new Set(["issues", "issue_urls", "issues_overview", "crawl_overview"]);
+    for (const view of CSV_VIEWS) {
+      const opts =
+        view === "issue_urls"
+          ? { view, ruleId: "meta-description.missing" }
+          : view === "metric_table"
+            ? { view, metricId: "site.health" }
+            : { view };
+      const result = (await service.exportCrawl(crawlId, {
+        format: "csv",
+        ...opts,
+      })) as CsvExportResult;
+      if (FINDINGS_VIEWS.has(view)) {
+        expect(result.disabledRules, view).toEqual(["title.too-long"]);
+      } else {
+        expect(result, view).not.toHaveProperty("disabledRules");
+      }
+    }
+    // An empty disabled set is stated, not omitted.
+    await setJudgement({});
+    const clean = (await service.exportCrawl(crawlId, {
+      format: "csv",
+      view: "issues_overview",
+    })) as CsvExportResult;
+    expect(clean.disabledRules).toEqual([]);
   });
 
   it("the JSONL issues export leaves out the disabled rule and names it in its manifest", async () => {

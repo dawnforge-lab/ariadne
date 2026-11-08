@@ -759,7 +759,7 @@ export async function buildCrawlOverview(
   registry: Registry,
   loadDetail: (reader: SnapshotReader) => Promise<CrawlOverviewDetail>,
   ruleFor: (ruleId: string) => AnyRule,
-): Promise<CrawlOverview> {
+): Promise<{ overview: CrawlOverview; view: JudgementView }> {
   return await inSnapshot(db, async (tx) => {
     // The detail first: an unknown crawl is its NOT_FOUND.
     const detail = await loadDetail(tx);
@@ -792,6 +792,9 @@ export async function buildCrawlOverview(
     if (judged) sections.push(await issuesGridSection(tx, crawlId, view, ruleFor));
     else skip("issues-grid");
 
-    return { crawlId, sections, notMeasured, judgementStale: view.judgementStale };
+    return {
+      overview: { crawlId, sections, notMeasured, judgementStale: view.judgementStale },
+      view,
+    };
   });
 }

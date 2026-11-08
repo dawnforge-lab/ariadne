@@ -1589,8 +1589,11 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "(default issues). issue_urls is one rule's findings and needs a ruleId; " +
         "metric_table is one metric's table and needs a metricId; issues_overview is " +
         "the issues_overview tool's one-row-per-rule table; crawl_overview is the " +
-        "crawl_overview tool's sections as Section,Label,Value,Percent rows; the other six " +
-        "refuse both. Answers {format, view, path, rows, bytes}.\n" +
+        "crawl_overview tool's sections as Section,Label,Value,Percent rows; the other " +
+        "seven, like the two overviews, refuse both. Answers {format, view, path, rows, " +
+        "bytes}, plus disabledRules on the four views that read findings (issues, " +
+        "issue_urls, issues_overview, crawl_overview): the rules the crawl's judgement " +
+        "disables, whose findings the file leaves out.\n" +
         "  metric_table is the spreadsheet of the metric_table tool's table: the " +
         "header is the column LABELS, one row per table row, and the metric's " +
         "summary scalars lead every row as extra columns — a CSV has no place " +

@@ -673,7 +673,7 @@ Two properties make the double-transport claim below cheap to trust:
   answers are `toEqual`. `test/api/mcp.test.ts:2816` ("refuses in the same
   words, whichever transport asked") does the same for five refusals — the same
   sentence and the mapped status. `test/api/mcp.test.ts:2873` ("streams the
-  bytes the other transport writes to a file") and `test/api/mcp.test.ts:2895`
+  bytes the other transport writes to a file") and `test/api/mcp.test.ts:2899`
   ("streams the resources view byte for byte") assert the CSV a route streams is
   byte-identical to the file the tool writes, for the `issues` and `resources`
   views.
@@ -719,7 +719,7 @@ Two properties make the double-transport claim below cheap to trust:
   names *which* thing was wrong — missing header, wrong scheme, wrong token.
 - **MCP asks for no credential** and that is a posture, not an omission: an
   stdio client either started this process or was handed its pipes
-  (`test/api/mcp.test.ts:2999` "asks for no bearer token: an stdio client is the
+  (`test/api/mcp.test.ts:3003` "asks for no bearer token: an stdio client is the
   process that started this one"). If Ariadne's MCP server is ever mounted on a
   network transport, that argument dies with the change and a credential has to
   arrive with it.
@@ -761,7 +761,7 @@ Two properties make the double-transport claim below cheap to trust:
 | A defect of ours | 500 `{error: "internal error", correlationId}` | `{error: "internal error", correlationId}` |
 
 `correlationId` is a UUID; the stack goes to the server log under that id and
-nowhere else (`test/api/mcp.test.ts:2922` "turns an unexpected throw into a tool
+nowhere else (`test/api/mcp.test.ts:2926` "turns an unexpected throw into a tool
 error with a correlation id", `test/api/http.test.ts:2160` "turns an unexpected
 throw into a 500 with a correlation id").
 
@@ -1372,7 +1372,7 @@ are stored, but its group is left out. The filter is SQL, so `count`,
 never fired. This field is how a reader tells "filtered out" from "did not
 fire". **`judgementStale`** is `crawl_status`'s flag (§4.2), carried on the
 listing so a dashboard drawing it needs no second call. Pinned:
-`test/api/judgement-surfaces.test.ts:133` "issues_list drops the disabled rule,
+`test/api/judgement-surfaces.test.ts:139` "issues_list drops the disabled rule,
 names it, and carries the overrides".
 
 Pinned: `test/api/query.test.ts:1080` "groups by rule, orders by severity then
@@ -1617,9 +1617,9 @@ and an empty page here would read as "this rule found nothing". The gate crawl
 answered `rule 'title.same-as-h1' is disabled on crawl
 'crawl_4dd32709-56c9-4a62-9af4-7a843f76ff6c'; re-enable it with crawl_config_set
 to list its findings`. `issue_inlinks` refuses a disabled rule the same way.
-Pinned: `test/api/judgement-surfaces.test.ts:159` "issue_urls and issue_inlinks
+Pinned: `test/api/judgement-surfaces.test.ts:165` "issue_urls and issue_inlinks
 refuse a disabled rule with CONFLICT naming it",
-`test/api/judgement-surfaces.test.ts:214` "the issue_urls CSV of a disabled
+`test/api/judgement-surfaces.test.ts:220` "the issue_urls CSV of a disabled
 rule is refused before a byte".
 
 ### 4.4a `issue_inlinks` → `{columns, items, nextCursor}` — the links that point at it
@@ -2038,9 +2038,9 @@ never a silent return to the default"), over MCP `test/api/judgement-config.test
 `test/api/judgement-config.test.ts:654` "crawl_config_set refuses severity with
 the HTTP route's text", `test/api/judgement-config.test.ts:717` "brings the group
 back at once while site.health keeps the disabled run's value",
-`test/api/judgement-surfaces.test.ts:265` "re-enabling brings the findings back
+`test/api/judgement-surfaces.test.ts:300` "re-enabling brings the findings back
 at once, and the judgement is no longer stale" and
-`test/api/judgement-surfaces.test.ts:278` "quotes the stamped value until the
+`test/api/judgement-surfaces.test.ts:313` "quotes the stamped value until the
 rules re-run, and reports the staleness".
 
 ---
@@ -2094,9 +2094,9 @@ the crawl's findings were judged with) and `judgementStale`; and the copy is
 rendered from those thresholds, so an override shows in the text only after
 `crawl_rules` re-runs (the gate crawl's `performance.slow-response` title read
 "Response time over 1500 ms" with `SLOW_MS: 500` set and stale, and "over 500
-ms" after the re-run). Pinned: `test/api/judgement-surfaces.test.ts:176`
+ms" after the re-run). Pinned: `test/api/judgement-surfaces.test.ts:182`
 "rules_catalog keeps the disabled rule, flags it, and still counts its stored
-findings", `test/api/judgement-surfaces.test.ts:301` "without a crawl the
+findings", `test/api/judgement-surfaces.test.ts:336` "without a crawl the
 catalog is the default rendering, with type and priority and no judgement
 fields".
 
@@ -2428,7 +2428,7 @@ robots.txt answers 502); `test/db/migration-0017.test.ts:258` "clears the
 sentence when the failed crawl is resumed" (the implication over a RESUME, which
 is the one move that changes the status without closing the crawl — the fixture
 holds the robots request so the row is read mid-run);
-`test/api/mcp.test.ts:3150` "clears the failure sentence of the crawl a resume
+`test/api/mcp.test.ts:3154` "clears the failure sentence of the crawl a resume
 accepts" (the same, over the queue's own writer and on the wire);
 `test/api/query.test.ts:4208` "tells a pre-0017 failed
 crawl apart from a crawl that did not fail" (the two nulls, on the wire).
@@ -3209,8 +3209,11 @@ Three consequences a consumer must plan for:
 `GET /crawls/:id/export?format=csv&view=<view>` streams `text/csv; charset=utf-8`,
 chunked, with no `Content-Length` and a `Content-Disposition` filename. The MCP
 tool writes the same bytes to a file under the server's export directory and
-answers `{format, view, ruleId?, path, rows, bytes}`. `rows` counts **data
-rows**; the header is always written and never counted.
+answers `{format, view, ruleId?, metricId?, path, rows, bytes, disabledRules?}`.
+`rows` counts **data rows**; the header is always written and never counted.
+`disabledRules` is on the answer of the four views that read findings
+(`issues`, `issue_urls`, `issues_overview`, `crawl_overview`) and absent on the
+rest.
 
 | view | columns | one row is | measured on `crawl_02ff6f7a` |
 |---|---|---|---|
@@ -3230,12 +3233,18 @@ Semantics a consumer must repeat to its own users:
 
 - **The crawl's judgement is applied (Phase 27a).** The `issues` view's `type`
   and `priority` columns are the crawl's, after its overrides, and a rule the
-  judgement disables has no rows in it; the export answer names those rules in
-  `disabledRules`, as the `issues` JSONL dataset's does. The `issue_urls` view of
-  a disabled rule is refused before the first byte (409). On the gate crawl,
+  judgement disables has no rows in it. The MCP `export_crawl` answer names
+  those rules in `disabledRules`, as the `issues` JSONL dataset's does, for the
+  `issues`, `issue_urls`, `issues_overview` and `crawl_overview` views (the
+  last leaves them out of its issues grid). The HTTP route streams the file and
+  carries no metadata headers beyond `Content-Type` / `Content-Disposition`, so
+  a dashboard downloading over HTTP reads the disabled set from
+  `crawl_config_get` (`GET /crawls/:id/config`, its `judgement.rules`) or from
+  the JSON listing's `disabledRules` (`GET /crawls/:id/issues`, §4.3). The
+  `issue_urls` view of a disabled rule is refused before the first byte (409). On the gate crawl,
   with `title.same-as-h1` disabled, the `issues` view held 2,864 rows, its
   3,202 findings less that rule's 338
-  (`test/api/judgement-surfaces.test.ts:203` "the issues CSV carries type and
+  (`test/api/judgement-surfaces.test.ts:209` "the issues CSV carries type and
   priority and leaves out the disabled rule").
 - **`issues_overview` is the Issues Overview as a sheet** (Phase 27a): the
   JSON's rows in the JSON's order, with `Issue Name` the rule's title and
@@ -3366,7 +3375,7 @@ answer", `test/api/query.test.ts:3376` "refuses a crawl holding a retired rule's
 findings BEFORE the header", `test/api/http.test.ts:2036` "tears the response
 when a CSV export fails mid-stream, rather than truncating the file";
 `test/api/mcp.test.ts:810` "describes the shape of the CSV it writes, not just
-that it writes one" and `test/api/mcp.test.ts:2895` "streams the resources view
+that it writes one" and `test/api/mcp.test.ts:2899` "streams the resources view
 byte for byte, as it writes it".
 
 ---
