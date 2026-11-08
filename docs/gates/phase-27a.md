@@ -5,8 +5,13 @@ Date: 2026-11-08. Spec: `docs/superpowers/specs/2026-11-08-phase-27-agent-contro
 `docs/superpowers/plans/2026-11-08-phase-27a-judgement-and-overviews.md`. Branch
 `worktree-phase-27`, built on `cb63104` (the design commit over `bc9ce32`, PR #24's merge).
 Every figure below was measured on the code of `4b008a1` (Task 9's last commit) plus this
-task's documentation commit, which changes no behaviour: two description sentences in
-`src/api/mcp.ts` / `src/api/service.ts` and the identifier guard's vocabulary. The gate is
+task's documentation commit (`db91923`), which changes no behaviour. Its `src/` edits
+are text only: the `crawl_status` description in `src/api/mcp.ts`, the
+`CrawlDetail.findingsCount` docblock in `src/api/service.ts`, and item 9 of the
+version note in `src/rules/registry/registry.ts`; its test edit widens the identifier
+guard's vocabulary. The one behaviour change after the gate, the fix in §7, makes the
+Crawl Overview's `crawl_status` reads sequential on its transaction and moves no
+number. The gate is
 **local database work only**: the stored lavishalice crawl was re-judged and read, and
 nothing was crawled, rendered or fetched. Raw outputs and the gate scripts are in the
 git-ignored SDD workspace (`.superpowers/sdd/2026-11-08-phase-27a-judgement-and-overviews/gate27a/`).
@@ -532,11 +537,19 @@ effect that a stored override of a removed rule is a 409 naming the rule.
   meanwhile.
 - **`GET /crawls/:id/overview/issues` has no route test.** The gate compared it live
   (§3); a pair in the transport-equality test would pin it.
-- **`pg` deprecation warning from the Crawl Overview.** Reading `crawl_status`'s
-  detail inside the overview's transaction issues its statements together on one
-  connection (`Promise.all`); `pg` 8 queues them and warns "Calling client.query() when
-  the client is already executing a query is deprecated and will be removed in pg@9.0".
-  Correct today; a `pg` 9 upgrade must serialise them.
+- **Fixed after the gate: the `pg` deprecation warning from the Crawl Overview.** The
+  gate's live run printed "Calling client.query() when the client is already executing
+  a query is deprecated and will be removed in pg@9.0" on every `crawl_overview` call,
+  the CSV included. `crawlDetailOn` ran `crawl_status`'s six detail reads in a
+  `Promise.all`, and inside the overview's snapshot transaction they all landed on one
+  client, which `pg` 8 queues and `pg` 9 will not. The reads now run one after another
+  on a transaction and stay parallel on the pool, so `crawl_status` is unchanged. A test
+  in `test/api/crawl-overview.test.ts` ("never issues a query while another is in
+  flight on its client, and emits no warning") watches the client directly, because
+  Node prints that deprecation only once per process. It failed with 20 overlapping
+  queries against the old code and passes now. Re-run after the fix: `test/api`
+  10 files / 483 tests green with no warning in the output, `tsc` clean, and the four
+  live route-versus-tool comparisons (§3) still equal, with no warning printed.
 - **`H1_MAX` / `H2_MAX` accept 300**, the extraction cap on stored heading text, so an
   override of 300 leaves `h1.too-long` / `h2.too-long` unable to fire. A range of
   1–299 would close it.

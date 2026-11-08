@@ -10,6 +10,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { eq, sql } from "drizzle-orm";
+import pg from "pg";
 
 import { csvRecord } from "../../src/api/csv.js";
 import { createApiServer } from "../../src/api/http.js";
@@ -580,5 +581,65 @@ describe("crawl_overview CSV", () => {
     expect(lines).toContain(
       "click-depth,Not measured: click depth is derived by the rules run; run crawl_rules,,\r\n",
     );
+  });
+});
+
+/**
+ * A transaction holds ONE pg client, and pg 8 queues a second `query()` issued
+ * while the first is in flight, warns that the queueing is deprecated, and pg 9
+ * removes it. The overview reads `crawl_status`'s detail inside its snapshot,
+ * so those reads must be issued one at a time there (27a T10 fix).
+ *
+ * The deprecation is a `util.deprecate` notice, which Node prints ONCE per
+ * process: a listener alone would miss it if an earlier test in the same worker
+ * had already triggered it. So the test also watches the client directly and
+ * fails on any query issued while another is in flight on the same client.
+ */
+describe("crawl_overview on one pg client", () => {
+  it("never issues a query while another is in flight on its client, and emits no warning", async () => {
+    const proto = pg.Client.prototype as unknown as { query: (...args: unknown[]) => unknown };
+    const original = proto.query;
+    const inFlight = new WeakMap<object, number>();
+    const overlaps: string[] = [];
+    const warnings: string[] = [];
+    const onWarning = (w: Error): void => {
+      warnings.push(`${w.name}: ${w.message}`);
+    };
+    proto.query = function (this: object, ...args: unknown[]): unknown {
+      const n = inFlight.get(this) ?? 0;
+      if (n > 0) {
+        const first = args[0];
+        const text = typeof first === "string" ? first : (first as { text?: string } | undefined)?.text;
+        overlaps.push(String(text).slice(0, 80));
+      }
+      inFlight.set(this, n + 1);
+      const done = (): void => {
+        inFlight.set(this, (inFlight.get(this) ?? 1) - 1);
+      };
+      const last = args.at(-1);
+      if (typeof last === "function") {
+        args[args.length - 1] = (...cb: unknown[]): unknown => {
+          done();
+          return (last as (...a: unknown[]) => unknown)(...cb);
+        };
+        return original.apply(this, args);
+      }
+      const result = original.apply(this, args);
+      if (result instanceof Promise) return result.finally(done);
+      done();
+      return result;
+    };
+    process.on("warning", onWarning);
+    try {
+      await overview(crawlId);
+      await overview(renderedId);
+      await overview(unjudgedId);
+      await csvLines();
+    } finally {
+      proto.query = original;
+      process.off("warning", onWarning);
+    }
+    expect(overlaps).toEqual([]);
+    expect(warnings.filter((w) => w.includes("already executing a query"))).toEqual([]);
   });
 });

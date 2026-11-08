@@ -2552,23 +2552,41 @@ export class ApiService {
    * the caller needs the detail to share. The Crawl Overview reads its `urls`
    * section through here INSIDE its snapshot, so those entries are
    * `crawl_status`'s own fields and describe the same moment as every other
-   * section. On a transaction the statements below queue on its one
-   * connection; on the pool they run in parallel, as they always have.
+   * section.
+   *
+   * On the pool the six reads below run in parallel, each on a connection of
+   * its own, as they always have. A transaction holds ONE client, and pg does
+   * not run two statements on one client at once: it queues them, warns that
+   * the queueing is deprecated, and pg 9 removes it. So on a transaction the
+   * reads are awaited one after another; the snapshot makes the order
+   * irrelevant to what they see.
    */
   private async crawlDetailOn(db: SnapshotReader, crawlId: string): Promise<CrawlDetail> {
     const { row, findingsCount, pagesScanned } = await this.crawlRowWithCounts(crawlId, db);
+    const reads = [
+      () => frontierCounts(db, crawlId),
+      () => this.liveLeaseCount(crawlId, db),
+      () => this.blockedPageCount(crawlId, db),
+      () => this.robotsBlockedCount(crawlId, db),
+      () => this.resourceCoverage(crawlId, db),
+      // The crawl row's own stamp rides in rather than being read again: it
+      // came out of the statement above, so the block's `passAt` and its
+      // counts cannot describe two different runs of the pass.
+      () => this.recheckCoverage(crawlId, row.recheckPassAt, db),
+    ] as const;
     const [counts, liveLeases, blockedPages, robotsBlockedRows, resourceCounts, recheckCounts] =
-      await Promise.all([
-        frontierCounts(db, crawlId),
-        this.liveLeaseCount(crawlId, db),
-        this.blockedPageCount(crawlId, db),
-        this.robotsBlockedCount(crawlId, db),
-        this.resourceCoverage(crawlId, db),
-        // The crawl row's own stamp rides in rather than being read again: it
-        // came out of the statement above, so the block's `passAt` and its
-        // counts cannot describe two different runs of the pass.
-        this.recheckCoverage(crawlId, row.recheckPassAt, db),
-      ]);
+      db === this.db
+        ? await Promise.all([
+            reads[0](), reads[1](), reads[2](), reads[3](), reads[4](), reads[5](),
+          ])
+        : ([
+            await reads[0](),
+            await reads[1](),
+            await reads[2](),
+            await reads[3](),
+            await reads[4](),
+            await reads[5](),
+          ] as const);
     return {
       crawlId: row.id,
       siteUrl: row.siteUrl,
