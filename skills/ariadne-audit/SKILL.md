@@ -701,7 +701,12 @@ now) is NOT MEASURED, never a PASS. The remedy is a re-crawl. By check:
   source lists and another omits is not a conflict, because search engines union the
   sources; such codes are listed in `onlyIn` for context. `hreflang.multiple-entries`
   is now one code with several targets inside ONE source, so the two rules never
-  report one defect twice.
+  report one defect twice. Only a declaring page that served HTML with a 200 is
+  judged. A `Link` header on a PDF (or any non-HTML file) is recorded and counts
+  as that file's return link when an HTML page names it, but the file's own
+  declarations are never judged: a missing self-reference, an invalid code or a
+  source conflict on a PDF produces no finding. Check those by hand if the site
+  annotates its documents.
 - **CHECK-28, URL length:** `url.reference-too-long` (warning) is a page carrying a
   link, file or hreflang target whose address is over 2,500 characters. The crawler
   cannot index such an address, so it counts it on the page and stores it nowhere:

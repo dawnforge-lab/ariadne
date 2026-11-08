@@ -1596,7 +1596,12 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
      evidence that names the fix. Every hreflang finding that lists a declaration
      carries `sources` (`html`, `header`, `sitemap`): where the annotation lives, and
      so where it is fixed. `hreflang.unlinked-target` is the exception; its `sources`
-     are the declaring pages. A sitemap `<url>` is read for at most 200 alternates;
+     are the declaring pages. Only a declaring page fetched as HTML with a 200 is
+     judged. A `Link` header on a non-HTML file (a PDF) is recorded and counts as
+     that file's return link for the HTML pages naming it, but the file's own
+     declarations are never judged: no finding on a PDF says its set is broken, so
+     a site that annotates documents needs a manual look before this check passes.
+     A sitemap `<url>` is read for at most 200 alternates;
      the rest are counted, not recorded, in the `sitemap.structure` site row's
      `alternatesCapped` (CHECK-08), so above zero the sitemap source is a floor.
      - `hreflang.inconsistent-return-code` (warning) — page A lists B, B links back to

@@ -40,10 +40,15 @@ info counting the fourteen metric rules). The new ids:
   those codes are listed under `onlyIn`.
 
 What changed under existing ids. **Hreflang is read from all three sources**: the
-page's HTML, its HTTP `Link` header (read whole at fetch, a PDF's included) and
-the `xhtml:link` alternates of its sitemap entry. Every hreflang rule judges the
-union, and the eight that list a declaration carry `sources` in their evidence
-(`html`, `header`, `sitemap`); `hreflang.multiple-entries` counts targets within
+page's HTML, its HTTP `Link` header (read whole at fetch, on every classified
+response) and the `xhtml:link` alternates of its sitemap entry. Every hreflang
+rule judges the union of a declaring page's sources, and judges a declaring page
+only when it was fetched OK as HTML with a 200. A `Link` header on a non-HTML
+response (a PDF) is recorded, `source = 'header'`, and counts as that file's
+return link when an HTML page names it; the file's own declaration set is not
+judged, so a PDF's missing self-reference, invalid code or source conflict is no
+finding (a known limit, not a pass). The eight that list a declaration carry
+`sources` in their evidence (`html`, `header`, `sitemap`); `hreflang.multiple-entries` counts targets within
 ONE source, so a disagreement between sources is `source-conflict`'s finding and
 never both. **Sitemaps are streamed** to the 50 MB limit (a 10–50 MB sitemap was
 dropped before and is read whole now), and every listing is recorded:
