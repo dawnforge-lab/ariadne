@@ -342,9 +342,12 @@ type SitemapRow = {
  *    and the per-document `urls` come from `sitemap_memberships`, one row per
  *    URL per document: a URL in three documents counts in all three, listings in
  *    that document. False for an older crawl, counted from `sitemap_urls`.
- *  - `membershipLimited`, `hreflangLimited`, `overlongLocsSkipped` — the
- *    sitemap walk's own caps and refusals, from `discovery.sitemapFacts`. A
- *    pre-26c crawl did not record them and says null, never zero.
+ *  - `membershipLimited`, `hreflangLimited`, `overlongLocsSkipped`,
+ *    `alternatesCapped` — the sitemap walk's own caps and refusals, from
+ *    `discovery.sitemapFacts`; `alternatesCapped` counts the `xhtml:link`
+ *    alternates past `MAX_HREFLANG_PAIRS` in one `<url>`, read and never staged
+ *    (final review I5). A pre-26c crawl did not record them and says null,
+ *    never zero.
  *
  * And each `sitemap_doc` row: `urls`, how many entries that document
  * contributed, and `breaches50k`, whether that is past the protocol's 50,000.
@@ -421,6 +424,7 @@ async function sitemapStructure(db: Db, crawlId: string, self: MetricIdentity): 
           membershipLimited: facts?.membershipLimited ?? null,
           hreflangLimited: facts?.hreflangLimited ?? null,
           overlongLocsSkipped: facts?.overlongLocsSkipped ?? null,
+          alternatesCapped: facts?.alternatesCapped ?? null,
         },
       });
     }
@@ -476,6 +480,7 @@ export const crawlMetrics: MetricRule[] = [
       { key: "membershipLimited", label: "Membership Cap Reached" },
       { key: "hreflangLimited", label: "Hreflang Cap Reached" },
       { key: "overlongLocsSkipped", label: "Over-Long Locs Not Stored" },
+      { key: "alternatesCapped", label: "Alternates Over Per-URL Cap" },
     ], 10),
     async (db, crawlId, self) => sitemapStructure(db, crawlId, self),
   ),

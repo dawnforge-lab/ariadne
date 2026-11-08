@@ -454,6 +454,7 @@ describe("the crawl metrics against the database", () => {
         membershipLimited: null,
         hreflangLimited: null,
         overlongLocsSkipped: null,
+        alternatesCapped: null,
       });
 
       // Ordered by entries descending, ties by source URL ascending.
@@ -504,6 +505,7 @@ describe("the crawl metrics against the database", () => {
         membershipLimited: null,
         hreflangLimited: null,
         overlongLocsSkipped: null,
+        alternatesCapped: null,
       });
       expect(await docRows(crawlId)).toEqual([
         [big, { urls: over, breaches50k: true }],
@@ -532,6 +534,7 @@ describe("the crawl metrics against the database", () => {
         membershipLimited: null,
         hreflangLimited: null,
         overlongLocsSkipped: null,
+        alternatesCapped: null,
       });
       const rows = await docRows(crawlId);
       expect(rows).toHaveLength(SITEMAP_DOC_ROWS_CAP);
@@ -555,6 +558,7 @@ describe("the crawl metrics against the database", () => {
         membershipLimited: false,
         hreflangLimited: false,
         overlongLocsSkipped: 0,
+        alternatesCapped: 0,
       });
     });
 
@@ -581,6 +585,7 @@ describe("the crawl metrics against the database", () => {
             membershipLimited: true,
             hreflangLimited: true,
             overlongLocsSkipped: 3,
+            alternatesCapped: 5,
           },
         }),
       );
@@ -607,11 +612,21 @@ describe("the crawl metrics against the database", () => {
         membershipLimited: true,
         hreflangLimited: true,
         overlongLocsSkipped: 3,
+        alternatesCapped: 5,
       });
       expect(await docRows(crawlId)).toEqual([
         [doc("sitemap-products.xml"), { urls: 2, breaches50k: false }],
         [doc("sitemap-blog.xml"), { urls: 1, breaches50k: false }],
       ]);
+    });
+
+    it("throws re-crawl on 26c sitemap facts without alternatesCapped (final review I5)", async () => {
+      const discovery = mkDiscovery();
+      const { alternatesCapped: _dropped, ...older } = discovery.sitemapFacts!;
+      const crawlId = await newCrawl({ ...discovery, sitemapFacts: older });
+      await expect(rule(ID).run(db, crawlId)).rejects.toThrow(
+        /sitemapFacts has a non-count alternatesCapped; re-crawl the site/,
+      );
     });
 
     it("flags a document over 50,000 memberships even when its URLs sit under another source", async () => {

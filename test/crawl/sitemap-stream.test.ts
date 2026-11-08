@@ -81,9 +81,10 @@ const URLSET_EXPECTED: SitemapUrlEntry[] = [
       { hreflang: "de", href: "https://site.example/de/" },
       { hreflang: "x-default", href: "https://site.example/" },
     ],
+    alternatesCapped: 0,
   },
-  { loc: "https://site.example/a?x=1&y=2", lastmod: null, alternates: [] },
-  { loc: "https://site.example/cdata?p&q", lastmod: "2026", alternates: [] },
+  { loc: "https://site.example/a?x=1&y=2", lastmod: null, alternates: [], alternatesCapped: 0 },
+  { loc: "https://site.example/cdata?p&q", lastmod: "2026", alternates: [], alternatesCapped: 0 },
 ];
 
 const INDEX = `<?xml version="1.0" encoding="UTF-8"?>
@@ -218,8 +219,25 @@ describe("parseSitemapStream", () => {
       hreflang: `l${MAX_HREFLANG_PAIRS - 1}`,
       href: `https://site.example/${MAX_HREFLANG_PAIRS - 1}`,
     });
+    // Final review I5: the alternates past the cap are counted, not lost.
+    expect(urls[0]?.alternatesCapped).toBe(25);
     // The cap is per entry: the next <url> starts from zero.
     expect(urls[1]?.alternates).toEqual([{ hreflang: "de", href: "https://site.example/de/b" }]);
+    expect(urls[1]?.alternatesCapped).toBe(0);
+  });
+
+  it("counts one alternate past the cap as one, and only well-formed alternates", async () => {
+    const alternate = (i: number) =>
+      `<xhtml:link rel="alternate" hreflang="l${i}" href="https://site.example/${i}"/>`;
+    const links = Array.from({ length: MAX_HREFLANG_PAIRS + 1 }, (_, i) => alternate(i)).join("");
+    // Past the cap, a link that is no alternate (no hreflang, another rel) is not counted.
+    const noise =
+      `<xhtml:link rel="alternate" href="https://site.example/no-code"/>` +
+      `<xhtml:link rel="canonical" hreflang="de" href="https://site.example/c"/>`;
+    const doc = `<urlset><url><loc>https://site.example/</loc>${links}${noise}</url></urlset>`;
+    const { urls } = await run(chunked(doc, 64));
+    expect(urls[0]?.alternates).toHaveLength(MAX_HREFLANG_PAIRS);
+    expect(urls[0]?.alternatesCapped).toBe(1);
   });
 
   it("awaits drain after every chunk, before reading the next", async () => {

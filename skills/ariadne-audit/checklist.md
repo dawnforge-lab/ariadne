@@ -962,9 +962,12 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
   - the `site` row: `{docs, totalUrls (distinct URLs), totalMemberships (listings,
     null on an older crawl), urlCapBreaches, entryCapReached,
     oversizedDocsSkipped, docCountsExact, membershipLimited, hreflangLimited,
-    overlongLocsSkipped}`. `docCountsExact: false` is a crawl made before memberships
-    were recorded: its counts come from the deduplicated entry list and the three
-    walk-cap fields are null (not recorded)
+    overlongLocsSkipped, alternatesCapped}`. `alternatesCapped` counts the sitemap
+    `xhtml:link` alternates past 200 in one `<url>`: read, never recorded, so the
+    sitemap's hreflang for those URLs is a floor when it is above zero.
+    `docCountsExact: false` is a crawl made before memberships were recorded: its
+    counts come from the deduplicated entry list and the four walk-cap fields are
+    null (not recorded)
   - one `sitemap_doc` row per document (`scopeValue` is the document's URL) with
     `{urls, breaches50k}` — the largest 50 are listed
   - `entryCapReached: true` means every count here is a FLOOR, not a total: say so
@@ -1593,7 +1596,9 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
      evidence that names the fix. Every hreflang finding that lists a declaration
      carries `sources` (`html`, `header`, `sitemap`): where the annotation lives, and
      so where it is fixed. `hreflang.unlinked-target` is the exception; its `sources`
-     are the declaring pages.
+     are the declaring pages. A sitemap `<url>` is read for at most 200 alternates;
+     the rest are counted, not recorded, in the `sitemap.structure` site row's
+     `alternatesCapped` (CHECK-08), so above zero the sitemap source is a floor.
      - `hreflang.inconsistent-return-code` (warning) — page A lists B, B links back to
        A, and the code B uses for A differs from the code A uses for itself.
        `x-default` is not read as a language; a page with no self-reference is

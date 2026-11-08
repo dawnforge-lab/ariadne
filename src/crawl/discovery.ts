@@ -352,6 +352,12 @@ export type DiscoverySitemapFacts = {
    */
   overlongLocsSkipped: number;
   /**
+   * Well-formed `xhtml:link` alternates past `MAX_HREFLANG_PAIRS` in one
+   * `<url>`, summed over every `<url>` whose `<loc>` was kept (final review I5):
+   * read, never staged. Zero on every 26c crawl that capped none.
+   */
+  alternatesCapped: number;
+  /**
    * Documents that ran past the size cap, in walk order, capped at 50 (every
    * one is counted in `truncation.oversizedDocsSkipped`). `bytesRead` is the
    * decompressed bytes read, or the wire bytes when the compressed body itself
@@ -1177,6 +1183,7 @@ export async function discover(
     hreflangRows: 0,
     hreflangLimited: false,
     overlongLocsSkipped: 0,
+    alternatesCapped: 0,
     oversizedDocs: [],
   };
 
@@ -1251,6 +1258,8 @@ export async function discover(
       throw new Error(`discover: an allowed sitemap URL does not normalise: ${resolved}`);
     }
     doc.urlsKept++;
+    // The stream read these and kept none of them (final review I5).
+    sitemapFacts.alternatesCapped += entry.alternatesCapped;
 
     // The membership's primary key holds the URL AND the document's URL in one
     // btree entry, so the pair, not each, must fit (ruling R10a). A long loc

@@ -11,6 +11,7 @@ import {
 } from "../../src/crawl/discovery.js";
 import { closeFetchAgents } from "../../src/crawl/http.js";
 import { INDEXED_URL_MAX } from "../../src/crawl/parse/url-utils.js";
+import { MAX_HREFLANG_PAIRS } from "../../src/crawl/parse/page-analyzer.js";
 
 /**
  * A sink that records what discovery hands it, in order. The crawl loop's sink
@@ -64,6 +65,7 @@ const NO_SITEMAP_FACTS = {
   hreflangRows: 0,
   hreflangLimited: false,
   overlongLocsSkipped: 0,
+  alternatesCapped: 0,
   oversizedDocs: [],
 };
 
@@ -252,6 +254,25 @@ beforeAll(async () => {
           '<xhtml:link rel="alternate" hreflang="de" href="/de/a"/>' +
           `<xhtml:link rel="alternate" hreflang="en" href="${bare}/en/a"/>` +
           "</url></urlset>",
+      );
+    } else if (path === "/alts-capped.xml") {
+      // Final review I5: two <url>s, past MAX_HREFLANG_PAIRS by 3 and by 1, and
+      // a third whose loc is refused (not http), whose capped alternates are
+      // not counted because the entry itself is not kept.
+      const links = (n: number, page: string) =>
+        Array.from(
+          { length: n },
+          (_, i) => `<xhtml:link rel="alternate" hreflang="l${i}" href="/${page}/${i}"/>`,
+        ).join("");
+      xml(
+        res,
+        '<?xml version="1.0" encoding="UTF-8"?>' +
+          '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9" ' +
+          'xmlns:xhtml="http://www.w3.org/1999/xhtml">' +
+          `<url><loc>${bare}/capped-a</loc>${links(MAX_HREFLANG_PAIRS + 3, "a")}</url>` +
+          `<url><loc>${bare}/capped-b</loc>${links(MAX_HREFLANG_PAIRS + 1, "b")}</url>` +
+          `<url><loc>ftp://elsewhere.example/c</loc>${links(MAX_HREFLANG_PAIRS + 5, "c")}</url>` +
+          "</urlset>",
       );
     } else if (path.startsWith("/long-source.xml?")) {
       // A document behind a long (presigned-style) URL listing one long loc
@@ -950,6 +971,16 @@ describe("discover: memberships, alternates and sitemapFacts", () => {
     for (const m of sink.memberships) expect(m.url.length).toBeLessThanOrEqual(INDEXED_URL_MAX);
     // Not a malformed entry: it is a URL, just one no index can hold.
     expect(d.truncation.malformedEntriesSkipped).toBe(0);
+  });
+
+  it("sums the alternates past MAX_HREFLANG_PAIRS over every kept <url> (final review I5)", async () => {
+    const sink = recordingSink();
+    const d = await discover(bare, { ...OPTS, sink, extraSitemaps: [`${bare}/alts-capped.xml`] });
+    expect(d.sitemapEntries.map((e) => e.url)).toEqual([`${bare}/capped-a`, `${bare}/capped-b`]);
+    // 3 + 1; the refused loc's alternates are dropped with it, not counted here.
+    expect(d.sitemapFacts.alternatesCapped).toBe(4);
+    expect(d.sitemapFacts.hreflangRows).toBe(2 * MAX_HREFLANG_PAIRS);
+    expect(sink.alternates).toHaveLength(2 * MAX_HREFLANG_PAIRS);
   });
 
   it("writes sitemapFacts with zeros when there is no sitemap", async () => {

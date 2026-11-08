@@ -1002,7 +1002,7 @@ beforeAll(async () => {
         docCountsExact: true,
         membershipLimited: false,
         hreflangLimited: false,
-        overlongLocsSkipped: 0,
+        overlongLocsSkipped: 0, alternatesCapped: 0,
       },
     },
     {
@@ -1652,7 +1652,7 @@ describe("GET /crawls/:id/metrics/:metricId", () => {
       "Counts Exact",
       "Membership Cap Reached",
       "Hreflang Cap Reached",
-      "Over-Long Locs Not Stored",
+      "Over-Long Locs Not Stored", "Alternates Over Per-URL Cap",
     ]);
     expect(tableRows(res)).toEqual([
       {
@@ -1666,7 +1666,7 @@ describe("GET /crawls/:id/metrics/:metricId", () => {
         docCountsExact: true,
         membershipLimited: false,
         hreflangLimited: false,
-        overlongLocsSkipped: 0,
+        overlongLocsSkipped: 0, alternatesCapped: 0,
       },
       // A document row carries its own two facts and NULL — never zero, never
       // false — under the three columns that are the site's alone.
@@ -1681,7 +1681,7 @@ describe("GET /crawls/:id/metrics/:metricId", () => {
         docCountsExact: null,
         membershipLimited: null,
         hreflangLimited: null,
-        overlongLocsSkipped: null,
+        overlongLocsSkipped: null, alternatesCapped: null,
       },
       {
         scope: `${SITE}/sitemap_products_1.xml`,
@@ -1694,7 +1694,7 @@ describe("GET /crawls/:id/metrics/:metricId", () => {
         docCountsExact: null,
         membershipLimited: null,
         hreflangLimited: null,
-        overlongLocsSkipped: null,
+        overlongLocsSkipped: null, alternatesCapped: null,
       },
     ]);
   });
@@ -3131,10 +3131,10 @@ describe("GET /crawls/:id/export?format=csv", () => {
       "Sitemap", "URLs (Site) / Listings (Document)", "Over 50,000 Entries",
       "Listings (All Documents)", "Documents",
       "Documents Dropped For Size", "Entry Cap Reached", "Counts Exact",
-      "Membership Cap Reached", "Hreflang Cap Reached", "Over-Long Locs Not Stored",
+      "Membership Cap Reached", "Hreflang Cap Reached", "Over-Long Locs Not Stored", "Alternates Over Per-URL Cap",
     ]);
     expect(rows(sitemap)[1]).toEqual([
-      `${SITE}/sitemap_blogs_1.xml`, "5", "false", "", "", "", "", "", "", "", "",
+      `${SITE}/sitemap_blogs_1.xml`, "5", "false", "", "", "", "", "", "", "", "", "",
     ]);
 
     // The header is written for a metric that measured nothing too: a zero-row

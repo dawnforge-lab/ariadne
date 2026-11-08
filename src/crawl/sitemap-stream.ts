@@ -59,7 +59,15 @@ export const SITEMAP_MAX_BYTES = 50 * 1024 * 1024;
 export type SitemapUrlEntry = {
   loc: string;
   lastmod: string | null;
+  /** At most `MAX_HREFLANG_PAIRS`, in document order. */
   alternates: { hreflang: string; href: string }[];
+  /**
+   * Well-formed alternates (`rel` holding `alternate`, a non-empty `hreflang`,
+   * an `href`) past `MAX_HREFLANG_PAIRS` in this `<url>`: counted, not kept
+   * (final review I5). On the entry rather than the stream's result, so an entry
+   * read before an on-the-wire cap or a mid-stream failure keeps its count.
+   */
+  alternatesCapped: number;
 };
 
 export type SitemapStreamResult =
@@ -250,6 +258,7 @@ export async function parseSitemapStream(
   let loc = emptyField();
   let lastmod = emptyField();
   let alternates: { hreflang: string; href: string }[] = [];
+  let alternatesCapped = 0;
 
   const ignoring = (): boolean => refusal !== null || rootClosed;
 
@@ -271,6 +280,7 @@ export async function parseSitemapStream(
             loc = emptyField();
             lastmod = emptyField();
             alternates = [];
+            alternatesCapped = 0;
           }
           return;
         }
@@ -280,16 +290,13 @@ export async function parseSitemapStream(
           else if (local === "lastmod") field = lastmod;
           else field = null;
           if (field !== null) field.count++;
-          if (
-            local === "link" &&
-            kind === "urlset" &&
-            alternates.length < MAX_HREFLANG_PAIRS
-          ) {
+          if (local === "link" && kind === "urlset") {
             const rel = attribs["rel"]?.trim().toLowerCase();
             const hreflang = attribs["hreflang"];
             const href = attribs["href"];
             if (rel && rel.split(/\s+/).includes("alternate") && hreflang && href !== undefined) {
-              alternates.push({ hreflang, href });
+              if (alternates.length < MAX_HREFLANG_PAIRS) alternates.push({ hreflang, href });
+              else alternatesCapped++;
             }
           }
           return;
@@ -310,7 +317,7 @@ export async function parseSitemapStream(
           if (locValue === null) {
             malformedEntries++;
           } else if (kind === "urlset") {
-            opts.onUrl({ loc: locValue, lastmod: fieldValue(lastmod), alternates });
+            opts.onUrl({ loc: locValue, lastmod: fieldValue(lastmod), alternates, alternatesCapped });
           } else {
             opts.onSitemap(locValue, fieldValue(lastmod));
           }

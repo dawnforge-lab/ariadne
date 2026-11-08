@@ -46,6 +46,7 @@ export function mkSitemapFacts(
     hreflangRows: 0,
     hreflangLimited: false,
     overlongLocsSkipped: 0,
+    alternatesCapped: 0,
     oversizedDocs: [],
     ...overrides,
   };

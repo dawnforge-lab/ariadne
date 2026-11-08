@@ -688,8 +688,10 @@ now) is NOT MEASURED, never a PASS. The remedy is a re-crawl. By check:
   (a repeat inside one document does not count). It is crawled once; the finding is
   the redundancy, usually two generators, so report it once with the documents it
   names. `sitemap.structure` now carries `totalMemberships` beside `totalUrls`, and
-  `docCountsExact`, `membershipLimited`, `hreflangLimited` and `overlongLocsSkipped`.
-  If any cap is `true`, say the sitemap counts are a floor.
+  `docCountsExact`, `membershipLimited`, `hreflangLimited`, `overlongLocsSkipped` and
+  `alternatesCapped` (sitemap alternates past 200 in one `<url>`, read and not
+  recorded). If any cap is `true`, or `alternatesCapped` is above zero, say the
+  sitemap counts (or its hreflang) are a floor.
 - **CHECK-24, hreflang:** every hreflang rule now reads three sources, the page's
   HTML, its `Link` header and its sitemap entry's alternates, and judges what they say
   together, the way search engines do. Each finding that lists a declaration names
@@ -920,7 +922,7 @@ broken there.
           "metricId": "sitemap.structure",
           "scope": "site",
           "scopeValue": "",
-          "value": { "docs": 6, "totalUrls": 4102, "totalMemberships": 4102, "urlCapBreaches": 0, "entryCapReached": false, "oversizedDocsSkipped": 0, "docCountsExact": true, "membershipLimited": false, "hreflangLimited": false, "overlongLocsSkipped": 0 }
+          "value": { "docs": 6, "totalUrls": 4102, "totalMemberships": 4102, "urlCapBreaches": 0, "entryCapReached": false, "oversizedDocsSkipped": 0, "docCountsExact": true, "membershipLimited": false, "hreflangLimited": false, "overlongLocsSkipped": 0, "alternatesCapped": 0 }
         }
       ]
     },

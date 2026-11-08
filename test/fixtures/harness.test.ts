@@ -2883,7 +2883,7 @@ describe("the fixture site end to end", () => {
       docCountsExact: true,
       membershipLimited: false,
       hreflangLimited: false,
-      overlongLocsSkipped: 0,
+      overlongLocsSkipped: 0, alternatesCapped: 0,
     });
     // The per-document rows beneath it, which is where `docs: 2` is spent: the
     // main document with its 145 entries, and the extra one with its single

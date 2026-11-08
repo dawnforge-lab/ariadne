@@ -126,7 +126,7 @@ describe("perScope", () => {
         docCountsExact: true,
         membershipLimited: false,
         hreflangLimited: false,
-        overlongLocsSkipped: 0,
+        overlongLocsSkipped: 0, alternatesCapped: 2,
       }),
       { scope: "sitemap_doc", scopeValue: "https://site/sitemap-1.xml", value: { urls: 5, breaches50k: false } },
     ]);
@@ -141,7 +141,7 @@ describe("perScope", () => {
       "Counts Exact",
       "Membership Cap Reached",
       "Hreflang Cap Reached",
-      "Over-Long Locs Not Stored",
+      "Over-Long Locs Not Stored", "Alternates Over Per-URL Cap",
     ]);
     expect(shaped.rows).toEqual([
       {
@@ -155,7 +155,7 @@ describe("perScope", () => {
         docCountsExact: true,
         membershipLimited: false,
         hreflangLimited: false,
-        overlongLocsSkipped: 0,
+        overlongLocsSkipped: 0, alternatesCapped: 2,
       },
       {
         scope: "https://site/sitemap-1.xml",
@@ -168,7 +168,7 @@ describe("perScope", () => {
         docCountsExact: null,
         membershipLimited: null,
         hreflangLimited: null,
-        overlongLocsSkipped: null,
+        overlongLocsSkipped: null, alternatesCapped: null,
       },
     ]);
   });

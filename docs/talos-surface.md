@@ -48,8 +48,9 @@ ONE source, so a disagreement between sources is `source-conflict`'s finding and
 never both. **Sitemaps are streamed** to the 50 MB limit (a 10–50 MB sitemap was
 dropped before and is read whole now), and every listing is recorded:
 `sitemap.over-50k-urls` is now an exact count, and `sitemap.structure` gains
-`totalMemberships`, `docCountsExact`, `membershipLimited`, `hreflangLimited` and
-`overlongLocsSkipped` on its site row. `sitemap.url-too-long` adds one site
+`totalMemberships`, `docCountsExact`, `membershipLimited`, `hreflangLimited`,
+`overlongLocsSkipped` and `alternatesCapped` (sitemap alternates past 200 in one
+`<url>`, read and not recorded) on its site row. `sitemap.url-too-long` adds one site
 finding `{skipped, max}` for the `<loc>`s over 2,500 characters that were never
 stored. `social.image-broken` gains the problem `too-long`. The two links rules
 read a link's wider name ("Links" under Phase 26b below).

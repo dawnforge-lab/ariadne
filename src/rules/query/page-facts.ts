@@ -141,6 +141,9 @@ export async function readSitemapFacts(
     hreflangRows: count("hreflangRows"),
     hreflangLimited: flag("hreflangLimited"),
     overlongLocsSkipped: count("overlongLocsSkipped"),
+    // Final review I5: written on every 26c crawl from that fix on. A crawl this
+    // branch wrote before it lacks the key and throws "re-crawl" (dev DBs only).
+    alternatesCapped: count("alternatesCapped"),
     oversizedDocs,
   };
 }

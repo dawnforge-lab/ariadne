@@ -2668,6 +2668,7 @@ describe("sitemap memberships and staged hreflang (Phase 26c)", () => {
       hreflangRows: 0,
       hreflangLimited: false,
       overlongLocsSkipped: 0,
+      alternatesCapped: 0,
       oversizedDocs: [],
     });
   });
