@@ -79,13 +79,18 @@ export const CSV_VIEWS = [
   "redirects",
   "resources",
   "metric_table",
+  "issues_overview",
 ] as const;
 export type CsvViewName = (typeof CSV_VIEWS)[number];
 
 /**
- * THE EIGHT VIEWS THAT ARE A KEYSET READ OF A TABLE — every view but one.
+ * THE EIGHT VIEWS THAT ARE A KEYSET READ OF A TABLE — every view but two.
  *
- * `metric_table` is the exception and it is a different KIND of view: its rows
+ * `metric_table` and `issues_overview` are the exceptions and they are a
+ * different KIND of view. `issues_overview` is one `GROUP BY rule_id` aggregate
+ * (one row per rule, at most 174, ordered by type, priority, count), built by
+ * `buildIssuesOverview` — the same function the JSON tool calls, so the two
+ * cannot disagree — and an aggregate has no keyset. `metric_table`'s rows
  * are not rows of a table at all. One metric's stored rows become a table
  * through the rule's own `table` declaration (`shapeMetricTable`), which turns
  * one stored row into three (a measure each), or a stored list into twenty rows,
@@ -101,7 +106,8 @@ export type CsvViewName = (typeof CSV_VIEWS)[number];
  * `ApiService.metricTable`, which is the one place those rows are read.
  */
 export const CSV_QUERY_VIEWS = CSV_VIEWS.filter(
-  (view): view is Exclude<CsvViewName, "metric_table"> => view !== "metric_table",
+  (view): view is Exclude<CsvViewName, "metric_table" | "issues_overview"> =>
+    view !== "metric_table" && view !== "issues_overview",
 );
 export type CsvQueryViewName = (typeof CSV_QUERY_VIEWS)[number];
 
@@ -1058,5 +1064,51 @@ export function metricTableCells(
   return [
     ...table.summary.map((s) => orEmpty(s.value)),
     ...table.columns.map((column) => orEmpty(row[column.key])),
+  ];
+}
+
+/** The Issues Overview's header — `Issue Name` is the rule's title. */
+export const ISSUES_OVERVIEW_HEADER = [
+  "Issue Name",
+  "Issue Type",
+  "Issue Priority",
+  "Severity",
+  "URLs",
+  "% of Judged",
+  "Description",
+  "How To Fix",
+  "Rule Id",
+  "Check Ids",
+];
+
+/**
+ * One overview row as cells, in `ISSUES_OVERVIEW_HEADER` order. `% of Judged` is
+ * empty when the engine has no Pages Judged to divide by (this file's one
+ * meaning for "no value").
+ */
+export function issuesOverviewCells(
+  row: {
+    ruleId: string;
+    title: string;
+    type: string;
+    priority: string;
+    severity: string;
+    urls: number;
+    percentOfJudged: number | null;
+    checkIds: readonly string[];
+  },
+  copy: { explanation: string; howToFix: string },
+): string[] {
+  return [
+    row.title,
+    row.type,
+    row.priority,
+    row.severity,
+    String(row.urls),
+    orEmpty(row.percentOfJudged),
+    copy.explanation,
+    copy.howToFix,
+    row.ruleId,
+    row.checkIds.join(LIST_SEPARATOR),
   ];
 }

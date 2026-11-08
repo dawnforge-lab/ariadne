@@ -943,6 +943,12 @@ const KINDS = ["page", "query", "metric"] as const satisfies readonly AnyRule["k
 //     where null is uncapped), refused while the rules run. `judgementStale`
 //     rides `crawl_status`, `metrics_get` and `metric_table`; `crawl_compare`
 //     gains a `judgement-overrides` caveat. No finding moves. 188 rules.
+//  7. (T8) The Issues Overview: `issues_overview` / `GET /crawls/:id/overview/issues`
+//     and the `issues_overview` CSV view serve one row per rule (type,
+//     priority, severity, urls, percent of the pages judged) with the crawl's
+//     judgement applied, from one `GROUP BY rule_id` and the stored
+//     `site.health` Pages Judged. A new read surface; no finding moves.
+//     188 rules.
 export const RULESET_VERSION = "0.23.0";
 
 /**

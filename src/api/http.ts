@@ -62,6 +62,10 @@
  *                                      robots.blocks-internal-urls) — Source,
  *                                      Destination, Anchor, Status Code. 404 for
  *                                      any other rule: it has no inlinks report
+ *   GET  /crawls/:id/overview/issues   the Issues Overview: one row per rule with
+ *                                      the crawl's judgement applied, `?includeZero=true`
+ *                                      adds the rules that found nothing. 409 on a
+ *                                      crawl no rules run has judged
  *   GET  /crawls/:id/metrics           the measured numbers, with their copy
  *   GET  /crawls/:id/metrics/:metricId one metric as a table: {metricId, title,
  *                                      explanation, howToFix, summary, columns,
@@ -438,6 +442,17 @@ function buildRoutes(): Route[] {
           ...optionalString(ctx.query, "scopeValue"),
           ...optionalNumber(ctx.query, "limit"),
           ...optionalString(ctx.query, "cursor"),
+        }),
+      }),
+    },
+    {
+      method: "GET",
+      pattern: ["crawls", id, "overview", "issues"],
+      query: ["includeZero"],
+      handler: async (service, ctx) => ({
+        status: 200,
+        body: await service.issuesOverview(param(ctx, "id"), {
+          ...optionalBoolean(ctx.query, "includeZero"),
         }),
       }),
     },

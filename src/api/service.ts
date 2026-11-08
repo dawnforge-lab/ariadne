@@ -149,6 +149,8 @@ import { isHostAllowed, type ServiceConfig } from "./config.js";
 import {
   CSV_VIEWS,
   CSV_VIEW_DEFS,
+  ISSUES_OVERVIEW_HEADER,
+  issuesOverviewCells,
   metricTableCells,
   metricTableHeader,
   EXPORT_FORMATS,
@@ -159,6 +161,7 @@ import {
   type ExportFormat,
 } from "./csv.js";
 import { ServiceError, clip } from "./errors.js";
+import { buildIssuesOverview, type IssuesOverview } from "./overview.js";
 import {
   copyRenderer,
   isPlainObject,
@@ -3949,6 +3952,26 @@ export class ApiService {
   }
 
   /**
+   * The Issues Overview: one row per rule with the crawl's judgement applied
+   * (`overview.ts`). `issues_overview` and the `issues_overview` CSV view are
+   * both this one answer.
+   */
+  async issuesOverview(
+    crawlId: string,
+    opts: { includeZero?: boolean } = {},
+  ): Promise<IssuesOverview> {
+    const view = await this.judgementView(crawlId);
+    return await buildIssuesOverview(
+      this.db,
+      crawlId,
+      this.registry,
+      view,
+      (id) => this.ruleFor(id, crawlId, "issues"),
+      opts.includeZero === true,
+    );
+  }
+
+  /**
    * One rule's findings, URL by URL — the action-plan tab feed.
    *
    * Ordered by URL, with `dedupe_key` breaking ties. That pair is a TOTAL order
@@ -4956,6 +4979,7 @@ export class ApiService {
       }
       return await this.metricTableStream(crawlId, metricId);
     }
+    if (view === "issues_overview") return await this.issuesOverviewStream(crawlId);
     // The two findings views apply the crawl's judgement, read once before the
     // header (a refusal after it is a torn socket): a disabled rule's findings
     // are left out in SQL, `issue_urls` of a disabled rule is refused outright
@@ -5015,6 +5039,31 @@ export class ApiService {
           const last = result.rows[result.rows.length - 1];
           if (last === undefined) return;
           cursor = def.next(last);
+        }
+      },
+    };
+  }
+
+  /**
+   * `issues_overview` as a stream: header, then the overview's rows. Built whole
+   * before the first byte, for `metricTableStream`'s reason: its refusals (an
+   * unjudged crawl, a stored finding of an unknown rule) must be a clean 409,
+   * not a torn socket. At most one row per rule, so the table is bounded by the
+   * ruleset and not by the site.
+   */
+  private async issuesOverviewStream(crawlId: string): Promise<CsvStream> {
+    const view = await this.judgementView(crawlId);
+    const overview = await this.issuesOverview(crawlId, {});
+    const copy = copyRenderer(view.copyThresholds);
+    return {
+      view: "issues_overview",
+      ruleId: null,
+      metricId: null,
+      filename: csvFilename(slug(crawlId), "issues_overview", null),
+      async *records(): AsyncGenerator<string> {
+        yield csvRecord(ISSUES_OVERVIEW_HEADER);
+        for (const row of overview.rows) {
+          yield csvRecord(issuesOverviewCells(row, copy(row.ruleId)));
         }
       },
     };
@@ -6899,6 +6948,16 @@ function parseExportRequest(
       );
     }
     return { format, view, ruleId: null, metricId: opts.metricId };
+  }
+  if (view === "issues_overview") {
+    if (opts.ruleId !== undefined || opts.metricId !== undefined) {
+      throw new ServiceError(
+        "VALIDATION",
+        "the issues_overview view is one row per rule over the whole crawl; it takes no " +
+          "'ruleId' or 'metricId'",
+      );
+    }
+    return { format, view, ruleId: null, metricId: null };
   }
   if (opts.metricId !== undefined) {
     throw new ServiceError(

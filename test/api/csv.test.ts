@@ -207,10 +207,16 @@ describe("the view definitions", () => {
     // is not something a keyset query can express. The split is the type
     // (`CSV_QUERY_VIEWS`), so a ninth keyset view cannot be added without a
     // definition and this one cannot be mistaken for having lost its.
-    expect(CSV_VIEWS).toHaveLength(9);
+    //
+    // TEN ADVERTISED SINCE 27a-T8: `issues_overview` is the second view that is
+    // not a keyset read — one `GROUP BY rule_id` aggregate shared with the JSON
+    // tool (`buildIssuesOverview`), at most one row per rule.
+    expect(CSV_VIEWS).toHaveLength(10);
     expect(CSV_QUERY_VIEWS).toHaveLength(8);
     expect(CSV_VIEWS).toContain("metric_table");
+    expect(CSV_VIEWS).toContain("issues_overview");
     expect(CSV_QUERY_VIEWS).not.toContain("metric_table");
+    expect(CSV_QUERY_VIEWS).not.toContain("issues_overview");
   });
 
   it("gives every view a header, a keyset and a start cursor of matching arity", () => {

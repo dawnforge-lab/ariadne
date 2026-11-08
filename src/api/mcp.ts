@@ -110,6 +110,7 @@ export const TOOL_NAMES = [
   "crawl_config_set",
   "robots_get",
   "issues_list",
+  "issues_overview",
   "issue_urls",
   "issue_inlinks",
   "metrics_get",
@@ -835,6 +836,44 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
   );
 
   server.registerTool(
+    named("issues_overview"),
+    {
+      title: "Issues Overview: one row per rule",
+      description:
+        "THE ISSUES OVERVIEW of a judged crawl, with its judgement applied: " +
+        "{crawlId, rulesetVersion, pagesJudged, rows, disabledRules, judgementStale}. " +
+        "One row per rule that found something — {ruleId, title, type, priority, " +
+        "severity, category, checkIds, urls, percentOfJudged, marker?} — ordered by " +
+        "type (issue, warning, opportunity), then priority (high, medium, low), then " +
+        "urls descending, then ruleId. typeOverridden / priorityOverridden are present " +
+        "(true) when the crawl's judgement sets them; severity is never overridable. " +
+        "urls is the number of distinct pages the rule fired on, plus one when it has " +
+        "a site-wide finding. pagesJudged is site.health's Pages Judged as the rules " +
+        "run stored it, and percentOfJudged is urls over it to one decimal place; both " +
+        "are null when the crawl has no site.health row (and percentOfJudged when " +
+        "pagesJudged is 0). Rules the crawl's judgement disables are left out and " +
+        "named in disabledRules; metric rules never appear. Not paginated: one row per " +
+        "rule, at most the ruleset's rule count.\n\n" +
+        "A crawl no rules run has judged is refused (409): an empty overview would " +
+        "read as a clean site. The same rows are a spreadsheet through export_crawl " +
+        "(format=csv, view=issues_overview). issues_list is the grouped triage view " +
+        "with sample URLs; this is the one-line-per-rule summary.",
+      inputSchema: z.strictObject({
+        crawlId: crawlIdField(),
+        includeZero: z
+          .boolean()
+          .describe(
+            "Also list every enabled page and query rule that found nothing, with urls 0. " +
+              "Default false: only rules with at least one finding.",
+          )
+          .optional(),
+      }),
+    },
+    async ({ crawlId, ...rest }) =>
+      run("issues_overview", () => service.issuesOverview(crawlId, defined(rest))),
+  );
+
+  server.registerTool(
     named("issue_urls"),
     {
       title: "One rule's findings, as a table",
@@ -1493,7 +1532,8 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "them out too, and issue_urls of a disabled rule is refused).\n" +
         `  format=csv writes a spreadsheet of one VIEW: ${CSV_VIEWS.join(", ")} ` +
         "(default issues). issue_urls is one rule's findings and needs a ruleId; " +
-        "metric_table is one metric's table and needs a metricId; the other seven " +
+        "metric_table is one metric's table and needs a metricId; issues_overview is " +
+        "the issues_overview tool's one-row-per-rule table; the other six " +
         "refuse both. Answers {format, view, path, rows, bytes}.\n" +
         "  metric_table is the spreadsheet of the metric_table tool's table: the " +
         "header is the column LABELS, one row per table row, and the metric's " +
