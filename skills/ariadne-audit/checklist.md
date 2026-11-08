@@ -1631,7 +1631,7 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
      (info) is a NOT MEASURED marker, not a finding about the site: some hreflang
      declarations were not read in full. It fires once for the crawl, with
      `{hreflangLimited, entryLimited, docLimited, depthLimited, sitemapDocsFailed,
-     sitemapDocsOversized, possiblyCappedPages}`, in three cases:
+     sitemapDocsOversized, alternatesCapped, possiblyCappedPages}`, in four cases:
      - **The sitemap walk was cut short** (`hreflangLimited`, `entryLimited`,
        `docLimited` or `depthLimited` true, or `sitemapDocsOversized` above 0).
        Then `hreflang.missing-return-link`, `hreflang.missing-self-reference`,
@@ -1644,11 +1644,15 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
        return link or self-reference they report missing may sit in the unread
        file: confirm a sample against the live sitemap before reporting them as
        FAIL, and fix the sitemap first.
+     - **A sitemap `<url>` listed more than 200 alternates** (`alternatesCapped`,
+       the alternates past 200 summed over every such entry). Which URLs is not
+       recorded, so the four rules still run; treat the sitemap source as a floor,
+       as for a sitemap that could not be read.
      - **A page reached the 200-alternate limit** in one source
        (`possiblyCappedPages`, on any crawl). Such a page is not judged for a
        missing self-reference, x-default or alternate, and is never reported as
        failing to return a link; check a sample by hand.
-     On a crawl from before Phase 26c the four sitemap keys are `null` and only
+     On a crawl from before Phase 26c the seven sitemap keys are `null` and only
      `possiblyCappedPages` is judged.
 - **Important**: Don't just check for hreflang errors — also assess **coverage**:
   1. How many internal indexable URLs have hreflang tags vs how many should?

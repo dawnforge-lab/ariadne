@@ -1140,6 +1140,7 @@ describe("the fixture site end to end", () => {
         depthLimited: false,
         sitemapDocsFailed: 1,
         sitemapDocsOversized: 0,
+        alternatesCapped: 0,
         possiblyCappedPages: 0,
       },
     ]);

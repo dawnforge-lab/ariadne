@@ -872,11 +872,13 @@ const KINDS = ["page", "query", "metric"] as const satisfies readonly AnyRule["k
 //     never a target that "does not return the link". New query marker
 //     `hreflang.declarations-incomplete` (info, CHECK-24, category `hreflang`):
 //     one site finding when the walk was cut short, a sitemap document failed,
-//     or a judged page reached the pair cap, evidence `{hreflangLimited,
-//     entryLimited, docLimited, depthLimited, sitemapDocsFailed,
-//     sitemapDocsOversized, possiblyCappedPages}`, the first six null on a crawl
-//     before the sitemap facts (judged on the pair cap alone).
-//     `rules_catalog` re-measured at 194,039 bytes. 188 rules.
+//     a sitemap `<url>` lost alternates past the per-URL cap (ruling R22; like
+//     a failed document, marker only), or a judged page reached the pair cap,
+//     evidence `{hreflangLimited, entryLimited, docLimited, depthLimited,
+//     sitemapDocsFailed, sitemapDocsOversized, alternatesCapped,
+//     possiblyCappedPages}`, the first seven null on a crawl before the sitemap
+//     facts (judged on the pair cap alone).
+//     `rules_catalog` re-measured at 194,112 bytes. 188 rules.
 export const RULESET_VERSION = "0.22.0";
 
 /**

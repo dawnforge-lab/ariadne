@@ -25,10 +25,10 @@ import type { RuleCaps } from "../registry/types.js";
 import { capsOr, noteAtLeastTruncation, noteTruncation } from "./crawl-evidence.js";
 import {
   AT_PAIR_CAP,
-  cutShort,
   POSSIBLY_CAPPED_PAGES,
   readSitemapHreflang,
   sitemapHreflangCutShort,
+  sitemapIncomplete,
 } from "./hreflang-completeness.js";
 
 /**
@@ -755,8 +755,10 @@ async function alternatesNotCrawledFindings(db: Db, crawlId: string): Promise<Fi
  *
  *  (a) on a crawl that recorded its sitemap facts (Phase 26c on), the sitemap
  *      walk was cut short (`cutShort`: the four absence-based rules refused),
- *      or a sitemap document could not be read (`sitemapDocsFailed`: the rules
- *      ran, and the sitemap source is a floor);
+ *      or a sitemap document could not be read (`sitemapDocsFailed`), or a
+ *      `<url>` lost alternates past the per-URL cap (`alternatesCapped`,
+ *      ruling R22): in those two the rules ran, and the sitemap source is a
+ *      floor (`sitemapIncomplete`);
  *  (b) on any crawl, a declaring page the hreflang rules judge — fetched OK
  *      with a 200 and not canonicalised elsewhere — holds `MAX_HREFLANG_PAIRS`
  *      or more declarations from one source (`possiblyCappedPages`, counted in
@@ -779,9 +781,7 @@ async function declarationsIncompleteFindings(db: Db, crawlId: string): Promise<
   if (row === undefined) throw new Error(`${INCOMPLETE.id}: aggregate returned no row`);
   const possiblyCappedPages = Number(row.n);
 
-  const sitemapIncomplete =
-    reading !== null && (cutShort(reading) || reading.sitemapDocsFailed > 0);
-  if (!sitemapIncomplete && possiblyCappedPages === 0) return [];
+  if (!sitemapIncomplete(reading) && possiblyCappedPages === 0) return [];
   return [
     queryFinding(INCOMPLETE, {
       pageId: null,
@@ -793,6 +793,7 @@ async function declarationsIncompleteFindings(db: Db, crawlId: string): Promise<
         depthLimited: reading?.depthLimited ?? null,
         sitemapDocsFailed: reading?.sitemapDocsFailed ?? null,
         sitemapDocsOversized: reading?.sitemapDocsOversized ?? null,
+        alternatesCapped: reading?.alternatesCapped ?? null,
         possiblyCappedPages,
       },
       dedupeKey: "site",
@@ -1134,6 +1135,10 @@ export const hreflangRules: QueryRule[] = [
       { key: "depthLimited", label: "Sitemap Depth Limit Reached" },
       { key: "sitemapDocsFailed", label: "Sitemaps Not Read" },
       { key: "sitemapDocsOversized", label: `Sitemaps Over ${SITEMAP_MAX_BYTES / (1024 * 1024)} MB` },
+      {
+        key: "alternatesCapped",
+        label: `Sitemap Alternates Past ${MAX_HREFLANG_PAIRS} per URL`,
+      },
       {
         key: "possiblyCappedPages",
         label: `Pages at the ${MAX_HREFLANG_PAIRS}-Alternate Limit`,

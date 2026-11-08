@@ -715,8 +715,9 @@ now) is NOT MEASURED, never a PASS. The remedy is a re-crawl. By check:
   `hreflang.missing-return-link`, `hreflang.missing-self-reference`,
   `hreflang.missing-x-default` and `hreflang.self-only` did not run: those parts of
   CHECK-24 and CHECK-25 are NOT MEASURED, never a PASS. If only `sitemapDocsFailed`
-  is above zero, the rules ran but a sitemap could not be read (`sitemap.invalid`
-  names it), so confirm a sample of missing return links against the live sitemap.
+  or `alternatesCapped` is above zero, the rules ran but a sitemap could not be
+  read (`sitemap.invalid` names it) or a sitemap entry listed more than 200
+  alternates, so confirm a sample of missing return links against the live sitemap.
   `possiblyCappedPages` counts pages with 200 or more alternates in one source,
   which those rules do not judge for an absence; check one by hand.
 - **CHECK-28, URL length:** `url.reference-too-long` (warning) is a page carrying a

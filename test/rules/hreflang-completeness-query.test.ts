@@ -67,6 +67,7 @@ describe("hreflang.declarations-incomplete metadata", () => {
       "depthLimited",
       "sitemapDocsFailed",
       "sitemapDocsOversized",
+      "alternatesCapped",
       "possiblyCappedPages",
     ]);
   });
@@ -164,6 +165,7 @@ describe("hreflang.declarations-incomplete against the database", () => {
     depthLimited: false,
     sitemapDocsFailed: 0,
     sitemapDocsOversized: 0,
+    alternatesCapped: 0,
     possiblyCappedPages: 0,
   };
 
@@ -243,6 +245,15 @@ describe("hreflang.declarations-incomplete against the database", () => {
     const marker = await run(MARKER, crawlId);
     expect(marker).toHaveLength(1);
     expect(marker[0]!.evidence).toEqual({ ...CLEAN, sitemapDocsFailed: 1 });
+  });
+
+  it("a sitemap <url> that lost alternates past the per-URL cap fires the marker and silences nothing (R22)", async () => {
+    const crawlId = await newCrawl(mkDiscovery({ sitemapFacts: { alternatesCapped: 3 } }));
+    await seedAbsences(crawlId);
+    expect(await absenceCounts(crawlId)).toEqual(ALL_FIRE);
+    const marker = await run(MARKER, crawlId);
+    expect(marker).toHaveLength(1);
+    expect(marker[0]!.evidence).toEqual({ ...CLEAN, alternatesCapped: 3 });
   });
 
   it("(iii) a declarer at the pair cap is not judged for its self-reference or x-default", async () => {
@@ -332,6 +343,7 @@ describe("hreflang.declarations-incomplete against the database", () => {
       depthLimited: null,
       sitemapDocsFailed: null,
       sitemapDocsOversized: null,
+      alternatesCapped: null,
       possiblyCappedPages: 1,
     });
     expect(await run(SELF_REFERENCE, crawlId)).toEqual([]);

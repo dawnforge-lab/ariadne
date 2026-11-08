@@ -24,7 +24,11 @@
  *     stale sitemap that 404s is commonplace, `sitemap.invalid` already
  *     reports it, and silencing four rules site-wide for it would hide far more
  *     than it protects. The marker names it (`sitemapDocsFailed`) so the
- *     reader knows the sitemap source is a floor.
+ *     reader knows the sitemap source is a floor. The same holds for
+ *     alternates past `MAX_HREFLANG_PAIRS` in one `<url>`
+ *     (`sitemapFacts.alternatesCapped`, ruling R22): counted, their URLs not
+ *     recorded, so the marker reports them and nothing is silenced
+ *     (`sitemapIncomplete`).
  *
  *  2. THE PER-SOURCE PAIR CAP. The page analyzer, the `Link` header reader and
  *     the sitemap stream each keep at most `MAX_HREFLANG_PAIRS` pairs and drop
@@ -57,6 +61,13 @@ export interface SitemapHreflangReading {
   sitemapDocsFailed: number;
   /** `truncation.oversizedDocsSkipped`: documents read only to the size limit. */
   sitemapDocsOversized: number;
+  /**
+   * `sitemapFacts.alternatesCapped`: alternates past `MAX_HREFLANG_PAIRS` in one
+   * `<url>`, read and never staged. The URLs they belong to are not recorded,
+   * so like a failed document this is the marker's to report and silences
+   * nothing (ruling R22).
+   */
+  alternatesCapped: number;
 }
 
 /**
@@ -96,7 +107,18 @@ export async function readSitemapHreflang(
     depthLimited: flag("depthLimited"),
     sitemapDocsFailed: discovery.truncation.failures.length,
     sitemapDocsOversized: discovery.truncation.oversizedDocsSkipped,
+    alternatesCapped: facts.alternatesCapped,
   };
+}
+
+/**
+ * Whether the sitemap source is incomplete at all: cut short (`cutShort`, the
+ * four rules refuse), or a document failed, or a `<url>` lost alternates past
+ * the per-URL cap (the rules run; the marker says the source is a floor).
+ */
+export function sitemapIncomplete(reading: SitemapHreflangReading | null): boolean {
+  if (reading === null) return false;
+  return cutShort(reading) || reading.sitemapDocsFailed > 0 || reading.alternatesCapped > 0;
 }
 
 /**

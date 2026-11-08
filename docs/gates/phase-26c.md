@@ -223,13 +223,17 @@ same exposure.
   declarer for the self-reference, x-default and self-only rules, and is never a target that
   "does not return the link".
 - The new marker `hreflang.declarations-incomplete` (info, CHECK-24) fires once per crawl when the
-  walk was cut short, when a sitemap document failed, or when a judged page reached the pair cap.
-  Its evidence is `{hreflangLimited, entryLimited, docLimited, depthLimited, sitemapDocsFailed,
-  sitemapDocsOversized, possiblyCappedPages}`. On a crawl from before 26c, the six sitemap keys
-  are `null` and only the pair cap is judged.
+  walk was cut short, when a sitemap document failed, when a sitemap `<url>` lost alternates past
+  the per-URL cap (`alternatesCapped`, ruling R22: like a failed document, marker only), or when a
+  judged page reached the pair cap. Its evidence is `{hreflangLimited, entryLimited, docLimited,
+  depthLimited, sitemapDocsFailed, sitemapDocsOversized, alternatesCapped, possiblyCappedPages}`.
+  On a crawl from before 26c, the seven sitemap keys are `null` and only the pair cap is judged.
+- Ruling R22 also moved the 45 MB RSS-growth test of the sitemap stream into a file of its own
+  (`test/crawl/sitemap-stream-memory.test.ts`), so its RSS delta is measured in a fresh worker. It
+  had once read 85 MB in a full run, from garbage left by the earlier tests in its file.
 
 **Counts.** 188 rules: 72 page / 102 query / 14 metric; 33 critical / 66 warning / 89 info; 16
-markers. `rules_catalog` is 194,039 bytes, up from 191,912. No migration and no version bump.
+markers. `rules_catalog` is 194,112 bytes, up from 191,912. No migration and no version bump.
 
 **Why the gate stands.** Every figure in §1–§5 was measured on `b5284c8`, before this change.
 None of the gate crawls truncated hreflang:
@@ -243,5 +247,6 @@ The Hurtigruten **first** crawl (§5.1, 20 locale sitemaps timed out) is exactly
 case. Judged now, it would carry the marker with `sitemapDocsFailed: 20` beside `sitemap.invalid`,
 and the four rules would still run on it.
 
-Clause 1 was re-run after the change: **121 files / 3,480 tests, 0 failed, 0 skipped**; `tsc`
-clean (+1 file, +22 tests over `b5284c8`).
+Clause 1 was re-run after the change, twice: **122 files / 3,481 tests, 0 failed, 0 skipped**
+both times; `tsc` clean (+2 files, +23 tests over `b5284c8`; one of the files is the RSS test
+moved out by R22).

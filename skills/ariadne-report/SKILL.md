@@ -298,7 +298,7 @@ the old way): the checks it claims, CHECK-08 and CHECK-28 now among them, go und
   read in full. When it says the sitemaps were cut short, the missing-return-link,
   self-reference, x-default and self-only checks did not run, so put them under "Not
   audited" rather than reporting the cluster clean. When it says only that a sitemap
-  could not be read, report the hreflang findings with the caveat that some may be
+  could not be read, or that a sitemap entry listed more than 200 alternates, report the hreflang findings with the caveat that some may be
   answered in that sitemap, and lead with fixing it.
 - **Sitemaps** (CHECK-08): `sitemap.oversized` is a sitemap over 50 MB, which search
   engines reject whole, so every URL in it is unsubmitted: rank it with the
