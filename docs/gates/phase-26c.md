@@ -228,19 +228,24 @@ same exposure.
   judged page reached the pair cap. Its evidence is `{hreflangLimited, entryLimited, docLimited,
   depthLimited, sitemapDocsFailed, sitemapDocsOversized, alternatesCapped, possiblyCappedPages}`.
   On a crawl from before 26c, the seven sitemap keys are `null` and only the pair cap is judged.
+- Ruling R23: "possibly capped" now counts the pair slots taken, not only the rows stored (HTML
+  and header rows plus the page's over-long hreflang targets; staged sitemap alternates before
+  the derivation's DISTINCT), the marker counts every skipped page whatever its status, and its
+  new `reason` evidence names only the triggers that fired. `rules_catalog` is 194,186 bytes.
 - Ruling R22 also moved the 45 MB RSS-growth test of the sitemap stream into a file of its own
   (`test/crawl/sitemap-stream-memory.test.ts`), so its RSS delta is measured in a fresh worker. It
   had once read 85 MB in a full run, from garbage left by the earlier tests in its file.
 
 **Counts.** 188 rules: 72 page / 102 query / 14 metric; 33 critical / 66 warning / 89 info; 16
-markers. `rules_catalog` is 194,112 bytes, up from 191,912. No migration and no version bump.
+markers. `rules_catalog` is 194,112 bytes after R22, up from 191,912, and 194,186 after R23. No
+migration and no version bump.
 
 **Why the gate stands.** Every figure in §1–§5 was measured on `b5284c8`, before this change.
 None of the gate crawls truncated hreflang:
 - The Hurtigruten re-crawl read 11 sitemaps with 0 failures, `hreflangLimited` false and no page
   near 200 pairs, so the marker would be silent and the four rules judge it as before.
 - The 50k runs, the hreflang run's 600,080 alternates included, stayed under every cap.
-- The change adds one aggregate query (the marker) and a window count to two existing batch
+- The change adds one aggregate query (the marker) and a batch-scoped sub-select to two existing batch
   queries, so it adds nothing to the memory contract.
 
 The Hurtigruten **first** crawl (§5.1, 20 locale sitemaps timed out) is exactly the failed-document

@@ -879,6 +879,17 @@ const KINDS = ["page", "query", "metric"] as const satisfies readonly AnyRule["k
 //     possiblyCappedPages}`, the first seven null on a crawl before the sitemap
 //     facts (judged on the pair cap alone).
 //     `rules_catalog` re-measured at 194,112 bytes. 188 rules.
+// 15. (PR #24 review, ruling R23) No new rule, migration or version bump.
+//     "Possibly capped" (`POSSIBLY_CAPPED_PAGES`, the one definition) counts
+//     the pair slots a source took, not only the rows it stored: HTML and
+//     header rows plus `pages.overlong_urls.hreflang` (per page, applied to
+//     each of the two), and a page's staged `sitemap_hreflang` rows before the
+//     derivation's DISTINCT. The marker's `possiblyCappedPages` counts every
+//     crawled page not canonicalised elsewhere, any status, so a 404 target
+//     skipped at the cap is counted. Its evidence gains `reason` (column
+//     "Reason", first): one sentence per trigger that fired; the static marker
+//     sentence and the fix copy no longer tell every crawl to fix failing
+//     sitemaps. `rules_catalog` re-measured at 194,186 bytes. 188 rules.
 export const RULESET_VERSION = "0.22.0";
 
 /**

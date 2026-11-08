@@ -1134,6 +1134,8 @@ describe("the fixture site end to end", () => {
     expect(siteFindings.get("hreflang.declarations-incomplete")).toEqual([
       {
         pageUrl: null,
+        reason:
+          "1 sitemap could not be read, so a return link or self-reference reported missing may be in the unread file; fix the sitemap reported as Sitemaps: Sitemap could not be read and re-crawl.",
         hreflangLimited: false,
         entryLimited: false,
         docLimited: false,

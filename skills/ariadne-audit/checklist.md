@@ -1630,8 +1630,10 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
   6. `issues_list` with `checkId: "CHECK-24"` — `hreflang.declarations-incomplete`
      (info) is a NOT MEASURED marker, not a finding about the site: some hreflang
      declarations were not read in full. It fires once for the crawl, with
-     `{hreflangLimited, entryLimited, docLimited, depthLimited, sitemapDocsFailed,
-     sitemapDocsOversized, alternatesCapped, possiblyCappedPages}`, in four cases:
+     `{reason, hreflangLimited, entryLimited, docLimited, depthLimited,
+     sitemapDocsFailed, sitemapDocsOversized, alternatesCapped,
+     possiblyCappedPages}`, in four cases (`reason` names, in words, only the
+     ones that fired):
      - **The sitemap walk was cut short** (`hreflangLimited`, `entryLimited`,
        `docLimited` or `depthLimited` true, or `sitemapDocsOversized` above 0).
        Then `hreflang.missing-return-link`, `hreflang.missing-self-reference`,
@@ -1648,10 +1650,12 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
        the alternates past 200 summed over every such entry). Which URLs is not
        recorded, so the four rules still run; treat the sitemap source as a floor,
        as for a sitemap that could not be read.
-     - **A page reached the 200-alternate limit** in one source
-       (`possiblyCappedPages`, on any crawl). Such a page is not judged for a
-       missing self-reference, x-default or alternate, and is never reported as
-       failing to return a link; check a sample by hand.
+     - **A page may have filled the 200-alternate limit** in one source
+       (`possiblyCappedPages`, on any crawl, any status): its stored HTML or
+       header pairs plus its over-long hreflang targets, or its staged sitemap
+       alternates, reach 200. Such a page is not judged for a missing
+       self-reference, x-default or alternate, and is never reported as failing
+       to return a link; check a sample by hand.
      On a crawl from before Phase 26c the seven sitemap keys are `null` and only
      `possiblyCappedPages` is judged.
 - **Important**: Don't just check for hreflang errors — also assess **coverage**:

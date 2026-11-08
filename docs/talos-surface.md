@@ -40,19 +40,21 @@ info counting the fourteen metric rules). The new ids:
   those codes are listed under `onlyIn`.
 - `hreflang.declarations-incomplete` (info, CHECK-24, a NOT MEASURED marker;
   added in the PR #24 review): hreflang declarations this crawl did not read in
-  full. One site finding, `{hreflangLimited, entryLimited, docLimited,
+  full. One site finding, `{reason, hreflangLimited, entryLimited, docLimited,
   depthLimited, sitemapDocsFailed, sitemapDocsOversized, alternatesCapped,
-  possiblyCappedPages}`. When the sitemap walk was cut short (a staging, entry,
+  possiblyCappedPages}`; `reason` is a sentence per trigger that fired, and
+  names nothing that did not. When the sitemap walk was cut short (a staging, entry,
   document or depth limit, or a sitemap over 50 MB),
   `hreflang.missing-return-link`, `hreflang.missing-self-reference`,
   `hreflang.missing-x-default` and `hreflang.self-only` answer nothing on that
   crawl and this marker speaks for them; a sitemap that could not be read, or a
   sitemap `<url>` with alternates past 200 (`alternatesCapped`), fires it
-  without silencing them. A page with 200 or more declarations from one source
-  (`possiblyCappedPages`, on any crawl) is never judged by those rules as
-  missing a self-reference, x-default or alternate, nor reported as not
-  returning a link. The first seven keys are `null` on a crawl from before
-  Phase 26c.
+  without silencing them. A page whose declarations may have filled the
+  200-pair cap in one source — stored HTML or header rows plus its over-long
+  hreflang targets, or 200 staged sitemap alternates — (`possiblyCappedPages`,
+  on any crawl, any status) is never judged by those rules as missing a
+  self-reference, x-default or alternate, nor reported as not returning a link.
+  The seven keys after `reason` are `null` on a crawl from before Phase 26c.
 
 What changed under existing ids. **Hreflang is read from all three sources**: the
 page's HTML, its HTTP `Link` header (read whole at fetch, on every classified
@@ -723,11 +725,15 @@ argument nobody allowed, naming it").
 
 **Not paginated, on purpose:** `rules_catalog` and `crawl_compare`. Both are
 bounded by the **ruleset** (188 rows at 0.22.0) rather than by the crawl. The
-catalog is ~189 KB (**194,112 bytes**, measured 2026-11-08 after the PR #24
-review over all 188 rows of ruleset 0.22.0 by serialising what `rulesCatalog`
-answers with no crawl id — 16 markers at 2,568 bytes, the `marker` values
-JSON-serialised as one array, and the fourteen tables at 5,620 the same way;
-the 2,200 bytes over the 191,912 before it are the one new marker's row, its
+catalog is ~189 KB (**194,186 bytes**, measured 2026-11-08 after the PR #24
+review's R23 follow-up over all 188 rows of ruleset 0.22.0 by serialising what
+`rulesCatalog` answers with no crawl id — 16 markers at 2,487 bytes, the
+`marker` values JSON-serialised as one array, and the fourteen tables at 5,620
+the same way; the 74 bytes over the 194,112 before it are the marker's `reason`
+column and its rewritten marker sentence and fix copy, and the same
+measurement over the code before it reproduces the 194,112 to the byte; the
+194,112 was measured the same day after the review's R22 fix, 16 markers at
+2,568 bytes; the 2,200 bytes over the 191,912 before that are the one new marker's row, its
 copy and its reason; the 191,912 was measured the same day after Phase 26c Task
 12a over all 187 rows, 15 markers at 2,286 bytes and the tables at 5,620;
 the 163 bytes over the 191,749 before it are that task's `sitemap.structure`
@@ -1319,7 +1325,7 @@ not name", `test/api/query.test.ts:1456` "carries a finding with no page as a
 null url", `test/rules/helpers.test.ts:697` "maps each fetch class to the status
 a reader acts on", `test/rules/helpers.test.ts:717` "names a block a block,
 whatever status the challenge was served with",
-`test/fixtures/harness.test.ts:1285` "declares a column for every evidence key it
+`test/fixtures/harness.test.ts:1287` "declares a column for every evidence key it
 writes, and writes every column it declares",
 `test/rules/registry.test.ts:755` "finds one defining file per rule, and the key
 spelled inside it".
@@ -1471,7 +1477,7 @@ header on the catalog, and only on metric rules",
 and one row per scope",
 `test/rules/metric-table.test.ts:377` "gives every metric rule a table whose
 columns are the catalog's",
-`test/fixtures/harness.test.ts:2381` "renders every metric's table, with no
+`test/fixtures/harness.test.ts:2383` "renders every metric's table, with no
 empty column and no unmapped key".
 
 ### 4.5 `metrics_get` → `{items: MetricRow[], nextCursor}`
@@ -2085,7 +2091,7 @@ threshold";
 `test/rules/coverage.test.ts:607` "site.health is filed under the
 engine-coverage check, and CHECK-32 lost no claimant" (the re-file in both
 directions, and CHECK-83 outside the crawl-derived universe);
-`test/fixtures/harness.test.ts:3274` "the health rollup agrees with a
+`test/fixtures/harness.test.ts:3276` "the health rollup agrees with a
 page-by-page recount" — an independent recount in JavaScript over the end-to-end
 fixture crawl.
 

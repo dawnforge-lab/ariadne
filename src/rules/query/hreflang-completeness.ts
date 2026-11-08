@@ -33,8 +33,9 @@
  *  2. THE PER-SOURCE PAIR CAP. The page analyzer, the `Link` header reader and
  *     the sitemap stream each keep at most `MAX_HREFLANG_PAIRS` pairs and drop
  *     the rest uncounted (the sitemap stream counts its own, per `<url>`). A
- *     declaration set with that many rows from one source may have lost the very
- *     pair a rule looks for. `POSSIBLY_CAPPED_PAGES` names those page ids; such a
+ *     declaration set that filled the cap in one source may have lost the very
+ *     pair a rule looks for. `POSSIBLY_CAPPED_PAGES` names those page ids (how
+ *     a filled cap is recognised is at its definition: ruling R23); such a
  *     set is never a declarer for the self-reference, x-default and self-only
  *     rules, and never a target that "does not return the link". This applies
  *     on every crawl, whatever its sitemap facts say.
@@ -147,23 +148,95 @@ export async function sitemapHreflangCutShort(
 }
 
 /**
- * True on every row of a declaration query whose (page, source) holds
- * `MAX_HREFLANG_PAIRS` or more rows: the window form of
- * `POSSIBLY_CAPPED_PAGES`, for the per-batch queries that already read every
- * row of their pages (`alias` is the `hreflang` alias; the query must select
- * ALL of each page's rows for the count to be the set's).
+ * Which pages a `POSSIBLY_CAPPED_PAGES` sub-select considers: a predicate over
+ * the `pages` alias it is handed. A batch query passes its own page ids, so the
+ * sub-select reads only that batch's rows (hard rule 3: no crawl-wide set is
+ * ever held, in RAM or re-scanned per batch).
  */
-export const AT_PAIR_CAP = (alias: string): SQL =>
-  sql`(count(*) over (partition by ${sql.raw(alias)}.page_id, ${sql.raw(alias)}.source) >= ${MAX_HREFLANG_PAIRS})`;
+export type PageScope = (pagesAlias: string) => SQL;
+
+/** Every page of the crawl, for the one-scan readers (the marker, self-only). */
+export const EVERY_PAGE: PageScope = () => sql`true`;
+
+/** The pages whose ids are in `ids`: a declaration batch. */
+export const PAGE_IDS =
+  (ids: string[]): PageScope =>
+  (p) =>
+    sql`${sql.raw(p)}.id = any(${sql.param(ids)}::text[])`;
+
+/** The pages whose `url` is in `urls`: a batch's crawled targets. */
+export const PAGE_URLS =
+  (urls: string[]): PageScope =>
+  (p) =>
+    sql`${sql.raw(p)}.url = any(${sql.param(urls)}::text[])`;
 
 /**
- * The page ids of the crawl with `MAX_HREFLANG_PAIRS` or more declarations
- * from one source, as a sub-select (`page_id in (…)`): the marker's count and
- * `hreflang.self-only`'s exclusion, each one grouped scan of the crawl's rows.
+ * `pages.overlong_urls.hreflang` for the `pages` alias `p`: hreflang targets
+ * the page's HTML or `Link` header named that were over `INDEXED_URL_MAX`,
+ * counted and never stored (Phase 26c, extraction 3).
+ *
+ * NULL COUNTS 0, and that is the column's own meaning here rather than a
+ * default: null is written where no response was classified (no header and no
+ * HTML were read, so no pair was taken or refused) and on a row from before
+ * extraction 3, which refused no over-long target (the refusal is extraction
+ * 3's; such a row stored every pair it kept). A NON-null blob without a numeric
+ * `hreflang` is a defect in the write and is LOUD: the `strict` path raises
+ * "JSON object does not contain key", and a non-number fails the cast (hard
+ * rule 7; `url.reference-too-long` throws "re-crawl" on the same blob).
  */
-export const POSSIBLY_CAPPED_PAGES = (crawlId: string): SQL => sql`
-  select c.page_id
-  from hreflang c
-  where c.crawl_id = ${crawlId}
-  group by c.page_id, c.source
+const OVERLONG_HREFLANG = (p: string): SQL =>
+  sql.raw(
+    `(case when ${p}.overlong_urls is null then 0 ` +
+      `else jsonb_path_query_first(${p}.overlong_urls, 'strict $.hreflang')::int end)`,
+  );
+
+/**
+ * The page ids, among `among`, whose declarations may have filled the
+ * per-source pair cap, as a sub-select (`page_id in (…)`). THE ONE DEFINITION
+ * of "possibly capped" (ruling R23): the per-batch declaration and target
+ * queries, the marker's count and `hreflang.self-only`'s exclusion all read it.
+ *
+ * A source filled its cap when the pairs that TOOK A SLOT reach
+ * `MAX_HREFLANG_PAIRS`, which is not always the rows stored:
+ *
+ *  - HTML and `Link` header (`source in ('html', 'header')`): the source's
+ *    stored rows plus `overlong_urls.hreflang`, because an over-long target
+ *    takes a slot and is not stored. The over-long count is per PAGE, not
+ *    split by source (the analyzer's and the header reader's are summed into
+ *    one column), so it is added to EACH of the two: the conservative reading,
+ *    which may call a set capped that was not and never the reverse. The left
+ *    join keeps a page with no stored row from a source, so a page whose every
+ *    slot went to an over-long target is caught too.
+ *  - Sitemap: the page's STAGED `sitemap_hreflang` rows, joined to the page
+ *    exactly as `deriveSitemapHreflang` joins them (`url_normalised =
+ *    pages.url`), counted before the derivation's DISTINCT. A `<url>` that
+ *    filled its cap with pairs another document (or a repeat of the `<url>`)
+ *    also states derives to fewer than `MAX_HREFLANG_PAIRS` rows, and the
+ *    derived rows alone would miss it. Staged rows of several documents add
+ *    up, so a page listed twice with 100 alternates each counts as at the cap:
+ *    conservative again. The derived `source = 'sitemap'` rows are not read:
+ *    they never outnumber the staged rows they come from.
+ *
+ * WHAT IT STILL UNDERCOUNTS. An href that did not resolve took a slot and was
+ * neither stored nor counted on the page (`PageWriter.counts.hreflangUnresolved`
+ * is crawl-wide only), and a sitemap alternate over `INDEXED_URL_MAX` is
+ * counted only crawl-wide (`sitemapFacts.overlongLocsSkipped`); a set short of
+ * the cap by those is read as whole. Neither is recorded per page, and
+ * recording it would be a migration.
+ */
+export const POSSIBLY_CAPPED_PAGES = (crawlId: string, among: PageScope): SQL => sql`
+  select cp.id as page_id
+  from pages cp
+  left join hreflang ch
+    on ch.crawl_id = cp.crawl_id and ch.page_id = cp.id and ch.source in ('html', 'header')
+  where cp.crawl_id = ${crawlId} and ${among("cp")}
+  -- cp.id is the primary key, so cp.overlong_urls may be read in the having.
+  group by cp.id, ch.source
+  having count(ch.page_id) + ${OVERLONG_HREFLANG("cp")} >= ${MAX_HREFLANG_PAIRS}
+  union
+  select sp.id as page_id
+  from pages sp
+  join sitemap_hreflang ss on ss.crawl_id = sp.crawl_id and ss.url_normalised = sp.url
+  where sp.crawl_id = ${crawlId} and ${among("sp")}
+  group by sp.id
   having count(*) >= ${MAX_HREFLANG_PAIRS}`;

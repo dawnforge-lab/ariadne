@@ -709,7 +709,8 @@ now) is NOT MEASURED, never a PASS. The remedy is a re-crawl. By check:
   source conflict on a PDF produces no finding. Check those by hand if the site
   annotates its documents.
   `hreflang.declarations-incomplete` (info) is a NOT MEASURED marker: some hreflang
-  was not read in full. Read its evidence before writing any reciprocity verdict. If
+  was not read in full. Read its evidence (`reason` says which triggers fired)
+  before writing any reciprocity verdict. If
   `hreflangLimited`, `entryLimited`, `docLimited` or `depthLimited` is `true`, or
   `sitemapDocsOversized` is above zero, the sitemap walk was cut short and
   `hreflang.missing-return-link`, `hreflang.missing-self-reference`,
@@ -718,8 +719,9 @@ now) is NOT MEASURED, never a PASS. The remedy is a re-crawl. By check:
   or `alternatesCapped` is above zero, the rules ran but a sitemap could not be
   read (`sitemap.invalid` names it) or a sitemap entry listed more than 200
   alternates, so confirm a sample of missing return links against the live sitemap.
-  `possiblyCappedPages` counts pages with 200 or more alternates in one source,
-  which those rules do not judge for an absence; check one by hand.
+  `possiblyCappedPages` counts pages whose alternates in one source may have filled
+  the 200 kept (over-long targets and sitemap duplicates take a place too), which
+  those rules do not judge for an absence; check one by hand.
 - **CHECK-28, URL length:** `url.reference-too-long` (warning) is a page carrying a
   link, file or hreflang target whose address is over 2,500 characters. The crawler
   cannot index such an address, so it counts it on the page and stores it nowhere:

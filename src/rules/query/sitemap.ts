@@ -83,7 +83,8 @@ const CATEGORY = "sitemap";
 export const MAX_FAILURES_LISTED = 50;
 
 const MISSING: RuleIdentity = { id: "sitemap.missing", severity: "warning" };
-const INVALID: RuleIdentity = { id: "sitemap.invalid", severity: "critical" };
+/** Exported for `hreflang.declarations-incomplete`, whose reason names this finding by its title. */
+export const INVALID: RuleIdentity = { id: "sitemap.invalid", severity: "critical" };
 const NON_200: RuleIdentity = { id: "sitemap.non-200", severity: "critical" };
 const REDIRECTED: RuleIdentity = { id: "sitemap.redirected", severity: "warning" };
 const NON_INDEXABLE: RuleIdentity = { id: "sitemap.non-indexable", severity: "critical" };
