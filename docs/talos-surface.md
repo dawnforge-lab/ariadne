@@ -647,7 +647,7 @@ Two properties make the double-transport claim below cheap to trust:
 
 - The token is `ARIADNE_API_TOKEN`, minimum 16 characters, compared in constant
   time over SHA-256 digests (`src/api/auth.ts`). The server refuses to boot
-  without one (`test/api/http.test.ts:2203` "refuses to produce a config without
+  without one (`test/api/http.test.ts:2217` "refuses to produce a config without
   a token").
 - **The token is checked before routing**, so an unauthenticated caller cannot
   map the surface: an unknown path answers 401, not 404
@@ -698,7 +698,7 @@ Two properties make the double-transport claim below cheap to trust:
 
 `correlationId` is a UUID; the stack goes to the server log under that id and
 nowhere else (`test/api/mcp.test.ts:2906` "turns an unexpected throw into a tool
-error with a correlation id", `test/api/http.test.ts:2146` "turns an unexpected
+error with a correlation id", `test/api/http.test.ts:2160` "turns an unexpected
 throw into a 500 with a correlation id").
 
 ---
@@ -921,7 +921,7 @@ ran, `findingsCount` would sit beside a larger `pagesScanned`, and
 against §2's "empty is never a verdict", which rests entirely on that field.
 Findings rows are left in place and then read exactly as a run that died
 part-way, which §5 already covers. Re-run `crawl_rules` after the resumed crawl
-finishes (`test/api/http.test.ts:1318` "unjudges a crawl it queues, so no
+finishes (`test/api/http.test.ts:1328` "unjudges a crawl it queues, so no
 timestamp outlives the pages it described").
 
 Refusals, each naming which one fired: no such crawl (404); this server already
@@ -943,11 +943,11 @@ same terms. A caller who wants the crawl dead rather than continued still has
 **Pages waiting on the render pass are NOT resumable work.** `render_pending`
 rows are already-crawled pages the selection promoted and the crawl loop never
 leases them; the refusal names them and points at `crawl_render`
-(`test/api/http.test.ts:1428` "names render_pending rows as the render pass's
+(`test/api/http.test.ts:1442` "names render_pending rows as the render pass's
 work, not a resume's"). Neither are the null `fetch_class` rows of a crawl
 configured with `fetchResources: false` — those carry the operator's decision,
 and a resume would not ask about them
-(`test/api/http.test.ts:1405` "does not read an off switch as resumable work").
+(`test/api/http.test.ts:1419` "does not read an off switch as resumable work").
 
 **The honest race.** The two liveness checks are a snapshot: a lease can expire
 between the count and the enqueue, and a worker this server cannot see can take a
@@ -958,7 +958,7 @@ row says something else — the silent no-op hard rule 7 forbids. That narrows t
 double-accept race as far as it goes without a lock (of two callers past the
 guards, only the one whose UPDATE lands first is accepted), and it cannot close
 the window against a process that never touches the status
-(`test/api/http.test.ts:1347` "409s when the crawl's state changes under the
+(`test/api/http.test.ts:1361` "409s when the crawl's state changes under the
 call, rather than queueing anyway").
 
 For the remainder, the guard is not the safety mechanism — `leaseBatch` is.
@@ -1514,7 +1514,7 @@ when both counts are 0. `"failed"` is neither "rendered" nor "no render
 needed". `"failed"` takes precedence over `"ran"`; the closed vocabulary is
 `ran`, `none`, `failed`. Read it before quoting any JavaScript finding. Pinned:
 `test/api/mcp.test.ts:1499` "says over the wire whether a render pass ran, not
-just how many pages it left", `test/api/http.test.ts:1806` "serves
+just how many pages it left", `test/api/http.test.ts:1820` "serves
 renderPassEvidence none beside the selection a pass would make",
 `test/rules/render-metrics.test.ts:536` "answers none on a crawl nobody
 rendered, and still reports what a pass would choose".
@@ -2785,7 +2785,7 @@ referencing counts summing to the edge table), `test/api/query.test.ts:3239`
 "reads every view through a cursor that can be walked one row at a time",
 `test/api/query.test.ts:3274` "refuses a view, a format or a rule it cannot
 answer", `test/api/query.test.ts:3344` "refuses a crawl holding a retired rule's
-findings BEFORE the header", `test/api/http.test.ts:2022` "tears the response
+findings BEFORE the header", `test/api/http.test.ts:2036` "tears the response
 when a CSV export fails mid-stream, rather than truncating the file";
 `test/api/mcp.test.ts:796` "describes the shape of the CSV it writes, not just
 that it writes one" and `test/api/mcp.test.ts:2879` "streams the resources view
