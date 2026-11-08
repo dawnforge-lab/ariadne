@@ -518,11 +518,19 @@ describe("checklist coverage", () => {
   //   page    72
   //   query   100 + 1 = 101
   //   total   186 + 1 = 187
-  it("pins the ruleset split: 187 rules = 72 page + 101 query + 14 metric", () => {
+  //
+  // The PR #24 review adds ONE query rule, the marker
+  // `hreflang.declarations-incomplete` (CHECK-24, already claimed), in
+  // `src/rules/query/hreflang.ts`.
+  //
+  //   page    72
+  //   query   101 + 1 = 102
+  //   total   187 + 1 = 188
+  it("pins the ruleset split: 188 rules = 72 page + 102 query + 14 metric", () => {
     const registry = buildRegistry();
-    expect(registry.all()).toHaveLength(187);
+    expect(registry.all()).toHaveLength(188);
     expect(registry.byKind("page")).toHaveLength(72);
-    expect(registry.byKind("query")).toHaveLength(101);
+    expect(registry.byKind("query")).toHaveLength(102);
     // The link-graph five, the two content metrics and hreflang coverage, plus
     // the URL-parameter, redirect-volume and sitemap-structure metrics, plus
     // the render pass's coverage, the health rollup, and the page-weight table.

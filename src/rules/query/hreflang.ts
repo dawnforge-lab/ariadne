@@ -2,7 +2,9 @@ import { createHash } from "node:crypto";
 import { sql } from "drizzle-orm";
 
 import type { Db } from "../../db/client.js";
+import { MAX_HREFLANG_PAIRS } from "../../crawl/parse/page-analyzer.js";
 import { normalizeUrl } from "../../crawl/parse/url-utils.js";
+import { SITEMAP_MAX_BYTES } from "../../crawl/sitemap-stream.js";
 import {
   CANONICALISED_ELSEWHERE,
   FETCHED_OK,
@@ -21,6 +23,13 @@ import {
 } from "../registry/registry.js";
 import type { RuleCaps } from "../registry/types.js";
 import { capsOr, noteAtLeastTruncation, noteTruncation } from "./crawl-evidence.js";
+import {
+  AT_PAIR_CAP,
+  cutShort,
+  POSSIBLY_CAPPED_PAGES,
+  readSitemapHreflang,
+  sitemapHreflangCutShort,
+} from "./hreflang-completeness.js";
 
 /**
  * BCP-47-lite: a 2–3 letter language, optionally followed by a region that is
@@ -50,6 +59,7 @@ const RETURN_LINK: RuleIdentity = { id: "hreflang.missing-return-link", severity
 const NON_INDEXABLE: RuleIdentity = { id: "hreflang.non-indexable-target", severity: "critical" };
 const SELF_REFERENCE: RuleIdentity = { id: "hreflang.missing-self-reference", severity: "warning" };
 const NOT_CRAWLED: RuleIdentity = { id: "hreflang.alternates-not-crawled", severity: "info" };
+const INCOMPLETE: RuleIdentity = { id: "hreflang.declarations-incomplete", severity: "info" };
 
 /**
  * Target hosts the not-crawled marker lists before it stops naming them. The
@@ -143,6 +153,13 @@ interface DeclarationSet {
   hasXDefault: boolean;
   /** `isAuditable` for the DECLARING page: fetched OK as HTML with a 200. */
   auditable: boolean;
+  /**
+   * One of the page's sources holds `MAX_HREFLANG_PAIRS` or more rows, so the
+   * set may have lost pairs at extraction (src/rules/query/
+   * hreflang-completeness.ts). What the set NAMES is still true; what it does
+   * not name is unknown, so no rule reads an absence from it.
+   */
+  capped: boolean;
 }
 
 /**
@@ -167,9 +184,21 @@ interface TargetContext {
   page: (target: string) => TargetPage | undefined;
   /** The target keys that crawled page itself declares — empty when it declares none. */
   declares: (target: string) => ReadonlySet<string>;
+  /**
+   * Whether that crawled page's own set reached the pair cap in one source, so
+   * a key missing from `declares` may only be missing from what was kept.
+   */
+  capped: (target: string) => boolean;
 }
 
 const NO_TARGETS: ReadonlySet<string> = new Set<string>();
+
+/** The context of a walk that does not look its targets up. */
+const NO_CONTEXT: TargetContext = {
+  page: () => undefined,
+  declares: () => NO_TARGETS,
+  capped: () => false,
+};
 
 /**
  * Walk the crawl's hreflang declarations, one page's set at a time.
@@ -220,10 +249,14 @@ async function eachDeclarationSet(
       hreflang_code: string;
       target_url: string;
       source: string;
+      at_cap: boolean;
     }>(sql`
       select h.page_id, p.url as page_url, p.fetch_class, p.status_code,
              p.canonical_html, p.canonical_header,
-             h.hreflang_code, h.target_url, h.source
+             h.hreflang_code, h.target_url, h.source,
+             -- Every row of each page in the batch is selected, so the window
+             -- counts the page's whole set per source.
+             ${AT_PAIR_CAP("h")} as at_cap
       from hreflang h
       join pages p on p.id = h.page_id
       where h.crawl_id = ${crawlId}
@@ -264,6 +297,7 @@ async function eachDeclarationSet(
           sources: [],
           sourcesByTarget: new Map(),
           hasXDefault: false,
+          capped: false,
           auditable: isAuditable({
             fetchClass: String(row.fetch_class),
             statusCode: row.status_code === null ? null : Number(row.status_code),
@@ -280,6 +314,7 @@ async function eachDeclarationSet(
       memberSources.set(member, named);
       codes.get(pageId)!.add(String(row.hreflang_code).trim());
       if (isXDefault(String(row.hreflang_code))) set.hasXDefault = true;
+      if (row.at_cap === true) set.capped = true;
     }
     for (const set of sets.values()) {
       const memberSources = members.get(set.pageId)!;
@@ -293,7 +328,7 @@ async function eachDeclarationSet(
 
     const context = opts.withTargets
       ? await targetContext(db, crawlId, [...sets.values()])
-      : { page: () => undefined, declares: () => NO_TARGETS };
+      : NO_CONTEXT;
     for (const set of sets.values()) {
       if (visit(set, context) === "stop") return;
     }
@@ -307,9 +342,7 @@ async function targetContext(
   sets: DeclarationSet[],
 ): Promise<TargetContext> {
   const wanted = [...new Set(sets.flatMap((s) => s.targets))];
-  if (wanted.length === 0) {
-    return { page: () => undefined, declares: () => NO_TARGETS };
-  }
+  if (wanted.length === 0) return NO_CONTEXT;
 
   // One array parameter rather than one placeholder per URL, so Postgres can
   // reuse the plan across batches (the link-targets pattern).
@@ -360,9 +393,13 @@ async function targetContext(
   // uncrawled targets exists to avoid.
   const crawled = [...byUrl.keys()];
   const back = new Map<string, Set<string>>();
+  /** Crawled targets whose own set reached the pair cap in one source. */
+  const atCap = new Set<string>();
   if (crawled.length > 0) {
-    const backRows = await db.execute<{ page_url: string; target_url: string }>(sql`
-      select p.url as page_url, h.target_url
+    // Every row of each crawled target is selected, so the window counts the
+    // target's whole set per source.
+    const backRows = await db.execute<{ page_url: string; target_url: string; at_cap: boolean }>(sql`
+      select p.url as page_url, h.target_url, ${AT_PAIR_CAP("h")} as at_cap
       from hreflang h
       join pages p on p.id = h.page_id
       where h.crawl_id = ${crawlId} and p.url = any(${sql.param(crawled)}::text[])`);
@@ -371,12 +408,14 @@ async function targetContext(
       const declared = back.get(key) ?? new Set<string>();
       declared.add(targetKey(String(row.target_url)));
       back.set(key, declared);
+      if (row.at_cap === true) atCap.add(key);
     }
   }
 
   return {
     page: (target) => byUrl.get(target),
     declares: (target) => back.get(target) ?? NO_TARGETS,
+    capped: (target) => atCap.has(target),
   };
 }
 
@@ -484,6 +523,9 @@ async function missingXDefaultFindings(
   crawlId: string,
   caps: RuleCaps,
 ): Promise<Finding[]> {
+  // A cut-short sitemap walk may have left the x-default unread; the marker
+  // `hreflang.declarations-incomplete` speaks instead (ruling R21).
+  if (await sitemapHreflangCutShort(db, crawlId, X_DEFAULT.id)) return [];
   const incomplete = new Map<string, IncompleteSet>();
   /** 1 once the walk has seen a cluster it could not keep, 0 while it fits. */
   let beyondCap = 0;
@@ -492,6 +534,8 @@ async function missingXDefaultFindings(
     // `declarationFindings`): a redirect's header or a robots-blocked row's
     // sitemap entry is not one.
     if (!set.auditable) return;
+    // A set cut at the pair cap may have lost its x-default (PR #24 review).
+    if (set.capped) return;
     // A page naming one URL is not a cluster: there is no other version to
     // fall back FROM, so there is nothing missing.
     if (set.hasXDefault || set.targets.length < 2) return;
@@ -561,10 +605,14 @@ async function missingSelfReferenceFindings(
   crawlId: string,
   caps: RuleCaps,
 ): Promise<Finding[]> {
+  // As for the x-default: refused when the sitemap walk was cut short, and a
+  // set cut at the pair cap may have lost its self-reference (PR #24 review).
+  if (await sitemapHreflangCutShort(db, crawlId, SELF_REFERENCE.id)) return [];
   const findings: Finding[] = [];
   let total = 0;
   await eachDeclarationSet(db, crawlId, { withTargets: false }, (set) => {
     if (!set.auditable) return;
+    if (set.capped) return;
     if (set.targets.includes(set.pageKey)) return;
     total += 1;
     if (caps.listing !== null && findings.length >= caps.listing) return;
@@ -692,6 +740,60 @@ async function alternatesNotCrawledFindings(db: Db, crawlId: string): Promise<Fi
         ...(hostCount > hosts.length
           ? { hostsTruncated: { reported: hosts.length, total: hostCount } }
           : {}),
+      },
+      dedupeKey: "site",
+    }),
+  ];
+}
+
+/**
+ * The NOT MEASURED marker for hreflang declarations this crawl did not read in
+ * full (PR #24 review, rulings R20 and R21; src/rules/query/
+ * hreflang-completeness.ts says what cuts them short and why).
+ *
+ * One site finding when either holds:
+ *
+ *  (a) on a crawl that recorded its sitemap facts (Phase 26c on), the sitemap
+ *      walk was cut short (`cutShort`: the four absence-based rules refused),
+ *      or a sitemap document could not be read (`sitemapDocsFailed`: the rules
+ *      ran, and the sitemap source is a floor);
+ *  (b) on any crawl, a declaring page the hreflang rules judge — fetched OK
+ *      with a 200 and not canonicalised elsewhere — holds `MAX_HREFLANG_PAIRS`
+ *      or more declarations from one source (`possiblyCappedPages`, counted in
+ *      SQL: hard rule 3).
+ *
+ * A crawl before the sitemap facts staged no sitemap alternates, so it is
+ * judged on (b) alone and its sitemap keys are `null` — "not recorded", the
+ * convention `sitemap.structure`'s cap columns keep — never `false`.
+ */
+async function declarationsIncompleteFindings(db: Db, crawlId: string): Promise<Finding[]> {
+  // Throws for a crawl that does not exist (`readSitemapFacts`).
+  const reading = await readSitemapHreflang(db, crawlId, INCOMPLETE.id);
+  const capped = await db.execute<{ n: number }>(sql`
+    select count(distinct x.page_id)::int as n
+    from (${POSSIBLY_CAPPED_PAGES(crawlId)}) x
+    join pages p on p.id = x.page_id
+    where ${FETCHED_OK("p")} and not ${CANONICALISED_ELSEWHERE("p")}`);
+  // A count with no `group by` always answers one row (hard rule 7).
+  const row = capped.rows[0];
+  if (row === undefined) throw new Error(`${INCOMPLETE.id}: aggregate returned no row`);
+  const possiblyCappedPages = Number(row.n);
+
+  const sitemapIncomplete =
+    reading !== null && (cutShort(reading) || reading.sitemapDocsFailed > 0);
+  if (!sitemapIncomplete && possiblyCappedPages === 0) return [];
+  return [
+    queryFinding(INCOMPLETE, {
+      pageId: null,
+      pageUrl: null,
+      evidence: {
+        hreflangLimited: reading?.hreflangLimited ?? null,
+        entryLimited: reading?.entryLimited ?? null,
+        docLimited: reading?.docLimited ?? null,
+        depthLimited: reading?.depthLimited ?? null,
+        sitemapDocsFailed: reading?.sitemapDocsFailed ?? null,
+        sitemapDocsOversized: reading?.sitemapDocsOversized ?? null,
+        possiblyCappedPages,
       },
       dedupeKey: "site",
     }),
@@ -895,19 +997,25 @@ export const hreflangRules: QueryRule[] = [
     ],
     ...copyFor(RETURN_LINK.id),
     rulesetVersion: RULESET_VERSION,
-    run: (db, crawlId, caps) =>
-      declarationFindings(
+    run: async (db, crawlId, caps) => {
+      // Refused when the sitemap walk was cut short: a crawled target's
+      // sitemap alternates may never have been read (ruling R21).
+      if (await sitemapHreflangCutShort(db, crawlId, RETURN_LINK.id)) return [];
+      return declarationFindings(
         RETURN_LINK,
         db,
         crawlId,
         (set, target, context) => {
           const back = context.declares(target.url);
-          return back.has(set.pageKey)
-            ? null
-            : { target: target.url, targetHasHreflang: back.size > 0 };
+          if (back.has(set.pageKey)) return null;
+          // A target whose own set reached the pair cap may name this page in
+          // a pair that was not kept: unknown, not a finding.
+          if (context.capped(target.url)) return null;
+          return { target: target.url, targetHasHreflang: back.size > 0 };
         },
         capsOr(caps),
-      ),
+      );
+    },
   }),
 
   // An alternate that points at a redirect or at a page excluded from the
@@ -1006,5 +1114,35 @@ export const hreflangRules: QueryRule[] = [
     marker:
       "The hreflang alternates these pages declare were not requested by this crawl, so their return links and indexability were not checked; crawl those domains or add them as start URLs.",
     run: (db, crawlId) => alternatesNotCrawledFindings(db, crawlId),
+  }),
+
+  // A check we could not run in full is visible, never silent (hard rule 7):
+  // hreflang declarations the crawl did not read whole, because the sitemap
+  // walk was cut short or failed, or a page reached the pair cap. Info: it
+  // reports the boundary of this crawl's evidence, not a fault of the site.
+  // CHECK-24, whose return-link and self-reference halves read an absence.
+  defineRule<QueryRule>({
+    kind: "query",
+    id: INCOMPLETE.id,
+    checkIds: ["CHECK-24"],
+    category: CATEGORY,
+    severity: INCOMPLETE.severity,
+    columns: [
+      { key: "hreflangLimited", label: "Sitemap Alternates Limit Reached" },
+      { key: "entryLimited", label: "Sitemap Entry Limit Reached" },
+      { key: "docLimited", label: "Sitemap Document Limit Reached" },
+      { key: "depthLimited", label: "Sitemap Depth Limit Reached" },
+      { key: "sitemapDocsFailed", label: "Sitemaps Not Read" },
+      { key: "sitemapDocsOversized", label: `Sitemaps Over ${SITEMAP_MAX_BYTES / (1024 * 1024)} MB` },
+      {
+        key: "possiblyCappedPages",
+        label: `Pages at the ${MAX_HREFLANG_PAIRS}-Alternate Limit`,
+      },
+    ],
+    ...copyFor(INCOMPLETE.id),
+    rulesetVersion: RULESET_VERSION,
+    marker:
+      "Some of this site's hreflang annotations were not read in full, because a sitemap could not be read, a sitemap limit was reached or a page lists more alternates than are kept, so missing return links and self-references cannot be ruled out; fix the failing sitemaps and re-crawl.",
+    run: (db, crawlId) => declarationsIncompleteFindings(db, crawlId),
   }),
 ];

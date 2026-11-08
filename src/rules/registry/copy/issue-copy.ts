@@ -428,6 +428,13 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
     howToFix:
       "Add the alternate domains as extra start URLs so one crawl covers the whole international set, or crawl each domain and read the results together. For an uncrawled alternate on the crawled domain, check the robots.txt rule or crawl limit that excluded it.",
   },
+  "hreflang.declarations-incomplete": {
+    title: "Hreflang: Annotations not read in full",
+    explanation:
+      "Some hreflang annotations on this site were not read in full: a sitemap could not be read, the sitemaps were only partly read because a size, entry, file-count or nesting limit was reached, or a page lists 200 or more alternates in one place (its HTML, HTTP Link header or sitemap entry), of which only the first 200 are kept. When the sitemaps were only partly read, missing return links, missing self-references, missing x-default and sets naming only the page itself were not checked; after a sitemap that could not be read those checks did run, but a return link or self-reference reported missing may be in the unread file. Pages at the 200 limit are not checked for a missing self-reference, x-default or other alternate, and are never reported as failing to return a link.",
+    howToFix:
+      "Fix the sitemaps reported as Sitemaps: Sitemap could not be read, split any sitemap over 50 MB into smaller files, and re-crawl. Where a page lists 200 or more alternates, check its template for a block emitted twice.",
+  },
   "hreflang.coverage": {
     title: "Hreflang: Share of pages declaring hreflang",
     explanation:

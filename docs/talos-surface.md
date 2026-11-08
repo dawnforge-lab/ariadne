@@ -7,15 +7,15 @@ under the ruleset version the engine reports — `rules_catalog`'s
 `docs/talos-integration.md` says *why* the seam exists and what obligations bind
 it; this document says *what the seam is*.
 
-**What Phase 26c changed here: five rule ids, every hreflang source, one CSV
+**What Phase 26c changed here: six rule ids, every hreflang source, one CSV
 column, and a re-crawl.** Ruleset 0.22.0, migration 0029 (the nullable
 `links.name_hint` / `name_hint_source`, `resources.share_image`,
 `pages.overlong_urls`, and the tables `sitemap_memberships` and
 `sitemap_hreflang`) and migration 0030 (it backfills `resources.share_image` on
 older crawls), extraction version 3. No tool, route or response field is added;
 the one addition is the `shareImage` column on the `resources` CSV view (§12).
-`rules_catalog` now answers 187 rows (72 page, 101 query, 14 metric; 15 of them
-markers), and the finding rules split 33 critical / 66 warning / 74 info (88
+`rules_catalog` now answers 188 rows (72 page, 102 query, 14 metric; 16 of them
+markers), and the finding rules split 33 critical / 66 warning / 75 info (89
 info counting the fourteen metric rules). The new ids:
 - `url.reference-too-long` (warning, CHECK-28, category `url`): the page
   carries a link, file or hreflang target whose address is over 2,500
@@ -38,6 +38,19 @@ info counting the fourteen metric rules). The new ids:
   conflictingCodes, onlyIn, onlyInTruncated?}`). A code one source lists and
   another omits is not a conflict, because search engines union the sources;
   those codes are listed under `onlyIn`.
+- `hreflang.declarations-incomplete` (info, CHECK-24, a NOT MEASURED marker;
+  added in the PR #24 review): hreflang declarations this crawl did not read in
+  full. One site finding, `{hreflangLimited, entryLimited, docLimited,
+  depthLimited, sitemapDocsFailed, sitemapDocsOversized, possiblyCappedPages}`.
+  When the sitemap walk was cut short (a staging, entry, document or depth
+  limit, or a sitemap over 50 MB), `hreflang.missing-return-link`,
+  `hreflang.missing-self-reference`, `hreflang.missing-x-default` and
+  `hreflang.self-only` answer nothing on that crawl and this marker speaks for
+  them; a sitemap that could not be read fires it without silencing them. A
+  page with 200 or more declarations from one source (`possiblyCappedPages`, on
+  any crawl) is never judged by those rules as missing a self-reference,
+  x-default or alternate, nor reported as not returning a link. The first six
+  keys are `null` on a crawl from before Phase 26c.
 
 What changed under existing ids. **Hreflang is read from all three sources**: the
 page's HTML, its HTTP `Link` header (read whole at fetch, on every classified
@@ -707,11 +720,14 @@ validator before the handler runs (`test/api/mcp.test.ts:825` "refuses an
 argument nobody allowed, naming it").
 
 **Not paginated, on purpose:** `rules_catalog` and `crawl_compare`. Both are
-bounded by the **ruleset** (187 rows at 0.22.0) rather than by the crawl. The
-catalog is ~187 KB (**191,912 bytes**, measured 2026-11-08 after Phase 26c Task
-12a over all 187 rows of ruleset 0.22.0 by serialising what `rulesCatalog`
-answers with no crawl id — 15 markers at 2,286 bytes, the `marker` values
+bounded by the **ruleset** (188 rows at 0.22.0) rather than by the crawl. The
+catalog is ~189 KB (**194,039 bytes**, measured 2026-11-08 after the PR #24
+review over all 188 rows of ruleset 0.22.0 by serialising what `rulesCatalog`
+answers with no crawl id — 16 markers at 2,568 bytes, the `marker` values
 JSON-serialised as one array, and the fourteen tables at 5,620 the same way;
+the 2,127 bytes over the 191,912 before it are the one new marker's row, its
+copy and its reason; the 191,912 was measured the same day after Phase 26c Task
+12a over all 187 rows, 15 markers at 2,286 bytes and the tables at 5,620;
 the 163 bytes over the 191,749 before it are that task's `sitemap.structure`
 copy (161) and column label (2); the 191,749 was measured the same day after
 the Phase 26c final review (tables 5,618), `sitemap.structure`'s six new
@@ -1301,9 +1317,9 @@ not name", `test/api/query.test.ts:1456` "carries a finding with no page as a
 null url", `test/rules/helpers.test.ts:697` "maps each fetch class to the status
 a reader acts on", `test/rules/helpers.test.ts:717` "names a block a block,
 whatever status the challenge was served with",
-`test/fixtures/harness.test.ts:1261` "declares a column for every evidence key it
+`test/fixtures/harness.test.ts:1284` "declares a column for every evidence key it
 writes, and writes every column it declares",
-`test/rules/registry.test.ts:752` "finds one defining file per rule, and the key
+`test/rules/registry.test.ts:755` "finds one defining file per rule, and the key
 spelled inside it".
 
 ### 4.4a `issue_inlinks` → `{columns, items, nextCursor}` — the links that point at it
@@ -1453,7 +1469,7 @@ header on the catalog, and only on metric rules",
 and one row per scope",
 `test/rules/metric-table.test.ts:377` "gives every metric rule a table whose
 columns are the catalog's",
-`test/fixtures/harness.test.ts:2357` "renders every metric's table, with no
+`test/fixtures/harness.test.ts:2380` "renders every metric's table, with no
 empty column and no unmapped key".
 
 ### 4.5 `metrics_get` → `{items: MetricRow[], nextCursor}`
@@ -2064,10 +2080,10 @@ canonicalises under noindex", `test/rules/health-metrics.test.ts:412`
 are over", `test/rules/copy.test.ts:1549` "says the counts are the authority, not the
 ratio", `test/rules/copy.test.ts:1566` "grades nothing: no score, no label, no
 threshold";
-`test/rules/coverage.test.ts:599` "site.health is filed under the
+`test/rules/coverage.test.ts:607` "site.health is filed under the
 engine-coverage check, and CHECK-32 lost no claimant" (the re-file in both
 directions, and CHECK-83 outside the crawl-derived universe);
-`test/fixtures/harness.test.ts:3250` "the health rollup agrees with a
+`test/fixtures/harness.test.ts:3273` "the health rollup agrees with a
 page-by-page recount" — an independent recount in JavaScript over the end-to-end
 fixture crawl.
 
@@ -2438,9 +2454,14 @@ broken" to "carrying a first-fix SEO defect"), so a health gauge drawn from it
 must show the ruleset version beside the number. Stored findings keep the
 severity their ruleset stamped; nothing is backfilled.
 
-**Phase 26c bumped to 0.22.0, once: five ids, every hreflang rule widened to
+**Phase 26c bumped to 0.22.0, once: six ids, every hreflang rule widened to
 three sources, and a re-crawl attached.** The ids and the widened readings are
-listed at the top of this document; no existing rule's severity moved. The phase
+listed at the top of this document; no existing rule's severity moved. The
+sixth id, the marker `hreflang.declarations-incomplete`, came with the PR #24
+review under the same, unreleased version: from it on, the four absence-based
+hreflang rules answer nothing on a crawl whose sitemap walk was cut short, and
+skip a set at the 200-pair limit, so a crawl re-judged at 0.22.0 can lose
+findings it had before the review as well as gain the marker. The phase
 also moves `EXTRACTION_VERSION` to 3 (migration 0029), and its discovery records
 every sitemap listing and alternate (`discovery.sitemapFacts`), so the marker
 `extraction.not-recorded` now fires on any crawl with a page below version 3 or

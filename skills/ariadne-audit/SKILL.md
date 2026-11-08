@@ -673,8 +673,9 @@ check:
   crawl `social.image-broken` judges only relative or malformed image addresses, and
   `resources.not-fetched` says the images' status was not asked.
 
-**Five rules joined at ruleset 0.22.0, and every one needs a crawl from Phase 26c
-on.** The crawler now records extraction version 3 (over-long addresses, the
+**Six rules joined at ruleset 0.22.0, and five of them need a crawl from Phase 26c
+on** (the sixth, the marker `hreflang.declarations-incomplete`, reads part of its
+answer on any crawl; see CHECK-24 below). The crawler now records extraction version 3 (over-long addresses, the
 og:image:secure_url tag, a link's wider name, hreflang from the HTTP `Link` header)
 and every sitemap listing and `xhtml:link` alternate. On an older crawl, a 26b crawl
 included, `extraction.not-recorded` fires with `requiredVersion: 3` and
@@ -707,6 +708,17 @@ now) is NOT MEASURED, never a PASS. The remedy is a re-crawl. By check:
   declarations are never judged: a missing self-reference, an invalid code or a
   source conflict on a PDF produces no finding. Check those by hand if the site
   annotates its documents.
+  `hreflang.declarations-incomplete` (info) is a NOT MEASURED marker: some hreflang
+  was not read in full. Read its evidence before writing any reciprocity verdict. If
+  `hreflangLimited`, `entryLimited`, `docLimited` or `depthLimited` is `true`, or
+  `sitemapDocsOversized` is above zero, the sitemap walk was cut short and
+  `hreflang.missing-return-link`, `hreflang.missing-self-reference`,
+  `hreflang.missing-x-default` and `hreflang.self-only` did not run: those parts of
+  CHECK-24 and CHECK-25 are NOT MEASURED, never a PASS. If only `sitemapDocsFailed`
+  is above zero, the rules ran but a sitemap could not be read (`sitemap.invalid`
+  names it), so confirm a sample of missing return links against the live sitemap.
+  `possiblyCappedPages` counts pages with 200 or more alternates in one source,
+  which those rules do not judge for an absence; check one by hand.
 - **CHECK-28, URL length:** `url.reference-too-long` (warning) is a page carrying a
   link, file or hreflang target whose address is over 2,500 characters. The crawler
   cannot index such an address, so it counts it on the page and stores it nowhere:

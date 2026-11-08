@@ -16,6 +16,9 @@ sitemap streams in **+39.0 MB** of RSS. The stored pre-26c lavishalice crawl get
 from every new check and is otherwise judged as before. Hurtigruten's sitemaps give 61,304
 alternates and 100% hreflang coverage on the 599 crawled pages, with **no false positive**.
 
+The PR #24 review added one marker after the gate (188 rules, 16 markers): see §8. It moves
+none of the gate's measurements.
+
 ## Gate clauses
 
 | # | clause | result | where |
@@ -197,3 +200,48 @@ this gate measured:
   the rule.
 - **Deferred minors** from the task reviews and the final review are triaged in the SDD ledger.
   Each is "can wait"; none blocks merge.
+
+## 8. Post-gate change (PR #24 review)
+
+**The finding.** Truncated hreflang input was read as "no declaration". When the sitemap walk
+stops early (the staging caps on sitemap alternates, the entry, document or depth caps, or a
+document over 50 MB), the `<loc>`s read before the cut are crawled, but their alternates, or
+those of later documents, are never read. A page can also lose pairs past 200 per source in its
+HTML, its `Link` header or one sitemap `<url>`. `hreflang.missing-return-link` (critical) then
+reported every crawled target whose declarations had been dropped. A sitemap-only site with 45k
+URLs in 25 locales could get a critical finding for every staged page against every such target.
+`hreflang.missing-self-reference`, `hreflang.missing-x-default` and `hreflang.self-only` had the
+same exposure.
+
+**The fix (rulings R20 and R21).**
+- When the sitemap walk was cut short, the four rules refuse (one shared condition,
+  `sitemapHreflangCutShort` in `src/rules/query/hreflang-completeness.ts`).
+- A sitemap document that **failed** does not silence them. `sitemap.invalid` already reports it,
+  and a stale sitemap that 404s is common enough that refusing would hide far more than it
+  protects.
+- On any crawl, a declaration set with 200 or more rows from one source is never judged as a
+  declarer for the self-reference, x-default and self-only rules, and is never a target that
+  "does not return the link".
+- The new marker `hreflang.declarations-incomplete` (info, CHECK-24) fires once per crawl when the
+  walk was cut short, when a sitemap document failed, or when a judged page reached the pair cap.
+  Its evidence is `{hreflangLimited, entryLimited, docLimited, depthLimited, sitemapDocsFailed,
+  sitemapDocsOversized, possiblyCappedPages}`. On a crawl from before 26c, the six sitemap keys
+  are `null` and only the pair cap is judged.
+
+**Counts.** 188 rules: 72 page / 102 query / 14 metric; 33 critical / 66 warning / 89 info; 16
+markers. `rules_catalog` is 194,039 bytes, up from 191,912. No migration and no version bump.
+
+**Why the gate stands.** Every figure in §1–§5 was measured on `b5284c8`, before this change.
+None of the gate crawls truncated hreflang:
+- The Hurtigruten re-crawl read 11 sitemaps with 0 failures, `hreflangLimited` false and no page
+  near 200 pairs, so the marker would be silent and the four rules judge it as before.
+- The 50k runs, the hreflang run's 600,080 alternates included, stayed under every cap.
+- The change adds one aggregate query (the marker) and a window count to two existing batch
+  queries, so it adds nothing to the memory contract.
+
+The Hurtigruten **first** crawl (§5.1, 20 locale sitemaps timed out) is exactly the failed-document
+case. Judged now, it would carry the marker with `sitemapDocsFailed: 20` beside `sitemap.invalid`,
+and the four rules would still run on it.
+
+Clause 1 was re-run after the change: **121 files / 3,480 tests, 0 failed, 0 skipped**; `tsc`
+clean (+1 file, +22 tests over `b5284c8`).

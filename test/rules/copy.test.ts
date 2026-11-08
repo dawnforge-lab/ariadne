@@ -2012,3 +2012,25 @@ describe("copy: Phase 26c final review", () => {
     expect(said[2]).not.toMatch(/not fetched/);
   });
 });
+
+// PR #24 review (rulings R20, R21): the marker for hreflang not read in full.
+describe("copy: hreflang declarations not read in full", () => {
+  it("quotes the pair limit and the sitemap size limit from their constants", () => {
+    const c = copy("hreflang.declarations-incomplete");
+    expect(c.explanation).toContain(`${MAX_HREFLANG_PAIRS} or more alternates`);
+    expect(c.explanation).toContain(`first ${MAX_HREFLANG_PAIRS} are kept`);
+    expect(c.howToFix).toContain(`over ${SITEMAP_MAX_BYTES / (1024 * 1024)} MB`);
+  });
+
+  it("says which checks were not run and that a sitemap that could not be read silences none", () => {
+    const said = sentences(copy("hreflang.declarations-incomplete").explanation);
+    expect(said[1]).toMatch(/only partly read/);
+    expect(said[1]).toMatch(/were not checked/);
+    expect(said[1]).toMatch(/could not be read those checks did run/);
+    expect(said[2]).toMatch(/never reported as failing to return a link/);
+    // It names the finding that reports the unreadable sitemap, by its title.
+    expect(copy("hreflang.declarations-incomplete").howToFix).toContain(
+      copy("sitemap.invalid").title,
+    );
+  });
+});

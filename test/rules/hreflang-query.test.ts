@@ -26,9 +26,10 @@ function rule(id: string): QueryRule {
 }
 
 describe("hreflangRules metadata", () => {
-  it("defines exactly the six hreflang rules of the Phase 2, 3 and 19 tables", () => {
+  it("defines exactly the six hreflang rules of the Phase 2, 3 and 19 tables, and the PR #24 marker", () => {
     expect(hreflangRules.map((r) => r.id).sort()).toEqual([
       "hreflang.alternates-not-crawled",
+      "hreflang.declarations-incomplete",
       "hreflang.invalid-code",
       "hreflang.missing-return-link",
       "hreflang.missing-self-reference",
@@ -48,6 +49,9 @@ describe("hreflangRules metadata", () => {
       // Both checks that read a FETCHED alternate: neither can be answered for
       // a URL nobody requested.
       "hreflang.alternates-not-crawled": ["CHECK-24", "CHECK-26"],
+      // PR #24 review: the declarations not read in full, which the
+      // absence-based halves of CHECK-24 depend on.
+      "hreflang.declarations-incomplete": ["CHECK-24"],
     });
   });
 
@@ -61,15 +65,17 @@ describe("hreflangRules metadata", () => {
       // A NOT MEASURED marker reports a hole in OUR evidence, never a fault of
       // the site, so it can only be info.
       "hreflang.alternates-not-crawled": "info",
+      "hreflang.declarations-incomplete": "info",
     });
   });
 
   // The marker flag is the single source of truth for "which rules are
   // markers" (RuleMeta.marker), and the identifier guard derives the checklist
-  // obligations from it. Exactly one rule here carries it.
-  it("flags the alternates marker, and nothing else in this family", () => {
+  // obligations from it. Exactly two rules here carry it.
+  it("flags the two markers, and nothing else in this family", () => {
     expect(hreflangRules.filter((r) => r.marker !== undefined).map((r) => r.id)).toEqual([
       "hreflang.alternates-not-crawled",
+      "hreflang.declarations-incomplete",
     ]);
     const marker = rule("hreflang.alternates-not-crawled").marker!;
     // A reason names the cause AND what would answer the check (Phase 19 §6).

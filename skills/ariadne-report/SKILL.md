@@ -282,7 +282,7 @@ never as clean. Grouped by the problem a client reads:
   findings. `hreflang.html-lang-mismatch` and `pagination.multiple` compound with the
   older hreflang and pagination findings.
 
-**Ruleset 0.22.0 added five rule ids, and all five need a crawl from Phase 26c on.**
+**Ruleset 0.22.0 added six rule ids, and five of them need a crawl from Phase 26c on.**
 On an older crawl, a 26b crawl included, `extraction.not-recorded` carries
 `requiredVersion: 3` (and `sitemapFactsRecorded: false` when the sitemaps were read
 the old way): the checks it claims, CHECK-08 and CHECK-28 now among them, go under
@@ -294,6 +294,12 @@ the old way): the checks it claims, CHECK-08 and CHECK-28 now among them, go und
   `hreflang.source-conflict` is two of those sources giving one language different
   addresses, which leaves search engines with two candidates; rank it with the other
   hreflang integrity findings and report the cluster once.
+  `hreflang.declarations-incomplete` is a marker, not a fault: some hreflang was not
+  read in full. When it says the sitemaps were cut short, the missing-return-link,
+  self-reference, x-default and self-only checks did not run, so put them under "Not
+  audited" rather than reporting the cluster clean. When it says only that a sitemap
+  could not be read, report the hreflang findings with the caveat that some may be
+  answered in that sitemap, and lead with fixing it.
 - **Sitemaps** (CHECK-08): `sitemap.oversized` is a sitemap over 50 MB, which search
   engines reject whole, so every URL in it is unsubmitted: rank it with the
   sitemap-coverage findings, high where the file carries the product or article URLs.

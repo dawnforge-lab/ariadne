@@ -856,7 +856,27 @@ const KINDS = ["page", "query", "metric"] as const satisfies readonly AnyRule["k
 //     `sitemap.invalid` reports it as it does a 2,501-character child refused
 //     at request time; it no longer counts in `malformedEntriesSkipped`. The
 //     `sitemap.structure` copy names `alternatesCapped`, and its
-//     `overlongLocsSkipped` column reads "Addresses Too Long To Store". 187 rules.
+//     `overlongLocsSkipped` column reads "Addresses Too Long To Store".
+//     `rules_catalog` re-measured at 191,912 bytes. 187 rules.
+// 14. (PR #24 review) No migration or version bump. Hreflang declarations the
+//     crawl did not read in full are no longer read as "not declared"
+//     (rulings R20 and R21; src/rules/query/hreflang-completeness.ts). When
+//     the sitemap walk was cut short (`sitemapFacts.hreflangLimited`,
+//     `truncation.entryLimited`, `docLimited` or `depthLimited`, or an
+//     oversized document), `hreflang.missing-return-link`,
+//     `missing-self-reference`, `missing-x-default` and `self-only` refuse
+//     (one shared condition, `sitemapHreflangCutShort`); a sitemap document
+//     that failed does not silence them. A declaration set with
+//     `MAX_HREFLANG_PAIRS` or more rows from one source, on any crawl, is never
+//     a declarer for the self-reference, x-default and self-only rules and
+//     never a target that "does not return the link". New query marker
+//     `hreflang.declarations-incomplete` (info, CHECK-24, category `hreflang`):
+//     one site finding when the walk was cut short, a sitemap document failed,
+//     or a judged page reached the pair cap, evidence `{hreflangLimited,
+//     entryLimited, docLimited, depthLimited, sitemapDocsFailed,
+//     sitemapDocsOversized, possiblyCappedPages}`, the first six null on a crawl
+//     before the sitemap facts (judged on the pair cap alone).
+//     `rules_catalog` re-measured at 194,039 bytes. 188 rules.
 export const RULESET_VERSION = "0.22.0";
 
 /**

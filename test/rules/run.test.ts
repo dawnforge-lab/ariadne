@@ -143,7 +143,9 @@ describe("buildRegistry", () => {
     expect(ids).toContain("url.reference-too-long");
     // Phase 26c Task 10: one code, different URLs in two hreflang sources.
     expect(ids).toContain("hreflang.source-conflict");
-    expect(ids.length).toBe(187);
+    // PR #24 review: hreflang declarations not read in full.
+    expect(ids).toContain("hreflang.declarations-incomplete");
+    expect(ids.length).toBe(188);
   });
 
   it("registers every kind the runner drives", () => {

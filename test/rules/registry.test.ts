@@ -588,7 +588,7 @@ describe("check annotations", () => {
  * `render.meta-description-changed` and `render.h1-changed`. Two classes are fixed by
  * construction rather than by judgement and can never appear in the critical
  * list: metric rules (`metricRule` takes no severity and hard-codes `info`) and
- * the fifteen markers (26a added `security.headers-not-recorded`, 26b `extraction.not-recorded`), which report a hole in OUR evidence and never a fault of
+ * the sixteen markers (26a added `security.headers-not-recorded`, 26b `extraction.not-recorded`, the PR #24 review `hreflang.declarations-incomplete`), which report a hole in OUR evidence and never a fault of
  * the site.
  *
  * Owner calls 2026-11-07 (0.21.0, unreleased, so no bump under ruling R20; the
@@ -609,15 +609,18 @@ describe("check annotations", () => {
  *
  * Phase 26c (0.22.0) Task 10 adds `hreflang.source-conflict` (warning): 66
  * warnings.
+ *
+ * The PR #24 review (0.22.0, no bump) adds the marker
+ * `hreflang.declarations-incomplete` (info): 89 info, sixteen markers.
  */
 describe("severity shape of the ruleset", () => {
   const all = buildRegistry().all();
 
-  it("holds 33 critical, 66 warning and 88 info rules", () => {
+  it("holds 33 critical, 66 warning and 89 info rules", () => {
     const counts = { critical: 0, warning: 0, info: 0 };
     for (const r of all) counts[r.severity] += 1;
-    expect(counts).toEqual({ critical: 33, warning: 66, info: 88 });
-    expect(all).toHaveLength(187);
+    expect(counts).toEqual({ critical: 33, warning: 66, info: 89 });
+    expect(all).toHaveLength(188);
   });
 
   it("names exactly the rules that are critical", () => {

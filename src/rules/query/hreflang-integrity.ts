@@ -18,6 +18,7 @@ import {
 } from "../registry/registry.js";
 import type { RuleCaps } from "../registry/types.js";
 import { capsOr, limitTo, noteTruncation } from "./crawl-evidence.js";
+import { POSSIBLY_CAPPED_PAGES, sitemapHreflangCutShort } from "./hreflang-completeness.js";
 import { SAMPLE_SOURCES } from "./link-targets.js";
 import { sitemapFactsRecorded, v2Gate, v3Gate } from "./page-facts.js";
 
@@ -260,8 +261,15 @@ async function multipleEntriesFindings(
  * The union of the sources is judged: a page whose HTML names only itself and
  * whose sitemap entry names its French version declares an alternate. `sources`
  * names every source that annotated the page.
+ *
+ * It reads an ABSENCE (no alternate), so it refuses a crawl whose sitemap walk
+ * was cut short, where a page's sitemap alternates may never have been read,
+ * and skips a page with `MAX_HREFLANG_PAIRS` or more declarations from one
+ * source, whose alternates may have been the pairs not kept (PR #24 review;
+ * `hreflang.declarations-incomplete` speaks for both).
  */
 async function selfOnlyFindings(db: Db, crawlId: string, caps: RuleCaps): Promise<Finding[]> {
+  if (await sitemapHreflangCutShort(db, crawlId, SELF_ONLY.id)) return [];
   const result = await db.execute<{
     page_id: string;
     page_url: string;
@@ -276,6 +284,7 @@ async function selfOnlyFindings(db: Db, crawlId: string, caps: RuleCaps): Promis
              count(*) over ()::int as total_matches
       from decl d
       cross join lateral unnest(d.sources) as s(source)
+      where d.page_id not in (${POSSIBLY_CAPPED_PAGES(crawlId)})
       group by d.page_id, d.page_url, d.page_key
       having bool_and(d.target_key = d.page_key)
     )

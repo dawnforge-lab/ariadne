@@ -439,6 +439,7 @@ const FIXTURE_COLUMN_RULES: readonly string[] = [
   "host.http-serves-200",
   "host.legacy-host-reachable",
   "hreflang.alternates-not-crawled",
+  "hreflang.declarations-incomplete",
   "hreflang.invalid-code",
   "hreflang.missing-return-link",
   "hreflang.missing-self-reference",
@@ -960,7 +961,7 @@ describe("the fixture site end to end", () => {
   });
 
   it("the site-scoped findings are the two host names, the sitemap's own faults and the missing breadcrumbs", async () => {
-    // Nine rules write a null-page finding on this crawl (the nine ids asserted
+    // Ten rules write a null-page finding on this crawl (the ten ids asserted
     // below; `resources.uncached` carries its own comment on the list), and each
     // of them is a
     // statement about the SITE rather than about a URL:
@@ -992,6 +993,11 @@ describe("the fixture site end to end", () => {
     //    indexability of those two URLs are unknown, and the marker says so
     //    once for the crawl rather than staying silent about it. It is site-
     //    scoped because the gap is a property of the crawl, not of a page.
+    //  - `hreflang.declarations-incomplete` (PR #24 review), the NOT MEASURED
+    //    marker for hreflang not read in full: `/sitemap-broken.xml` could not
+    //    be read, so whatever alternates it held are unknown. A FAILED document
+    //    fires it and silences nothing (ruling R21), which is why the four
+    //    absence-based hreflang rules still fire on this crawl below.
     //
     // Everything else must stay off this list. `links.orphan-skipped` and
     // `robots.check-skipped` write null-page findings only when the crawl was
@@ -1004,6 +1010,7 @@ describe("the fixture site end to end", () => {
       "host.http-serves-200",
       "host.legacy-host-reachable",
       "hreflang.alternates-not-crawled",
+      "hreflang.declarations-incomplete",
       // P11-T3. `/img/control-outline.svg` is served with no `cache-control`
       // and no `expires` (test/fixtures/assets.ts, where it says so), and the
       // rule speaks once for the site rather than once per file — which is why
@@ -1118,6 +1125,22 @@ describe("the fixture site end to end", () => {
           },
         ],
         failureCount: 1,
+      },
+    ]);
+
+    // The same unreadable document, as the hreflang marker reads it: one
+    // sitemap not read, nothing cut short, no page at the pair cap. The
+    // absence-based hreflang rules keep their findings below (ruling R21).
+    expect(siteFindings.get("hreflang.declarations-incomplete")).toEqual([
+      {
+        pageUrl: null,
+        hreflangLimited: false,
+        entryLimited: false,
+        docLimited: false,
+        depthLimited: false,
+        sitemapDocsFailed: 1,
+        sitemapDocsOversized: 0,
+        possiblyCappedPages: 0,
       },
     ]);
   });
