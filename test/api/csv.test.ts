@@ -50,11 +50,13 @@ function ruleCtx(): CsvViewContext {
   return {
     rule: (ruleId) => {
       const rule = registry.all().find((r) => r.id === ruleId);
-      if (rule === undefined) throw new Error(`no rule ${ruleId}`);
+      if (rule === undefined || rule.kind === "metric") throw new Error(`no finding rule ${ruleId}`);
       return {
         title: rule.title,
         category: rule.category,
         checkIds: rule.checkIds,
+        type: rule.type,
+        priority: rule.priority,
         columns: columnsFor(rule),
       };
     },
@@ -188,7 +190,7 @@ describe("the view definitions", () => {
   const dialect = new PgDialect();
   const rendered = (view: CsvQueryViewName): string =>
     dialect.sqlToQuery(
-      CSV_VIEW_DEFS[view].query("crawl_x", CSV_VIEW_DEFS[view].start, 500, "title.missing"),
+      CSV_VIEW_DEFS[view].query("crawl_x", CSV_VIEW_DEFS[view].start, 500, "title.missing", []),
     ).sql;
 
   it("defines exactly the eight keyset views the surface advertises", () => {
@@ -205,10 +207,21 @@ describe("the view definitions", () => {
     // is not something a keyset query can express. The split is the type
     // (`CSV_QUERY_VIEWS`), so a ninth keyset view cannot be added without a
     // definition and this one cannot be mistaken for having lost its.
-    expect(CSV_VIEWS).toHaveLength(9);
+    //
+    // TEN ADVERTISED SINCE 27a-T8: `issues_overview` is the second view that is
+    // not a keyset read — one `GROUP BY rule_id` aggregate shared with the JSON
+    // tool (`buildIssuesOverview`), at most one row per rule.
+    //
+    // ELEVEN SINCE 27a-T9: `crawl_overview` is the third — sectioned aggregates
+    // shared with the JSON tool (`buildCrawlOverview`), bounded by its sections.
+    expect(CSV_VIEWS).toHaveLength(11);
     expect(CSV_QUERY_VIEWS).toHaveLength(8);
     expect(CSV_VIEWS).toContain("metric_table");
+    expect(CSV_VIEWS).toContain("issues_overview");
+    expect(CSV_VIEWS).toContain("crawl_overview");
     expect(CSV_QUERY_VIEWS).not.toContain("metric_table");
+    expect(CSV_QUERY_VIEWS).not.toContain("issues_overview");
+    expect(CSV_QUERY_VIEWS).not.toContain("crawl_overview");
   });
 
   it("gives every view a header, a keyset and a start cursor of matching arity", () => {
@@ -297,7 +310,7 @@ describe("the view definitions", () => {
   it("parameterises the crawl id rather than interpolating it into the SQL", () => {
     for (const view of CSV_QUERY_VIEWS) {
       const { params } = new PgDialect().sqlToQuery(
-        CSV_VIEW_DEFS[view].query("crawl_x", CSV_VIEW_DEFS[view].start, 500, "title.missing"),
+        CSV_VIEW_DEFS[view].query("crawl_x", CSV_VIEW_DEFS[view].start, 500, "title.missing", []),
       );
       expect(params, `${view} does not parameterise its crawl id`).toContain("crawl_x");
       expect(rendered(view), `${view} interpolates its crawl id`).not.toContain("crawl_x");

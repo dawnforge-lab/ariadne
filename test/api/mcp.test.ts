@@ -57,6 +57,7 @@ import { DISCOVERED_VIA } from "../../src/crawl/frontier.js";
 import { METRIC_SCOPES } from "../../src/rules/registry/types.js";
 import { RENDER_PASS_EVIDENCE } from "../../src/rules/metric/render-metrics.js";
 import { buildRegistry } from "../../src/rules/index.js";
+import { DEFAULT_THRESHOLDS } from "../../src/rules/judgement.js";
 import { RULESET_VERSION } from "../../src/rules/registry/registry.js";
 
 /** `crawl_status.recheck.noResponse` on a crawl with no no-response pages. */
@@ -241,7 +242,22 @@ async function seedCrawl(row: {
     rulesetVersion: "0.0.0-test",
     status: row.status,
     ...(row.discovery === undefined ? {} : { discovery: row.discovery }),
-    ...(row.judged === true ? { rulesRunAt: new Date("2026-08-30T09:00:00.000Z") } : {}),
+    // Since Phase 27a a judged crawl also carries the stamp of what its run was
+    // judged with, which the read surfaces require beside `rules_run_at` (hard
+    // rule 7) — migrations 0032 and 0033: no overrides (every threshold at its
+    // default), the config's cap.
+    ...(row.judged === true
+      ? {
+          rulesRunAt: new Date("2026-08-30T09:00:00.000Z"),
+          rulesJudgedWith: {
+            disabledRules: [],
+            thresholds: { ...DEFAULT_THRESHOLDS },
+            ...(row.config !== undefined && "findingCap" in row.config
+              ? { findingCap: row.config["findingCap"] }
+              : {}),
+          },
+        }
+      : {}),
   });
   createdCrawls.push(row.id);
   return row.id;
@@ -651,14 +667,14 @@ afterAll(async () => {
 });
 
 describe("the tool surface", () => {
-  it("advertises exactly the eighteen tools of the agent surface, each described", async () => {
+  it("advertises exactly the twenty-two tools of the agent surface, each described", async () => {
     const listed = await client.listTools();
     expect(listed.tools.map((t) => t.name).sort()).toEqual(
       [
-        "compare_urls", "crawl_compare", "crawl_list", "crawl_mark_failed", "crawl_render",
-        "crawl_resume", "crawl_rules", "crawl_start", "crawl_status", "export_crawl",
-        "issue_inlinks", "issue_urls", "issues_list", "metric_table", "metrics_get",
-        "pages_query", "robots_get", "rules_catalog",
+        "compare_urls", "crawl_compare", "crawl_config_get", "crawl_config_set", "crawl_list",
+        "crawl_mark_failed", "crawl_overview", "crawl_render", "crawl_resume", "crawl_rules", "crawl_start",
+        "crawl_status", "export_crawl", "issue_inlinks", "issue_urls", "issues_list",
+        "issues_overview", "metric_table", "metrics_get", "pages_query", "robots_get", "rules_catalog",
       ].sort(),
     );
     for (const tool of listed.tools) {
@@ -2124,7 +2140,7 @@ describe("crawl_compare / compare_urls", () => {
     // state.
     for (const code of [
       "ruleset-mismatch", "ruleset-unrecorded", "ruleset-mixed",
-      "finding-cap-differs", "severity-changed",
+      "finding-cap-differs", "severity-changed", "judgement-overrides",
     ]) {
       expect(text, `crawl_compare's description does not name '${code}'`).toContain(code);
     }
@@ -2504,7 +2520,9 @@ describe("export_crawl — the CSV views", () => {
     // caller compared it against findingsCount.
     expect(body["rows"]).toBe(5);
     const text = read(body);
-    expect(text.split("\r\n")[0]).toBe("ruleId,severity,category,checkIds,url,title,evidence");
+    expect(text.split("\r\n")[0]).toBe(
+      "ruleId,severity,type,priority,category,checkIds,url,title,evidence",
+    );
     expect(text.trimEnd().split("\r\n")).toHaveLength(6);
     // A path and a count, never the contents (the JSONL half's contract).
     expect(JSON.stringify(body)).not.toContain("links.orphan");
@@ -2868,8 +2886,12 @@ describe("the two transports answer with one shape", () => {
     expect(streamed.text).toBe(file);
     // Not vacuously equal: a header and the crawl's five findings.
     expect(file.trimEnd().split("\r\n")).toHaveLength(6);
-    // The MCP answer says where the file is; the HTTP answer IS the file.
-    expect(Object.keys(written).sort()).toEqual(["bytes", "format", "path", "rows", "view"]);
+    // The MCP answer says where the file is (and, on a view that reads
+    // findings, which rules the judgement left out); the HTTP answer IS the file.
+    expect(Object.keys(written).sort()).toEqual([
+      "bytes", "disabledRules", "format", "path", "rows", "view",
+    ]);
+    expect(written["disabledRules"]).toEqual([]);
     expect(streamed.body).toBeNull();
   });
 

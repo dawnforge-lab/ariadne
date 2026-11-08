@@ -32,22 +32,44 @@
  *                                      instead, replacing the automatic
  *                                      selection for that pass
  *   POST /crawls/:id/rules             run the rules
+ *   GET  /crawls/:id/config            the crawl's judgement block, every
+ *                                      overridable threshold, the last run's
+ *                                      stamp and `judgementStale`
+ *   PATCH /crawls/:id/config           `{judgement: {...}}`, an RFC 7396
+ *                                      merge-patch of the block (null removes a
+ *                                      key, except `findingCap`, where null is
+ *                                      uncapped). 409 while the rules run
  *   GET  /crawls/:id/issues            findings grouped by rule (the triage view).
  *                                      A group's `count` is the rows the rule
  *                                      wrote; `truncated` + `total`|`atLeast`
  *                                      appear when the rule capped its listing,
  *                                      and their absence means the count is the
- *                                      whole number (see `listIssues`).
+ *                                      whole number (see `listIssues`). The
+ *                                      crawl's judgement is applied: each group
+ *                                      carries `type` / `priority` after its
+ *                                      overrides, a disabled rule's group is
+ *                                      left out and named in `disabledRules`,
+ *                                      and `judgementStale` says whether the
+ *                                      judgement moved since the last rules run
  *   GET  /crawls/:id/issues/:rule/urls one rule's findings as a table:
  *                                      `{columns, items, nextCursor}`, each row
  *                                      the four standard columns plus the rule's
- *                                      own evidence
+ *                                      own evidence. 409 for a rule the crawl's
+ *                                      judgement disables (so is /inlinks)
  *   GET  /crawls/:id/issues/:rule/inlinks the links that point at what the three
  *                                      target rules found (links.broken-internal,
  *                                      links.to-server-error,
  *                                      robots.blocks-internal-urls) — Source,
  *                                      Destination, Anchor, Status Code. 404 for
  *                                      any other rule: it has no inlinks report
+ *   GET  /crawls/:id/overview/issues   the Issues Overview: one row per rule with
+ *                                      the crawl's judgement applied, `?includeZero=true`
+ *                                      adds the rules that found nothing. 409 on a
+ *                                      crawl no rules run has judged
+ *   GET  /crawls/:id/overview/crawl    the Crawl Overview: sectioned counts that
+ *                                      describe the crawl, with what it could not
+ *                                      measure named in `notMeasured`; answered on
+ *                                      an unjudged crawl too
  *   GET  /crawls/:id/metrics           the measured numbers, with their copy
  *   GET  /crawls/:id/metrics/:metricId one metric as a table: {metricId, title,
  *                                      explanation, howToFix, summary, columns,
@@ -66,7 +88,14 @@
  *                                      issues route. `measuresOnly: true` marks
  *                                      a metric rule, whose 0 is structural —
  *                                      it measures rather than finds and writes
- *                                      no issues at all (see `RuleFired`)
+ *                                      no issues at all (see `RuleFired`).
+ *                                      Every finding rule carries `type` and
+ *                                      `priority`; with `?crawlId=` they are the
+ *                                      crawl's, `disabled: true` marks a rule
+ *                                      its judgement disables, the copy renders
+ *                                      from the thresholds it was judged with,
+ *                                      and `thresholds` + `judgementStale` ride
+ *                                      the answer (see `RulesCatalog`)
  *   GET  /crawls/:id/export            write a dataset to disk, answer with the
  *                                      path. `?format=csv&view=` STREAMS instead:
  *                                      `text/csv`, chunked, one of six spreadsheet
@@ -333,6 +362,27 @@ function buildRoutes(): Route[] {
         return { status: 200, body: await service.runRulesForCrawl(param(ctx, "id")) };
       },
     },
+    {
+      method: "GET",
+      pattern: ["crawls", id, "config"],
+      query: [],
+      handler: async (service, ctx) => ({
+        status: 200,
+        body: await service.getCrawlConfig(param(ctx, "id")),
+      }),
+    },
+    {
+      method: "PATCH",
+      pattern: ["crawls", id, "config"],
+      query: [],
+      // The body is the patch, validated whole by the service: a missing body,
+      // a key other than `judgement`, or a block the ruleset cannot apply is a
+      // 400 naming what was wrong, and nothing is written.
+      handler: async (service, ctx) => ({
+        status: 200,
+        body: await service.setCrawlJudgement(param(ctx, "id"), ctx.body),
+      }),
+    },
     // THE QUERY SURFACE. Every one of these is a GET whose whole body is
     // `{items, nextCursor}` — one pagination shape, so an agent that learns to
     // follow a cursor once can follow every listing here. The filters are read
@@ -397,6 +447,26 @@ function buildRoutes(): Route[] {
           ...optionalNumber(ctx.query, "limit"),
           ...optionalString(ctx.query, "cursor"),
         }),
+      }),
+    },
+    {
+      method: "GET",
+      pattern: ["crawls", id, "overview", "issues"],
+      query: ["includeZero"],
+      handler: async (service, ctx) => ({
+        status: 200,
+        body: await service.issuesOverview(param(ctx, "id"), {
+          ...optionalBoolean(ctx.query, "includeZero"),
+        }),
+      }),
+    },
+    {
+      method: "GET",
+      pattern: ["crawls", id, "overview", "crawl"],
+      query: [],
+      handler: async (service, ctx) => ({
+        status: 200,
+        body: await service.crawlOverview(param(ctx, "id")),
       }),
     },
     // ONE METRIC AS A TABLE. `/metrics` is the raw rows an agent quotes;

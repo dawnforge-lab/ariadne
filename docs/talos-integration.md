@@ -93,7 +93,9 @@ crawler inside Talos. The intended shape:
    client-facing copy (`title`, `explanation`, `howToFix`). Severity-in-context
    and narrative belong to the consuming agent — for Talos that agent is
    tenant-facing, so engine output must already be tenant-safe (no internal
-   hostnames, no stack traces in `evidence`).
+   hostnames, no stack traces in `evidence`). Since Phase 27a the engine's
+   `type` and `priority` on each finding rule are the rule's defaults, and the
+   agent's per-crawl overrides (`crawl_config_set`) are the judgement.
 
 ## What Talos must eventually do (not Ariadne's job, recorded so it isn't lost)
 

@@ -1,7 +1,9 @@
 import { metricTableColumns, metricTableSummary, RESERVED_TABLE_KEYS } from "./metric-table.js";
-import type { AnyRule } from "./types.js";
+import { triageRow, type TriageLookup } from "./triage.js";
+import type { AnyRule, IssueType, Priority } from "./types.js";
 export * from "./metric-table.js";
 export * from "./types.js";
+export type { Triage, TriageLookup } from "./triage.js";
 
 export class RuleDefinitionError extends Error {
   // Explicit so the name survives transpilation and minification: callers that
@@ -890,7 +892,93 @@ const KINDS = ["page", "query", "metric"] as const satisfies readonly AnyRule["k
 //     "Reason", first): one sentence per trigger that fired; the static marker
 //     sentence and the fix copy no longer tell every crawl to fix failing
 //     sitemaps. `rules_catalog` re-measured at 194,186 bytes. 188 rules.
-export const RULESET_VERSION = "0.22.0";
+// 0.23.0: Phase 27a — (T1) type and priority on every finding rule (triage.ts).
+//  1. (T1) Every page and query rule carries `type` (issue | warning |
+//     opportunity) and `priority` (high | medium | low) beside its severity,
+//     attached by `defineRule` from the one table in
+//     src/rules/registry/triage.ts, referenced against Screaming Frog's Issue
+//     Type and Issue Priority where a rule maps to an SF issue. A rule that
+//     finds with no row, a metric rule with one, and a NOT MEASURED marker
+//     filed as anything but warning / low fail registry load. No verdict,
+//     severity, finding or copy moves; this is client-facing judgement, which
+//     is why the version moves. 188 rules.
+//  2. (T2) The per-crawl judgement block (src/rules/judgement.ts): rule
+//     overrides (disable / retype / reprioritise; never severity, never a
+//     metric rule) and overrides of 20 allowlisted thresholds, stored in
+//     `crawls.judgement_jsonb` (0031). `runRules` validates the stored block
+//     up front and stamps what it judged with (disabled set, threshold
+//     overrides, cap) in `crawls.rules_judged_with_jsonb` beside
+//     `rules_run_at`, backfilled for older judged crawls (0032). No verdict,
+//     finding or copy moves.
+//  3. (T3) The block reaches the rules. `runRules` builds one `JudgementContext`
+//     per run (effective thresholds + disabled set) and passes it to every
+//     page, query and metric rule, so the 20 thresholds are read per run rather
+//     than imported: a threshold override takes effect at the crawl's next
+//     rules run, and evidence that quotes a threshold quotes the effective
+//     value. `site.health` skips findings of disabled rules; disabled rules
+//     still run and their findings are still stored. With no overrides every
+//     verdict is unchanged.
+//  4. (T4) Issue copy is a template. Titles, explanations and fixes quote the
+//     thresholds as `{NAME}` / `{NAME:n}` placeholders (src/rules/registry/copy)
+//     rendered by `renderCopy` from the thresholds a crawl was judged with, so
+//     an override shows up in the text. At the defaults every entry renders
+//     byte for byte as 0.22.0 wrote it; an unknown or leftover placeholder
+//     throws, naming the rule.
+//  5. (T5) The read surfaces apply a crawl's judgement, through one loader
+//     (src/api/judgement-view.ts): `issues_list`, the issues CSV and the
+//     JSONL issues export leave out a disabled rule's stored findings IN SQL
+//     and name the disabled set; `issue_urls` / `issue_inlinks` (and the
+//     `issue_urls` CSV) refuse a disabled rule with a 409; groups, CSV rows
+//     and catalog rows carry type and priority after overrides; copy renders
+//     from the thresholds the findings were judged with (the stamp; the
+//     current block on an unjudged crawl); `judgementStale` rides the
+//     listing and the catalog. All additive; no finding moves.
+//     `rules_catalog` re-measured at 200,260 bytes (no crawl). 188 rules.
+//  6. (T6) The judgement is settable. `crawl_start` takes a `judgement` block
+//     (its `findingCap` written to `config_jsonb.findingCap`, refused if it
+//     disagrees with the top-level one); `crawl_config_get` /
+//     `GET /crawls/:id/config` reads it with every overridable threshold and
+//     the last run's stamp; `crawl_config_set` / `PATCH /crawls/:id/config`
+//     applies an RFC 7396 merge-patch (null removes a key, except findingCap,
+//     where null is uncapped), refused while the rules run. `judgementStale`
+//     rides `crawl_status`, `metrics_get` and `metric_table`; `crawl_compare`
+//     gains a `judgement-overrides` caveat. No finding moves. 188 rules.
+//  7. (T8) The Issues Overview: `issues_overview` / `GET /crawls/:id/overview/issues`
+//     and the `issues_overview` CSV view serve one row per rule (type,
+//     priority, severity, urls, percent of the pages judged) with the crawl's
+//     judgement applied, from one `GROUP BY rule_id` and the stored
+//     `site.health` Pages Judged. A new read surface; no finding moves.
+//     188 rules.
+//  8. (T9) The Crawl Overview: `crawl_overview` / `GET /crawls/:id/overview/crawl`
+//     and the `crawl_overview` CSV view serve sectioned counts that describe
+//     the crawl (urls from `crawl_status`'s fields; fetch class, status class,
+//     content, indexability, click depth, discovery, response time, render, and
+//     the type x priority issues grid after overrides), each one bounded
+//     aggregate. What a crawl could not measure is named in `notMeasured`,
+//     never zero. A new read surface; no finding moves. 188 rules.
+//  9. (T10) Surface docs, skills and the gate (docs/gates/phase-27a.md). No
+//     rule, verdict or copy moves; `crawl_status`'s description now says that
+//     `findingsCount` counts a disabled rule's stored rows, which `issues_list`
+//     leaves out. `rules_catalog` re-measured at 200,260 bytes with no crawl
+//     id (16 markers at 2,487 bytes, the 14 metric tables at 5,620), by
+//     serialising what `rulesCatalog` answers as 26c did; the same measurement
+//     over the 0.22.0 code (cb63104) reproduces its 194,186 to the byte. The
+//     6,074 bytes between them are `type` and `priority` on the 174 finding
+//     rules (T1). T6–T9 add none: their fields ride only a catalog read WITH a
+//     crawl id. 188 rules: 72 page / 102 query / 14 metric.
+// 10. (final review) Three threshold ranges narrow so an override cannot sit
+//     at the extraction cap of what it measures, where the rule could never
+//     fire (hard rule 1): `H1_MAX` 1–299 (cap `MAX_H1_TEXT_CHARS` 300),
+//     `H2_MAX` 1–299 (`H2_TEXT_MAX` 300), `URL_MAX` 20–2499
+//     (`INDEXED_URL_MAX` 2500). Defaults unchanged; no verdict moves.
+// 11. (final review) The run stamp holds the EFFECTIVE thresholds, as the spec
+//     says: `rules_judged_with_jsonb.thresholds` is all 20 at the values the
+//     run used, not its overrides alone. `readStamp` refuses a stamp missing a
+//     name or holding an out-of-range value; copy renders from the stamp as
+//     stored; staleness compares effective values on both sides, so a later
+//     default change reads stale. Migration 0033 rewrote the existing stamps
+//     (the 0.22.0 / 0.23.0 defaults under their overrides). No finding moves.
+export const RULESET_VERSION = "0.23.0";
 
 /**
  * The 47 crawl-derived checks (sf-audit checklist, Pre-Crawl + sections 1–11):
@@ -926,7 +1014,33 @@ export const CRAWL_CHECK_IDS: readonly string[] = [
  */
 export const AGENT_CHECKS: readonly string[] = ["CHECK-38", "CHECK-41", "CHECK-42"];
 
-export function defineRule<T extends AnyRule>(rule: T): T {
+/**
+ * A rule as its module writes it: every field but the triage (`type`,
+ * `priority`), which `defineRule` attaches from src/rules/registry/triage.ts.
+ * Distributive, so each kind keeps its own shape. A rule that is already
+ * defined is also a valid definition, which is how `Registry.register`
+ * re-checks one.
+ */
+export type RuleDefinition<T extends AnyRule = AnyRule> = T extends AnyRule
+  ? Omit<T, "type" | "priority"> & Partial<Pick<T, "type" | "priority">>
+  : never;
+
+/**
+ * Validate a rule's definition and return it with its triage attached: a NEW
+ * object for a rule that finds (the definition is not mutated), the definition
+ * itself for a metric rule.
+ *
+ * `triage` is how the table is read; production uses `triageRow`, and a test
+ * passes its own to exercise these checks on synthetic rules without editing
+ * `TRIAGE`.
+ */
+export function defineRule<T extends AnyRule>(
+  definition: RuleDefinition<T>,
+  triage: TriageLookup = triageRow,
+): T {
+  // The checks below read the definition as a rule; the triage fields are the
+  // only ones it may lack, and `attachTriage` is what supplies them.
+  const rule = definition as unknown as AnyRule;
   const fail = (msg: string): never => {
     throw new RuleDefinitionError(`rule '${rule.id ?? "<no id>"}': ${msg}`);
   };
@@ -947,7 +1061,56 @@ export function defineRule<T extends AnyRule>(rule: T): T {
     fail("marker, when present, must be a non-empty reason string");
   validateColumns(rule, fail);
   validateTable(rule, fail);
-  return rule;
+  return attachTriage(rule, triage, fail) as T;
+}
+
+const ISSUE_TYPES = ["issue", "warning", "opportunity"] as const satisfies readonly IssueType[];
+const PRIORITIES = ["high", "medium", "low"] as const satisfies readonly Priority[];
+
+/**
+ * The triage half of `defineRule`. ONE TABLE decides every rule's type and
+ * priority, so:
+ *  - a metric rule has no row (it produces no findings) and carries neither;
+ *  - a rule that finds must have a row, or registry load fails, as missing copy
+ *    does;
+ *  - a NOT MEASURED marker's row is warning / low;
+ *  - a definition that already carries a type or priority (a rule defined
+ *    once, registered again) must agree with the row: a value written by hand
+ *    against the table is refused, never silently replaced.
+ * The row's values are checked too, because the lookup is a parameter and a
+ * value from JavaScript the type system did not see is not a judgement.
+ */
+function attachTriage(rule: AnyRule, lookup: TriageLookup, fail: (msg: string) => never): AnyRule {
+  const row = lookup(rule.id);
+  if (rule.kind === "metric") {
+    if (row !== undefined)
+      fail(
+        "a metric rule has no type or priority — it produces no findings — so it has no " +
+          "row in src/rules/registry/triage.ts",
+      );
+    if (rule.type !== undefined || rule.priority !== undefined)
+      fail("a metric rule carries no type or priority: it produces no findings");
+    return rule;
+  }
+  if (row === undefined)
+    return fail("no type or priority: add the rule's row to src/rules/registry/triage.ts");
+  const { type, priority } = row;
+  if (!(ISSUE_TYPES as readonly string[]).includes(type)) fail(`bad issue type '${type}'`);
+  if (!(PRIORITIES as readonly string[]).includes(priority)) fail(`bad priority '${priority}'`);
+  if (rule.marker !== undefined && (type !== "warning" || priority !== "low"))
+    fail(
+      `a NOT MEASURED marker is warning / low, and src/rules/registry/triage.ts files it ` +
+        `as ${type} / ${priority}`,
+    );
+  if (
+    (rule.type !== undefined && rule.type !== type) ||
+    (rule.priority !== undefined && rule.priority !== priority)
+  )
+    fail(
+      `type and priority come from src/rules/registry/triage.ts (${type} / ${priority}); ` +
+        `the definition says ${rule.type} / ${rule.priority}`,
+    );
+  return { ...rule, type, priority };
 }
 
 /**
@@ -1201,11 +1364,17 @@ function validateTable(rule: AnyRule, fail: (msg: string) => never): void {
 export class Registry {
   private rules = new Map<string, AnyRule>();
 
-  register(rule: AnyRule): void {
-    defineRule(rule);
-    if (this.rules.has(rule.id))
-      throw new RuleDefinitionError(`duplicate rule id '${rule.id}'`);
-    this.rules.set(rule.id, rule);
+  /**
+   * `triage` reads the type-and-priority table; a test registering synthetic
+   * rules passes its own (see `defineRule`).
+   */
+  constructor(private readonly triage: TriageLookup = triageRow) {}
+
+  register(rule: RuleDefinition): void {
+    const defined = defineRule(rule, this.triage);
+    if (this.rules.has(defined.id))
+      throw new RuleDefinitionError(`duplicate rule id '${defined.id}'`);
+    this.rules.set(defined.id, defined);
   }
   all(): AnyRule[] { return [...this.rules.values()]; }
   byKind<K extends AnyRule["kind"]>(kind: K): Extract<AnyRule, { kind: K }>[] {

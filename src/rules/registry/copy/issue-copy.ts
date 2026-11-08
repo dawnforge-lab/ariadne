@@ -26,6 +26,12 @@
  *     response 1500 ms, deep page 5, images 100,000 bytes, redirect chain 2
  *     hops). Change one, change both; test/rules/copy.test.ts pins them.
  *
+ *  3. A number that is an OVERRIDABLE threshold (src/rules/threshold-table.ts)
+ *     is written as a placeholder, `{NAME}` for bare digits or `{NAME:n}` for
+ *     en-US thousands separators, and rendered by `renderCopy` (./index.ts)
+ *     from the thresholds the crawl was judged with. `COPY_TEMPLATES` holds
+ *     the raw entries. Constants that are not overridable stay literal.
+ *
  * Metric rules describe a TABLE: the title names it, the description says
  * what the columns are, the fix says how to read it.
  */
@@ -36,7 +42,7 @@ export interface IssueCopy {
   howToFix: string;
 }
 
-export const ISSUE_COPY: Record<string, IssueCopy> = {
+export const COPY_TEMPLATES: Record<string, IssueCopy> = {
   // ------------------------------------------------------------- canonicals
   "canonical.cross-domain": {
     title: "Canonicals: Canonical points to another host",
@@ -167,9 +173,9 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
       "Replace the quoted text with real copy or unpublish the page. Check excerpts, summaries and descriptions as well as the body, and search the CMS for the phrase: placeholder text usually sits in the same field on several records.",
   },
   "content.soft-404": {
-    title: "Content: Soft 404 (not-found wording under 300 words, or the not-found template)",
+    title: "Content: Soft 404 (not-found wording under {SOFT_404_WORDS} words, or the not-found template)",
     explanation:
-      "Pages returning 200 that look like an error page, whatever their directives or canonical say: not-found wording with fewer than 300 renderable words, or content within 4 of 64 fingerprint bits of the site's real not-found page. Search engines treat them as errors, keep them out of the index and keep re-crawling them.",
+      "Pages returning 200 that look like an error page, whatever their directives or canonical say: not-found wording with fewer than {SOFT_404_WORDS} renderable words, or content within 4 of 64 fingerprint bits of the site's real not-found page. Search engines treat them as errors, keep them out of the index and keep re-crawling them.",
     howToFix:
       "Return a real 404 or 410 for content that is gone, or 301 to the closest live page. If the page is genuine, expand it so it no longer resembles the error template, and check what links to it.",
   },
@@ -181,9 +187,9 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
       "Consolidate a template whose share within 3 bits is high, or give each page content of its own; a wide spread means the template is really two.",
   },
   "content.thin": {
-    title: "Content: Low content pages (under 150 words of own content)",
+    title: "Content: Low content pages (under {THIN_WORDS} words of own content)",
     explanation:
-      "Indexable, self-canonical pages with fewer than 150 words of their own content: the text inside the page's main area, or the whole body where none is marked, in both cases with header, navigation, sidebar and footer excluded. Each row shows own words beside the whole-document word count; a page with no own text shows 0.",
+      "Indexable, self-canonical pages with fewer than {THIN_WORDS} words of their own content: the text inside the page's main area, or the whole body where none is marked, in both cases with header, navigation, sidebar and footer excluded. Each row shows own words beside the whole-document word count; a page with no own text shows 0.",
     howToFix:
       "Add content that answers the page's query, consolidate the page into a stronger one, or noindex it if it exists for another reason. If own words are far below the document total, check that the template's content field is being filled for this record.",
   },
@@ -557,11 +563,11 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
       "Remove the directive if the restriction is not intended. To limit rather than forbid a preview, use a value such as max-snippet:160 or max-image-preview:large.",
   },
   "directives.unavailable-after": {
-    title: "Directives: unavailable_after date within 30 days",
+    title: "Directives: unavailable_after date within {UNAVAILABLE_AFTER_WARN_DAYS} days",
     explanation:
-      "Pages whose unavailable_after directive names a date that had passed or fell within 30 days of the crawl, or a date in no standard format (ISO 8601, RFC 822, 850 or 1123, or asctime) that search engines cannot read. A page leaves the index once the date passes, and an unreadable date is ignored, so the page stays indexed when its author expected it to leave. The Days From Fetch column counts the days from the crawl to the date (negative means already past), and Assumed UTC marks a date and time written without a time zone, which is read as UTC.",
+      "Pages whose unavailable_after directive names a date that had passed or fell within {UNAVAILABLE_AFTER_WARN_DAYS} days of the crawl, or a date in no standard format (ISO 8601, RFC 822, 850 or 1123, or asctime) that search engines cannot read. A page leaves the index once the date passes, and an unreadable date is ignored, so the page stays indexed when its author expected it to leave. The Days From Fetch column counts the days from the crawl to the date (negative means already past), and Assumed UTC marks a date and time written without a time zone, which is read as UTC.",
     howToFix:
-      "Remove the directive if the page should stay indexed, or move the date well beyond 30 days. If the date cannot be read, rewrite it in a standard format such as 2027-01-31T00:00:00Z.",
+      "Remove the directive if the page should stay indexed, or move the date well beyond {UNAVAILABLE_AFTER_WARN_DAYS} days. If the date cannot be read, rewrite it in a standard format such as 2027-01-31T00:00:00Z.",
   },
 
   // ------------------------------------------------------------------ links
@@ -673,11 +679,11 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
       "Add a descriptive H2 for each section of the content, under the page's H1.",
   },
   "h2.too-long": {
-    title: "Headings: H2 over 70 characters",
+    title: "Headings: H2 over {H2_MAX} characters",
     explanation:
-      "Indexable, self-canonical pages whose first H2 is longer than 70 characters. A long H2 is usually body copy marked up as a heading, which weakens the section outline.",
+      "Indexable, self-canonical pages whose first H2 is longer than {H2_MAX} characters. A long H2 is usually body copy marked up as a heading, which weakens the section outline.",
     howToFix:
-      "Shorten the H2 to the section's subject in 70 characters or fewer and move the rest into the paragraph below it.",
+      "Shorten the H2 to the section's subject in {H2_MAX} characters or fewer and move the rest into the paragraph below it.",
   },
   "h2.duplicate": {
     title: "Headings: Duplicate H2",
@@ -722,11 +728,11 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
       "Keep one H1 for the main heading and demote the rest to H2 or H3; mark up a logo with a non-heading element.",
   },
   "headings.h1-too-long": {
-    title: "H1: Over 70 characters",
+    title: "H1: Over {H1_MAX} characters",
     explanation:
-      "Indexable, self-canonical pages whose first H1 is longer than 70 characters; H1 text over 300 characters is reported as 300. A long H1 is usually a sentence of body copy marked up as a heading, which dilutes the one heading that names the page's subject.",
+      "Indexable, self-canonical pages whose first H1 is longer than {H1_MAX} characters; H1 text over 300 characters is reported as 300. A long H1 is usually a sentence of body copy marked up as a heading, which dilutes the one heading that names the page's subject.",
     howToFix:
-      "Shorten the H1 to the page's subject in 70 characters or fewer and move the rest into the paragraph below it.",
+      "Shorten the H1 to the page's subject in {H1_MAX} characters or fewer and move the rest into the paragraph below it.",
   },
   "headings.level-skip": {
     title: "Headings: Non-sequential levels (skip of more than 1)",
@@ -747,49 +753,49 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
     explanation:
       "Indexable, self-canonical pages whose HTML response has no meta description, or an empty one. Search engines then build the snippet from page text, which is less compelling and lowers click-through rate.",
     howToFix:
-      "Add a unique meta description of 70 to 155 characters that summarises the page and gives a reason to click.",
+      "Add a unique meta description of {META_MIN} to {META_MAX} characters that summarises the page and gives a reason to click.",
   },
   "meta-description.too-long": {
-    title: "Meta description: Over 155 characters",
+    title: "Meta description: Over {META_MAX} characters",
     explanation:
-      "Indexable, self-canonical pages whose meta description exceeds 155 characters. Search results cut descriptions by pixel width, so the closing words are lost.",
+      "Indexable, self-canonical pages whose meta description exceeds {META_MAX} characters. Search results cut descriptions by pixel width, so the closing words are lost.",
     howToFix:
-      "Trim the description to 155 characters or fewer, keeping the core message and the reason to click in the first sentence.",
+      "Trim the description to {META_MAX} characters or fewer, keeping the core message and the reason to click in the first sentence.",
   },
   "title.pixel-too-long": {
-    title: "Page titles: Wider than 561 pixels",
+    title: "Page titles: Wider than {TITLE_PX_MAX} pixels",
     explanation:
-      "Indexable, self-canonical pages whose title is wider than 561 pixels in the font search results use, so the end is likely to be cut off. Width is measured, not counted in characters, and a title with characters outside the Latin, Greek and Cyrillic scripts is not judged here.",
+      "Indexable, self-canonical pages whose title is wider than {TITLE_PX_MAX} pixels in the font search results use, so the end is likely to be cut off. Width is measured, not counted in characters, and a title with characters outside the Latin, Greek and Cyrillic scripts is not judged here.",
     howToFix:
-      "Shorten the title or swap wide letters for narrower words so it fits in 561 pixels, keeping the important words at the front.",
+      "Shorten the title or swap wide letters for narrower words so it fits in {TITLE_PX_MAX} pixels, keeping the important words at the front.",
   },
   "title.pixel-too-short": {
-    title: "Page titles: Narrower than 200 pixels",
+    title: "Page titles: Narrower than {TITLE_PX_MIN} pixels",
     explanation:
-      "Indexable, self-canonical pages whose title is narrower than 200 pixels in the font search results use, so it leaves most of the line unused. Width is measured, not counted in characters, and a title with characters outside the Latin, Greek and Cyrillic scripts is not judged here.",
+      "Indexable, self-canonical pages whose title is narrower than {TITLE_PX_MIN} pixels in the font search results use, so it leaves most of the line unused. Width is measured, not counted in characters, and a title with characters outside the Latin, Greek and Cyrillic scripts is not judged here.",
     howToFix:
       "Add the words people search for to the title, such as the product, the place or the benefit, until it fills more of the line.",
   },
   "meta-description.pixel-too-long": {
-    title: "Meta description: Wider than 985 pixels",
+    title: "Meta description: Wider than {META_PX_MAX} pixels",
     explanation:
-      "Indexable, self-canonical pages whose meta description is wider than 985 pixels in the font search results use, so its ending is likely to be cut off. Width is measured, not counted in characters, and a description with characters outside the Latin, Greek and Cyrillic scripts is not judged here.",
+      "Indexable, self-canonical pages whose meta description is wider than {META_PX_MAX} pixels in the font search results use, so its ending is likely to be cut off. Width is measured, not counted in characters, and a description with characters outside the Latin, Greek and Cyrillic scripts is not judged here.",
     howToFix:
-      "Trim the description so it fits in 985 pixels, keeping the core message and the reason to click in the first sentence.",
+      "Trim the description so it fits in {META_PX_MAX} pixels, keeping the core message and the reason to click in the first sentence.",
   },
   "meta-description.pixel-too-short": {
-    title: "Meta description: Narrower than 400 pixels",
+    title: "Meta description: Narrower than {META_PX_MIN} pixels",
     explanation:
-      "Indexable, self-canonical pages whose meta description is narrower than 400 pixels in the font search results use, so it fills little of the space a result offers. Width is measured, not counted in characters, and a description with characters outside the Latin, Greek and Cyrillic scripts is not judged here.",
+      "Indexable, self-canonical pages whose meta description is narrower than {META_PX_MIN} pixels in the font search results use, so it fills little of the space a result offers. Width is measured, not counted in characters, and a description with characters outside the Latin, Greek and Cyrillic scripts is not judged here.",
     howToFix:
       "Expand the description with what the page offers and a reason to click, until it fills more of the result.",
   },
   "meta-description.too-short": {
-    title: "Meta description: Below 70 characters",
+    title: "Meta description: Below {META_MIN} characters",
     explanation:
-      "Indexable, self-canonical pages whose meta description is under 70 characters. Short descriptions waste the snippet space and are frequently replaced by search engines with text from the page.",
+      "Indexable, self-canonical pages whose meta description is under {META_MIN} characters. Short descriptions waste the snippet space and are frequently replaced by search engines with text from the page.",
     howToFix:
-      "Expand the description to 70 to 155 characters. Where a whole section is short, build it in the template from fields that differ per page.",
+      "Expand the description to {META_MIN} to {META_MAX} characters. Where a whole section is short, build it in the template from fields that differ per page.",
   },
   "title.duplicate": {
     title: "Page titles: Duplicate",
@@ -803,26 +809,26 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
     explanation:
       "Indexable, self-canonical pages whose HTML response has no title tag, or an empty one. The title is a primary relevance signal and the headline of the search result; without one, search engines write their own from page text.",
     howToFix:
-      "Add a unique, descriptive title naming the page's main topic (30 to 60 characters is the usual target), generated in the template from the fields that differ per page.",
+      "Add a unique, descriptive title naming the page's main topic ({TITLE_MIN} to {TITLE_MAX} characters is the usual target), generated in the template from the fields that differ per page.",
   },
   "title.too-long": {
-    title: "Page titles: Over 60 characters",
+    title: "Page titles: Over {TITLE_MAX} characters",
     explanation:
-      "Indexable, self-canonical pages whose title exceeds 60 characters. Search results cut titles by pixel width, so long titles lose their ending and a title under 60 characters can still be cut.",
+      "Indexable, self-canonical pages whose title exceeds {TITLE_MAX} characters. Search results cut titles by pixel width, so long titles lose their ending and a title under {TITLE_MAX} characters can still be cut.",
     howToFix:
-      "Shorten the title to 60 characters or fewer, front-loading the important words and moving or dropping the site name.",
+      "Shorten the title to {TITLE_MAX} characters or fewer, front-loading the important words and moving or dropping the site name.",
   },
   "title.too-short": {
-    title: "Page titles: Below 30 characters",
+    title: "Page titles: Below {TITLE_MIN} characters",
     explanation:
-      "Indexable, self-canonical pages whose title is under 30 characters. A title this short rarely says what the page is about and who it is for, and leaves most of the space in a search result unused.",
+      "Indexable, self-canonical pages whose title is under {TITLE_MIN} characters. A title this short rarely says what the page is about and who it is for, and leaves most of the space in a search result unused.",
     howToFix:
-      "Expand the title to a descriptive phrase of 30 to 60 characters: the page's subject first, then what sets it apart, then the brand. Where a whole section is short, add the missing part in the template.",
+      "Expand the title to a descriptive phrase of {TITLE_MIN} to {TITLE_MAX} characters: the page's subject first, then what sets it apart, then the brand. Where a whole section is short, add the missing part in the template.",
   },
 
   // -------------------------------------------------------------- redirects
   "redirect.chain": {
-    title: "Redirects: Redirect chain (2 or more hops)",
+    title: "Redirects: Redirect chain ({CHAIN_HOPS} or more hops)",
     explanation:
       "URLs that redirect to a URL that redirects again; the row lists the chain and the final status. Chains are followed up to 10 hops; a chain marked truncated is longer than that and may be a loop. Each hop costs a request, chains break when a middle hop is removed, and search engines stop following after a limited number of hops.",
     howToFix:
@@ -989,9 +995,9 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
 
   // ----------------------------------------------------------------- images
   "images.legacy-format": {
-    title: "Images: Over 100,000 bytes served as PNG or JPEG",
+    title: "Images: Over {IMAGE_WEIGHT_WARN:n} bytes served as PNG or JPEG",
     explanation:
-      "Images over 100,000 bytes whose server-sent content type is PNG or JPEG, listed per file with size, size source, content type, the number of referencing pages and up to 10 of them. WebP and AVIF usually carry the same picture in far fewer bytes. Only img src references in the HTML response that the server answered successfully are checked.",
+      "Images over {IMAGE_WEIGHT_WARN:n} bytes whose server-sent content type is PNG or JPEG, listed per file with size, size source, content type, the number of referencing pages and up to 10 of them. WebP and AVIF usually carry the same picture in far fewer bytes. Only img src references in the HTML response that the server answered successfully are checked.",
     howToFix:
       "Add WebP or AVIF renditions for photographs and let the browser choose via a picture element or CDN negotiation, keeping the original as fallback. Leave PNG where sharp-edged graphics need it.",
   },
@@ -1024,9 +1030,9 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
       "Set width and height attributes to the image's intrinsic pixel dimensions, or set an aspect-ratio in CSS. Verify against the rendered page before treating it as a defect.",
   },
   "images.oversized": {
-    title: "Images: Over 100,000 bytes",
+    title: "Images: Over {IMAGE_WEIGHT_WARN:n} bytes",
     explanation:
-      "Images that transfer more than 100,000 bytes, listed per file with size, how the size was established (server-declared or measured), content type, the number of referencing pages and up to 10 of them. Only img src references in the HTML response that the server answered successfully are weighed; CSS backgrounds and later srcset renditions are not, and dimensions and compression are not examined.",
+      "Images that transfer more than {IMAGE_WEIGHT_WARN:n} bytes, listed per file with size, how the size was established (server-declared or measured), content type, the number of referencing pages and up to 10 of them. Only img src references in the HTML response that the server answered successfully are weighed; CSS backgrounds and later srcset renditions are not, and dimensions and compression are not examined.",
     howToFix:
       "Start with the images referenced by the most pages. Re-export at the displayed size, compress, and serve a modern format. Link to files that must stay large instead of embedding them.",
   },
@@ -1054,9 +1060,9 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
       "Read script bytes against total weight first; a template whose median script weight is a large share of the total is a build problem. Compare templates with the site row, and check the weighed count against the referenced count before quoting a figure.",
   },
   "performance.slow-response": {
-    title: "Performance: Response time over 1500 ms",
+    title: "Performance: Response time over {SLOW_MS} ms",
     explanation:
-      "Indexable, self-canonical pages that took more than 1500 ms to start responding, measured once from the crawler. Time to first byte delays everything the reader sees and reduces how much a search engine crawls per visit. A cold cache or a busy moment shows up the same as a slow route.",
+      "Indexable, self-canonical pages that took more than {SLOW_MS} ms to start responding, measured once from the crawler. Time to first byte delays everything the reader sees and reduces how much a search engine crawls per visit. A cold cache or a busy moment shows up the same as a slow route.",
     howToFix:
       "Re-test to rule out a cold cache, then reduce server and database time for the route; serve cached or statically generated HTML where possible.",
   },
@@ -1117,9 +1123,9 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
       "Start with the unreachable pages and give each a home in a category, hub or related block, or remove it from the sitemap. Shorten the path to templates whose median depth is high with a hub or navigation entry.",
   },
   "structure.deep-page": {
-    title: "Links: Crawl depth over 5",
+    title: "Links: Crawl depth over {DEEP_DEPTH}",
     explanation:
-      "Indexable, self-canonical pages whose shortest internal link path from the home page is more than 5 links. Deep pages are crawled less often, receive less internal link value and are harder to reach. Pages with no link path from the home page have no depth and are not in this report.",
+      "Indexable, self-canonical pages whose shortest internal link path from the home page is more than {DEEP_DEPTH} links. Deep pages are crawled less often, receive less internal link value and are harder to reach. Pages with no link path from the home page have no depth and are not in this report.",
     howToFix:
       "Link to the page from a category, landing page or navigation entry closer to the home page. If it is not worth linking from higher up, consolidate or remove it.",
   },
@@ -1245,9 +1251,9 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
       "Canonicalise parameter combinations that should not be pages to the clean URL and keep them out of the sitemap and internal links. Sort, view and session parameters should never produce indexable URLs.",
   },
   "url.too-long": {
-    title: "URL: Over 115 characters",
+    title: "URL: Over {URL_MAX} characters",
     explanation:
-      "Indexable, self-canonical pages whose URL is longer than 115 characters. Long URLs are truncated in search results, are hard to share and usually carry parameters, session values or repeated folders that should not be there.",
+      "Indexable, self-canonical pages whose URL is longer than {URL_MAX} characters. Long URLs are truncated in search results, are hard to share and usually carry parameters, session values or repeated folders that should not be there.",
     howToFix:
       "Shorten the URL to the words that describe the page, drop needless folders and parameters, and 301 the old URL to the new one.",
   },
@@ -1378,9 +1384,9 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
       "Where the target matters for search, give the link visible text or an image with alt text that describes the target; icon links to pages such as the cart, wishlist or account can stay as they are.",
   },
   "links.high-outlinks": {
-    title: "Links: Over 1,000 internal or 10 external links",
+    title: "Links: Over {HIGH_INTERNAL_OUTLINKS:n} internal or {HIGH_EXTERNAL_OUTLINKS} external links",
     explanation:
-      "Pages that link to more than 1,000 different internal URLs or more than 10 different external URLs. Internally, link value is shared between the links on a page, so every extra link dilutes the rest, and a page this long is hard for a visitor to use; externally, 10 is a review threshold, not a defect, because that many outbound links send visitors and link value off the site and can read as a link list. The row gives both counts and the limit that was crossed.",
+      "Pages that link to more than {HIGH_INTERNAL_OUTLINKS:n} different internal URLs or more than {HIGH_EXTERNAL_OUTLINKS} different external URLs. Internally, link value is shared between the links on a page, so every extra link dilutes the rest, and a page this long is hard for a visitor to use; externally, {HIGH_EXTERNAL_OUTLINKS} is a review threshold, not a defect, because that many outbound links send visitors and link value off the site and can read as a link list. The row gives both counts and the limit that was crossed.",
     howToFix:
       "Internal: cut the list down to the links a visitor needs, and move long lists into paginated or category pages that each carry a manageable number. External: keep the links that earn their place, such as sources and references, and remove or mark with rel=\"nofollow\" or rel=\"sponsored\" any you would not vouch for.",
   },

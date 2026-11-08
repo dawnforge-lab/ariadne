@@ -76,7 +76,7 @@ import {
   type Finding,
   type QueryRule,
 } from "../registry/registry.js";
-import type { RuleCaps } from "../registry/types.js";
+import { judgementOr, type RuleCaps } from "../registry/types.js";
 import {
   capsOr,
   limitTo,
@@ -87,11 +87,9 @@ import {
 } from "./crawl-evidence.js";
 import { CLUSTER_KEY, HREFLANG_CLUSTER_CTES } from "./hreflang-cluster.js";
 import {
-  SOFT_404_WORDS,
   TEMPLATE_HAMMING,
   NEAR_DUPLICATE_HAMMING,
   NEAR_DUPLICATE_MIN_MAIN_WORDS,
-  THIN_WORDS,
 } from "../thresholds.js";
 
 const CATEGORY = "content" as const;
@@ -249,7 +247,12 @@ function templateSimhash(probe: NotFoundProbeReading): bigint | null {
  * `hammingToTemplate` appears exactly when a distance was actually computed —
  * there is no "0" standing in for "not measured".
  */
-async function soft404Findings(db: Db, crawlId: string, caps: RuleCaps): Promise<Finding[]> {
+async function soft404Findings(
+  db: Db,
+  crawlId: string,
+  caps: RuleCaps,
+  soft404Words: number,
+): Promise<Finding[]> {
   // The crawl must exist before anything is concluded from an empty scan (the
   // `sitemap` rules' precedent). `readNotFoundProbe` throws for an unknown
   // crawl id too, so this is the probe read rather than a second round trip.
@@ -283,7 +286,7 @@ async function soft404Findings(db: Db, crawlId: string, caps: RuleCaps): Promise
     where p.crawl_id = ${crawlId} and ${FETCHED_OK("p")}
       and (
         (p.has_soft404_phrases and p.renderable_word_count is not null
-          and p.renderable_word_count < ${SOFT_404_WORDS})
+          and p.renderable_word_count < ${soft404Words})
         or ${
           distance === null
             ? sql`false`
@@ -298,7 +301,7 @@ async function soft404Findings(db: Db, crawlId: string, caps: RuleCaps): Promise
     if (
       row.has_soft404_phrases &&
       row.renderable_word_count !== null &&
-      row.renderable_word_count < SOFT_404_WORDS
+      row.renderable_word_count < soft404Words
     ) {
       signals.push("phrases");
     }
@@ -980,7 +983,12 @@ async function nearDuplicateFindings(
  * happens to name early. The total beside the note is exact (`count(*) over ()`
  * over the whole match set, evaluated before the limit).
  */
-async function thinFindings(db: Db, crawlId: string, caps: RuleCaps): Promise<Finding[]> {
+async function thinFindings(
+  db: Db,
+  crawlId: string,
+  caps: RuleCaps,
+  thinWords: number,
+): Promise<Finding[]> {
   await readCrawlEvidence(db, crawlId, THIN.id);
   // The gate, for `nearDuplicateFindings`'s reason and with the same predicate:
   // on a crawl with no main-content fingerprint every page's `main_word_count`
@@ -1000,7 +1008,7 @@ async function thinFindings(db: Db, crawlId: string, caps: RuleCaps): Promise<Fi
     from pages p
     where p.crawl_id = ${crawlId} and ${JUDGED("p")}
       and p.word_count is not null
-      and (p.main_word_count is null or p.main_word_count < ${THIN_WORDS})
+      and (p.main_word_count is null or p.main_word_count < ${thinWords})
     order by coalesce(p.main_word_count, 0), p.url
     ${limitTo(caps.listing)}`);
 
@@ -1017,7 +1025,7 @@ async function thinFindings(db: Db, crawlId: string, caps: RuleCaps): Promise<Fi
         mainWords: row.main_word_count ?? 0,
         ...(row.main_word_count === null ? { note: "no main-content text at all" } : {}),
         wordCount: row.word_count,
-        threshold: THIN_WORDS,
+        threshold: thinWords,
       },
       dedupeKey: row.url,
     }),
@@ -1050,7 +1058,11 @@ async function thinFindings(db: Db, crawlId: string, caps: RuleCaps): Promise<Fi
  * which has renderable counts, no main-content counts, and had nothing to say
  * about it at all.
  */
-async function thinSkippedFindings(db: Db, crawlId: string): Promise<Finding[]> {
+async function thinSkippedFindings(
+  db: Db,
+  crawlId: string,
+  thinWords: number,
+): Promise<Finding[]> {
   await readCrawlEvidence(db, crawlId, THIN_SKIPPED.id);
   const census = await mainFingerprintCensus(db, crawlId);
   if (!mainFingerprintUnavailable(census)) return [];
@@ -1062,7 +1074,7 @@ async function thinSkippedFindings(db: Db, crawlId: string): Promise<Finding[]> 
         // The size of what went unjudged, in the word every site-scoped finding
         // publishes this quantity under.
         indexablePages: census.auditable,
-        threshold: THIN_WORDS,
+        threshold: thinWords,
       },
       dedupeKey: "site",
     }),
@@ -1084,7 +1096,8 @@ export const contentRules: QueryRule[] = [
     ],
     ...copyFor(SOFT_404.id),
     rulesetVersion: RULESET_VERSION,
-    run: (db, crawlId, caps) => soft404Findings(db, crawlId, capsOr(caps)),
+    run: (db, crawlId, caps, ctx) =>
+      soft404Findings(db, crawlId, capsOr(caps), judgementOr(ctx).thresholds.SOFT_404_WORDS),
   }),
 
   defineRule<QueryRule>({
@@ -1169,7 +1182,8 @@ export const contentRules: QueryRule[] = [
     ],
     ...copyFor(THIN.id),
     rulesetVersion: RULESET_VERSION,
-    run: (db, crawlId, caps) => thinFindings(db, crawlId, capsOr(caps)),
+    run: (db, crawlId, caps, ctx) =>
+      thinFindings(db, crawlId, capsOr(caps), judgementOr(ctx).thresholds.THIN_WORDS),
   }),
 
   // And the crawl that rule cannot be run on. It claims the same two checks as
@@ -1194,6 +1208,7 @@ export const contentRules: QueryRule[] = [
     // establish.
     marker:
       "No page in this crawl has an own-content word count, so low content could not be checked; re-crawl the site.",
-    run: (db, crawlId) => thinSkippedFindings(db, crawlId),
+    run: (db, crawlId, _caps, ctx) =>
+      thinSkippedFindings(db, crawlId, judgementOr(ctx).thresholds.THIN_WORDS),
   }),
 ];

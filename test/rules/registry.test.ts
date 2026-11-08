@@ -49,9 +49,17 @@ const validMetricRule = {
   run: async () => [],
 };
 
+/**
+ * `defineRule` returns a rule that finds as a NEW object carrying its triage
+ * (src/rules/registry/triage.ts; `title.missing` is issue / high there), and
+ * leaves the definition it was given untouched.
+ */
+const triaged = <R extends object>(rule: R) => ({ ...rule, type: "issue", priority: "high" });
+
 describe("defineRule", () => {
   it("accepts a well-formed rule", () => {
-    expect(defineRule(validPageRule)).toBe(validPageRule);
+    expect(defineRule(validPageRule)).toEqual(triaged(validPageRule));
+    expect(validPageRule).not.toHaveProperty("type");
   });
   it("throws on empty checkIds", () => {
     expect(() => defineRule({ ...validPageRule, checkIds: [] }))
@@ -98,7 +106,7 @@ describe("defineRule", () => {
   });
   it("accepts a checkId with a letter suffix", () => {
     const suffixed = { ...validPageRule, checkIds: ["CHECK-38a"] };
-    expect(defineRule(suffixed)).toBe(suffixed);
+    expect(defineRule(suffixed)).toEqual(triaged(suffixed));
   });
   it("throws on an unknown kind", () => {
     expect(() => defineRule({ ...validPageRule, kind: "cosmic" as never }))
@@ -108,7 +116,9 @@ describe("defineRule", () => {
   });
   it("accepts a marker flag carrying a reason", () => {
     const marked = { ...validPageRule, marker: "a crawl condition the check cannot judge" };
-    expect(defineRule(marked)).toBe(marked);
+    // A marker is warning / low (triage.ts); `title.missing`'s own row is not.
+    const markerRow = () => ({ type: "warning" as const, priority: "low" as const });
+    expect(defineRule(marked, markerRow)).toEqual({ ...marked, ...markerRow() });
   });
   it("throws on a present-but-empty marker flag — a flag with no reason", () => {
     expect(() => defineRule({ ...validPageRule, marker: "   " }))
@@ -123,7 +133,7 @@ describe("defineRule", () => {
   // real crawl in both directions.
   it("accepts an EMPTY column list — a report that is the standard columns and nothing else", () => {
     const bare = { ...validPageRule, columns: [] };
-    expect(defineRule(bare)).toBe(bare);
+    expect(defineRule(bare)).toEqual(triaged(bare));
   });
   it("throws when a rule that finds declares no columns at all", () => {
     const { columns: _dropped, ...columnless } = validPageRule;
@@ -514,7 +524,11 @@ describe("check universe", () => {
     // (http.no-response pair, page.html-too-large, the crawl.unreadable-encoding
     // marker); the recheck pass also re-asks the no-response rows; registry.ts
     // carries the grounds.
-    expect(RULESET_VERSION).toBe("0.22.0");
+    //
+    // 0.23.0: Phase 27a — every rule that finds gains an issue type and a
+    // priority from src/rules/registry/triage.ts; client-facing judgement
+    // changed, no verdict moved; registry.ts carries the grounds.
+    expect(RULESET_VERSION).toBe("0.23.0");
   });
   it("every listed check id is a well-formed CHECK-NN and unique", () => {
     expect(new Set(CRAWL_CHECK_IDS).size).toBe(CRAWL_CHECK_IDS.length);

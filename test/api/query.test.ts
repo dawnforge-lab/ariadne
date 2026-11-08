@@ -42,6 +42,7 @@ import { NO_RESPONSE_ANSWERED, RECHECK_CLEARED } from "../../src/rules/page/stat
 /** `crawl_status.recheck.noResponse` on a crawl with no no-response pages. */
 const NO_RESPONSE_ZERO = { pages: 0, confirmed: 0, answered: 0, inconclusive: 0, pending: 0 };
 import { buildRegistry } from "../../src/rules/index.js";
+import { DEFAULT_THRESHOLDS } from "../../src/rules/judgement.js";
 
 /**
  * The registry's own copy, for the three assertions below that are about the
@@ -341,8 +342,27 @@ async function seedCrawl(
     // pass completed over this crawl. The seeded rows below are written by hand
     // either way; the marker is what makes an empty rule "ran and found
     // nothing" rather than "nobody has looked".
-    ...(opts.judged === true ? { rulesRunAt: new Date("2026-08-30T09:00:00.000Z") } : {}),
+    // Since Phase 27a a judged crawl also carries the stamp of what its run was
+    // judged with (`rules_judged_with_jsonb`), which the read surfaces require
+    // beside `rules_run_at` (hard rule 7). This is the stamp migrations 0032
+    // and 0033 leave: no overrides (every threshold at its default), under the
+    // cap the config carries.
+    ...(opts.judged === true
+      ? {
+          rulesRunAt: new Date("2026-08-30T09:00:00.000Z"),
+          rulesJudgedWith: judgedWithDefaults(opts.config),
+        }
+      : {}),
   });
+}
+
+/** The stamp of a run with no overrides, under `config.findingCap` when it has one. */
+function judgedWithDefaults(config: Record<string, unknown> | undefined): Record<string, unknown> {
+  return {
+    disabledRules: [],
+    thresholds: { ...DEFAULT_THRESHOLDS },
+    ...(config !== undefined && "findingCap" in config ? { findingCap: config["findingCap"] } : {}),
+  };
 }
 
 interface SeedPage {
@@ -2164,10 +2184,10 @@ describe("GET /crawls/:id — the fields an audit checks itself against", () => 
 
   it("reports the stamp a completed rules run leaves, as an ISO timestamp", async () => {
     const stamped = new Date("2026-08-28T10:11:12.000Z");
-    await db.update(crawls).set({ rulesRunAt: stamped }).where(eq(crawls.id, crawlE));
+    await db.update(crawls).set({ rulesRunAt: stamped, rulesJudgedWith: { disabledRules: [], thresholds: { ...DEFAULT_THRESHOLDS } } }).where(eq(crawls.id, crawlE));
     const res = await call(`/crawls/${crawlE}`);
     expect(res.body["rulesRunAt"]).toBe(stamped.toISOString());
-    await db.update(crawls).set({ rulesRunAt: null }).where(eq(crawls.id, crawlE));
+    await db.update(crawls).set({ rulesRunAt: null, rulesJudgedWith: null }).where(eq(crawls.id, crawlE));
   });
 
   // THE RESOURCE COVERAGE BLOCK (P11-T4). It is the evidence CHECK-83 is
@@ -2719,7 +2739,12 @@ describe("GET /crawls/:id/export", () => {
     expect(res.status).toBe(200);
     expect(res.body["dataset"]).toBe("issues");
     expect(res.body["rows"]).toBe(12);
-    expect(Object.keys(res.body).sort()).toEqual(["bytes", "dataset", "path", "rows"]);
+    // `disabledRules` on the issues dataset since Phase 27a: the rules the
+    // crawl's judgement leaves out of the file (none here).
+    expect(Object.keys(res.body).sort()).toEqual([
+      "bytes", "dataset", "disabledRules", "path", "rows",
+    ]);
+    expect(res.body["disabledRules"]).toEqual([]);
 
     // One file per (crawl, dataset), named for the pair rather than for the
     // moment: a caller can find yesterday's export without a listing, and an
@@ -2879,23 +2904,27 @@ describe("GET /crawls/:id/export?format=csv", () => {
 
   it("writes each view's header, always, and the row a caller came for", async () => {
     const issuesCsv = await callCsv(`/crawls/${crawlF}/export?format=csv&view=issues`);
+    // `type` and `priority` follow `severity` since Phase 27a: the rule's
+    // reader axes after the crawl's overrides (none on this crawl).
     expect(issuesCsv.records[0]).toEqual([
-      "ruleId", "severity", "category", "checkIds", "url", "title", "evidence",
+      "ruleId", "severity", "type", "priority", "category", "checkIds", "url", "title", "evidence",
     ]);
     const chain = rowWhere(issuesCsv, "ruleId", "redirect.chain");
     const chainRule = rules.get("redirect.chain");
     expect(chain[1]).toBe("warning");
-    expect(chain[2]).toBe(chainRule?.category);
-    expect(chain[3]).toBe(chainRule?.checkIds.join("|"));
-    expect(chain[4]).toBe(`${SITE}/csv-r1`);
-    expect(chain[5]).toBe(chainRule?.title);
+    expect(chain[2]).toBe(chainRule?.type);
+    expect(chain[3]).toBe(chainRule?.priority);
+    expect(chain[4]).toBe(chainRule?.category);
+    expect(chain[5]).toBe(chainRule?.checkIds.join("|"));
+    expect(chain[6]).toBe(`${SITE}/csv-r1`);
+    expect(chain[7]).toBe(chainRule?.title);
     // The evidence is FLATTENED, deterministically and in sorted key order —
     // never the raw JSON blob, which is what a cell cannot hold usefully.
-    expect(chain[6]).toBe(
+    expect(chain[8]).toBe(
       `chain=${SITE}/csv-r1|${SITE}/csv-r2|${SITE}/csv-end; ` +
         "chainTruncated=false; finalStatus=200; length=2",
     );
-    expect(chain[6]).not.toContain("{");
+    expect(chain[8]).not.toContain("{");
 
     const internal = await callCsv(`/crawls/${crawlF}/export?format=csv&view=internal_urls`);
     expect(internal.records[0]).toEqual([
@@ -3240,7 +3269,7 @@ describe("GET /crawls/:id/export?format=csv", () => {
     const ctx = {
       rule: (ruleId: string) => {
         const rule = rules.get(ruleId);
-        if (rule === undefined) throw new Error(`no rule ${ruleId}`);
+        if (rule === undefined || rule.kind === "metric") throw new Error(`no finding rule ${ruleId}`);
         return { ...rule, columns: columnsFor(rule) };
       },
       evidence: (value: unknown) => value as Record<string, unknown>,
@@ -3253,7 +3282,7 @@ describe("GET /crawls/:id/export?format=csv", () => {
       const walked: string[][] = [];
       for (let hop = 0; hop < 2000; hop += 1) {
         const batch = await db.execute<Record<string, unknown>>(
-          def.query(crawlF, cursor, 1, ruleId),
+          def.query(crawlF, cursor, 1, ruleId, []),
         );
         const row = batch.rows[0];
         if (row === undefined) break;
@@ -3327,11 +3356,16 @@ describe("GET /crawls/:id/export?format=csv", () => {
       path: join(exportDir, `${crawlF}-issues.jsonl.gz`),
       rows: 3,
       bytes: implicit.body["bytes"],
+      // Additive since Phase 27a: the issues dataset names the rules the
+      // crawl's judgement leaves out (none here).
+      disabledRules: [],
     });
     expect(explicit.body).toEqual(implicit.body);
     // No `format` key on the JSONL answer: the shape a caller already parses is
     // untouched by this task.
-    expect(Object.keys(implicit.body).sort()).toEqual(["bytes", "dataset", "path", "rows"]);
+    expect(Object.keys(implicit.body).sort()).toEqual([
+      "bytes", "dataset", "disabledRules", "path", "rows",
+    ]);
   });
 
   // THE REFUSAL THAT IS NOT ABOUT THE REQUEST, and the one that could only

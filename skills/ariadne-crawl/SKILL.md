@@ -124,12 +124,23 @@ Fields worth setting deliberately:
   is judged. Defaults to 200: a bounded first look.
   **Set `findingCap: null` for a billed audit** — the client is paying for the whole
   picture, and "243 orphans, here are 200" is not a list they can finish. Like the
-  render knobs it is stored on the crawl row and spent later, which is why it must
-  be set HERE: `crawl_rules` has no cap argument, so a crawl started at the default
-  is re-judged at the default forever. Measured cost on a 20,000-page crawl: about a
-  minute of extra rules time, ~116MB RSS. See the audit skill's "Reading the
+  render knobs it is stored on the crawl row and spent later: `crawl_rules` has no
+  cap argument. Set it HERE when you know; if you did not, `crawl_config_set` can
+  change it afterwards (see "Changing how the crawl is judged" below) and the next
+  `crawl_rules` applies it — no re-crawl. Measured cost on a 20,000-page crawl: about
+  a minute of extra rules time, ~116MB RSS. See the audit skill's "Reading the
   answers" for the one shape where uncapped is genuinely expensive
   (`content.near-duplicate` on a site with thousands of byte-similar pages).
+- **`judgement`** — how this crawl will be JUDGED from its first rules run:
+  `{rules?: {<ruleId>: {disabled?: true, type?, priority?}}, thresholds?: {<name>:
+  number}, findingCap?}`, the same block `crawl_config_set` changes later. Leave it
+  unset unless the brief already tells you something the defaults get wrong — a
+  client whose title template is deliberately 70 characters (`{"thresholds":
+  {"TITLE_MAX": 70}}`), or a rule the client has told you does not apply. It is
+  checked against the ruleset before the crawl is accepted, and a block the ruleset
+  cannot apply is refused naming the path (severity is never settable). A
+  `findingCap` inside `judgement` must agree with a top-level `findingCap` if you
+  give both.
 
 ### The sitemap has two paths, and only two
 
@@ -227,7 +238,7 @@ target is not something this skill can crawl.
  queuePosition, liveLeases, blockedPages, hostSpacingMs, throttle,
  platform, platformProfile,
  robotsBlocked: {recorded, dropped},
- rulesRunAt, findingsCount, pagesScanned, fetchResources,
+ rulesRunAt, judgementStale, findingsCount, pagesScanned, fetchResources,
  resourceRefsCappedPages,
  resources: {seen, fetched, failed, skipped, robotsDenied, robotsUnreachable,
              capped},
@@ -411,7 +422,8 @@ What the fields mean when you are waiting:
   run. `200` is the default (nobody chose); `null` is uncapped, the billed-audit
   setting; a number is what was set. **Check it before running the rules on client
   work**: the cap lives on the crawl row and `crawl_rules` has no argument to restate
-  it, so a billed audit started at the default has to be re-crawled, not re-judged.
+  it. A billed audit started at the default is fixed with `crawl_config_set`
+  (`{"judgement": {"findingCap": null}}`) before `crawl_rules`, not with a re-crawl.
   A reported `200` does not distinguish an explicit `findingCap: 200` from an absent
   one, and since Phase 19 §11 there is nothing to distinguish: one budget, so the
   stated default and the absent one judge identically.
@@ -677,6 +689,53 @@ only orphaned because the page linking to it has not been fetched yet. Running i
 second time re-judges the crawl with the current ruleset, which is what you do after
 upgrading the engine rather than re-crawling the site.
 
+### Changing how the crawl is judged
+
+`crawl_config_get` answers the crawl's judgement: `{crawlId, judgement, thresholds,
+judgedWith, judgementStale}`. `judgement` is the block, `{}` when nothing is set;
+`thresholds` lists all 20 overridable thresholds as `{value, default, min, max,
+overridden}`, where `value` is what the NEXT rules run will use; `judgedWith` is what
+the last completed run used — `{disabledRules, thresholds, findingCap?}`, its
+`thresholds` all 20 at the values that run actually judged with — (`null` if nobody
+has judged the crawl); and
+`judgementStale` (`{stale, reasons}`) says whether the two differ.
+
+`crawl_config_set` takes `{crawlId, judgement: <patch>}` and answers the same shape.
+The patch is a MERGE-PATCH of the stored block: objects merge key by key, and `null`
+removes a key — `{"judgement": {"rules": {"title.too-long": null}}}` drops that rule's
+override, `{"judgement": {"thresholds": {"SLOW_MS": null}}}` returns `SLOW_MS` to its
+default, and `{"judgement": {"rules": null, "thresholds": null}}` clears everything. **The one exception is
+`findingCap`: `null` there means uncapped, exactly as at `crawl_start`, never "remove
+the key".** Send `200` to go back to the default cap.
+
+When each kind of change takes effect is the thing to get right:
+
+- **Rule overrides act on what is READ, immediately.** Disable a rule and its findings
+  leave `issues_list`, `issues_overview`, the CSV views and the exports at once (each
+  names it in `disabledRules`); remove the override and they come back at once —
+  they were stored all along. A retype or reprioritise changes the served `type` /
+  `priority` everywhere at once. None of these needs a run.
+- **Thresholds and `findingCap` act at the NEXT `crawl_rules`.** Until you re-run,
+  the stored findings and their copy are the old run's, and `crawl_status`'s
+  `judgementStale` says so (`reasons` includes `thresholds` or `findingCap`). After
+  the run the findings, the copy (a title that names a threshold names the new value)
+  and `judgedWith` agree, and nothing is stale.
+- **`site.health` is the last run's.** It counted the rules enabled at that run, so
+  after a disable or re-enable it stays as it was, and `judgementStale` reads
+  `overrides`, until `crawl_rules` runs again.
+
+It is refused, by name and with nothing written, for: a severity override, a metric
+rule, a rule id the ruleset does not have, a threshold outside its bounds, a min not
+strictly below its max (`TITLE_MIN`/`TITLE_MAX` and the other three pairs, on the
+effective values), any key besides `judgement` — and, with a 409, while `crawl_rules`
+is running over the crawl: wait for the run to answer, then set it.
+
+**A 409 naming an override on a rule "this ruleset does not define"** — on
+`crawl_status`, the listings, the metrics or `crawl_compare` — means the crawl's
+stored judgement names a rule a later engine release removed. `crawl_config_set` with
+`{"judgement": {"rules": {"<that id>": null}}}` repairs it; it is the one tool that accepts the crawl
+in that state.
+
 ## Step 5 — when things go wrong
 
 **`status: "failed"`** — the crawl ended badly, and the frontier and pages rows are
@@ -757,7 +816,7 @@ row, so one appearing in the results is a URL that failed three times, not once.
 
 ## What to hand over
 
-An audit needs four things from this skill, and they should be stated together:
+An audit needs these things from this skill, and they should be stated together:
 
 1. the **`crawlId`**;
 2. the **`crawl_status`** of the finished crawl — `pagesCrawled`, the frontier
@@ -766,7 +825,10 @@ An audit needs four things from this skill, and they should be stated together:
 3. the **`crawl_render`** `selection` block if a render pass ran — its `mode`
    especially, and on an explicit pass the templates the named pages stood for. That
    is the whole of the coverage claim, and nobody downstream can reconstruct it;
-4. the **`crawl_rules`** summary.
+4. the **`crawl_rules`** summary;
+5. the crawl's **`crawl_config_get`** `judgement`, if anything was set at
+   `crawl_start` or since — the overrides are part of what the findings mean, and
+   `judgementStale` should be `false` when you hand over.
 
 Together they say what the evidence covers. The audit's job is to judge that
 evidence; its first duty is not to overstate it.

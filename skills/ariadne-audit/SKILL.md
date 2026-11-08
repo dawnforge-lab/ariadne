@@ -29,6 +29,31 @@ states what it means. Severity in this site's context, priority against this cli
 commercial position, and the narrative that ties twelve findings into three problems:
 those are yours, and nothing in the engine will produce them for you.
 
+**The engine makes an opening bid, and it is yours to change.** Since ruleset 0.23.0
+every finding rule carries `type` (`issue`, `warning` or `opportunity`) and
+`priority` (`high`, `medium` or `low`) beside its `severity`. They are the RULE's
+defaults: what that kind of finding usually is, and what fixing it is usually worth,
+referenced against Screaming Frog's Issue Type and Issue Priority. They have not seen
+this site any more than severity has. Treat them as the opening bid: where this site
+says otherwise, record your reading on the crawl with `crawl_config_set` (for
+example `{"judgement": {"rules": {"images.missing-dimensions": {"priority": "high"}}}}`),
+and every surface — `issues_list`, `issues_overview`, the CSV views — then serves your value
+with `typeOverridden` / `priorityOverridden` marking it as set by you. Severity cannot
+be overridden: it is the engine's fact about the rule; adjust it in the findings file
+with the reason in `notes`, as below.
+
+**Disabling a rule is how "this does not apply here" is recorded.** When a rule's
+findings are true but irrelevant to this site — `url.internal-search` on a site whose
+search pages are deliberately crawlable, a pagination rule on a template the client
+has retired — send `{"judgement": {"rules": {"<ruleId>": {"disabled": true}}}}` with
+`crawl_config_set`, and say why in that check's `notes`. The findings stay stored;
+every listing leaves them out and names the rule in `disabledRules`, `issue_urls` of
+that rule is refused rather than answered empty, and removing the override
+(`{"judgement": {"rules": {"<ruleId>": null}}}`) brings them back at once. The decision is visible,
+reversible and on the crawl, not buried in your notes. Never disable a rule to make a
+real defect disappear; a check whose findings you disabled is a `SKIP` with its
+reason, or a `FAIL` you argue down, never a `PASS`.
+
 **The skill-side hard rule: never re-judge a claimed check by eyeball.** If the
 checklist's **Engine** line names a rule or metric, the answer is the engine's output,
 quoted. Do not open one page in a browser and grade the check on what that page
@@ -194,8 +219,13 @@ Two unfiltered, paginated sweeps give you the whole picture before you commit to
 check, and the issues sweep is usually one call:
 
 1. `issues_list` with no filter but `crawlId` — every rule that found something, with
-   its `checkIds`, `severity`, `count` and five `sampleUrls`. Follow `nextCursor` to
-   the end. Index the rows by check id.
+   its `checkIds`, `severity`, `type`, `priority`, `count` and five `sampleUrls`.
+   Follow `nextCursor` to the end. Index the rows by check id. Read the answer's
+   `disabledRules` too: a rule named there fired and was filtered out by the crawl's
+   judgement, which is not the same as finding nothing. `issues_overview` is the same
+   picture in one unpaginated call, one row per rule, ordered by type and then
+   priority, with `urls` (distinct URLs) and `percentOfJudged` — a good first read,
+   but it has no sample URLs and no check index of its own beyond `checkIds`.
 2. `metrics_get` with no filter — every measured number, each with its own
    `checkIds`, `title` and `explanation`. Follow the cursors. Index by check id too.
 
@@ -267,10 +297,14 @@ of three ways:
   complete. Never infer completeness from the crawl's `findingCap`; infer it from
   the absence of the note.
 
-  **It is set at `crawl_start` and nowhere else.** `crawl_rules` has no cap argument:
-  the choice lives on the crawl row so that re-judging the crawl months later
-  produces the same listing. A billed audit started without it has to be re-started,
-  not re-judged.
+  **Set it at `crawl_start`; change it with `crawl_config_set`.** `crawl_rules` has no
+  cap argument: the choice lives on the crawl row so that re-judging the crawl months
+  later produces the same listing. A billed audit started without it does not need a
+  re-crawl since Phase 27a: `crawl_config_set` with `{"judgement": {"findingCap": null}}` (null is
+  uncapped there too — it is not "remove the key") and then `crawl_rules` re-judges it
+  uncapped. Until that run, `crawl_status`'s `judgementStale` reads
+  `{"stale": true, "reasons": ["findingCap"]}`: the stored listing is still the capped
+  one.
 
   **What it costs, measured** (synthetic 20,000-page site, 1,000 duplicate title /
   meta / h1 groups, 1,000 exact-duplicate content groups, 500 near-duplicate

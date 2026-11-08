@@ -17,7 +17,13 @@ import { metricRow } from "../../src/rules/helpers.js";
 import { buildRegistry } from "../../src/rules/index.js";
 import { PAGE_BATCH, runRules } from "../../src/rules/run.js";
 import { perScope } from "../../src/rules/registry/metric-table.js";
-import { Registry, RULESET_VERSION } from "../../src/rules/registry/registry.js";
+import {
+  Registry,
+  RULESET_VERSION,
+  type RuleDefinition,
+  type TriageLookup,
+} from "../../src/rules/registry/registry.js";
+import { triageRow } from "../../src/rules/registry/triage.js";
 import type {
   Metric,
   MetricRule,
@@ -27,6 +33,17 @@ import type {
 } from "../../src/rules/registry/types.js";
 import { mkDiscovery, mkHostProbe } from "./mk-discovery.js";
 import { CLEAN_META, mkPage } from "./mk-page.js";
+
+/**
+ * The triage a synthetic rule is registered with. The real table
+ * (src/rules/registry/triage.ts) has no row for a rule that never ships, and
+ * `defineRule` refuses a rule that finds without one, so the test supplies the
+ * row for its own rule and reads the table for every other.
+ */
+const syntheticTriage =
+  (id: string): TriageLookup =>
+  (ruleId) =>
+    ruleId === id ? { type: "warning", priority: "low" } : triageRow(ruleId);
 
 function databaseUrl(): string {
   const url = process.env.DATABASE_URL;
@@ -641,7 +658,7 @@ describe("runRules against the database", () => {
 
     const CAP = 3;
     let run = 0;
-    const capped: QueryRule = {
+    const capped: RuleDefinition<QueryRule> = {
       kind: "query",
       id: "test.capped-nondeterministic",
       checkIds: ["CHECK-01"],
@@ -668,7 +685,7 @@ describe("runRules against the database", () => {
         }));
       },
     };
-    const registry = new Registry();
+    const registry = new Registry(syntheticTriage(capped.id));
     registry.register(capped);
 
     const first = await runRules(db, crawlId, registry);
@@ -763,7 +780,7 @@ describe("runRules against the database", () => {
     await runRules(db, crawlId, buildRegistry());
     expect(await rulesRunAt(crawlId)).not.toBeNull();
 
-    const exploding: PageRule = {
+    const exploding: RuleDefinition<PageRule> = {
       kind: "page",
       id: "test.exploding-marker",
       checkIds: ["CHECK-01"],
@@ -778,7 +795,7 @@ describe("runRules against the database", () => {
         throw new Error("boom");
       },
     };
-    const registry = new Registry();
+    const registry = new Registry(syntheticTriage(exploding.id));
     registry.register(exploding);
 
     await expect(runRules(db, crawlId, registry)).rejects.toThrow(/test\.exploding-marker/);
@@ -793,7 +810,7 @@ describe("runRules against the database", () => {
     const crawlId = await newCrawl();
     await db.insert(pages).values([mkRow(crawlId, "/clean")]);
 
-    const exploding: PageRule = {
+    const exploding: RuleDefinition<PageRule> = {
       kind: "page",
       id: "test.exploding",
       checkIds: ["CHECK-01"],
@@ -808,7 +825,7 @@ describe("runRules against the database", () => {
         throw new Error("boom");
       },
     };
-    const registry = new Registry();
+    const registry = new Registry(syntheticTriage(exploding.id));
     registry.register(exploding);
 
     await expect(runRules(db, crawlId, registry)).rejects.toThrow(/test\.exploding/);

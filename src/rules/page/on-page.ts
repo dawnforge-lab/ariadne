@@ -3,13 +3,6 @@ import { INDEXED_URL_MAX } from "../../crawl/parse/url-utils.js";
 import { finding, isJudged, pageRule, present } from "../helpers.js";
 import type { PageRule } from "../registry/types.js";
 import {
-  TITLE_MIN,
-  TITLE_MAX,
-  META_MIN,
-  META_MAX,
-  H1_MAX,
-  H2_MAX,
-  URL_MAX,
   HEADING_MAX_STEP,
 } from "../thresholds.js";
 
@@ -97,9 +90,9 @@ export const onPageRules: PageRule[] = [
       { key: "length", label: "Title 1 Length" },
       { key: "min", label: "Minimum Length" },
     ],
-    (p, self) =>
-      isJudged(p) && present(p.title) && p.title.length < TITLE_MIN
-        ? [finding(self, p, { title: p.title, length: p.title.length, min: TITLE_MIN })]
+    (p, self, j) =>
+      isJudged(p) && present(p.title) && p.title.length < j.thresholds.TITLE_MIN
+        ? [finding(self, p, { title: p.title, length: p.title.length, min: j.thresholds.TITLE_MIN })]
         : [],
   ),
 
@@ -113,9 +106,9 @@ export const onPageRules: PageRule[] = [
       { key: "length", label: "Title 1 Length" },
       { key: "max", label: "Maximum Length" },
     ],
-    (p, self) =>
-      isJudged(p) && present(p.title) && p.title.length > TITLE_MAX
-        ? [finding(self, p, { title: p.title, length: p.title.length, max: TITLE_MAX })]
+    (p, self, j) =>
+      isJudged(p) && present(p.title) && p.title.length > j.thresholds.TITLE_MAX
+        ? [finding(self, p, { title: p.title, length: p.title.length, max: j.thresholds.TITLE_MAX })]
         : [],
   ),
 
@@ -141,13 +134,13 @@ export const onPageRules: PageRule[] = [
       { key: "length", label: "Meta Description 1 Length" },
       { key: "min", label: "Minimum Length" },
     ],
-    (p, self) =>
-      isJudged(p) && present(p.metaDescription) && p.metaDescription.length < META_MIN
+    (p, self, j) =>
+      isJudged(p) && present(p.metaDescription) && p.metaDescription.length < j.thresholds.META_MIN
         ? [
             finding(self, p, {
               metaDescription: p.metaDescription,
               length: p.metaDescription.length,
-              min: META_MIN,
+              min: j.thresholds.META_MIN,
             }),
           ]
         : [],
@@ -163,13 +156,13 @@ export const onPageRules: PageRule[] = [
       { key: "length", label: "Meta Description 1 Length" },
       { key: "max", label: "Maximum Length" },
     ],
-    (p, self) =>
-      isJudged(p) && present(p.metaDescription) && p.metaDescription.length > META_MAX
+    (p, self, j) =>
+      isJudged(p) && present(p.metaDescription) && p.metaDescription.length > j.thresholds.META_MAX
         ? [
             finding(self, p, {
               metaDescription: p.metaDescription,
               length: p.metaDescription.length,
-              max: META_MAX,
+              max: j.thresholds.META_MAX,
             }),
           ]
         : [],
@@ -227,9 +220,9 @@ export const onPageRules: PageRule[] = [
     ],
     // `h1Text` is the analyzer's capped text (300 characters), so a longer H1
     // reports 300; null (no H1, or a pre-Phase-7 row) is silent.
-    (p, self) =>
-      isJudged(p) && present(p.h1Text) && p.h1Text.length > H1_MAX
-        ? [finding(self, p, { h1Text: p.h1Text, length: p.h1Text.length, max: H1_MAX })]
+    (p, self, j) =>
+      isJudged(p) && present(p.h1Text) && p.h1Text.length > j.thresholds.H1_MAX
+        ? [finding(self, p, { h1Text: p.h1Text, length: p.h1Text.length, max: j.thresholds.H1_MAX })]
         : [],
   ),
 
@@ -256,9 +249,9 @@ export const onPageRules: PageRule[] = [
     ],
     // `h2Text` is the first H2's collapsed, capped text; null (no H2, or a v1
     // row) is silent.
-    (p, self) =>
-      isJudged(p) && present(p.h2Text) && p.h2Text.length > H2_MAX
-        ? [finding(self, p, { h2Text: p.h2Text, length: p.h2Text.length, max: H2_MAX })]
+    (p, self, j) =>
+      isJudged(p) && present(p.h2Text) && p.h2Text.length > j.thresholds.H2_MAX
+        ? [finding(self, p, { h2Text: p.h2Text, length: p.h2Text.length, max: j.thresholds.H2_MAX })]
         : [],
   ),
 
@@ -313,9 +306,9 @@ export const onPageRules: PageRule[] = [
       { key: "length", label: "URL Length" },
       { key: "max", label: "Maximum Length" },
     ],
-    (p, self) =>
-      isJudged(p) && p.url.length > URL_MAX
-        ? [finding(self, p, { length: p.url.length, max: URL_MAX })]
+    (p, self, j) =>
+      isJudged(p) && p.url.length > j.thresholds.URL_MAX
+        ? [finding(self, p, { length: p.url.length, max: j.thresholds.URL_MAX })]
         : [],
   ),
 

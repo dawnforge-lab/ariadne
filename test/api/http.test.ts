@@ -32,6 +32,7 @@ import { createApiServer, type ApiServer } from "../../src/api/http.js";
 import { isHostAllowed, loadApiConfig, parseAllowedDomains } from "../../src/api/config.js";
 import { MAX_SUPPLIED_SITEMAPS, MIN_PER_HOST_DELAY_MS } from "../../src/api/service.js";
 import { UrlPolicyError, type AddressResolver } from "../../src/crawl/url-policy.js";
+import { DEFAULT_THRESHOLDS } from "../../src/rules/judgement.js";
 import { URL_FINDING_CAP } from "../../src/rules/query/crawl-evidence.js";
 import { RENDER_PASS_EVIDENCE } from "../../src/rules/metric/render-metrics.js";
 
@@ -1308,6 +1309,16 @@ describe("POST /crawls/:id/resume", () => {
     expect(String(res.body["error"])).toContain("no such crawl");
   });
 
+  /** `crawls.rules_judged_with_jsonb` as stored; the surface does not serve it yet. */
+  async function judgedWithOn(id: string): Promise<unknown> {
+    const [row] = await db
+      .select({ stamp: crawls.rulesJudgedWith })
+      .from(crawls)
+      .where(eq(crawls.id, id));
+    if (row === undefined) throw new Error(`no crawl row for ${id}`);
+    return row.stamp;
+  }
+
   // THE JUDGED MARKER CANNOT SURVIVE A RESUME. `rulesRunAt` is the surface's
   // load-bearing sentence (talos-surface.md §5): a timestamp means a complete
   // rules pass is on record, so an empty findings answer means "looked, found
@@ -1329,11 +1340,15 @@ describe("POST /crawls/:id/resume", () => {
     // a rules pass actually writes.
     expect((await call("POST", `/crawls/${id}/rules`)).status).toBe(200);
     expect((await call("GET", `/crawls/${id}`)).body["rulesRunAt"]).not.toBeNull();
+    expect(await judgedWithOn(id), "a rules pass stamps what it judged with").not.toBeNull();
 
     expect((await call("POST", `/crawls/${id}/resume`)).status).toBe(202);
     // Cleared in the same statement that queued it, so there is no window in
     // which a poller sees a queued crawl wearing a completed judgement.
     expect((await call("GET", `/crawls/${id}`)).body["rulesRunAt"]).toBeNull();
+    // And the stamp of what that judgement used goes with it (27a T2): it is
+    // non-null exactly when `rules_run_at` is.
+    expect(await judgedWithOn(id)).toBeNull();
 
     await settle(id, 90_000);
     // And it stays null after the resumed run: only crawl_rules ever sets it.
@@ -1936,7 +1951,7 @@ describe("the judged-state marker across a re-judge", () => {
     // the old timestamp over the new run's half-written table.
     const id = await seedCrawl({ status: "finished", discovery: DISCOVERY });
     const before = new Date("2020-01-01T00:00:00.000Z");
-    await db.update(crawls).set({ rulesRunAt: before }).where(eq(crawls.id, id));
+    await db.update(crawls).set({ rulesRunAt: before, rulesJudgedWith: { disabledRules: [], thresholds: { ...DEFAULT_THRESHOLDS } } }).where(eq(crawls.id, id));
 
     const stale = await call("GET", `/crawls/${id}`);
     expect(stale.body["rulesRunAt"]).toBe(before.toISOString());

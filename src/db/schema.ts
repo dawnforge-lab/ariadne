@@ -149,6 +149,25 @@ export const crawls = pgTable("crawls", {
   // and found clean are different facts, and nothing else can tell them apart
   // (hard rule 7). The agent surface exposes it as `rulesRunAt`.
   rulesRunAt: timestamp("rules_run_at", { withTimezone: true }),
+  // The crawl's judgement block (Phase 27a): rule overrides (disable, retype,
+  // reprioritise) and threshold overrides, as `parseJudgement` in
+  // src/rules/judgement.ts accepts them. NULL means no overrides. Never holds
+  // `findingCap`, whose bytes stay in `config_jsonb.findingCap`. A value that
+  // does not parse is never read as "no overrides": `readStoredJudgement`
+  // throws naming the crawl (hard rule 7).
+  judgement: jsonb("judgement_jsonb"),
+  // What the last complete rules run was judged with (`JudgedWith`: the
+  // disabled set, all 20 overridable thresholds at the EFFECTIVE values the run
+  // used, the finding cap it used). STAMPED BY `runRules` ALONE, in the update
+  // that stamps `rules_run_at`; NULLED WITH `rules_run_at` wherever that is
+  // nulled — `runRules`' opening transaction and the resume claim in
+  // `ApiService` (service.ts), which clears the judged marker of a crawl that
+  // is about to grow. So it is non-null exactly when `rules_run_at` is, and a
+  // judged crawl without it is a defect `readStamp` throws on. Compared with
+  // the current block to say a judgement is stale (`staleReasons`). Migration
+  // 0032 backfilled it for crawls judged before it existed; 0033 rewrote every
+  // stamp's thresholds from overrides to effective values.
+  rulesJudgedWith: jsonb("rules_judged_with_jsonb"),
   // The explicit render list, verbatim as the agent supplied it. NULL means no
   // explicit pass was requested — automatic selection, or no render at all;
   // render_pass_count says whether A pass ran, this says who chose the pages.

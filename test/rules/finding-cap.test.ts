@@ -28,11 +28,28 @@ import {
 } from "../../src/rules/query/crawl-evidence.js";
 import { fieldDuplicateRules } from "../../src/rules/query/field-duplicates.js";
 import { linkGraphRules } from "../../src/rules/query/link-graph.js";
-import { Registry, RULESET_VERSION } from "../../src/rules/registry/registry.js";
+import {
+  Registry,
+  RULESET_VERSION,
+  type RuleDefinition,
+  type TriageLookup,
+} from "../../src/rules/registry/registry.js";
+import { triageRow } from "../../src/rules/registry/triage.js";
 import type { Finding, QueryRule, RuleCaps } from "../../src/rules/registry/types.js";
 import { runRules } from "../../src/rules/run.js";
 import { mkDiscovery } from "./mk-discovery.js";
 import { CLEAN_META, mkPage } from "./mk-page.js";
+
+/**
+ * The triage a synthetic rule is registered with. The real table
+ * (src/rules/registry/triage.ts) has no row for a rule that never ships, and
+ * `defineRule` refuses a rule that finds without one, so the test supplies the
+ * row for its own rule and reads the table for every other.
+ */
+const syntheticTriage =
+  (id: string): TriageLookup =>
+  (ruleId) =>
+    ruleId === id ? { type: "warning", priority: "low" } : triageRow(ruleId);
 
 function databaseUrl(): string {
   const url = process.env.DATABASE_URL;
@@ -454,7 +471,7 @@ describe("the finding cap against the database", () => {
     let waiting = 0;
     const seen = new Map<string, RuleCaps | undefined>();
 
-    const spy: QueryRule = {
+    const spy: RuleDefinition<QueryRule> = {
       kind: "query",
       id: "test.caps-spy",
       checkIds: ["CHECK-01"],
@@ -476,7 +493,7 @@ describe("the finding cap against the database", () => {
       },
     };
 
-    const registry = new Registry();
+    const registry = new Registry(syntheticTriage(spy.id));
     registry.register(spy);
     registry.register(rule(linkGraphRules, "links.orphan"));
     // Resolve the rendezvous even if only one run reaches the rule, so a

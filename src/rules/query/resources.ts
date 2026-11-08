@@ -104,9 +104,8 @@ import {
   type Finding,
   type QueryRule,
 } from "../registry/registry.js";
-import type { RuleCaps } from "../registry/types.js";
+import { judgementOr, type RuleCaps } from "../registry/types.js";
 import { capsOr, limitTo, noteTruncation } from "./crawl-evidence.js";
-import { IMAGE_WEIGHT_WARN } from "../thresholds.js";
 
 /** Verdict thresholds live in `../thresholds.js`; re-exported so every existing import still resolves. */
 export { IMAGE_WEIGHT_WARN } from "../thresholds.js";
@@ -551,6 +550,7 @@ async function heavyImageFindings(
   crawlId: string,
   extra: ReturnType<typeof sql>,
   caps: RuleCaps,
+  weightWarn: number,
 ): Promise<Finding[]> {
   const result = await db.execute<{
     url: string;
@@ -574,7 +574,7 @@ async function heavyImageFindings(
         -- size worth reporting either.
         and r.fetch_class = ${RESOURCE_OK_CLASS}
         and r.bytes is not null
-        and r.bytes > ${IMAGE_WEIGHT_WARN}
+        and r.bytes > ${weightWarn}
         -- Deviation 3: a share image is heavy by design and no page loads it.
         and ${LOADED_BY_A_PAGE}
         and ${extra}
@@ -617,7 +617,7 @@ async function heavyImageFindings(
         // quoted as more certain than it is.
         bytesSource: row.bytes_source,
         contentType: row.content_type,
-        threshold: IMAGE_WEIGHT_WARN,
+        threshold: weightWarn,
         referencingPages: row.referencing_pages,
         samplePages: row.sample_pages,
       },
@@ -1329,8 +1329,15 @@ export const resourceRules: QueryRule[] = [
     ],
     ...copyFor(OVERSIZED.id),
     rulesetVersion: RULESET_VERSION,
-    run: (db, crawlId, caps) =>
-      heavyImageFindings(OVERSIZED, db, crawlId, sql`true`, capsOr(caps)),
+    run: (db, crawlId, caps, ctx) =>
+      heavyImageFindings(
+        OVERSIZED,
+        db,
+        crawlId,
+        sql`true`,
+        capsOr(caps),
+        judgementOr(ctx).thresholds.IMAGE_WEIGHT_WARN,
+      ),
   }),
 
   // The other half of CHECK-49's line ("no modern formats"), and INFO rather
@@ -1356,13 +1363,14 @@ export const resourceRules: QueryRule[] = [
     ],
     ...copyFor(LEGACY.id),
     rulesetVersion: RULESET_VERSION,
-    run: (db, crawlId, caps) =>
+    run: (db, crawlId, caps, ctx) =>
       heavyImageFindings(
         LEGACY,
         db,
         crawlId,
         sql`${bareContentType} = any(${sql.param([...LEGACY_IMAGE_TYPES])}::text[])`,
         capsOr(caps),
+        judgementOr(ctx).thresholds.IMAGE_WEIGHT_WARN,
       ),
   }),
 

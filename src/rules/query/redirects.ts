@@ -26,12 +26,9 @@ import {
   type Finding,
   type QueryRule,
 } from "../registry/registry.js";
-import type { RuleCaps } from "../registry/types.js";
+import { judgementOr, type RuleCaps } from "../registry/types.js";
 import { capsOr, noteTruncation } from "./crawl-evidence.js";
-import {
-  MAX_REDIRECT_HOPS,
-  CHAIN_HOPS,
-} from "../thresholds.js";
+import { MAX_REDIRECT_HOPS } from "../thresholds.js";
 
 const CATEGORY = "redirects";
 
@@ -288,7 +285,12 @@ function unresolvedHeadless(rows: WalkRow[]): WalkRow[] {
  * ships (`/x` -> `/x/`) is not a chain — the fires-when is "a redirect whose
  * target is itself a redirect".
  */
-function chainFindings(self: RuleIdentity, rows: WalkRow[], caps: RuleCaps): Finding[] {
+function chainFindings(
+  self: RuleIdentity,
+  rows: WalkRow[],
+  caps: RuleCaps,
+  chainHops: number,
+): Finding[] {
   const byHead = new Map<string, Finding>();
   /** Every head that yielded a chain, cap or no cap — the exact count. */
   const heads = new Set<string>();
@@ -312,7 +314,7 @@ function chainFindings(self: RuleIdentity, rows: WalkRow[], caps: RuleCaps): Fin
     // about where the chain goes rests on this string.
     const chain = tail === null ? row.chain : [...row.chain, tail];
     const hops = tail === null ? row.chain.length - 1 : row.chain.length;
-    if (hops < CHAIN_HOPS) continue;
+    if (hops < chainHops) continue;
     if (heads.has(row.head)) continue;
     heads.add(row.head);
     if (caps.listing !== null && byHead.size >= caps.listing) continue;
@@ -408,12 +410,13 @@ export const redirectRules: QueryRule[] = [
     ],
     ...copyFor(CHAIN.id),
     rulesetVersion: RULESET_VERSION,
-    run: async (db, crawlId, caps) => {
+    run: async (db, crawlId, caps, ctx) => {
       const walk = await redirectWalk(db, crawlId);
       return chainFindings(
         CHAIN,
         [...walk.fromHeads, ...unresolvedHeadless(walk.headless)],
         capsOr(caps),
+        judgementOr(ctx).thresholds.CHAIN_HOPS,
       );
     },
   }),

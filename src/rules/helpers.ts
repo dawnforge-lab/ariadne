@@ -6,8 +6,10 @@ import { ROBOTS_BLOCKED_REASON_PREFIX } from "../crawl/discovery.js";
 import { copyFor } from "./registry/copy/index.js";
 import type { MetricTable } from "./registry/metric-table.js";
 import { defineRule, RULESET_VERSION } from "./registry/registry.js";
+import { judgementOr } from "./registry/types.js";
 import type {
   Finding,
+  JudgementContext,
   Metric,
   MetricRule,
   MetricScope,
@@ -939,6 +941,71 @@ export function indexabilityOf(page: IndexabilityInput): {
 }
 
 /**
+ * `saysNoindex` over one aliased robots column, in SQL. The same two tests on
+ * the verbatim value: the substring `noindex`, or `none` as a whole directive
+ * (`NONE_DIRECTIVE`'s pattern, case-insensitive). `present` is not restated: a
+ * value holding either token is not blank. NULL coalesces to false so the
+ * enclosing `case` reads "no directive" rather than "unknown".
+ *
+ * `\s` is Postgres's `[[:space:]]`, which for ASCII is JavaScript's `\s`; the
+ * two differ only on non-ASCII spaces (U+00A0 and friends), where a value like
+ * `none` flanked by one is a noindex here and not there. That is the direction
+ * that keeps the page out of the index count, never the one that silences.
+ */
+const SAYS_NOINDEX = (column: string): string =>
+  `coalesce(${column} ~* 'noindex' or ${column} ~* '(^|[\\s,])none([\\s,]|$)', false)`;
+
+/**
+ * `indexabilityOf(row).status` as a SQL expression over an aliased `pages`, so a
+ * count by indexability (the Crawl Overview) is one `group by` rather than a
+ * page load (hard rule 3). Returns `''` for an indexable page.
+ *
+ * ONE PRECEDENCE, TWO SPELLINGS. Each branch below is the same-numbered case of
+ * `indexabilityOf`, in the same order, reading the same columns
+ * (`fetch_class`, `status_code`, `robots_meta`, `x_robots_tag`,
+ * `canonical_html`, `canonical_header`, `url`). `test/rules/indexability-sql.test.ts`
+ * pins the two against each other over every status. Change one, change the other.
+ *
+ * WHERE THE TWO CANNOT BE IDENTICAL, and what this does about it:
+ *
+ *  - **Canonical.** `Canonicalised` is decided by `CANONICALISED_ELSEWHERE`, the
+ *    SQL twin of `isCanonicalisedElsewhere`, with its documented abstentions
+ *    (a relative canonical, non-ASCII, a dot segment, ...). Where it abstains
+ *    this returns `''` and `indexabilityOf` returns `Canonicalised`: the page is
+ *    counted indexable, never silenced.
+ *  - **An unknown `fetch_class`** makes `indexabilityOf` throw. A `case` cannot
+ *    raise, so the `else` branch casts a message naming the value to an integer,
+ *    which errors loudly when (and only when) the branch is evaluated. It is not
+ *    a label and not a NULL (hard rule 7).
+ *  - **The `is_indexable` cross-check** `indexabilityOf` makes after the
+ *    precedence is NOT repeated: it is an assertion about the stored column, and
+ *    this expression does not read it. A writer defect still surfaces through
+ *    `indexabilityOf` on the listing surfaces.
+ */
+export const INDEXABILITY_STATUS_SQL = (alias: string): SQL =>
+  sql`(${sql.raw(
+    `case ${alias}.fetch_class` +
+      ` when 'redirect' then 'Redirected'` +
+      ` when 'client_error' then 'Client Error'` +
+      ` when 'server_error' then 'Server Error'` +
+      ` when 'blocked' then 'Blocked by bot protection'` +
+      ` when 'disallowed' then 'Blocked by robots.txt'` +
+      ` when 'timeout' then 'No Response'` +
+      ` when 'network_error' then 'No Response'` +
+      ` when 'non_html' then 'Not HTML'` +
+      ` when 'too_large' then 'Not HTML'` +
+      ` when 'unsupported_encoding' then 'Not HTML'` +
+      ` when 'ok' then (case` +
+      ` when ${alias}.status_code is distinct from 200 then 'Not HTML'` +
+      ` when ${SAYS_NOINDEX(`${alias}.robots_meta`)} or ${SAYS_NOINDEX(`${alias}.x_robots_tag`)} then 'Noindex'` +
+      ` when `,
+  )}${CANONICALISED_ELSEWHERE(alias)}${sql.raw(
+    ` then 'Canonicalised' else '' end)` +
+      ` else ('indexabilityOf: unknown fetch_class ' || coalesce(${alias}.fetch_class, 'NULL'))::int::text` +
+      ` end`,
+  )})`;
+
+/**
  * The identity a finding is stamped with. `pageRule` hands this to the rule
  * body so the id and severity are written once, in the rule's definition,
  * rather than restated inside it where they can drift.
@@ -1067,7 +1134,7 @@ export function pageRule(
   // rule whose report is the four standard columns and nothing else; see
   // `RuleMeta.columns`.
   columns: ReadonlyArray<RuleColumn>,
-  run: (page: PageRecord, self: RuleIdentity) => Finding[],
+  run: (page: PageRecord, self: RuleIdentity, judgement: JudgementContext) => Finding[],
   // The NOT MEASURED marker flag, threaded through so a page-rule marker
   // (`content.thin-skipped`) declares itself the same one way every other marker
   // does. See `RuleMeta.marker`: present only on a marker, the value its reason.
@@ -1084,7 +1151,7 @@ export function pageRule(
     ...copyFor(id),
     rulesetVersion: RULESET_VERSION,
     ...(marker === undefined ? {} : { marker }),
-    run: (page) => run(page, self),
+    run: (page, ctx) => run(page, self, judgementOr(ctx)),
   });
 }
 
@@ -1117,7 +1184,12 @@ export function metricRule(
   checkIds: string[],
   category: RuleCategory,
   table: MetricTable,
-  run: (db: Db, crawlId: string, self: MetricIdentity) => Promise<Metric[]>,
+  run: (
+    db: Db,
+    crawlId: string,
+    self: MetricIdentity,
+    judgement: JudgementContext,
+  ) => Promise<Metric[]>,
 ): MetricRule {
   const self: MetricIdentity = { id };
   return defineRule<MetricRule>({
@@ -1129,7 +1201,7 @@ export function metricRule(
     ...copyFor(id),
     rulesetVersion: RULESET_VERSION,
     table,
-    run: (db, crawlId) => run(db, crawlId, self),
+    run: (db, crawlId, ctx) => run(db, crawlId, self, judgementOr(ctx)),
   });
 }
 
