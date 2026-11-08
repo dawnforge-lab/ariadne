@@ -966,6 +966,11 @@ const KINDS = ["page", "query", "metric"] as const satisfies readonly AnyRule["k
 //     6,074 bytes between them are `type` and `priority` on the 174 finding
 //     rules (T1). T6–T9 add none: their fields ride only a catalog read WITH a
 //     crawl id. 188 rules: 72 page / 102 query / 14 metric.
+// 10. (final review) Three threshold ranges narrow so an override cannot sit
+//     at the extraction cap of what it measures, where the rule could never
+//     fire (hard rule 1): `H1_MAX` 1–299 (cap `MAX_H1_TEXT_CHARS` 300),
+//     `H2_MAX` 1–299 (`H2_TEXT_MAX` 300), `URL_MAX` 20–2499
+//     (`INDEXED_URL_MAX` 2500). Defaults unchanged; no verdict moves.
 export const RULESET_VERSION = "0.23.0";
 
 /**

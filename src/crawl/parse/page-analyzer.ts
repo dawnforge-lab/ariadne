@@ -1162,7 +1162,7 @@ const MAX_ANCHOR_CHARS = 200;
  * 300 characters is five times the longest title any rule tolerates, so the cap
  * can only ever truncate text that was already past every question asked of it.
  */
-const MAX_H1_TEXT_CHARS = 300;
+export const MAX_H1_TEXT_CHARS = 300;
 /**
  * Per-page caps on the extracted collections. Crawler-trap and mega-menu pages
  * can carry thousands of links per page, and pages sit in memory in persist

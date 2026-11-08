@@ -42,9 +42,14 @@ export const THRESHOLD_ROWS = {
   TITLE_MAX: { min: 1, max: 300, default: TITLE_MAX },
   META_MIN: { min: 1, max: 300, default: META_MIN },
   META_MAX: { min: 1, max: 500, default: META_MAX },
-  H1_MAX: { min: 1, max: 300, default: H1_MAX },
-  H2_MAX: { min: 1, max: 300, default: H2_MAX },
-  URL_MAX: { min: 20, max: 2500, default: URL_MAX },
+  // Each of the next three sits strictly below the extraction cap on what it
+  // measures — `MAX_H1_TEXT_CHARS` (300), `H2_TEXT_MAX` (300), `INDEXED_URL_MAX`
+  // (2500) — because the rule fires on `length > max` and no stored value is
+  // longer than its cap: a max at the cap is a rule that can never fire (hard
+  // rule 1). Pinned by test/rules/threshold-table.test.ts against the caps.
+  H1_MAX: { min: 1, max: 299, default: H1_MAX },
+  H2_MAX: { min: 1, max: 299, default: H2_MAX },
+  URL_MAX: { min: 20, max: 2499, default: URL_MAX },
   SLOW_MS: { min: 100, max: 60000, default: SLOW_MS },
   TITLE_PX_MIN: { min: 1, max: 2000, default: TITLE_PX_MIN },
   TITLE_PX_MAX: { min: 1, max: 2000, default: TITLE_PX_MAX },

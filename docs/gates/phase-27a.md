@@ -550,9 +550,13 @@ effect that a stored override of a removed rule is a 409 naming the rule.
   queries against the old code and passes now. Re-run after the fix: `test/api`
   10 files / 483 tests green with no warning in the output, `tsc` clean, and the four
   live route-versus-tool comparisons (§3) still equal, with no warning printed.
-- **`H1_MAX` / `H2_MAX` accept 300**, the extraction cap on stored heading text, so an
-  override of 300 leaves `h1.too-long` / `h2.too-long` unable to fire. A range of
-  1–299 would close it.
+- **Fixed in the final review: three threshold maxima sat at an extraction cap.**
+  `H1_MAX` / `H2_MAX` accepted 300, the cap on stored heading text
+  (`MAX_H1_TEXT_CHARS`, `H2_TEXT_MAX`), and `URL_MAX` accepted 2500, the cap on a
+  stored URL (`INDEXED_URL_MAX`), so an override at the max left the rule unable to
+  fire (hard rule 1). The ranges are now `H1_MAX` 1–299, `H2_MAX` 1–299 and
+  `URL_MAX` 20–2499; `test/rules/threshold-table.test.ts` imports each cap and pins
+  `max < cap`.
 - **The stored crawl's `judgement_jsonb` is `{}` where it was `NULL`** (§5 (g)); the
   same meaning.
 - The deferred minors from the task reviews are triaged in the SDD ledger; each is
