@@ -79,6 +79,10 @@ const LONG_PATH = randomBytes(1_150).toString("hex");
 const LONG_PAIR_LOC = (): string => `${bare}/${LONG_PATH}`;
 const LONG_SOURCE = (): string => `${bare}/long-source.xml?sig=${LONG_SIG}`;
 
+/** Ruling R18's sitemap-index children: 2,501 characters, and 3,000. */
+const CHILD_2501 = (): string => `${bare}/${"b".repeat(INDEXED_URL_MAX + 1 - bare.length - 1)}`;
+const CHILD_3000 = (): string => `${bare}/${"s".repeat(3_000 - bare.length - 1)}`;
+
 /** The 12 MB fixture: over the old 10 MB cap, well under the protocol's 50 MB. */
 const BIG_ENTRIES = 11_000;
 let bigSitemap: Buffer;
@@ -263,6 +267,18 @@ beforeAll(async () => {
         '<?xml version="1.0" encoding="UTF-8"?>' +
           '<sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">' +
           `<sitemap><loc>${bare}/${"s".repeat(3_000)}.xml</loc></sitemap>` +
+          `<sitemap><loc>${bare}/alts.xml</loc></sitemap>` +
+          "</sitemapindex>",
+      );
+    } else if (path === "/index-boundary.xml") {
+      // Ruling R18: one child a character past the index limit (the stream
+      // reads it whole), one well past the stream's read cap, and a fine one.
+      xml(
+        res,
+        '<?xml version="1.0" encoding="UTF-8"?>' +
+          '<sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">' +
+          `<sitemap><loc>${CHILD_2501()}</loc></sitemap>` +
+          `<sitemap><loc>${CHILD_3000()}</loc></sitemap>` +
           `<sitemap><loc>${bare}/alts.xml</loc></sitemap>` +
           "</sitemapindex>",
       );
@@ -984,13 +1000,49 @@ describe("discover: memberships, alternates and sitemapFacts", () => {
     expect(d.truncation.malformedEntriesSkipped).toBe(0);
   });
 
-  it("counts an index's child <loc> past the read cap as a refused loc, never fetching a cut URL (final review M3)", async () => {
+  it("names an index's child <loc> past the read cap as a too-long failure, never fetching a cut URL (final review M3, ruling R18)", async () => {
     const sink = recordingSink();
     const d = await discover(bare, { ...OPTS, sink, extraSitemaps: [`${bare}/index-long.xml`] });
-    // The index and its one readable child: the over-long child is never requested.
-    expect(d.truncation.docsFetched).toBe(2);
-    expect(d.truncation.failures).toEqual([]);
-    expect(d.truncation.malformedEntriesSkipped).toBe(1);
+    // The index, the over-long child (attempted: refused, never requested) and
+    // the readable child, as a child the policy refuses at request time counts.
+    expect(d.truncation.docsFetched).toBe(3);
+    const child = `${bare}/${"s".repeat(3_000)}.xml`;
+    expect(d.truncation.failures).toEqual([
+      {
+        url: `${child.slice(0, INDEXED_URL_MAX + 1)}…`,
+        reason: `refused by URL policy: too_long (${INDEXED_URL_MAX + 2}+ characters; the limit is ${INDEXED_URL_MAX})`,
+      },
+    ]);
+    expect(d.truncation.malformedEntriesSkipped).toBe(0);
+    expect(d.sitemapFacts.overlongLocsSkipped).toBe(0);
+    expect(d.sitemapEntries.map((e) => e.url)).toEqual([`${bare}/en/a`]);
+  });
+
+  // Ruling R18: either side of the stream's read cap, an over-long index child
+  // is one named failure that `sitemap.invalid` reports, worded alike.
+  it("names a 2,501- and a 3,000-character index child alike, as too-long failures", async () => {
+    const sink = recordingSink();
+    const at2501 = CHILD_2501();
+    const at3000 = CHILD_3000();
+    expect(at2501.length).toBe(INDEXED_URL_MAX + 1);
+    expect(at3000.length).toBe(3_000);
+    const d = await discover(bare, {
+      ...OPTS,
+      sink,
+      extraSitemaps: [`${bare}/index-boundary.xml`],
+    });
+    expect(d.truncation.failures).toEqual([
+      {
+        url: at2501,
+        reason: `refused by URL policy: too_long (${INDEXED_URL_MAX + 1} characters; the limit is ${INDEXED_URL_MAX})`,
+      },
+      {
+        url: `${at3000.slice(0, INDEXED_URL_MAX + 1)}…`,
+        reason: `refused by URL policy: too_long (${INDEXED_URL_MAX + 2}+ characters; the limit is ${INDEXED_URL_MAX})`,
+      },
+    ]);
+    expect(d.truncation.docsFetched).toBe(4);
+    expect(d.truncation.malformedEntriesSkipped).toBe(0);
     expect(d.sitemapFacts.overlongLocsSkipped).toBe(0);
     expect(d.sitemapEntries.map((e) => e.url)).toEqual([`${bare}/en/a`]);
   });

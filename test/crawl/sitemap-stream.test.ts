@@ -30,6 +30,8 @@ interface Run {
   urls: SitemapUrlEntry[];
   sitemaps: { loc: string; lastmod: string | null }[];
   overlong: ("url" | "sitemap")[];
+  /** The text kept of each over-long `<loc>`, in the order reported. */
+  overlongKept: string[];
   drains: number;
 }
 
@@ -40,18 +42,22 @@ async function run(
   const urls: SitemapUrlEntry[] = [];
   const sitemaps: { loc: string; lastmod: string | null }[] = [];
   const overlong: ("url" | "sitemap")[] = [];
+  const overlongKept: string[] = [];
   let drains = 0;
   const result = await parseSitemapStream(body, {
     maxBytes: opts.maxBytes ?? SITEMAP_MAX_BYTES,
     charset: opts.charset ?? null,
     onUrl: (entry) => urls.push(entry),
     onSitemap: (loc, lastmod) => sitemaps.push({ loc, lastmod }),
-    onOverlongLoc: (entry) => overlong.push(entry),
+    onOverlongLoc: (entry, kept) => {
+      overlong.push(entry);
+      overlongKept.push(kept);
+    },
     drain: async () => {
       drains++;
     },
   });
-  return { result, urls, sitemaps, overlong, drains };
+  return { result, urls, sitemaps, overlong, overlongKept, drains };
 }
 
 const URLSET = `<?xml version="1.0" encoding="UTF-8"?>
@@ -385,10 +391,13 @@ describe("parseSitemapStream", () => {
     });
 
     it("reports an index's over-long child <loc> as over-long, never a truncated URL", async () => {
-      const doc = `<sitemapindex><sitemap><loc>https://site.example/${"s".repeat(5_000)}.xml</loc></sitemap>` +
+      const child = `https://site.example/${"s".repeat(5_000)}.xml`;
+      const doc = `<sitemapindex><sitemap><loc>  ${child}</loc></sitemap>` +
         `<sitemap><loc>https://site.example/ok.xml</loc></sitemap></sitemapindex>`;
-      const { sitemaps, overlong } = await run(chunked(doc, 500));
+      const { sitemaps, overlong, overlongKept } = await run(chunked(doc, 500));
       expect(overlong).toEqual(["sitemap"]);
+      // Ruling R18: the text kept (leading whitespace aside), for discovery to name it by.
+      expect(overlongKept).toEqual([child.slice(0, LOC_TEXT_MAX)]);
       expect(sitemaps).toEqual([{ loc: "https://site.example/ok.xml", lastmod: null }]);
     });
 

@@ -708,11 +708,14 @@ argument nobody allowed, naming it").
 
 **Not paginated, on purpose:** `rules_catalog` and `crawl_compare`. Both are
 bounded by the **ruleset** (187 rows at 0.22.0) rather than by the crawl. The
-catalog is ~187 KB (**191,749 bytes**, measured 2026-11-08 after the Phase 26c
-final review over all 187 rows of ruleset 0.22.0 by serialising what `rulesCatalog`
+catalog is ~187 KB (**191,912 bytes**, measured 2026-11-08 after Phase 26c Task
+12a over all 187 rows of ruleset 0.22.0 by serialising what `rulesCatalog`
 answers with no crawl id — 15 markers at 2,286 bytes, the `marker` values
-JSON-serialised as one array, and the fourteen tables at 5,618 the same way,
-`sitemap.structure`'s six new columns among them; the same measurement over the
+JSON-serialised as one array, and the fourteen tables at 5,620 the same way;
+the 163 bytes over the 191,749 before it are that task's `sitemap.structure`
+copy (161) and column label (2); the 191,749 was measured the same day after
+the Phase 26c final review (tables 5,618), `sitemap.structure`'s six new
+columns among them, and the same measurement over the
 pre-review code reproduces its 191,474 (tables 5,559) to the byte; the 191,474
 before it was measured 2026-11-07 at the end of Phase 26c, and the same
 measurement over the Phase 26b code reproduces its 183,585 to the byte; the
@@ -2057,9 +2060,9 @@ canonicalises under noindex", `test/rules/health-metrics.test.ts:412`
 "partitions every fetched URL over the four columns",
 `test/rules/health-metrics.test.ts:564`
 "buckets the findings the capped run wrote, and no others"; the copy contracts —
-`test/rules/copy.test.ts:1521` "names every column and the population they
-are over", `test/rules/copy.test.ts:1546` "says the counts are the authority, not the
-ratio", `test/rules/copy.test.ts:1563` "grades nothing: no score, no label, no
+`test/rules/copy.test.ts:1524` "names every column and the population they
+are over", `test/rules/copy.test.ts:1549` "says the counts are the authority, not the
+ratio", `test/rules/copy.test.ts:1566` "grades nothing: no score, no label, no
 threshold";
 `test/rules/coverage.test.ts:599` "site.health is filed under the
 engine-coverage check, and CHECK-32 lost no claimant" (the re-file in both

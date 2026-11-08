@@ -141,7 +141,7 @@ describe("perScope", () => {
       "Counts Exact",
       "Membership Cap Reached",
       "Hreflang Cap Reached",
-      "Over-Long Locs Not Stored", "Alternates Over Per-URL Cap",
+      "Addresses Too Long To Store", "Alternates Over Per-URL Cap",
     ]);
     expect(shaped.rows).toEqual([
       {

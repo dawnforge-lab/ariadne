@@ -481,7 +481,7 @@ export const crawlMetrics: MetricRule[] = [
       { key: "docCountsExact", label: "Counts Exact" },
       { key: "membershipLimited", label: "Membership Cap Reached" },
       { key: "hreflangLimited", label: "Hreflang Cap Reached" },
-      { key: "overlongLocsSkipped", label: "Over-Long Locs Not Stored" },
+      { key: "overlongLocsSkipped", label: "Addresses Too Long To Store" },
       { key: "alternatesCapped", label: "Alternates Over Per-URL Cap" },
     ], 10),
     async (db, crawlId, self) => sitemapStructure(db, crawlId, self),

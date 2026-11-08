@@ -31,6 +31,7 @@ import {
   META_PX_MIN,
 } from "../../src/rules/thresholds.js";
 import { CHAIN_HOPS } from "../../src/rules/query/redirects.js";
+import { MAX_HREFLANG_PAIRS } from "../../src/crawl/parse/page-analyzer.js";
 import {
   DUPLICATE_SAMPLE_URLS,
   NEAR_DUPLICATE_COUNT_CAP,
@@ -1478,6 +1479,8 @@ describe("copy: metric tables", () => {
       new RegExp(`largest ${SITEMAP_DOC_ROWS_CAP} documents`, "i"),
     );
     expect(text, "an entry in several documents").toMatch(/counted once/i);
+    expect(text, "alternatesCapped").toContain(`hreflang alternates past ${MAX_HREFLANG_PAIRS} in one URL entry`);
+    expect(text, "overlongLocsSkipped").toMatch(/too long to store \(a location, an alternate's target/i);
   });
 
   // The Phase 5 metric, whose shape is two-sided — what the selection decided,

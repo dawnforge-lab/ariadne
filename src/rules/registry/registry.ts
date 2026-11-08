@@ -849,6 +849,14 @@ const KINDS = ["page", "query", "metric"] as const satisfies readonly AnyRule["k
 //     and its copy names every address it counts; `hreflang.multiple-entries`'
 //     copy is split. A v3 social set with a partial `imageRefTooLong` throws
 //     "re-crawl". `rules_catalog` re-measured at 191,749 bytes. 187 rules.
+// 13. (T12) No new rule, migration or version bump. A sitemap index's child
+//     `<loc>` past the stream's read cap is a named `truncation.failures` entry
+//     again (ruling R18), `{url: <first 2,501 characters>…, reason: "refused by
+//     URL policy: too_long (2502+ characters; the limit is 2500)"}`, so
+//     `sitemap.invalid` reports it as it does a 2,501-character child refused
+//     at request time; it no longer counts in `malformedEntriesSkipped`. The
+//     `sitemap.structure` copy names `alternatesCapped`, and its
+//     `overlongLocsSkipped` column reads "Addresses Too Long To Store". 187 rules.
 export const RULESET_VERSION = "0.22.0";
 
 /**

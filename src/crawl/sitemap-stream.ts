@@ -293,9 +293,11 @@ export async function parseSitemapStream(
      * A finished entry whose one `<loc>` ran past `LOC_TEXT_MAX`: no index can
      * hold it, and its text was not read past the cap, so it is reported here
      * and never emitted (nor counted malformed). `"url"` in a urlset,
-     * `"sitemap"` in an index.
+     * `"sitemap"` in an index. `kept` is the text read before the cap
+     * (`LOC_TEXT_MAX` characters, leading whitespace aside), so the caller can
+     * name the entry; it is a prefix, never a URL to fetch (ruling R18).
      */
-    onOverlongLoc: (entry: "url" | "sitemap") => void;
+    onOverlongLoc: (entry: "url" | "sitemap", kept: string) => void;
     drain: () => Promise<void>;
   },
 ): Promise<SitemapStreamResult> {
@@ -382,7 +384,7 @@ export async function parseSitemapStream(
         } else if (depth === 2 && inEntry) {
           inEntry = false;
           if (!ended && loc.count === 1 && !loc.hasElement && loc.overflow) {
-            opts.onOverlongLoc(kind === "urlset" ? "url" : "sitemap");
+            opts.onOverlongLoc(kind === "urlset" ? "url" : "sitemap", loc.text);
             depth--;
             return;
           }

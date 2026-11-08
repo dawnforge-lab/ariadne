@@ -77,6 +77,7 @@ import {
 } from "./parse/url-utils.js";
 import { hreflangTarget } from "./parse/page-analyzer.js";
 import {
+  LOC_TEXT_MAX,
   parseSitemapStream,
   SITEMAP_MAX_BYTES,
   type SitemapStreamResult,
@@ -315,12 +316,14 @@ export interface DiscoveryTruncation {
   /**
    * `<loc>` values that were empty, unparseable, or refused by the policy, and
    * (Phase 26c) alternates whose `href` does not resolve against the document
-   * or whose `hreflang` code is over MAX_HREFLANG_CODE_CHARS, and a sitemap
-   * index's child `<loc>` past `LOC_TEXT_MAX`, which the policy would refuse as
-   * too long (final review M3).
+   * or whose `hreflang` code is over MAX_HREFLANG_CODE_CHARS.
    */
   malformedEntriesSkipped: number;
-  /** One line per document that was pointed at and could not be read. */
+  /**
+   * One line per document that was pointed at and could not be read. A
+   * sitemap index's child `<loc>` past `LOC_TEXT_MAX` is one too, named by the
+   * text read before the cap and an ellipsis (ruling R18).
+   */
   failures: { url: string; reason: string }[];
 }
 
@@ -1007,7 +1010,7 @@ async function* wireCapped(
 interface SitemapHandlers {
   onUrl: (entry: SitemapUrlEntry) => void;
   onSitemap: (loc: string, lastmod: string | null) => void;
-  onOverlongLoc: (entry: "url" | "sitemap") => void;
+  onOverlongLoc: (entry: "url" | "sitemap", kept: string) => void;
   /** Hand what the last chunk produced to the sink, and flush it. */
   drain: () => Promise<void>;
 }
@@ -1210,7 +1213,9 @@ export async function discover(
     return { robots, sitemapEntries: [], truncation, sitemapFacts };
   }
 
-  const queue: { url: string; depth: number }[] = sources.map((url) => ({
+  // `refused`: a child the walk already knows the policy refuses, recorded as
+  // a failure in its turn and never requested (ruling R18).
+  const queue: { url: string; depth: number; refused?: string }[] = sources.map((url) => ({
     url,
     depth: 0,
   }));
@@ -1367,6 +1372,13 @@ export async function discover(
       truncation.entryLimited = true;
       break;
     }
+    if (next.refused !== undefined) {
+      // Attempted and refused, as a request-time policy refusal is, with no
+      // request made, so no delay is owed for it.
+      truncation.docsFetched++;
+      truncation.failures.push({ url: next.url, reason: next.refused });
+      continue;
+    }
 
     if (crawlDelayMs > 0 && lastRequestAt !== null) {
       // Measured from the end of the previous request, so a slow document
@@ -1410,7 +1422,8 @@ export async function discover(
           // not cost a million queue entries — RAM is O(concurrency), not
           // O(URLs). The child's own URL-policy check happens when it is
           // requested, where a refusal becomes a named failure rather than an
-          // anonymous counter.
+          // anonymous counter. A child too long to read whole never gets here:
+          // `onOverlongLoc` queues it as already refused.
           if (queue.length >= MAX_SITEMAP_DOCS) {
             truncation.docLimited = true;
             indexFull = true;
@@ -1421,15 +1434,32 @@ export async function discover(
         },
         // Final review M3: a `<loc>` the stream stopped reading at
         // `LOC_TEXT_MAX`. A urlset's is a URL no index can hold, counted as
-        // `acceptUrl` counts a measured one; an index's is a child document
-        // url-policy would refuse as too long, counted as a refused `<loc>`.
-        onOverlongLoc: (entry) => {
+        // `acceptUrl` counts a measured one. An index's is a child document
+        // url-policy refuses as too long (`INDEXED_URL_MAX`), and ruling R18
+        // keeps it the named failure `sitemap.invalid` reports, as a child of
+        // 2,501 characters is when its request is refused: it takes its place
+        // in the queue (and its caps) and is recorded in its turn. The full URL
+        // was never read, so it is named by its first `LOC_TEXT_MAX`
+        // characters and an ellipsis, with its length as a lower bound.
+        onOverlongLoc: (entry, kept) => {
           if (entry === "url") {
             sitemapFacts.overlongLocsSkipped++;
             return;
           }
           if (indexFull) return;
-          truncation.malformedEntriesSkipped++;
+          if (queue.length >= MAX_SITEMAP_DOCS) {
+            truncation.docLimited = true;
+            indexFull = true;
+            return;
+          }
+          queue.push({
+            url: `${kept}…`,
+            depth: next.depth + 1,
+            refused:
+              `refused by URL policy: too_long (${LOC_TEXT_MAX + 1}+ characters; ` +
+              `the limit is ${INDEXED_URL_MAX})`,
+          });
+          doc.urlsKept++;
         },
         drain: drainPending,
       };

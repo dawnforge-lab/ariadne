@@ -1652,7 +1652,7 @@ describe("GET /crawls/:id/metrics/:metricId", () => {
       "Counts Exact",
       "Membership Cap Reached",
       "Hreflang Cap Reached",
-      "Over-Long Locs Not Stored", "Alternates Over Per-URL Cap",
+      "Addresses Too Long To Store", "Alternates Over Per-URL Cap",
     ]);
     expect(tableRows(res)).toEqual([
       {
@@ -3131,7 +3131,7 @@ describe("GET /crawls/:id/export?format=csv", () => {
       "Sitemap", "URLs (Site) / Listings (Document)", "Over 50,000 Entries",
       "Listings (All Documents)", "Documents",
       "Documents Over 50 MB", "Entry Cap Reached", "Counts Exact",
-      "Membership Cap Reached", "Hreflang Cap Reached", "Over-Long Locs Not Stored", "Alternates Over Per-URL Cap",
+      "Membership Cap Reached", "Hreflang Cap Reached", "Addresses Too Long To Store", "Alternates Over Per-URL Cap",
     ]);
     expect(rows(sitemap)[1]).toEqual([
       `${SITE}/sitemap_blogs_1.xml`, "5", "false", "", "", "", "", "", "", "", "", "",
