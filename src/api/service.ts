@@ -1108,7 +1108,11 @@ export interface CrawlConfigOut {
   judgement: JudgementBlock;
   /** Every overridable threshold, as the block leaves it. */
   thresholds: Record<ThresholdName, ThresholdSetting>;
-  /** What the last rules run was judged with, or null on a crawl nobody judged. */
+  /**
+   * What the last rules run was judged with, or null on a crawl nobody judged:
+   * its disabled set, all 20 overridable thresholds at the EFFECTIVE values it
+   * used (not only its overrides), and the cap it took as input.
+   */
   judgedWith: JudgedWith | null;
   judgementStale: JudgementStale;
 }

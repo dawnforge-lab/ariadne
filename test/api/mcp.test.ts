@@ -57,6 +57,7 @@ import { DISCOVERED_VIA } from "../../src/crawl/frontier.js";
 import { METRIC_SCOPES } from "../../src/rules/registry/types.js";
 import { RENDER_PASS_EVIDENCE } from "../../src/rules/metric/render-metrics.js";
 import { buildRegistry } from "../../src/rules/index.js";
+import { DEFAULT_THRESHOLDS } from "../../src/rules/judgement.js";
 import { RULESET_VERSION } from "../../src/rules/registry/registry.js";
 
 /** `crawl_status.recheck.noResponse` on a crawl with no no-response pages. */
@@ -243,13 +244,14 @@ async function seedCrawl(row: {
     ...(row.discovery === undefined ? {} : { discovery: row.discovery }),
     // Since Phase 27a a judged crawl also carries the stamp of what its run was
     // judged with, which the read surfaces require beside `rules_run_at` (hard
-    // rule 7) — migration 0032's backfill: no overrides, the config's cap.
+    // rule 7) — migrations 0032 and 0033: no overrides (every threshold at its
+    // default), the config's cap.
     ...(row.judged === true
       ? {
           rulesRunAt: new Date("2026-08-30T09:00:00.000Z"),
           rulesJudgedWith: {
             disabledRules: [],
-            thresholds: {},
+            thresholds: { ...DEFAULT_THRESHOLDS },
             ...(row.config !== undefined && "findingCap" in row.config
               ? { findingCap: row.config["findingCap"] }
               : {}),

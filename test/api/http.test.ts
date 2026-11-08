@@ -32,6 +32,7 @@ import { createApiServer, type ApiServer } from "../../src/api/http.js";
 import { isHostAllowed, loadApiConfig, parseAllowedDomains } from "../../src/api/config.js";
 import { MAX_SUPPLIED_SITEMAPS, MIN_PER_HOST_DELAY_MS } from "../../src/api/service.js";
 import { UrlPolicyError, type AddressResolver } from "../../src/crawl/url-policy.js";
+import { DEFAULT_THRESHOLDS } from "../../src/rules/judgement.js";
 import { URL_FINDING_CAP } from "../../src/rules/query/crawl-evidence.js";
 import { RENDER_PASS_EVIDENCE } from "../../src/rules/metric/render-metrics.js";
 
@@ -1950,7 +1951,7 @@ describe("the judged-state marker across a re-judge", () => {
     // the old timestamp over the new run's half-written table.
     const id = await seedCrawl({ status: "finished", discovery: DISCOVERY });
     const before = new Date("2020-01-01T00:00:00.000Z");
-    await db.update(crawls).set({ rulesRunAt: before, rulesJudgedWith: { disabledRules: [], thresholds: {} } }).where(eq(crawls.id, id));
+    await db.update(crawls).set({ rulesRunAt: before, rulesJudgedWith: { disabledRules: [], thresholds: { ...DEFAULT_THRESHOLDS } } }).where(eq(crawls.id, id));
 
     const stale = await call("GET", `/crawls/${id}`);
     expect(stale.body["rulesRunAt"]).toBe(before.toISOString());

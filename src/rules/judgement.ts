@@ -121,9 +121,21 @@ const blockSchema = z.strictObject({
   findingCap: findingCapSchema.optional(),
 });
 
+/**
+ * A stamp's thresholds: EVERY overridable threshold, each the effective value
+ * the run used — required, an integer, within its range. A stamp missing one is
+ * malformed (it cannot say what the run judged with), never "the default".
+ */
+const stampThresholdsSchema = z.strictObject(
+  Object.fromEntries(THRESHOLD_NAMES.map((n) => [n, thresholdValue(THRESHOLD_ROWS[n])])) as Record<
+    ThresholdName,
+    z.ZodNumber
+  >,
+);
+
 const stampSchema = z.strictObject({
   disabledRules: z.array(z.string()),
-  thresholds: thresholdsSchema,
+  thresholds: stampThresholdsSchema,
   findingCap: findingCapSchema.optional(),
 });
 
@@ -217,8 +229,14 @@ export function effectiveThresholds(block: JudgementBlock | null): Thresholds {
 export interface JudgedWith {
   /** Sorted ascending. */
   disabledRules: string[];
-  /** The overrides, not the effective values. */
-  thresholds: Partial<Record<ThresholdName, number>>;
+  /**
+   * All 20 overridable thresholds, each the EFFECTIVE value the run used (its
+   * override, else the ruleset's default at the time). Stored whole rather than
+   * as overrides so the stamp stays true when a later ruleset moves a default:
+   * the copy is rendered from these values and staleness is measured against
+   * them, never against today's defaults (migration 0033 rewrote older stamps).
+   */
+  thresholds: Record<ThresholdName, number>;
   /** Absent when the engine's default cap applied; null is uncapped. */
   findingCap?: number | null;
 }
@@ -236,7 +254,7 @@ export function judgedWithOf(
     .filter(([, o]) => o.disabled === true)
     .map(([id]) => id)
     .sort();
-  const stamp: JudgedWith = { disabledRules, thresholds: { ...(block?.thresholds ?? {}) } };
+  const stamp: JudgedWith = { disabledRules, thresholds: { ...effectiveThresholds(block) } };
   if (findingCap !== undefined) stamp.findingCap = findingCap;
   return stamp;
 }
@@ -247,10 +265,12 @@ export type StaleReason = "overrides" | "thresholds" | "findingCap";
  * Why a judgement stamped as `stamped` is stale against the crawl's `current`
  * block, sorted; empty when it is not.
  *
- * Compared on what a run would DO, not on how the inputs were spelled: an
- * override naming a threshold's default is the default, and naming the engine's
- * default cap is the same budget as omitting it (`resolveRuleCaps`). The
- * disabled sets are compared as sets.
+ * Compared on what a run would DO, not on how the inputs were spelled: both
+ * sides carry effective thresholds, so an override naming a threshold's default
+ * is the default — and a later ruleset that moves a default reads stale
+ * `thresholds` against a stamp of the old value, as it must; naming the
+ * engine's default cap is the same budget as omitting it (`resolveRuleCaps`).
+ * The disabled sets are compared as sets.
  */
 export function staleReasons(current: JudgedWith, stamped: JudgedWith): StaleReason[] {
   const reasons: StaleReason[] = [];
@@ -262,9 +282,9 @@ export function staleReasons(current: JudgedWith, stamped: JudgedWith): StaleRea
   const a = [...current.disabledRules].sort();
   const b = [...stamped.disabledRules].sort();
   if (a.length !== b.length || a.some((id, i) => id !== b[i])) reasons.push("overrides");
-  const ta = effectiveThresholds({ thresholds: current.thresholds });
-  const tb = effectiveThresholds({ thresholds: stamped.thresholds });
-  if (THRESHOLD_NAMES.some((n) => ta[n] !== tb[n])) reasons.push("thresholds");
+  if (THRESHOLD_NAMES.some((n) => current.thresholds[n] !== stamped.thresholds[n])) {
+    reasons.push("thresholds");
+  }
   return reasons;
 }
 
@@ -306,7 +326,9 @@ export function readStoredJudgement(
 /**
  * A crawl's stamp (`crawls.rules_judged_with_jsonb`), validated. Callers read it
  * only when `rules_run_at` is not null, so a null here is a judged crawl with no
- * record of what it was judged with — thrown, naming the crawl.
+ * record of what it was judged with — thrown, naming the crawl. So is a stamp
+ * whose `thresholds` lack any of the 20 names, or hold a non-integer or
+ * out-of-range value: it cannot say what the run used (hard rule 7).
  */
 export function readStamp(raw: unknown, crawlId: string): JudgedWith {
   if (raw === null || raw === undefined) {

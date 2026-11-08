@@ -971,6 +971,13 @@ const KINDS = ["page", "query", "metric"] as const satisfies readonly AnyRule["k
 //     fire (hard rule 1): `H1_MAX` 1–299 (cap `MAX_H1_TEXT_CHARS` 300),
 //     `H2_MAX` 1–299 (`H2_TEXT_MAX` 300), `URL_MAX` 20–2499
 //     (`INDEXED_URL_MAX` 2500). Defaults unchanged; no verdict moves.
+// 11. (final review) The run stamp holds the EFFECTIVE thresholds, as the spec
+//     says: `rules_judged_with_jsonb.thresholds` is all 20 at the values the
+//     run used, not its overrides alone. `readStamp` refuses a stamp missing a
+//     name or holding an out-of-range value; copy renders from the stamp as
+//     stored; staleness compares effective values on both sides, so a later
+//     default change reads stale. Migration 0033 rewrote the existing stamps
+//     (the 0.22.0 / 0.23.0 defaults under their overrides). No finding moves.
 export const RULESET_VERSION = "0.23.0";
 
 /**

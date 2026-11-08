@@ -70,8 +70,9 @@ export interface JudgementView {
   /** `typeOf`'s twin for priority, on the same terms. */
   priorityOf(ruleId: string): { priority: Priority; overridden: boolean };
   /**
-   * The thresholds client-facing copy is rendered with: the stamp's overrides
-   * over the defaults on a judged crawl, the current block's on an unjudged one.
+   * The thresholds client-facing copy is rendered with: the stamp's effective
+   * values, read as stored, on a judged crawl; the current block's over the
+   * defaults on an unjudged one.
    */
   copyThresholds: Thresholds;
   judgementStale: JudgementStale;
@@ -206,7 +207,7 @@ export function judgementViewOf(
     const stamp = readStamp(row.rulesJudgedWith, crawlId);
     const reasons = staleReasons(judgedWithOf(block, cap), stamp);
     judgementStale = { stale: reasons.length > 0, reasons };
-    copyThresholds = effectiveThresholds({ thresholds: stamp.thresholds });
+    copyThresholds = Object.freeze({ ...stamp.thresholds });
     judgedWith = stamp;
   }
 

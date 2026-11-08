@@ -32,7 +32,7 @@ import { closeFetchAgents } from "../../src/crawl/http.js";
 import { createApiServer, type ApiServer } from "../../src/api/http.js";
 import { createMcpServer, TOOL_NAMES, type AriadneMcpServer } from "../../src/api/mcp.js";
 import { mergePatch } from "../../src/api/judgement-view.js";
-import { OVERRIDABLE_THRESHOLDS } from "../../src/rules/judgement.js";
+import { DEFAULT_THRESHOLDS, OVERRIDABLE_THRESHOLDS } from "../../src/rules/judgement.js";
 import { mkDiscovery } from "../rules/mk-discovery.js";
 import { mkPage } from "../rules/mk-page.js";
 
@@ -384,7 +384,10 @@ describe("crawl_config_set — PATCH /crawls/:id/config", () => {
     expect(res.body["crawlId"]).toBe(judgedId);
     expect(res.body["judgement"]).toEqual({ rules: { "title.too-long": { disabled: true } } });
     // Judged with nothing disabled; the block now disables one rule.
-    expect(res.body["judgedWith"]).toEqual({ disabledRules: [], thresholds: {} });
+    expect(res.body["judgedWith"]).toEqual({
+      disabledRules: [],
+      thresholds: { ...DEFAULT_THRESHOLDS },
+    });
     expect(res.body["judgementStale"]).toEqual({ stale: true, reasons: ["overrides"] });
   });
 
@@ -626,9 +629,10 @@ describe("judgementStale on crawl_status, metrics_get and metric_table", () => {
       reasons: [],
     });
     const config = await call("GET", `/crawls/${judgedId}/config`);
+    // The stamp holds every threshold at the value the run USED.
     expect(config.body["judgedWith"]).toEqual({
       disabledRules: [],
-      thresholds: { SLOW_MS: 900 },
+      thresholds: { ...DEFAULT_THRESHOLDS, SLOW_MS: 900 },
       findingCap: 200,
     });
 

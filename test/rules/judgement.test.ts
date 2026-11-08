@@ -28,6 +28,7 @@ import {
   staleReasons,
   type JudgedWith,
   type JudgementBlock,
+  type ThresholdName,
 } from "../../src/rules/judgement.js";
 import { URL_FINDING_CAP } from "../../src/rules/query/crawl-evidence.js";
 import { linkGraphRules } from "../../src/rules/query/link-graph.js";
@@ -162,8 +163,11 @@ describe("thresholds", () => {
   });
 });
 
+/** Every overridable threshold at its default, as a fresh mutable record. */
+const defaults = (): Record<ThresholdName, number> => ({ ...DEFAULT_THRESHOLDS });
+
 describe("judgedWithOf", () => {
-  it("records the sorted disabled set, the threshold overrides and the cap", () => {
+  it("records the sorted disabled set, all 20 effective thresholds and the cap", () => {
     const block: JudgementBlock = {
       rules: {
         "title.too-short": { disabled: true },
@@ -172,22 +176,34 @@ describe("judgedWithOf", () => {
       },
       thresholds: { SLOW_MS: 2000 },
     };
-    expect(judgedWithOf(block, 50)).toEqual({
+    const stamp = judgedWithOf(block, 50);
+    expect(stamp).toEqual({
       disabledRules: ["title.too-long", "title.too-short"],
-      thresholds: { SLOW_MS: 2000 },
+      thresholds: { ...defaults(), SLOW_MS: 2000 },
       findingCap: 50,
     });
+    expect(Object.keys(stamp.thresholds).sort()).toEqual(
+      Object.keys(OVERRIDABLE_THRESHOLDS).sort(),
+    );
   });
 
   it("leaves findingCap absent when the engine default applies, and keeps null", () => {
     expect("findingCap" in judgedWithOf(null, undefined)).toBe(false);
-    expect(judgedWithOf(null, undefined)).toEqual({ disabledRules: [], thresholds: {} });
-    expect(judgedWithOf(null, null)).toEqual({ disabledRules: [], thresholds: {}, findingCap: null });
+    expect(judgedWithOf(null, undefined)).toEqual({ disabledRules: [], thresholds: defaults() });
+    expect(judgedWithOf(null, null)).toEqual({
+      disabledRules: [],
+      thresholds: defaults(),
+      findingCap: null,
+    });
   });
 });
 
 describe("staleReasons", () => {
-  const base: JudgedWith = { disabledRules: ["a.rule"], thresholds: { SLOW_MS: 2000 }, findingCap: 50 };
+  const base: JudgedWith = {
+    disabledRules: ["a.rule"],
+    thresholds: { ...defaults(), SLOW_MS: 2000 },
+    findingCap: 50,
+  };
 
   it("is empty when nothing differs", () => {
     expect(staleReasons(base, { ...base })).toEqual([]);
@@ -198,10 +214,12 @@ describe("staleReasons", () => {
   });
 
   it("names thresholds and findingCap, sorted, when both changed", () => {
-    expect(staleReasons({ ...base, thresholds: { SLOW_MS: 2500 }, findingCap: 60 }, base)).toEqual([
-      "findingCap",
-      "thresholds",
-    ]);
+    expect(
+      staleReasons(
+        { ...base, thresholds: { ...base.thresholds, SLOW_MS: 2500 }, findingCap: 60 },
+        base,
+      ),
+    ).toEqual(["findingCap", "thresholds"]);
   });
 
   it("tells an absent findingCap (the default) from null (uncapped)", () => {
@@ -214,10 +232,20 @@ describe("staleReasons", () => {
     // default cap is the same budget as omitting it (resolveRuleCaps).
     expect(
       staleReasons(
-        { disabledRules: [], thresholds: { SLOW_MS }, findingCap: URL_FINDING_CAP },
-        { disabledRules: [], thresholds: {} },
+        judgedWithOf({ thresholds: { SLOW_MS } }, URL_FINDING_CAP),
+        judgedWithOf(null, undefined),
       ),
     ).toEqual([]);
+  });
+
+  it("reads a stamp of an older default as stale thresholds, not as the new default", () => {
+    // A later ruleset that moves a default: the stamp holds the value the run
+    // USED, so the crawl's no-override block now judges differently and says so.
+    const stamped: JudgedWith = {
+      disabledRules: [],
+      thresholds: { ...defaults(), SLOW_MS: SLOW_MS + 500 },
+    };
+    expect(staleReasons(judgedWithOf(null, undefined), stamped)).toEqual(["thresholds"]);
   });
 });
 
@@ -257,24 +285,39 @@ describe("readStoredJudgement", () => {
 
 describe("readStamp", () => {
   it("reads a stamp back", () => {
-    const stamp = { disabledRules: ["a.rule"], thresholds: { SLOW_MS: 2000 }, findingCap: null };
+    const stamp = {
+      disabledRules: ["a.rule"],
+      thresholds: { ...defaults(), SLOW_MS: 2000 },
+      findingCap: null,
+    };
     expect(readStamp(stamp, "crawl_x")).toEqual(stamp);
-    expect(readStamp({ disabledRules: [], thresholds: {} }, "crawl_x")).toEqual({
+    expect(readStamp({ disabledRules: [], thresholds: defaults() }, "crawl_x")).toEqual({
       disabledRules: [],
-      thresholds: {},
+      thresholds: defaults(),
     });
   });
 
   it("throws naming the crawl on a missing or malformed stamp", () => {
+    const { SLOW_MS: _, ...missingOne } = defaults();
     for (const bad of [
       null,
       {},
-      { disabledRules: [], thresholds: {}, extra: 1 },
-      { disabledRules: [], thresholds: { NOT_A_THRESHOLD: 1 } },
-      { disabledRules: [], thresholds: {}, findingCap: 0 },
+      { disabledRules: [], thresholds: defaults(), extra: 1 },
+      { disabledRules: [], thresholds: { ...defaults(), NOT_A_THRESHOLD: 1 } },
+      { disabledRules: [], thresholds: defaults(), findingCap: 0 },
+      // Overrides alone (the pre-0033 shape) cannot say what the run used.
+      { disabledRules: [], thresholds: {} },
+      { disabledRules: [], thresholds: { SLOW_MS: 2000 } },
+      { disabledRules: [], thresholds: missingOne },
+      { disabledRules: [], thresholds: { ...defaults(), SLOW_MS: 1500.5 } },
+      { disabledRules: [], thresholds: { ...defaults(), SLOW_MS: 99 } },
+      { disabledRules: [], thresholds: { ...defaults(), SLOW_MS: "1500" } },
     ]) {
       expect(() => readStamp(bad, "crawl_s"), JSON.stringify(bad)).toThrow(/crawl_s/);
     }
+    expect(() => readStamp({ disabledRules: [], thresholds: missingOne }, "crawl_s")).toThrow(
+      /crawl_s.*thresholds\.SLOW_MS/,
+    );
   });
 });
 
@@ -382,18 +425,27 @@ describe("runRules stamps what it judged with", () => {
     const { at, stamp } = await stampOf(crawlId);
     expect(at).not.toBeNull();
     expect(stamp).toEqual(judgedWithOf(block, 2));
-    expect(stamp).toEqual({ disabledRules: ["links.orphan"], thresholds: { SLOW_MS: 2000 }, findingCap: 2 });
+    // Every threshold, at the value the run used: the override, else the default.
+    expect(stamp).toEqual({
+      disabledRules: ["links.orphan"],
+      thresholds: { ...defaults(), SLOW_MS: 2000 },
+      findingCap: 2,
+    });
   });
 
   it("stamps the cap this call stated over the crawl's own, and no cap when neither chose", async () => {
     const stated = await newCrawl({ findingCap: 2 }, null);
     await runRules(db, stated, orphanRegistry(), { findingCap: null });
-    expect((await stampOf(stated)).stamp).toEqual({ disabledRules: [], thresholds: {}, findingCap: null });
+    expect((await stampOf(stated)).stamp).toEqual({
+      disabledRules: [],
+      thresholds: defaults(),
+      findingCap: null,
+    });
 
     const defaulted = await newCrawl({}, null);
     await runRules(db, defaulted, orphanRegistry());
     const { stamp } = await stampOf(defaulted);
-    expect(stamp).toEqual({ disabledRules: [], thresholds: {} });
+    expect(stamp).toEqual({ disabledRules: [], thresholds: defaults() });
     expect(stamp !== null && typeof stamp === "object" && "findingCap" in stamp).toBe(false);
   });
 

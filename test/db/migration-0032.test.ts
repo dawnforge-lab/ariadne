@@ -18,7 +18,7 @@ import { eq, inArray, sql } from "drizzle-orm";
 import { closeDb, createDb, type Db } from "../../src/db/client.js";
 import { runMigrations } from "../../src/db/migrate.js";
 import { crawls } from "../../src/db/schema.js";
-import { readStamp } from "../../src/rules/judgement.js";
+import { DEFAULT_THRESHOLDS, readStamp } from "../../src/rules/judgement.js";
 
 function databaseUrl(): string {
   const url = process.env.DATABASE_URL;
@@ -87,9 +87,21 @@ describe("0032 — crawls judged before 27a carry a stamp", () => {
         expect(defaulted).toEqual({ disabledRules: [], thresholds: {} });
         expect(Object.keys(defaulted as object)).not.toContain("findingCap");
         expect(stamp.get(ids.unjudged)).toBeNull();
-        // Each backfilled stamp is one the reader accepts.
+        // Each backfilled stamp is one the reader accepts once 0033 has given it
+        // the effective thresholds (a stamp of overrides alone is refused).
         for (const id of [ids.capped, ids.uncapped, ids.defaulted]) {
-          expect(() => readStamp(stamp.get(id), id)).not.toThrow();
+          expect(() => readStamp(stamp.get(id), id)).toThrow(/thresholds/);
+        }
+        await tx.execute(sql.raw(readFileSync(
+          new URL("../../drizzle/0033_rules_judged_with_effective.sql", import.meta.url),
+          "utf8",
+        )));
+        const effective = await tx
+          .select({ id: crawls.id, stamp: crawls.rulesJudgedWith })
+          .from(crawls)
+          .where(inArray(crawls.id, [ids.capped, ids.uncapped, ids.defaulted]));
+        for (const { id, stamp: after } of effective) {
+          expect(readStamp(after, id).thresholds).toEqual({ ...DEFAULT_THRESHOLDS });
         }
 
         asserted = true;

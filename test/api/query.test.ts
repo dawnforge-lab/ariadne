@@ -42,6 +42,7 @@ import { NO_RESPONSE_ANSWERED, RECHECK_CLEARED } from "../../src/rules/page/stat
 /** `crawl_status.recheck.noResponse` on a crawl with no no-response pages. */
 const NO_RESPONSE_ZERO = { pages: 0, confirmed: 0, answered: 0, inconclusive: 0, pending: 0 };
 import { buildRegistry } from "../../src/rules/index.js";
+import { DEFAULT_THRESHOLDS } from "../../src/rules/judgement.js";
 
 /**
  * The registry's own copy, for the three assertions below that are about the
@@ -343,8 +344,9 @@ async function seedCrawl(
     // nothing" rather than "nobody has looked".
     // Since Phase 27a a judged crawl also carries the stamp of what its run was
     // judged with (`rules_judged_with_jsonb`), which the read surfaces require
-    // beside `rules_run_at` (hard rule 7). This is the stamp migration 0032
-    // backfills: no overrides, under the cap the config carries.
+    // beside `rules_run_at` (hard rule 7). This is the stamp migrations 0032
+    // and 0033 leave: no overrides (every threshold at its default), under the
+    // cap the config carries.
     ...(opts.judged === true
       ? {
           rulesRunAt: new Date("2026-08-30T09:00:00.000Z"),
@@ -358,7 +360,7 @@ async function seedCrawl(
 function judgedWithDefaults(config: Record<string, unknown> | undefined): Record<string, unknown> {
   return {
     disabledRules: [],
-    thresholds: {},
+    thresholds: { ...DEFAULT_THRESHOLDS },
     ...(config !== undefined && "findingCap" in config ? { findingCap: config["findingCap"] } : {}),
   };
 }
@@ -2182,7 +2184,7 @@ describe("GET /crawls/:id — the fields an audit checks itself against", () => 
 
   it("reports the stamp a completed rules run leaves, as an ISO timestamp", async () => {
     const stamped = new Date("2026-08-28T10:11:12.000Z");
-    await db.update(crawls).set({ rulesRunAt: stamped, rulesJudgedWith: { disabledRules: [], thresholds: {} } }).where(eq(crawls.id, crawlE));
+    await db.update(crawls).set({ rulesRunAt: stamped, rulesJudgedWith: { disabledRules: [], thresholds: { ...DEFAULT_THRESHOLDS } } }).where(eq(crawls.id, crawlE));
     const res = await call(`/crawls/${crawlE}`);
     expect(res.body["rulesRunAt"]).toBe(stamped.toISOString());
     await db.update(crawls).set({ rulesRunAt: null, rulesJudgedWith: null }).where(eq(crawls.id, crawlE));

@@ -157,13 +157,16 @@ export const crawls = pgTable("crawls", {
   // throws naming the crawl (hard rule 7).
   judgement: jsonb("judgement_jsonb"),
   // What the last complete rules run was judged with (`JudgedWith`: the
-  // disabled set, the threshold overrides, the finding cap it used). WRITTEN BY
-  // `runRules` AND BY NOTHING ELSE, in lockstep with `rules_run_at`: nulled in
-  // the transaction that nulls it, stamped in the update that stamps it. So it
-  // is non-null exactly when `rules_run_at` is, and a judged crawl without it
-  // is a defect `readStamp` throws on. Compared with the current block to say a
-  // judgement is stale (`staleReasons`). Migration 0032 backfilled it for
-  // crawls judged before it existed.
+  // disabled set, all 20 overridable thresholds at the EFFECTIVE values the run
+  // used, the finding cap it used). STAMPED BY `runRules` ALONE, in the update
+  // that stamps `rules_run_at`; NULLED WITH `rules_run_at` wherever that is
+  // nulled — `runRules`' opening transaction and the resume claim in
+  // `ApiService` (service.ts), which clears the judged marker of a crawl that
+  // is about to grow. So it is non-null exactly when `rules_run_at` is, and a
+  // judged crawl without it is a defect `readStamp` throws on. Compared with
+  // the current block to say a judgement is stale (`staleReasons`). Migration
+  // 0032 backfilled it for crawls judged before it existed; 0033 rewrote every
+  // stamp's thresholds from overrides to effective values.
   rulesJudgedWith: jsonb("rules_judged_with_jsonb"),
   // The explicit render list, verbatim as the agent supplied it. NULL means no
   // explicit pass was requested — automatic selection, or no render at all;

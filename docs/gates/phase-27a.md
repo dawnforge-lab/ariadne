@@ -18,8 +18,9 @@ git-ignored SDD workspace (`.superpowers/sdd/2026-11-08-phase-27a-judgement-and-
 
 **Verdict: all five clauses pass.** Ruleset 0.23.0 with **188 rules** (72 page / 102
 query / 14 metric; no rule added, removed or re-worded at the defaults), migrations 0031
-(the judgement block and the run stamp) and 0032 (the stamp backfilled on every judged
-crawl). Every one of the 174 finding rules has a type and a priority. Against Screaming
+(the judgement block and the run stamp), 0032 (the stamp backfilled on every judged
+crawl) and 0033 (added by the final review: every stamp's thresholds rewritten to the
+effective values, §5 (e)). Every one of the 174 finding rules has a type and a priority. Against Screaming
 Frog's Issues Overview, 132 map to an SF issue: 120 agree, and 12 differ, each for a
 stated difference in what the rule reports. On the stored lavishalice crawl the Issues
 Overview's `urls` equals the distinct URL count of `issue_urls` for all 46 rules that
@@ -50,7 +51,7 @@ rule for rule as before.
 | ruleset | **0.23.0** (one bump, in Task 1; the version note in `src/rules/registry/registry.ts` carries items T1–T10) |
 | registry | 188 rules: 72 page / 102 query / 14 metric; 33 critical / 66 warning / 89 info; 16 markers (unchanged from 0.22.0) |
 | `rules_catalog` (no crawl id) | **200,260 bytes** (16 markers at 2,487, 14 tables at 5,620). The same measurement over `cb63104` reproduces 0.22.0's 194,186 to the byte; the 6,074 between them are `type` and `priority` on the 174 finding rules (`gate27a/measure-catalog.mts`) |
-| migrations | 0031 (schema), 0032 (data); applied with `npm run db:migrate` |
+| migrations | 0031 (schema), 0032 (data), 0033 (data, final review: stamps hold effective thresholds); applied with `npm run db:migrate` |
 | MCP tools / HTTP routes | 22 / 22 (`crawl_config_get`, `crawl_config_set`, `issues_overview`, `crawl_overview` new); CSV views 11 (`issues_overview`, `crawl_overview` new) |
 
 The harness (`test/fixtures/harness.test.ts`) is part of `npm test` and ran in both runs.
@@ -426,9 +427,26 @@ overridden: true}`, `judgementStale {stale: true, reasons: ["overrides", "thresh
   pages over 500 ms, at 620, 597, 578 and 538 ms, each with `threshold: 500` in its
   evidence); title and explanation "…over 500 ms" in `rules_catalog` and the
   `issues_overview` row; `judgedWith {disabledRules: ["title.same-as-h1"], thresholds:
-  {SLOW_MS: 500}}`; `judgementStale {stale: false, reasons: []}` on `crawl_config_get`
+  {SLOW_MS: 500}}` (the stamp then held overrides only; see the re-run below);
+  `judgementStale {stale: false, reasons: []}` on `crawl_config_get`
   and `issues_list`; `crawl_overview`'s line reads `Over SLOW_MS (500 ms)`: 6 (all
   pages, so more than the rule's 4, as documented); the disabled rule still out.
+- **Re-run after the final review (Ruling 15: the stamp holds the 20 effective
+  thresholds).** On the same crawl, after migration 0033 and on the final code
+  (`gate27a/stamp.mts`, `gate27a/stamp.log`, 12 of 12 checks): the stamp 0033 left
+  was `{disabledRules: [], thresholds: {TITLE_MIN: 30, TITLE_MAX: 60, META_MIN: 70,
+  META_MAX: 155, H1_MAX: 70, H2_MAX: 70, URL_MAX: 115, SLOW_MS: 1500, TITLE_PX_MIN:
+  200, TITLE_PX_MAX: 561, META_PX_MIN: 400, META_PX_MAX: 985, DEEP_DEPTH: 5,
+  THIN_WORDS: 150, SOFT_404_WORDS: 300, IMAGE_WEIGHT_WARN: 100000, CHAIN_HOPS: 2,
+  HIGH_INTERNAL_OUTLINKS: 1000, HIGH_EXTERNAL_OUTLINKS: 10,
+  UNAVAILABLE_AFTER_WARN_DAYS: 30}}`. `crawl_config_set {thresholds: {SLOW_MS: 500}}`
+  → stale `["thresholds"]`, title still "…over 1500 ms"; `crawl_rules` → 3,206
+  findings in 9.2 s, `performance.slow-response` **0 → 4**; **the stamp then held all
+  20 keys, `SLOW_MS: 500` and the other 19 at their defaults**; title and explanation
+  "…over 500 ms" in `rules_catalog` and the `issues_overview` row, the catalog's
+  `thresholds.SLOW_MS` 500, `Over SLOW_MS (500 ms)`: 6, nothing stale. Cleanup:
+  `{thresholds: null}` and a re-run → 3,202 findings, every rule's count as before,
+  `judgedWith {disabledRules: [], thresholds: <the 20 defaults>}`, not stale.
 
 **(f) Re-enable.** `crawl_config_set {rules: {"title.same-as-h1": null}}`, no run →
 `issues_list` has the group back at **338**, `issue_urls` lists 338 rows,
@@ -438,8 +456,9 @@ last run stamped the rule as disabled, so `site.health` still left it out
 
 **(g) Cleanup.** `crawl_config_set {rules: null, thresholds: null}` → `judgement: {}`,
 stale `["overrides", "thresholds"]`; `crawl_rules` → 3,202 findings. Final
-`crawl_config_get`: `judgement {}`, `judgedWith {disabledRules: [], thresholds: {}}`,
-`judgementStale {stale: false}`, `SLOW_MS` 1500 not overridden. **Every rule's
+`crawl_config_get`: `judgement {}`, `judgedWith {disabledRules: [], thresholds: {}}`
+(overrides only, before the final review; after 0033 and the re-run above it holds
+the 20 defaults), `judgementStale {stale: false}`, `SLOW_MS` 1500 not overridden. **Every rule's
 `issues_list` count equals the step (a) baseline**, and `findingsCount` is 3,202. In
 the database (`psql`, `gate27a/final-state.txt`): `finished`, `judgement_jsonb` `{}`,
 stamp `{"thresholds": {}, "disabledRules": []}`, `config_jsonb` with no `findingCap`,
@@ -468,8 +487,11 @@ The plan's six deviations, unchanged by the build:
    `judgement.findingCap`, and get and set read and write that one location.
    `crawl_start`'s top-level `findingCap` is unchanged; given both ways with different
    values, the start is refused.
-2. **Two migrations, `0031` and `0032`, where the spec named one.** The backfill is
-   data and has its own custom migration. 27b's `control_request` column becomes `0033`.
+2. **Three migrations, `0031`–`0033`, where the spec named one.** The backfill is
+   data and has its own custom migration (`0032`), and the final review's
+   effective-value stamp rewrote the stamps already written (`0033`, also data:
+   0031 and 0032 were already applied, so they were not edited). 27b's
+   `control_request` column becomes `0034`.
 3. **`issue_urls` and `issue_inlinks` refuse a disabled rule** (409, "rule X is
    disabled on this crawl"), where the spec says the findings "disappear". A refusal
    cannot be mistaken for "fired on nothing".
@@ -481,6 +503,21 @@ The plan's six deviations, unchanged by the build:
 6. **`crawl_compare` reads stored findings, unfiltered,** and gains the caveat code
    `judgement-overrides` when either side disables rules. It does not change
    `comparable`.
+
+Two more, recorded by the final review:
+
+7. **The stamp now holds the effective thresholds, as the spec says** ("stamps the
+   effective thresholds it used"). The build first stamped the overrides alone and
+   rebuilt the values from today's defaults; a later ruleset that moved a default would
+   then have rendered copy against stored evidence with the wrong number and missed the
+   staleness. The stamp's `thresholds` is now all 20 at the values the run used;
+   `readStamp` refuses one missing a key or holding an out-of-range value, naming the
+   crawl; the copy reads the stamp directly; staleness compares effective values on
+   both sides. Migration 0033 rewrote the existing stamps (Ruling 15). This is a
+   deviation from the build, not from the spec.
+8. **The stamp's column is `crawls.rules_judged_with_jsonb`,** where the spec names
+   `rules_thresholds_jsonb`. It holds the disabled set and the cap beside the
+   thresholds, and the name says so.
 
 The rulings made during the build that change what a surface reader sees, each
 documented in `docs/talos-surface.md`:
@@ -520,6 +557,10 @@ documented in `docs/talos-surface.md`:
 - **Ruling 14: both overviews read the judgement inside their own repeatable-read
   snapshot**, so a concurrent `crawl_rules` cannot make an overview report measured
   zeros or a mix of two runs.
+- **Ruling 15 (final review): the stamp holds the 20 effective thresholds** (Deviation
+  7 above); `judgedWith.thresholds` on `crawl_config_get` lists all 20.
+- **Ruling 16 (final review): `H1_MAX` 1–299, `H2_MAX` 1–299, `URL_MAX` 20–2499**,
+  each strictly below the extraction cap on what it measures (§7).
 
 Rulings 1–4 and 6 are internal (task ordering, the threshold guard's form, error
 discrimination, a citation fix) and change nothing a reader sees, beyond Ruling 4's

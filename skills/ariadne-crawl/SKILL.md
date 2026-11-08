@@ -695,7 +695,9 @@ upgrading the engine rather than re-crawling the site.
 judgedWith, judgementStale}`. `judgement` is the block, `{}` when nothing is set;
 `thresholds` lists all 20 overridable thresholds as `{value, default, min, max,
 overridden}`, where `value` is what the NEXT rules run will use; `judgedWith` is what
-the last completed run used (`null` if nobody has judged the crawl); and
+the last completed run used — `{disabledRules, thresholds, findingCap?}`, its
+`thresholds` all 20 at the values that run actually judged with — (`null` if nobody
+has judged the crawl); and
 `judgementStale` (`{stale, reasons}`) says whether the two differ.
 
 `crawl_config_set` takes `{crawlId, judgement: <patch>}` and answers the same shape.

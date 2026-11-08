@@ -232,6 +232,13 @@
       "when": 1794157782286,
       "tag": "0032_rules_judged_with_backfill",
       "breakpoints": true
+    },
+    {
+      "idx": 33,
+      "version": "7",
+      "when": 1794170895156,
+      "tag": "0033_rules_judged_with_effective",
+      "breakpoints": true
     }
   ]
 }
