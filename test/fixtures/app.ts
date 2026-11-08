@@ -2,14 +2,14 @@
  * The fixture site: a `node:http` server that serves the fixture collection
  * over real HTTP so the real crawler can crawl it.
  *
- * Six things this server owns beyond dispatch:
+ * Seven things this server owns beyond dispatch:
  *  - **The hub.** `/` links every fixture that asks to be linked, so one crawl
  *    from the seed reaches the collection at depth 1. A fixture with
  *    `linkedFromHub: false` is reachable only through the sitemap, which is what
  *    makes it an orphan (see `Fixture.linkedFromHub`); the deep click-path is
  *    the other opt-out, because the point of those pages is how far from the
  *    seed they are.
- *  - **robots.txt.** Allow all except `/private/`, and two `Sitemap:` lines.
+ *  - **robots.txt.** Allow all except `/private/`, and three `Sitemap:` lines.
  *    The disallowed prefix is not decoration: `/private/hidden` is listed in the
  *    sitemap and is therefore a URL the site publishes and its own robots.txt
  *    forbids, which is what `robots.blocks-sitemap-urls` reports and, since the
@@ -22,6 +22,9 @@
  *  - **`/sitemap-broken.xml`**, the second declared document: a 200 that is not
  *    XML at all, which is the commonest broken sitemap in the wild and what
  *    `sitemap.invalid` reports.
+ *  - **`/sitemap-extra.xml`** (Phase 26c), the third declared document: a
+ *    second generator's sitemap listing the fixtures that ask
+ *    (`Fixture.extraSitemapListings`), which is a URL in two sitemaps.
  *  - **The static assets** the fixture pages reference (`/img/…`), served with
  *    real `content-type`, `content-length` and `cache-control` headers so the
  *    resource fetch pass has something true to record (see ./assets.ts).
@@ -68,6 +71,9 @@ const ROBOTS_BLOCKED_PATH = `${ROBOTS_BLOCKED_PREFIX}hidden`;
 
 /** The second declared sitemap document: a 200 that is not a sitemap. */
 const BROKEN_SITEMAP_PATH = "/sitemap-broken.xml";
+
+/** The third declared sitemap document, a second generator's (Phase 26c). */
+const EXTRA_SITEMAP_PATH = "/sitemap-extra.xml";
 
 /**
  * The hub is not a fixture and nothing is asserted about it, but it is still
@@ -140,7 +146,7 @@ function legacyOriginOf(port: string | number): string {
 function sitemapXml(fixtures: readonly Fixture[], origin: string): string {
   const legacyOrigin = legacyOriginOf(new URL(origin).port);
   const entries = [
-    { loc: `${origin}/`, lastmod: undefined },
+    { loc: `${origin}/`, lastmod: undefined, alternates: undefined },
     ...fixtures
       .filter((f) => f.inSitemap !== false)
       .map((f) => {
@@ -150,15 +156,47 @@ function sitemapXml(fixtures: readonly Fixture[], origin: string): string {
             ? `${legacyOrigin}${target.slice("{legacy}".length)}`
             : `${origin}${target}`,
           lastmod: f.sitemapLastmod,
+          alternates: f.sitemapAlternates,
         };
       }),
-    { loc: `${origin}${ROBOTS_BLOCKED_PATH}`, lastmod: undefined },
+    { loc: `${origin}${ROBOTS_BLOCKED_PATH}`, lastmod: undefined, alternates: undefined },
   ]
     .map(
       (e) =>
         `  <url><loc>${escapeHtml(e.loc)}</loc>${
           e.lastmod === undefined ? "" : `<lastmod>${escapeHtml(e.lastmod)}</lastmod>`
-        }</url>`,
+        }${(e.alternates ?? [])
+          .map(
+            (a) =>
+              `<xhtml:link rel="alternate" hreflang="${escapeHtml(a.hreflang)}" href="${escapeHtml(
+                `${origin}${a.path}`,
+              )}"/>`,
+          )
+          .join("")}</url>`,
+    )
+    .join("\n");
+  // The xhtml namespace is declared on every serve, used or not: the
+  // alternates are `Fixture.sitemapAlternates` (Phase 26c).
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9" xmlns:xhtml="http://www.w3.org/1999/xhtml">
+${entries}
+</urlset>`;
+}
+
+/**
+ * The third declared sitemap (Phase 26c): each fixture with
+ * `extraSitemapListings` above zero, that many times, in fixture order. A
+ * second generator's document, which is how a URL comes to be listed in two
+ * sitemaps (`sitemap.url-in-multiple`) and, listed twice here, how a repeat
+ * inside one document is shown to be one membership.
+ */
+function extraSitemapXml(fixtures: readonly Fixture[], origin: string): string {
+  const entries = fixtures
+    .flatMap((f) =>
+      Array.from(
+        { length: f.extraSitemapListings ?? 0 },
+        () => `  <url><loc>${escapeHtml(`${origin}${f.path}`)}</loc></url>`,
+      ),
     )
     .join("\n");
   return `<?xml version="1.0" encoding="UTF-8"?>
@@ -214,6 +252,7 @@ export async function startFixtureApp(fixtures: readonly Fixture[]): Promise<Fix
           `Disallow: ${ROBOTS_BLOCKED_PREFIX}`,
           `Sitemap: ${origin}/sitemap.xml`,
           `Sitemap: ${origin}${BROKEN_SITEMAP_PATH}`,
+          `Sitemap: ${origin}${EXTRA_SITEMAP_PATH}`,
           "",
         ].join("\n"),
       );
@@ -222,6 +261,11 @@ export async function startFixtureApp(fixtures: readonly Fixture[]): Promise<Fix
     if (path === "/sitemap.xml") {
       const origin = new URL(selfUrl(req)).origin;
       send(res, 200, "application/xml; charset=utf-8", sitemapXml(fixtures, origin));
+      return;
+    }
+    if (path === EXTRA_SITEMAP_PATH) {
+      const origin = new URL(selfUrl(req)).origin;
+      send(res, 200, "application/xml; charset=utf-8", extraSitemapXml(fixtures, origin));
       return;
     }
     if (path === BROKEN_SITEMAP_PATH) {

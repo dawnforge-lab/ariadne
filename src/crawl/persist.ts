@@ -93,6 +93,7 @@
  * `onConflictDoNothing` race, its children still carry the minted id.
  */
 import { randomUUID } from "node:crypto";
+import { sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import {
   hreflang,
@@ -103,8 +104,9 @@ import {
   structuredData,
 } from "../db/schema.js";
 import type { FetchResult } from "./fetch-page.js";
-import type { PageAnalysis } from "./parse/page-analyzer.js";
-import { isSameOrigin, normalizeUrl } from "./parse/url-utils.js";
+import { hreflangTarget, type PageAnalysis } from "./parse/page-analyzer.js";
+import type { OverlongUrls } from "./parse/page-facts.js";
+import { fitsIndex, isSameOrigin, normalizeUrl } from "./parse/url-utils.js";
 import { completeUrls } from "./frontier.js";
 import { derivePageType, type PageTypePattern } from "./page-type.js";
 import { EXTRACTION_VERSION } from "./versions.js";
@@ -154,8 +156,9 @@ export interface PageWriterStats {
   /** Page→resource edges written: one per reference, not per file. */
   pageResources: number;
   /**
-   * `<link rel=alternate hreflang>` hrefs that would not resolve against
-   * their page URL. `hreflang.target_url` is NOT NULL, so such a pair has no
+   * `<link rel=alternate hreflang>` hrefs, and `Link` header hreflang URIs
+   * (Phase 26c), that would not resolve against their page URL.
+   * `hreflang.target_url` is NOT NULL, so such a pair has no
    * row to be in — it is counted here instead of vanishing.
    */
   hreflangUnresolved: number;
@@ -222,6 +225,7 @@ export class PageWriter {
   private readonly hreflangBuffer: HreflangRow[] = [];
   private readonly structuredDataBuffer: StructuredDataRow[] = [];
   private readonly resourceBuffer: ResourceRow[] = [];
+  private readonly shareImageBuffer: string[] = [];
   private readonly pageResourceBuffer: PageResourceRow[] = [];
 
   private readonly counts: PageWriterStats = {
@@ -275,11 +279,25 @@ export class PageWriter {
   ): Promise<string> {
     const pageId = `page_${randomUUID()}`;
 
+    // Shaped before the page row, which carries their over-long count.
+    const header = this.headerHreflangRows(pageId, item.url, fetch);
+
     await this.push(
       this.pageBuffer,
-      [{ row: this.pageRow(pageId, item, fetch, analysis), complete: opts.complete }],
+      [
+        {
+          row: this.pageRow(pageId, item, fetch, analysis, header.overlong),
+          complete: opts.complete,
+        },
+      ],
       () => this.flushPages(),
     );
+
+    // Phase 26c: the `Link` header's hreflang, on EVERY row a response was
+    // classified for — a PDF, a redirect and a 404 included. The declaration is
+    // the response's whatever its body; the hreflang rules judge the declaring
+    // page's status themselves (`isAuditable`).
+    await this.push(this.hreflangBuffer, header.rows, () => this.flushHreflang());
 
     if (analysis !== null) {
       // The truncation flag, counted before anything is buffered: it is a fact
@@ -301,6 +319,8 @@ export class PageWriter {
           targetPageId: null,
           anchor: link.anchor,
           ariaLabel: link.ariaLabel,
+          nameHint: link.nameHint,
+          nameHintSource: link.nameHintSource,
           rel: link.rel,
           isInternal: isSameOrigin(link.href, item.url),
           isNofollow: link.nofollow,
@@ -359,15 +379,14 @@ export class PageWriter {
       // status and bytes — and NEVER `page_resources` edges. A browser does not
       // load a share image, so it is no part of page weight, mixed content or
       // `resources.broken`; every rule in that family judges only URLs with an
-      // edge. A URL the page also loads through a resource ref already has its
-      // row from the push above (with that ref's kind) and is not repeated.
-      const pageRefs = new Set(analysis.resourceRefs.map((ref) => ref.url));
+      // edge.
+      // Phase 26c: the row is marked `share_image` at the source. A URL that
+      // this page or another loads keeps its row from the push above, and the
+      // flag is set on conflict, so it is never lost to ordering.
       await this.push(
-        this.resourceBuffer,
-        analysis.socialImageRefs
-          .filter((url) => !pageRefs.has(url))
-          .map((url) => ({ crawlId: this.crawlId, url, kind: "image" as const })),
-        () => this.flushResources(),
+        this.shareImageBuffer,
+        analysis.socialImageRefs,
+        () => this.flushShareImages(),
       );
     }
 
@@ -406,6 +425,7 @@ export class PageWriter {
       // about. Neither is a foreign key (see schema.ts) — this is about which
       // half of the pair is the more useful survivor.
       ["resources", () => this.flushResources()],
+      ["resources (share images)", () => this.flushShareImages()],
       ["page_resources", () => this.flushPageResources()],
     ];
     const failed: string[] = [];
@@ -587,9 +607,11 @@ export class PageWriter {
           platformHint: null,
           // Never requested, so no response and no headers.
           responseHeaders: null,
+          headerHreflang: [],
           disallowedReason: reason,
         },
         null,
+        0,
       ),
       responseTimeMs: null,
       htmlBytes: null,
@@ -659,6 +681,45 @@ export class PageWriter {
     });
   }
 
+  /**
+   * Share images: insert-or-mark. The row is created if no page named the URL
+   * yet; a row that exists (a page loads it too, or another page shares it)
+   * gets `share_image = true` and nothing else touched.
+   *
+   * Buffered page-loaded refs are written first, so a URL both loaded and
+   * shared keeps the loading ref's kind. The batch is deduped here because
+   * `on conflict do update` refuses a statement that touches one row twice,
+   * and one default og:image across many pages is the common case.
+   *
+   * The count is the rows this statement INSERTED (`xmax = 0`), not the rows it
+   * marked, so `stats().resources` stays files discovered.
+   */
+  private async flushShareImages(): Promise<void> {
+    await this.flushResources();
+    await this.drain(
+      "resources (share images)",
+      "resources",
+      this.shareImageBuffer,
+      async (batch) => {
+        const rows = [...new Set(batch)].map((url) => ({
+          crawlId: this.crawlId,
+          url,
+          kind: "image" as const,
+          shareImage: true,
+        }));
+        const written = await this.db
+          .insert(resources)
+          .values(rows)
+          .onConflictDoUpdate({
+            target: [resources.crawlId, resources.url],
+            set: { shareImage: true },
+          })
+          .returning({ inserted: sql<boolean>`(xmax = 0)` });
+        return written.filter((row) => row.inserted).length;
+      },
+    );
+  }
+
   private async flushPageResources(): Promise<void> {
     await this.drain(
       "page_resources",
@@ -676,6 +737,8 @@ export class PageWriter {
     item: PageWriterItem,
     fetch: FetchResult,
     analysis: PageAnalysis | null,
+    /** `Link` header hreflang targets over `INDEXED_URL_MAX` (headerHreflangRows). */
+    headerOverlongHreflang: number,
   ): PageRow {
     const normalised = normalizeUrl(item.url);
     if (normalised === null) {
@@ -813,6 +876,15 @@ export class PageWriter {
       relNextCount: analysis === null ? null : analysis.relNextCount,
       relPrevCount: analysis === null ? null : analysis.relPrevCount,
       htmlStructure: analysis === null ? null : analysis.htmlStructure,
+      // Phase 26c (migration 0029): the references refused for being over
+      // `INDEXED_URL_MAX` — the analyzer's counts, plus the `Link` header's
+      // hreflang targets in `.hreflang` (Task 6). The header is read on every
+      // classified response, so a row with a status and no analysis (a PDF, a
+      // redirect, a 404) measured it: `{links: 0, resources: 0, hreflang: n}`,
+      // and `url.reference-too-long` judges it too. Null exactly when no
+      // response was classified (no status: a refusal, a robots-blocked URL, a
+      // timeout, a network error): nothing was measured.
+      overlongUrls: overlongUrls(fetch, analysis, headerOverlongHreflang),
       htmlBytes: fetch.htmlBytes,
       domSize: analysis?.domSize ?? null,
       imagesTotal: analysis?.imagesTotal ?? 0,
@@ -849,10 +921,10 @@ export class PageWriter {
   ): HreflangRow[] {
     const rows: HreflangRow[] = [];
     for (const pair of analysis.hreflang) {
-      let target: string;
-      try {
-        target = new URL(pair.href, pageUrl).href;
-      } catch {
+      // The analyzer measured exactly this resolution against
+      // `INDEXED_URL_MAX` and dropped the targets over it (Phase 26c).
+      const target = hreflangTarget(pair.href, pageUrl);
+      if (target === null) {
         this.counts.hreflangUnresolved += 1;
         continue;
       }
@@ -867,6 +939,59 @@ export class PageWriter {
     }
     return rows;
   }
+
+  /**
+   * The `Link` header's hreflang pairs as `source = 'header'` rows (Phase 26c).
+   * Resolved with `hreflangTarget` against the page URL, as the HTML pairs are,
+   * so the length measured against `INDEXED_URL_MAX` is the length the row
+   * would hold (ruling R5). Unresolvable hrefs count in `hreflangUnresolved`;
+   * over-long ones are returned as a count for `overlong_urls.hreflang`.
+   * Neither is stored.
+   */
+  private headerHreflangRows(
+    pageId: string,
+    pageUrl: string,
+    fetch: FetchResult,
+  ): { rows: HreflangRow[]; overlong: number } {
+    const rows: HreflangRow[] = [];
+    let overlong = 0;
+    for (const pair of fetch.headerHreflang) {
+      const target = hreflangTarget(pair.href, pageUrl);
+      if (target === null) {
+        this.counts.hreflangUnresolved += 1;
+        continue;
+      }
+      if (!fitsIndex(target)) {
+        overlong += 1;
+        continue;
+      }
+      rows.push({
+        crawlId: this.crawlId,
+        pageId,
+        hreflangCode: pair.code,
+        targetUrl: target,
+        targetPageId: null,
+        source: "header",
+      });
+    }
+    return { rows, overlong };
+  }
+}
+
+/** `pages.overlong_urls`; see the comment at its column in `pageRow`. */
+function overlongUrls(
+  fetch: FetchResult,
+  analysis: PageAnalysis | null,
+  headerOverlongHreflang: number,
+): OverlongUrls | null {
+  if (analysis !== null) {
+    return {
+      ...analysis.overlongUrls,
+      hreflang: analysis.overlongUrls.hreflang + headerOverlongHreflang,
+    };
+  }
+  if (fetch.statusCode === null) return null;
+  return { links: 0, resources: 0, hreflang: headerOverlongHreflang };
 }
 
 /**

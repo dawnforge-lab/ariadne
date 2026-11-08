@@ -992,7 +992,18 @@ beforeAll(async () => {
     },
     {
       crawlId: crawlM, metricId: "sitemap.structure", scope: "site", scopeValue: "",
-      value: { docs: 2, totalUrls: 376, oversizedDocsSkipped: 0, urlCapBreaches: 0, entryCapReached: false },
+      value: {
+        docs: 2,
+        totalUrls: 376,
+        totalMemberships: 376,
+        oversizedDocsSkipped: 0,
+        urlCapBreaches: 0,
+        entryCapReached: false,
+        docCountsExact: true,
+        membershipLimited: false,
+        hreflangLimited: false,
+        overlongLocsSkipped: 0, alternatesCapped: 0,
+      },
     },
     {
       crawlId: crawlM, metricId: "sitemap.structure", scope: "sitemap_doc",
@@ -1632,20 +1643,30 @@ describe("GET /crawls/:id/metrics/:metricId", () => {
     const res = await table("sitemap.structure");
     expect(labels(res)).toEqual([
       "Sitemap",
-      "Entries",
+      "URLs (Site) / Listings (Document)",
       "Over 50,000 Entries",
+      "Listings (All Documents)",
       "Documents",
-      "Documents Dropped For Size",
+      "Documents Over 50 MB",
       "Entry Cap Reached",
+      "Counts Exact",
+      "Membership Cap Reached",
+      "Hreflang Cap Reached",
+      "Addresses Too Long To Store", "Alternates Over Per-URL Cap",
     ]);
     expect(tableRows(res)).toEqual([
       {
         scope: "Site",
         entries: 376,
         over50kEntries: 0,
+        totalMemberships: 376,
         docs: 2,
         oversizedDocsSkipped: 0,
         entryCapReached: false,
+        docCountsExact: true,
+        membershipLimited: false,
+        hreflangLimited: false,
+        overlongLocsSkipped: 0, alternatesCapped: 0,
       },
       // A document row carries its own two facts and NULL — never zero, never
       // false — under the three columns that are the site's alone.
@@ -1653,17 +1674,27 @@ describe("GET /crawls/:id/metrics/:metricId", () => {
         scope: `${SITE}/sitemap_blogs_1.xml`,
         entries: 5,
         over50kEntries: false,
+        totalMemberships: null,
         docs: null,
         oversizedDocsSkipped: null,
         entryCapReached: null,
+        docCountsExact: null,
+        membershipLimited: null,
+        hreflangLimited: null,
+        overlongLocsSkipped: null, alternatesCapped: null,
       },
       {
         scope: `${SITE}/sitemap_products_1.xml`,
         entries: 371,
         over50kEntries: false,
+        totalMemberships: null,
         docs: null,
         oversizedDocsSkipped: null,
         entryCapReached: null,
+        docCountsExact: null,
+        membershipLimited: null,
+        hreflangLimited: null,
+        overlongLocsSkipped: null, alternatesCapped: null,
       },
     ]);
   });
@@ -2990,40 +3021,40 @@ describe("GET /crawls/:id/export?format=csv", () => {
   it("writes one row per referenced file, with the class that makes an empty status readable", async () => {
     const res = await callCsv(`/crawls/${crawlF}/export?format=csv&view=resources`);
     expect(res.records[0]).toEqual([
-      "url", "kind", "fetchClass", "status", "bytes", "bytesSource",
+      "url", "kind", "shareImage", "fetchClass", "status", "bytes", "bytesSource",
       "contentType", "cacheControl", "fetchReason", "referencingPages",
     ]);
 
     // A file the pass weighed, carried by TWO pages and appearing ONCE: the
     // whole reason `resources` and `page_resources` are separate tables.
     expect(rowWhere(res, "url", `${SITE}/a.png`)).toEqual([
-      `${SITE}/a.png`, "image", "ok", "200", "120000", "header",
+      `${SITE}/a.png`, "image", "false", "ok", "200", "120000", "header",
       "image/png", "public, max-age=600", "", "2",
     ]);
     // The server answered, and what it said was 404. Empty bytes here is "a
     // file we could not have has no weight to report".
     expect(rowWhere(res, "url", `${SITE}/b.css`)).toEqual([
-      `${SITE}/b.css`, "css", "client_error", "404", "", "", "text/html", "", "", "1",
+      `${SITE}/b.css`, "css", "false", "client_error", "404", "", "", "text/html", "", "", "1",
     ]);
     // SEEN, NOT ASKED. Empty class, empty status, and a reason naming the cap —
     // the row a reader would otherwise count as a file that is fine.
     expect(rowWhere(res, "url", `${SITE}/c.js`)).toEqual([
-      `${SITE}/c.js`, "js", "", "", "", "", "", "", "resource-cap", "1",
+      `${SITE}/c.js`, "js", "false", "", "", "", "", "", "", "resource-cap", "1",
     ]);
     // The two robots cases, told apart by CLASS since P12-T1 and still carrying
     // the sentence that says which host and why. The class is the cheap answer
     // a count can be built on; the reason is the one a person reads.
     expect(rowWhere(res, "url", "https://cdn.example/d.png")).toEqual([
-      "https://cdn.example/d.png", "image", "robots_unreachable", "", "", "", "", "",
+      "https://cdn.example/d.png", "image", "false", "robots_unreachable", "", "", "", "", "",
       "robots.txt unreachable (503): complete disallow", "1",
     ]);
     expect(rowWhere(res, "url", "https://cdn.example/e.png")).toEqual([
-      "https://cdn.example/e.png", "image", "robots_denied", "", "", "", "", "",
+      "https://cdn.example/e.png", "image", "false", "robots_denied", "", "", "", "", "",
       "robots.txt (cdn.example) disallows this URL", "1",
     ]);
     // `counted` beside `header` on the row above: a measurement and a claim,
     // told apart in the file rather than added together in a report.
-    expect(rowWhere(res, "url", `${SITE}/hostile.css`)[5]).toBe("counted");
+    expect(rowWhere(res, "url", `${SITE}/hostile.css`)[6]).toBe("counted");
   });
 
   // THE GUARD IS THE POINT OF THE WHOLE FILE. A crawled title is attacker text
@@ -3044,7 +3075,7 @@ describe("GET /crawls/:id/export?format=csv", () => {
     // rather than in a page's body — the guard is uniform because the inventory
     // of "which columns hold attacker text" is the thing that goes stale.
     const files = await callCsv(`/crawls/${crawlF}/export?format=csv&view=resources`);
-    expect(rowWhere(files, "url", `${SITE}/hostile.css`)[7]).toBe(`'${HOSTILE_CACHE_CONTROL}`);
+    expect(rowWhere(files, "url", `${SITE}/hostile.css`)[8]).toBe(`'${HOSTILE_CACHE_CONTROL}`);
     expect(files.text).toContain(`,'${HOSTILE_CACHE_CONTROL}`);
     expect(files.text).not.toContain(`,${HOSTILE_CACHE_CONTROL}`);
   });
@@ -3097,11 +3128,13 @@ describe("GET /crawls/:id/export?format=csv", () => {
       `/crawls/${crawlM}/export?format=csv&view=metric_table&metricId=sitemap.structure`,
     );
     expect(sitemap.records[0]).toEqual([
-      "Sitemap", "Entries", "Over 50,000 Entries", "Documents",
-      "Documents Dropped For Size", "Entry Cap Reached",
+      "Sitemap", "URLs (Site) / Listings (Document)", "Over 50,000 Entries",
+      "Listings (All Documents)", "Documents",
+      "Documents Over 50 MB", "Entry Cap Reached", "Counts Exact",
+      "Membership Cap Reached", "Hreflang Cap Reached", "Addresses Too Long To Store", "Alternates Over Per-URL Cap",
     ]);
     expect(rows(sitemap)[1]).toEqual([
-      `${SITE}/sitemap_blogs_1.xml`, "5", "false", "", "", "",
+      `${SITE}/sitemap_blogs_1.xml`, "5", "false", "", "", "", "", "", "", "", "", "",
     ]);
 
     // The header is written for a metric that measured nothing too: a zero-row
@@ -4258,5 +4291,36 @@ describe("GET /rules — the order of the sections", () => {
     // section off the catalog with a single filter and no sort.
     const kinds = rules.map((rule) => (rule.kind === "metric" ? "m" : "f"));
     expect(kinds.join("")).toMatch(/^f+m+$/);
+  });
+});
+
+// Task 3 (Phase 26c). Appended at the end so no line the surface document cites
+// moves. A share image is a `resources` row named by its own flag: the CSV says
+// `shareImage` true and `referencingPages` 0, and `crawl_status.resources`
+// counts it, because the resource pass fetches it like any page file.
+describe("a share image on the resources surface", () => {
+  const crawlId = `crawl_query_share_${Date.now().toString(36)}`;
+
+  afterAll(async () => {
+    await db.delete(crawls).where(eq(crawls.id, crawlId));
+  });
+
+  it("is flagged on the CSV row, carried by no page, and counted by crawl_status", async () => {
+    await seedCrawl(crawlId);
+    await db.insert(resources).values({
+      crawlId, url: `${SITE}/og-share.png`, kind: "image", shareImage: true,
+      fetchClass: "ok", statusCode: 200, contentType: "image/png",
+      bytes: 50_000, bytesSource: "header", fetchedAt: new Date(), fetchMs: 8,
+    });
+    const csv = await callCsv(`/crawls/${crawlId}/export?format=csv&view=resources`);
+    expect(csv.records[0]?.slice(0, 3)).toEqual(["url", "kind", "shareImage"]);
+    expect(csv.records.slice(1)).toEqual([
+      [
+        `${SITE}/og-share.png`, "image", "true", "ok", "200", "50000", "header",
+        "image/png", "", "", "0",
+      ],
+    ]);
+    const detail = await call(`/crawls/${crawlId}`);
+    expect(detail.body["resources"]).toMatchObject({ seen: 1, fetched: 1 });
   });
 });

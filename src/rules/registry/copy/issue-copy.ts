@@ -320,11 +320,11 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
 
   // ------------------------------------------------------------- extraction
   "extraction.not-recorded": {
-    title: "Crawl: Page facts not recorded on this crawl",
+    title: "Crawl: Page or sitemap facts not recorded on this crawl",
     explanation:
-      "Some or all pages in this crawl were extracted before the page facts the social, structure, link-hygiene and image checks read were recorded, so those checks were left unrun rather than reported clean. The Pages Without Version 2 Facts column counts the pages affected.",
+      "Some or all pages in this crawl were extracted before the page facts the social, structure, link-hygiene, image, hreflang and URL-length checks read were recorded, or its sitemaps were read before each sitemap's URLs and hreflang alternates were recorded, so those checks were left unrun rather than reported clean. The Pages Without Current Facts column counts the pages affected, Required Extraction Version names the version they need, and Sitemap Facts Recorded says whether the sitemap facts are on record.",
     howToFix:
-      "Re-crawl the site. These page facts are recorded for every page on crawls from this version onwards.",
+      "Re-crawl the site. These page and sitemap facts are recorded on every crawl from this version onwards.",
   },
   // ----------------------------------------------------------------- social
   "social.og-incomplete": {
@@ -355,6 +355,13 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
     howToFix:
       "Add <meta name=\"twitter:card\" content=\"summary_large_image\"> and a title to the template, and write every twitter: tag with name= rather than property=.",
   },
+  "social.image-insecure": {
+    title: "Social: Share image served over http on an https page",
+    explanation:
+      "Indexable, self-canonical https pages whose og:image is an http address and which declare no https og:image:secure_url; the OG Image column shows the address and OG Image Secure URL the secure one if given. Browsers never load an og:image, so this is not mixed content, but a platform that insists on https may show the shared link with no image.",
+    howToFix:
+      "Serve the share image over https and use that address in og:image, or add an og:image:secure_url tag that names the https address.",
+  },
   "social.og-duplicate": {
     title: "Social: Open Graph title or description duplicate",
     explanation:
@@ -365,9 +372,9 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
   "social.image-broken": {
     title: "Social: Share image relative, broken, over 5 MB or not checked",
     explanation:
-      "Indexable, self-canonical pages whose og:image or twitter:image is a relative or malformed address, answered with a status other than 200, or is larger than 5 MB, so platforms show the shared link with no image. The Image Problems column lists each tag, its address and the problem. An image listed as not fetched was skipped by the file check or got no answer: whether it loads is unknown, which is not the same as broken (when the file check was off for the whole crawl, no image is listed for that and the crawl-level notice says so once).",
+      "Indexable, self-canonical pages whose og:image or twitter:image is a relative or malformed address or one longer than 2,500 characters, answered with a status other than 200, or is larger than 5 MB, so platforms show the shared link with no image. The Image Problems column lists each tag, its address and the problem. An image listed as not fetched was skipped by the file check or got no answer: whether it loads is unknown, which is not the same as broken (when the file check was off for the whole crawl, no image is listed for that and the crawl-level notice says so once).",
     howToFix:
-      "Use an absolute https address for og:image and twitter:image, serve the file with a 200 and keep it under 5 MB. Re-run or resume the crawl to check an image listed as not fetched.",
+      "Use a short, absolute https address for og:image and twitter:image, serve the file with a 200 and keep it under 5 MB. Re-run or resume the crawl to check an image listed as not fetched.",
   },
   // --------------------------------------------------------------- security
   "security.headers-missing": {
@@ -421,6 +428,13 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
     howToFix:
       "Add the alternate domains as extra start URLs so one crawl covers the whole international set, or crawl each domain and read the results together. For an uncrawled alternate on the crawled domain, check the robots.txt rule or crawl limit that excluded it.",
   },
+  "hreflang.declarations-incomplete": {
+    title: "Hreflang: Annotations not read in full",
+    explanation:
+      "Some hreflang annotations on this site were not read in full: a sitemap could not be read, the sitemaps were only partly read because a size, entry, file-count or nesting limit was reached, or a page lists 200 or more alternates in one place (its HTML, HTTP Link header or sitemap entry), of which only the first 200 are kept. When the sitemaps were only partly read, missing return links, missing self-references, missing x-default and sets naming only the page itself were not checked; after a sitemap that could not be read those checks did run, but a return link or self-reference reported missing may be in the unread file. Pages at the 200 limit are not checked for a missing self-reference, x-default or other alternate, and are never reported as failing to return a link.",
+    howToFix:
+      "Act on the causes the Reason column names, then re-crawl: where a sitemap could not be read, fix it (each is reported as Sitemaps: Sitemap could not be read); where the sitemaps were only partly read, split any sitemap over 50 MB into smaller files; where a page lists 200 or more alternates, check its template for a block emitted twice.",
+  },
   "hreflang.coverage": {
     title: "Hreflang: Share of pages declaring hreflang",
     explanation:
@@ -459,7 +473,7 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
   "hreflang.multiple-entries": {
     title: "Hreflang: Same code listed for different URLs",
     explanation:
-      "Pages whose hreflang block gives one language code to two or more different URLs; spellings of one URL that differ only by fragment, host case or query order count as one. Search engines cannot tell which URL the code stands for and may ignore both. Only the block on the page is read, and the alternates are not fetched.",
+      "Pages whose HTML, HTTP Link header or sitemap entry gives one language code to two or more different URLs, each source read on its own; spellings of one URL that differ only by fragment, host case or query order count as one, and the alternates are not fetched. Search engines cannot tell which URL the code stands for and may ignore both. Two sources that each give the code one different URL are not this finding: that is reported as Hreflang: Sources disagree on an alternate URL.",
     howToFix:
       "Keep one URL per code and remove the stale or duplicate entry. Generate the block from one mapping so a code cannot be added twice.",
   },
@@ -473,9 +487,16 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
   "hreflang.self-only": {
     title: "Hreflang: Block names only the page itself",
     explanation:
-      "Pages whose hreflang block lists only the page's own URL, so no other version is named; pages canonicalised to another URL are ignored. The block is valid but connects nothing, which usually means the other versions were left out of the template.",
+      "Pages whose hreflang annotations, in the HTML, the HTTP Link header and the sitemap together, list only the page's own URL, so no other version is named; pages canonicalised to another URL are ignored. The annotation is valid but connects nothing, which usually means the other versions were left out of the template or the sitemap.",
     howToFix:
       "Add the other language versions to the block, or remove the block if the page has no alternate versions.",
+  },
+  "hreflang.source-conflict": {
+    title: "Hreflang: Sources disagree on an alternate URL",
+    explanation:
+      "Pages annotated in more than one place (the HTML, the HTTP Link header, the sitemap) where one language code points to different URLs in two of them; the columns show the first such code with each source's URLs, how many codes disagree, and the codes only one source lists, which is not a fault because search engines combine the sources. Search engines read every source, so the page claims two versions of one language and the set may be ignored. Pages canonicalised to another URL are ignored, and the alternates are not fetched.",
+    howToFix:
+      "Generate the HTML, header and sitemap annotations from one language-to-URL mapping, or keep hreflang in one place only and remove it from the others.",
   },
   "hreflang.unlinked-target": {
     title: "Hreflang: Alternate has no internal links",
@@ -854,7 +875,7 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
   "sitemap.invalid": {
     title: "Sitemaps: Sitemap could not be read",
     explanation:
-      "Sitemap documents that could not be read: a 4xx or 5xx, no response, a document over the size limit, an unsupported encoding, a non-XML response such as an HTML page served with 200, or a root element that is neither urlset nor sitemapindex. Up to 50 failures are listed and the count is exact. Their URLs are invisible to search engines.",
+      "Sitemap documents that could not be read: a 4xx or 5xx, no response, an unsupported encoding (and, on crawls made before oversized documents were reported on their own, a document over the size limit), a non-XML response such as an HTML page served with 200, or a root element that is neither urlset nor sitemapindex. Up to 50 failures are listed and the count is exact. Their URLs are invisible to search engines.",
     howToFix:
       "Request each listed sitemap URL and check the response. A sitemap must be well-formed XML with a urlset or sitemapindex root, served with 200 and an XML content type; remove index entries pointing at sitemaps that no longer exist.",
   },
@@ -889,9 +910,16 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
   "sitemap.over-50k-urls": {
     title: "Sitemaps: Sitemap over 50,000 URLs",
     explanation:
-      "A sitemap document that lists more than 50,000 URLs, the protocol limit per document; entries past it are not read. The row gives the document and its entry count, a lower bound because a URL listed in two documents is counted once and the crawl stops reading at its entry cap, which can fall before a document's end. No finding is therefore not proof that every document is under the limit.",
+      "A sitemap document that lists more than 50,000 URLs, the protocol limit per document; entries past it are not read. The row gives the document and its entry count, which is exact: a URL listed in two documents counts once in each, except that a row saying the membership cap was reached is a floor. A crawl made before sitemap memberships were recorded cannot judge this and reports nothing, and a re-crawl answers it.",
     howToFix:
       "Split the sitemap into several documents of 50,000 URLs or fewer and list them in a sitemap index.",
+  },
+  "sitemap.oversized": {
+    title: "Sitemaps: Sitemap over 50 MB",
+    explanation:
+      "A sitemap document that is larger than 50 MB (52,428,800 bytes) uncompressed, the protocol limit per document. Search engines reject the whole file, not just the excess; this crawl read up to the limit and kept the URLs it had read, so those were crawled and judged. The row gives the document, the bytes read and the URLs kept, and entries past that point were not read.",
+    howToFix:
+      "Split the sitemap into several documents under 50 MB uncompressed and 50,000 URLs each, and list them in a sitemap index.",
   },
   "sitemap.redirected": {
     title: "Sitemaps: Sitemap URLs that redirect",
@@ -903,14 +931,21 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
   "sitemap.structure": {
     title: "Sitemaps: Sitemap structure",
     explanation:
-      "How sitemap entries are distributed across sitemap documents: how many documents contributed at least one unique entry, total entries, documents dropped for size, documents over the 50,000-entry limit, whether the crawl's entry cap stopped collection (every count is then a floor and the 50,000 check may miss), and the largest 50 documents with their entry counts. An entry in several documents is counted once.",
+      "How sitemap entries are distributed across sitemap documents: how many documents contributed at least one unique entry, total distinct URLs, total listings across documents, documents over the 50 MB limit (read up to the limit since this version; dropped whole on older crawls), documents over the 50,000-entry limit, whether the crawl's entry cap stopped collection (every count is then a floor and the 50,000 check may miss), whether the counts are exact, the sitemap walk's own caps (memberships, hreflang alternates), how many hreflang alternates past 200 in one URL entry were read and not stored, how many addresses were too long to store (a location, an alternate's target, or a location and its sitemap's address together), and the largest 50 documents with their entry counts. Total URLs counts each URL once; total listings and each document's count are listings, so an entry in several documents counts in each (listings in this document), and on a crawl made before that was recorded they are counted once, under the first.",
     howToFix:
       "Split sitemaps by content type so stale sections can be seen and submitted separately. Split any document over 50,000 entries; entries past the limit are not read.",
+  },
+  "sitemap.url-in-multiple": {
+    title: "Sitemaps: URL listed in more than one sitemap",
+    explanation:
+      "URLs that appear in two or more sitemap documents of the site. The URL is crawled once and judged once, so this is redundancy rather than an error, but it often means overlapping generators or a section listed both in its own sitemap and in a catch-all one. The row gives the URL, up to 10 of the documents and the exact number of documents; a note says when the crawl's membership cap was reached and later listings were not recorded.",
+    howToFix:
+      "List each URL in one sitemap only. Remove the overlap from the catch-all sitemap, or make the generators agree on which document owns each section.",
   },
   "sitemap.url-too-long": {
     title: "Sitemaps: URL over 2,048 characters",
     explanation:
-      "Sitemap entries whose URL is longer than 2,048 characters. Search engines may drop or truncate entries that long. The row gives the start of the URL and its length.",
+      "Sitemap entries whose URL is longer than 2,048 characters. Search engines may drop or truncate entries that long. The row gives the start of the URL and its length, and one summary row counts the sitemap addresses the crawl could not store: locs and alternate targets over 2,500 characters, and listings whose URL and sitemap URL together are over 2,500 characters.",
     howToFix:
       "Shorten the URL or remove the entry. A very long address is usually a filter or session parameter that should not be in the sitemap.",
   },
@@ -1216,6 +1251,13 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
     howToFix:
       "Shorten the URL to the words that describe the page, drop needless folders and parameters, and 301 the old URL to the new one.",
   },
+  "url.reference-too-long": {
+    title: "URL: Links or files with addresses over 2,500 characters",
+    explanation:
+      "Pages that link to, load or name as an hreflang alternate an address longer than 2,500 characters; the row counts each kind, one per reference. Addresses that long were not followed or checked by this crawl, and search engines may ignore or truncate them. They are almost always a filter, tracking or session value repeated into the URL by a template.",
+    howToFix:
+      "Find the template that builds the address and shorten it to the path and the parameters the page needs. Remove the reference if the target is not a page or file anyone should reach.",
+  },
   "url.uppercase": {
     title: "URL: Upper-case letters in the path",
     explanation:
@@ -1324,14 +1366,14 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
   "links.no-anchor-text": {
     title: "Links: Internal links with no anchor text",
     explanation:
-      "Pages with internal links that nothing names: no text, no image alt text and no aria-label on the link itself (a label on an element inside the link, aria-labelledby, a title attribute or an svg <title> is not read). The anchor is what tells visitors, screen readers and search engines what the target is about. Only the first anchor seen for each target is stored, so a target first linked without text and later with text is listed too.",
+      "Pages with internal links that nothing names: no text, no image alt text, no aria-label, no aria-labelledby, no aria-label on an element inside the link, no svg <title> and no title attribute. The anchor is what tells visitors, screen readers and search engines what the target is about. Only the first anchor seen for each target is stored, so a target first linked without text and later with text is listed too.",
     howToFix:
       "Add descriptive text to each link, or an alt attribute that describes the target to each image that is the only content of a link.",
   },
   "links.aria-label-only": {
-    title: "Links: Internal links named only by aria-label",
+    title: "Links: Named Only by Attributes",
     explanation:
-      "Pages with internal links that have no visible text and no image alt text, only an aria-label, which the row lists. The label names the link for screen readers, but search engines document visible text and image alt as anchor text, not aria-label, so the link passes no anchor relevance to its target. This is often fine for icon links such as cart, wishlist or account.",
+      "Pages with internal links that have no visible text and no image alt text, only a name from attributes: an aria-label, aria-labelledby (listed as the ids it points to, not the text they hold), an aria-label on an element inside the link, an icon's svg <title> or a title attribute; the row lists each name and where it came from. These name the link for screen readers, but search engines document visible text and image alt as anchor text, not these attributes, so the link passes no anchor relevance to its target. This is often fine for icon links such as cart, wishlist or account.",
     howToFix:
       "Where the target matters for search, give the link visible text or an image with alt text that describes the target; icon links to pages such as the cart, wishlist or account can stay as they are.",
   },

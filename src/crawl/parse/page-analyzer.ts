@@ -471,7 +471,10 @@
  *    the candidate moves into the body. Document order, deduped, capped at
  *    `HEAD_LOST_MAX`. `<body>` and `</head>` confirm but are never lost, so
  *    a tracking pixel's `<noscript><img>` last in the head is an early close
- *    with `lost: []`. The confirmation rule itself is unchanged.
+ *    with `lost: []`. A `<template>`'s content is neither evidence nor lost:
+ *    a start tag inside one neither confirms the candidate nor joins `lost`
+ *    (`structureOnOpenTag` reads both at `templateDepth === 0`), since
+ *    template content is in no document's head.
  *
  * EVERY PHASE 26b STRING IS MADE STORABLE where it is capped, by the one shared
  * `storableCap` (src/crawl/storable-text.ts, also the render console's):
@@ -487,10 +490,59 @@
  * code point. The pre-26b caps (`h1Text`, the placeholder window, …) still
  * cut UTF-16 units: a half pair left at their edge reaches the writer and is
  * stored as U+FFFD, never as a failed insert.
+ *
+ * Phase 26c (P26c-T2, extraction version 3) keeps every reference out of the
+ * index it cannot fit. A resolved URL over `INDEXED_URL_MAX` (url-utils.ts) is
+ * a btree entry Postgres refuses, so one such `src` made the whole page's
+ * insert throw in 26b. Each reference site now measures the URL its row would
+ * hold, after resolving, with `fitsIndex`:
+ *  - a link (`closeAnchor`, after `normalizeUrl`) and a resource
+ *    (`addResource`, after `normalizeUrl`) over the limit are dropped and
+ *    counted in `overlongUrls.links` / `.resources`;
+ *  - an hreflang pair is measured by `hreflangTarget`, the resolution the
+ *    writer stores (`new URL(...).href`, not `normalizeUrl`: the target column
+ *    keeps fragment and parameter order), and counted in `.hreflang`;
+ *  - a share image resolved by `shareImage` gets a null ref and
+ *    `social.imageRefTooLong` set, so it has no `resources` row.
+ * A refused reference takes a slot under its kind's existing cap (links 2,000,
+ * `MAX_RESOURCE_REFS`, `MAX_HREFLANG_PAIRS`) exactly as a kept one does, so a
+ * hostile page of refused URLs cannot make the pass resolve without bound. The
+ * counts are of references, not distinct URLs: deduping would mean keeping the
+ * refused strings. `url.reference-too-long` reports the counts; `url-policy`'s
+ * `too_long` refusal keeps the same URLs off every fetch path.
+ * Phase 26c (P26c-T6) exports `MAX_HREFLANG_PAIRS` so the hreflang pairs of a
+ * `Link` header (fetch-page.ts) are capped at the same 200; nothing here reads
+ * the header.
+ * Phase 26c (P26c-T4) also records `og:image:secure_url` as one more social
+ * tag (`SOCIAL_SLOTS`: first value, count, conflict, capped at
+ * `SOCIAL_URL_MAX`); it is a plain fact, not a judged share image.
+ * Phase 26c (P26c-T5) records a link's wider name, `PageLink.nameHint` and
+ * `nameHintSource` (`links.name_hint` / `name_hint_source`), as tokenizer state
+ * on `OpenAnchor`, and only for a link whose anchor is empty and whose own
+ * `aria-label` is null. Precedence, highest first, approximating the
+ * accessible-name order: the `<a>`'s `aria-labelledby` (the trimmed id list,
+ * unresolved, since resolving ids needs the whole document: deviation 8); the
+ * first non-blank `aria-label` on an element opened inside the link; the first
+ * non-blank text of a `<title>` inside an `<svg>` inside the link (whitespace
+ * collapsed); the `<a>`'s `title`. Each is trimmed and cut at `ARIA_LABEL_MAX`
+ * through `storableCap`; only the winner is stored. The svg title is read in
+ * `ontext` above the `suppressDepth` return, by its own per-anchor state, so it
+ * never reaches the anchor text, and `titleCount` / `titleOutsideHead` /
+ * `titleDepth` keep their svg guard. `<noscript>` content names nothing.
+ * Phase 26c (final review I1): neither an `aria-hidden="true"` subtree (the
+ * value trimmed and case-insensitive; the hidden element itself included) nor
+ * `<template>` content offers an inner aria-label or svg title, since both are
+ * out of the accessibility tree; while `templateDepth > 0` no inner candidate is
+ * read, so a link inside a template keeps only its own attributes' hints. An
+ * `<a aria-hidden="true">` hides its content, so it takes no inner candidate,
+ * but its own `aria-labelledby` and `title` still count: the hint records what
+ * the link's own markup offers, as `ariaLabel` records its own `aria-label`
+ * whatever `aria-hidden` says (owner call O1), rather than computing the empty name
+ * accname gives a hidden root.
  */
 import { createHash } from "node:crypto";
 import { Parser } from "htmlparser2";
-import { normalizeUrl, isSameOrigin } from "./url-utils.js";
+import { fitsIndex, normalizeUrl, isSameOrigin } from "./url-utils.js";
 import { simhash64 } from "./simhash.js";
 import { storableCap } from "../storable-text.js";
 import {
@@ -514,11 +566,15 @@ import {
   type HtmlStructure,
   type InsecureRefKind,
   type InsecureRefs,
+  type OverlongUrls,
   type RefreshFact,
   type RobotsMetaEntry,
   type SocialFacts,
   type SocialTag,
 } from "./page-facts.js";
+
+/** Where a link's `nameHint` came from (Phase 26c), highest precedence first. */
+export type NameHintSource = "aria-labelledby" | "inner-aria-label" | "svg-title" | "title";
 
 /** A link as the `links` table wants it. */
 export interface PageLink {
@@ -533,6 +589,18 @@ export interface PageLink {
    * text, not `aria-label`.
    */
   ariaLabel: string | null;
+  /**
+   * Phase 26c: the link's wider name, recorded only when `anchor` is empty AND
+   * `ariaLabel` is null; otherwise null. The first of, in order: the `<a>`'s
+   * `aria-labelledby` (the id list as written, unresolved: deviation 8), the
+   * first non-blank `aria-label` on an element inside the link, the first
+   * non-blank text of a `<title>` inside an `<svg>` inside the link (whitespace
+   * collapsed), and the `<a>`'s `title`. Trimmed and cut at `ARIA_LABEL_MAX`
+   * through `storableCap`. Only the winner is kept; null when none names it.
+   */
+  nameHint: string | null;
+  /** Where `nameHint` came from; null exactly when `nameHint` is. */
+  nameHintSource: NameHintSource | null;
   /** Raw `rel` attribute, lowercased; null when the attribute was absent. */
   rel: string | null;
   nofollow: boolean;
@@ -799,7 +867,8 @@ export interface PageAnalysis {
    * never loads them, so they become `resources` rows with no `page_resources`
    * edge (deviation 3). A value that is not absolute http(s) (relative, another
    * scheme, empty) or that `normalizeUrl` refuses is skipped here and stays,
-   * raw, in `social`.
+   * raw, in `social`; so is one that resolves over `INDEXED_URL_MAX` (Phase
+   * 26c, `social.imageRefTooLong`).
    */
   socialImageRefs: string[];
   /** The first `<h2>`'s text, collected exactly as `h1Text` is; capped at `H2_TEXT_MAX`. */
@@ -851,6 +920,13 @@ export interface PageAnalysis {
    * header's T4 block for each part.
    */
   htmlStructure: HtmlStructure;
+  // ---- Phase 26c (extraction version 3) ----
+  /**
+   * References whose resolved URL is over `INDEXED_URL_MAX`, counted per kind
+   * and kept out of `links`, `resourceRefs` and `hreflang` (Phase 26c; the
+   * module header's Phase 26c block). Never null; zeros on a page with none.
+   */
+  overlongUrls: OverlongUrls;
 }
 
 /**
@@ -899,10 +975,41 @@ const ABSOLUTE_HTTP = /^https?:/i;
  * `social.image-broken` reads the stored string back rather than resolving
  * again (final review I1). Exported so a test can seed exactly what the
  * analyzer would have stored.
+ *
+ * Phase 26c: a resolved address over `INDEXED_URL_MAX` is no key at all (the
+ * `resources` btree refuses it), so `ref` is null and `tooLong` is true; the
+ * analyzer stores the pair as `imageRefs` / `imageRefTooLong`.
  */
+export function shareImage(
+  value: string,
+  pageUrl: string,
+): { ref: string | null; tooLong: boolean } {
+  if (!ABSOLUTE_HTTP.test(value)) return { ref: null, tooLong: false };
+  const resolved = normalizeUrl(value, pageUrl);
+  if (resolved !== null && !fitsIndex(resolved)) return { ref: null, tooLong: true };
+  return { ref: resolved, tooLong: false };
+}
+
+/** `shareImage`'s ref alone: the `resources` key the analyzer stores, or null. */
 export function shareImageRef(value: string, pageUrl: string): string | null {
-  if (!ABSOLUTE_HTTP.test(value)) return null;
-  return normalizeUrl(value, pageUrl);
+  return shareImage(value, pageUrl).ref;
+}
+
+/**
+ * The `hreflang.target_url` the writer stores for one `<link rel=alternate
+ * hreflang>` href: resolved against the page with `new URL(...).href`, fragment
+ * and parameter order kept, which is not `normalizeUrl`'s spelling. Null when it
+ * will not resolve; the writer counts those (`hreflangUnresolved`). The one
+ * definition, read by the analyzer to measure a target against
+ * `INDEXED_URL_MAX` and by persist.ts to write it, so the length checked is the
+ * length stored.
+ */
+export function hreflangTarget(href: string, pageUrl: string): string | null {
+  try {
+    return new URL(href, pageUrl).href;
+  } catch {
+    return null;
+  }
 }
 /**
  * The start tags the tree builder's "in head" insertion mode keeps in the head
@@ -1108,6 +1215,7 @@ const SOCIAL_SLOTS: Record<SocialTag, SocialSlot> = {
   "og:title": { group: "og", key: "title", cap: SOCIAL_TEXT_MAX },
   "og:description": { group: "og", key: "description", cap: SOCIAL_TEXT_MAX },
   "og:image": { group: "og", key: "image", cap: SOCIAL_URL_MAX },
+  "og:image:secure_url": { group: "og", key: "image:secure_url", cap: SOCIAL_URL_MAX },
   "og:url": { group: "og", key: "url", cap: SOCIAL_URL_MAX },
   "og:type": { group: "og", key: "type", cap: SOCIAL_TEXT_MAX },
   "og:site_name": { group: "og", key: "site_name", cap: SOCIAL_TEXT_MAX },
@@ -1120,7 +1228,8 @@ const isSocialTag = (value: string | undefined): value is SocialTag =>
   value !== undefined && Object.hasOwn(SOCIAL_SLOTS, value);
 const ROBOTS_META_BOT_NAMES: ReadonlySet<string> = new Set(ROBOTS_META_BOTS);
 const MAX_HEADING_ORDER = 500;
-const MAX_HREFLANG_PAIRS = 200;
+/** Exported (P26c-T6): fetch-page.ts caps the `Link` header's pairs at the same number. */
+export const MAX_HREFLANG_PAIRS = 200;
 const MAX_STRUCTURED_DATA_BLOCKS = 50;
 /**
  * Per-block buffer cap for JSON-LD text, in characters. A block over this is
@@ -1247,12 +1356,50 @@ interface OpenAnchor {
   rel: string | null;
   ariaLabel: string | null;
   text: string[];
+  // ---- Phase 26c: the wider name's candidates, each read as `ariaLabelOf` ----
+  /** The `<a>`'s own `aria-labelledby` (the id list) and `title`. */
+  labelledBy: string | null;
+  title: string | null;
+  /** The first non-blank `aria-label` on an element opened inside the link. */
+  innerAriaLabel: string | null;
+  /** `<svg>` elements open inside the link: a `<title>` is read only under one. */
+  svgDepth: number;
+  /** The text of the `<svg><title>` being read; null while none is open. */
+  svgTitleParts: string[] | null;
+  /** The first `<svg><title>` whose text is not blank, collapsed and capped. */
+  svgTitle: string | null;
+  /**
+   * The `elementDepth` of each `aria-hidden="true"` element open in the link,
+   * the `<a>` itself included (final review I1): while any is open, no inner
+   * aria-label or svg title is a candidate. Popped by depth, never by name.
+   */
+  ariaHiddenOpenedAt: number[];
+}
+
+/** `aria-hidden="true"`, the value read trimmed and case-insensitively. */
+function ariaHidden(attribs: Record<string, string>): boolean {
+  return attribs["aria-hidden"]?.trim().toLowerCase() === "true";
 }
 
 /** An `aria-label` as `PageLink.ariaLabel` stores it: trimmed, capped, null when blank. */
 function ariaLabelOf(raw: string | undefined): string | null {
   const trimmed = raw?.trim() ?? "";
   return trimmed === "" ? null : storableCap(trimmed, ARIA_LABEL_MAX);
+}
+
+/** The winning wider name of a closed anchor (Phase 26c; `PageLink.nameHint`). */
+function nameHintOf(
+  anchor: OpenAnchor,
+): { nameHint: string | null; nameHintSource: NameHintSource | null } {
+  if (anchor.labelledBy !== null) {
+    return { nameHint: anchor.labelledBy, nameHintSource: "aria-labelledby" };
+  }
+  if (anchor.innerAriaLabel !== null) {
+    return { nameHint: anchor.innerAriaLabel, nameHintSource: "inner-aria-label" };
+  }
+  if (anchor.svgTitle !== null) return { nameHint: anchor.svgTitle, nameHintSource: "svg-title" };
+  if (anchor.title !== null) return { nameHint: anchor.title, nameHintSource: "title" };
+  return { nameHint: null, nameHintSource: null };
 }
 
 /**
@@ -1411,6 +1558,8 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
   // whole, never capped), set when that first value is met; null while the tag
   // is unseen, which is also what an absent tag stores.
   const socialImageRef: SocialFacts["imageRefs"] = { og: null, x: null };
+  // Phase 26c: set beside the ref, from the same `shareImage` call.
+  const socialImageRefTooLong: SocialFacts["imageRefTooLong"] = { og: false, x: false };
 
   // JSON-LD is buffered one block at a time: the tokenizer hands its text over
   // in pieces, and only the closing </script> says the block is complete.
@@ -1517,6 +1666,12 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
   // worded for exactly that: a reference dropped unexamined, which is all this
   // position can honestly claim. See `PageAnalysis.resourceRefsCapped`.
   let resourceRefsCapped = false;
+  // Phase 26c: references refused for being over `INDEXED_URL_MAX`, per kind.
+  // Each refusal takes a slot under its kind's cap, as a kept reference does,
+  // so a page of refused URLs cannot make the pass resolve without bound.
+  let overlongLinks = 0;
+  let overlongResources = 0;
+  let overlongHreflang = 0;
   let pictureDepth = 0;
   const addResource = (raw: string | undefined, kind: ResourceKind) => {
     if (raw === undefined) return;
@@ -1524,15 +1679,21 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
     // Before the cap check, deliberately: a `data:` URI or a `javascript:` href
     // is not a resource at all, so turning one away is not a truncation.
     if (value === "" || SKIPPED_RESOURCE_PROTOCOLS.test(value)) return;
-    if (resourceRefs.size >= MAX_RESOURCE_REFS) {
+    if (resourceRefs.size + overlongResources >= MAX_RESOURCE_REFS) {
       resourceRefsCapped = true;
       return;
     }
     const resolved = normalizeUrl(value, pageUrl);
+    if (resolved === null) return;
+    // Phase 26c: no `resources` row can hold it; counted, never stored.
+    if (!fitsIndex(resolved)) {
+      overlongResources += 1;
+      return;
+    }
     // First kind wins, as the first anchor wins for a link target: one URL
     // referenced as both a script and an image is one file, and its kind is
     // whichever the document named first.
-    if (resolved === null || resourceRefs.has(resolved)) return;
+    if (resourceRefs.has(resolved)) return;
     resourceRefs.set(resolved, { url: resolved, kind });
   };
 
@@ -1965,8 +2126,12 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
       // Only the FIRST value of each image tag is judged, so only it is
       // resolved: into a slot of its own, never a resource ref (deviation 3,
       // and the header).
-      if (tag === "og:image") socialImageRef.og = shareImageRef(value, pageUrl);
-      if (tag === "twitter:image") socialImageRef.x = shareImageRef(value, pageUrl);
+      if (tag === "og:image") {
+        ({ ref: socialImageRef.og, tooLong: socialImageRefTooLong.og } = shareImage(value, pageUrl));
+      }
+      if (tag === "twitter:image") {
+        ({ ref: socialImageRef.x, tooLong: socialImageRefTooLong.x } = shareImage(value, pageUrl));
+      }
     } else if (first !== value) socialConflicting.add(tag);
   };
 
@@ -2053,8 +2218,12 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
       hreflangTags.push(code);
       // A pair with no href names no target, so it is not a pair. The code
       // itself survives on the raw `hreflangTags` list.
-      if (href !== undefined && hreflang.length < MAX_HREFLANG_PAIRS) {
-        hreflang.push({ code, href });
+      if (href !== undefined && hreflang.length + overlongHreflang < MAX_HREFLANG_PAIRS) {
+        // Phase 26c: measured as the writer will store it (`hreflangTarget`).
+        // An href that will not resolve is kept for the writer to count.
+        const target = hreflangTarget(href, pageUrl);
+        if (target !== null && !fitsIndex(target)) overlongHreflang += 1;
+        else hreflang.push({ code, href });
       }
     }
     // A stylesheet, matched as a token (`rel="preload stylesheet"` is one) and
@@ -2153,20 +2322,35 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
 
   const closeAnchor = () => {
     if (!openAnchor) return;
-    const { href, rel, ariaLabel, text } = openAnchor;
+    const closing = openAnchor;
+    const { href, rel, ariaLabel, text } = closing;
     openAnchor = null;
-    if (linksByTarget.size >= MAX_EXTRACTED_LINKS) return;
+    if (linksByTarget.size + overlongLinks >= MAX_EXTRACTED_LINKS) return;
     const resolved = normalizeUrl(href, pageUrl);
-    if (!resolved || linksByTarget.has(resolved)) return;
+    if (!resolved) return;
+    // Phase 26c: no `links` row can hold it; counted, never stored, and it
+    // takes no position, so the sequence stays dense.
+    if (!fitsIndex(resolved)) {
+      overlongLinks += 1;
+      return;
+    }
+    if (linksByTarget.has(resolved)) return;
     const anchor = text
       .join("")
       .replace(/\s+/g, " ")
       .trim()
       .slice(0, MAX_ANCHOR_CHARS);
+    // Phase 26c: the wider name only for a link its text and its own
+    // aria-label leave unnamed.
+    const hint =
+      anchor === "" && ariaLabel === null
+        ? nameHintOf(closing)
+        : { nameHint: null, nameHintSource: null };
     linksByTarget.set(resolved, {
       href: resolved,
       anchor,
       ariaLabel,
+      ...hint,
       rel,
       nofollow: (rel ?? "").split(/\s+/).includes("nofollow"),
       isInternal: isSameOrigin(resolved, pageUrl),
@@ -2211,6 +2395,30 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
         if (CHROME_TAGS.has(name)) chromeDepth += 1;
         if (name === "noscript") noscriptDepth += 1;
         if (noscriptDepth > 0) return;
+        // Phase 26c: an element inside an open link may name it. Below the
+        // noscript return, so `<noscript>` content names nothing, as its text
+        // is no anchor; never the `<a>` itself, which closes this one below.
+        // Final review I1: an `aria-hidden="true"` subtree (the element itself
+        // included) and `<template>` content are out of the accessibility tree,
+        // so neither offers a candidate; `templateDepth` already counts this
+        // tag's own `<template>` above.
+        if (openAnchor && name !== "a") {
+          if (ariaHidden(attribs)) openAnchor.ariaHiddenOpenedAt.push(elementDepth);
+          const inert = openAnchor.ariaHiddenOpenedAt.length > 0 || templateDepth > 0;
+          if (!inert && openAnchor.innerAriaLabel === null) {
+            openAnchor.innerAriaLabel = ariaLabelOf(attribs["aria-label"]);
+          }
+          if (name === "svg") openAnchor.svgDepth += 1;
+          else if (
+            !inert &&
+            name === "title" &&
+            openAnchor.svgDepth > 0 &&
+            openAnchor.svgTitle === null &&
+            openAnchor.svgTitleParts === null
+          ) {
+            openAnchor.svgTitleParts = [];
+          }
+        }
         switch (name) {
           case "title":
             // Ignore <title> inside <svg> — only the document title counts.
@@ -2394,6 +2602,15 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
                 rel: attribs["rel"]?.trim().toLowerCase() ?? null,
                 ariaLabel: ariaLabelOf(attribs["aria-label"]),
                 text: [],
+                labelledBy: ariaLabelOf(attribs["aria-labelledby"]),
+                title: ariaLabelOf(attribs["title"]),
+                innerAriaLabel: null,
+                svgDepth: 0,
+                svgTitleParts: null,
+                svgTitle: null,
+                // An aria-hidden `<a>` hides its content, not its own
+                // attributes (final review I1): see the module header.
+                ariaHiddenOpenedAt: ariaHidden(attribs) ? [elementDepth] : [],
               };
             }
             break;
@@ -2431,6 +2648,11 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
             ldJsonParts.push(text);
           }
         }
+        // Phase 26c: an icon's `<svg><title>` sits inside a suppressed subtree
+        // (`svg` is a NON_CONTENT_TAG), so it is read before the return below.
+        // It is never anchor text and never the document title: `titleDepth`,
+        // `titleCount` and `titleOutsideHead` keep their own svg guard.
+        if (openAnchor?.svgTitleParts && noscriptDepth === 0) openAnchor.svgTitleParts.push(text);
         if (suppressDepth > 0) return;
         if (titleDepth > 0) {
           titleParts.push(text);
@@ -2517,6 +2739,20 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
         if (name === "footer" && footerDepth > 0) footerDepth -= 1;
         if (name === "head" && headDepth > 0) headDepth -= 1;
         if (name === "body" && bodyDepth > 0) bodyDepth -= 1;
+        // Phase 26c: the open-tag hook's mirror, below the noscript returns as
+        // that hook is below its own.
+        if (openAnchor) {
+          // `elementDepth` was lowered above, so the closing element opened at
+          // one deeper. The `<a>`'s own entry goes with the anchor itself.
+          const hiddenAt = openAnchor.ariaHiddenOpenedAt;
+          if (hiddenAt[hiddenAt.length - 1] === elementDepth + 1) hiddenAt.pop();
+          if (name === "title" && openAnchor.svgTitleParts !== null) {
+            openAnchor.svgTitle = ariaLabelOf(openAnchor.svgTitleParts.join("").replace(/\s+/g, " "));
+            openAnchor.svgTitleParts = null;
+          } else if (name === "svg" && openAnchor.svgDepth > 0) {
+            openAnchor.svgDepth -= 1;
+          }
+        }
         if (name === "a") closeAnchor();
         if (name === "h1" && openH1) {
           h1s.push(openH1.join("").trim());
@@ -2603,6 +2839,7 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
       outsideHead: socialOutsideHead,
       xViaProperty,
       imageRefs: { ...socialImageRef },
+      imageRefTooLong: { ...socialImageRefTooLong },
     };
     const { og: ogRef, x: xRef } = socialImageRef;
     socialImageRefs = [...new Set([ogRef, xRef].filter((ref) => ref !== null))];
@@ -2690,6 +2927,7 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
       // not an early close.
       closedEarly: closedEarlyFact(),
     },
+    overlongUrls: { links: overlongLinks, resources: overlongResources, hreflang: overlongHreflang },
     bodyText,
     h1s,
     hasStructuredData,
@@ -2727,10 +2965,12 @@ export function analyzePage(html: string, url: string): PageAnalysis {
     navLinkCount: raw.navLinkCount,
     footerLinkCount: raw.footerLinkCount,
     frameworkMarkers: raw.frameworkMarkers,
-    links: raw.links.map(({ href, anchor, ariaLabel, rel, nofollow, position }) => ({
+    links: raw.links.map(({ href, anchor, ariaLabel, nameHint, nameHintSource, rel, nofollow, position }) => ({
       href,
       anchor,
       ariaLabel,
+      nameHint,
+      nameHintSource,
       rel,
       nofollow,
       position,
@@ -2774,5 +3014,6 @@ export function analyzePage(html: string, url: string): PageAnalysis {
     imagesAltTooLong: raw.imagesAltTooLong,
     imagesMissingAltSample: raw.imagesMissingAltSample,
     htmlStructure: raw.htmlStructure,
+    overlongUrls: { ...raw.overlongUrls },
   };
 }

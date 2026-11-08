@@ -9,11 +9,14 @@
  * a crawler defect into a green gate.
  */
 import { describe, expect, it } from "vitest";
-import { siteFixture, startSiteServer } from "./site-server.js";
+import { SITEMAP_MAX_BYTES } from "../../src/crawl/sitemap-stream.js";
+import { siteFixture, sitemapHreflangSwitch, startSiteServer } from "./site-server.js";
 
 const PAGES = 1_000;
 const BASE = "http://127.0.0.1:9999";
 const site = siteFixture.layout(PAGES);
+const OFF = { sitemapHreflang: false };
+const ON = { sitemapHreflang: true };
 
 describe("gate site fixture", () => {
   it("splits the index space into home, products and blog with nothing left over", () => {
@@ -71,7 +74,7 @@ describe("gate site fixture", () => {
   it("declares every URL exactly once across the sitemap shards", () => {
     const declared = new Set<string>();
     for (let shard = 0; shard < siteFixture.sitemapShards; shard++) {
-      const xml = siteFixture.sitemapShard(shard, site, BASE);
+      const xml = siteFixture.sitemapShard(shard, site, BASE, OFF);
       for (const match of xml.matchAll(/<loc>([^<]+)<\/loc>/g)) {
         const loc = match[1] as string;
         expect(declared.has(loc)).toBe(false);
@@ -98,6 +101,134 @@ describe("gate site fixture", () => {
       await missing.text();
     } finally {
       await server.close();
+    }
+  });
+});
+
+/**
+ * The Phase 26c gate switch, `GATE_SITEMAP_HREFLANG=1`. Off must be the
+ * baseline fixture byte for byte (the memory comparison is like for like only
+ * then); on must change the sitemap shards and nothing else.
+ */
+describe("gate site fixture: sitemap hreflang switch", () => {
+  /** The shard builder as it was before the switch: the off output's oracle. */
+  function legacyShard(shard: number, base: string): string {
+    const per = Math.ceil(site.pages / siteFixture.sitemapShards);
+    const start = shard * per;
+    const end = Math.min(start + per, site.pages);
+    const urls: string[] = [];
+    for (let index = start; index < end; index++) {
+      urls.push(`<url><loc>${base}${siteFixture.pathOfIndex(index, site)}</loc><lastmod>2026-08-25</lastmod></url>`);
+    }
+    return `<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+${urls.join("\n")}
+</urlset>
+`;
+  }
+
+  /** `<loc>` -> its alternates, code -> href, read off one shard. */
+  function alternatesOf(xml: string): Map<string, Map<string, string>> {
+    const out = new Map<string, Map<string, string>>();
+    for (const entry of xml.matchAll(/<url><loc>([^<]+)<\/loc>(.*?)<\/url>/g)) {
+      const codes = new Map<string, string>();
+      for (const link of (entry[2] as string).matchAll(/hreflang="([^"]+)" href="([^"]+)"/g)) {
+        expect(codes.has(link[1] as string), `one code once in ${entry[1]}`).toBe(false);
+        codes.set(link[1] as string, link[2] as string);
+      }
+      out.set(entry[1] as string, codes);
+    }
+    return out;
+  }
+
+  it("reads the switch from GATE_SITEMAP_HREFLANG, and refuses anything but 1, 0 or unset", () => {
+    expect(sitemapHreflangSwitch({})).toBe(false);
+    expect(sitemapHreflangSwitch({ GATE_SITEMAP_HREFLANG: "" })).toBe(false);
+    expect(sitemapHreflangSwitch({ GATE_SITEMAP_HREFLANG: "0" })).toBe(false);
+    expect(sitemapHreflangSwitch({ GATE_SITEMAP_HREFLANG: "1" })).toBe(true);
+    expect(() => sitemapHreflangSwitch({ GATE_SITEMAP_HREFLANG: "yes" })).toThrow(
+      /GATE_SITEMAP_HREFLANG must be 1, 0 or unset/,
+    );
+  });
+
+  it("serves the shards it always served when off", () => {
+    for (let shard = 0; shard < siteFixture.sitemapShards; shard++) {
+      expect(siteFixture.sitemapShard(shard, site, BASE, OFF)).toBe(legacyShard(shard, BASE));
+    }
+  });
+
+  it("gives every <url> at least 10 locales and x-default, all served pages, every cluster reciprocal", () => {
+    const all = new Map<string, Map<string, string>>();
+    for (let shard = 0; shard < siteFixture.sitemapShards; shard++) {
+      for (const [loc, codes] of alternatesOf(siteFixture.sitemapShard(shard, site, BASE, ON))) {
+        all.set(loc, codes);
+      }
+    }
+    expect(all.size).toBe(PAGES);
+    let widest = 0;
+    for (const [loc, codes] of all) {
+      expect(codes.size, loc).toBeGreaterThanOrEqual(11);
+      widest = Math.max(widest, codes.size);
+      expect(codes.has("x-default"), loc).toBe(true);
+      expect(codes.has("en") || codes.has("fr"), "never a code the page HTML states").toBe(false);
+      for (const [code, href] of codes) {
+        expect(href.startsWith(BASE), href).toBe(true);
+        expect(siteFixture.indexOfPath(href.slice(BASE.length), site), href).not.toBeNull();
+        if (code === "x-default") continue;
+        expect(siteFixture.hreflangLocales).toContain(code);
+        // Reciprocal: the target names the same cluster, so it lists `loc` back.
+        expect(all.get(href), `${href} lists ${loc}`).toEqual(codes);
+      }
+    }
+    // 1,000 pages: 90 clusters, the last 10 left over join the 90th (21 + x-default).
+    expect(widest).toBe(siteFixture.hreflangLocales.length + 1);
+  });
+
+  it("keeps every shard of the 50,000-page gate site under the protocol's 50 MB", () => {
+    const gate = siteFixture.layout(50_000);
+    for (let shard = 0; shard < siteFixture.sitemapShards; shard++) {
+      let bytes = 0;
+      for (const piece of siteFixture.sitemapShardPieces(shard, gate, "http://127.0.0.1:65535", ON)) {
+        bytes += Buffer.byteLength(piece);
+      }
+      expect(bytes).toBeGreaterThan(15 * 1024 * 1024);
+      expect(bytes).toBeLessThan(SITEMAP_MAX_BYTES);
+    }
+  });
+
+  it("changes the sitemap shards over HTTP and nothing else", async () => {
+    const off = await startSiteServer(PAGES, OFF);
+    const on = await startSiteServer(PAGES, ON);
+    expect(off.sitemapHreflang).toBe(false);
+    expect(on.sitemapHreflang).toBe(true);
+    const read = async (server: typeof off, path: string) => {
+      const response = await fetch(`${server.base}${path}`);
+      return {
+        status: response.status,
+        type: response.headers.get("content-type"),
+        body: (await response.text()).replaceAll(server.base, "BASE"),
+      };
+    };
+    try {
+      for (const path of ["/", "/products/p3", "/blog/7", "/robots.txt", "/sitemap.xml", "/media/1-0.jpg", "/sitemap-9.xml"]) {
+        expect(await read(on, path), path).toEqual(await read(off, path));
+      }
+      for (let shard = 0; shard < siteFixture.sitemapShards; shard++) {
+        const plain = await read(off, `/sitemap-${shard}.xml`);
+        const annotated = await read(on, `/sitemap-${shard}.xml`);
+        expect(plain.body).toBe(legacyShard(shard, "BASE"));
+        expect(annotated.status).toBe(200);
+        expect(annotated.type).toBe(plain.type);
+        expect(annotated.body).toContain("<xhtml:link ");
+        // Strip what the switch adds and the shard is the plain one.
+        const stripped = annotated.body
+          .replace(' xmlns:xhtml="http://www.w3.org/1999/xhtml"', "")
+          .replace(/<xhtml:link [^>]*\/>/g, "");
+        expect(stripped).toBe(plain.body);
+      }
+    } finally {
+      await off.close();
+      await on.close();
     }
   });
 });

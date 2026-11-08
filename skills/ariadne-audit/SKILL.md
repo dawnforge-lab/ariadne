@@ -552,8 +552,9 @@ every one of them. The checklist names each at its check, with its severity. By 
   rule's fix says to leave it on pages that are meant to be closed off.
 - **CHECK-07 and CHECK-08, sitemap entries:** `sitemap.url-too-long`,
   `sitemap.cross-host-loc`, `sitemap.lastmod-invalid` and `sitemap.over-50k-urls`.
-  CHECK-08 is no longer metric-only. `sitemap.over-50k-urls`'s count is a lower bound,
-  because a URL listed in two documents is stored once. `sitemap.cross-host-loc` stays
+  CHECK-08 is no longer metric-only. `sitemap.over-50k-urls`'s count is exact from
+  ruleset 0.22.0 (it counts each document's listings); on a crawl from before Phase
+  26c it is silent and `extraction.not-recorded` speaks. `sitemap.cross-host-loc` stays
   silent when a sitemap on another host lists the crawled site's own URLs, because that
   is a cross-submission the protocol allows. `sitemap.lastmod-invalid`'s `future` means
   dated after the crawl ENDED, so the value was already in the future when the sitemap
@@ -650,10 +651,12 @@ check:
 - **CHECK-86, link hygiene:** `links.empty-href`, `links.unsafe-target-blank` (a
   new-tab link to another origin, a subdomain or `www.` variant included, without
   `noopener`; same-origin links are not counted), `links.no-anchor-text` (warning:
-  internal links that nothing names, with no anchor text, no image alt and no
-  `aria-label`) and `links.aria-label-only` (info: internal links named only by an
-  `aria-label`, which search engines do not read as anchor text; often fine for icon
-  links such as cart, wishlist or account).
+  internal links that nothing names, with no anchor text, no image alt, no
+  `aria-label` and no wider name) and `links.aria-label-only` (info: internal links
+  named only by attributes, an `aria-label` or a wider name (`aria-labelledby` as its
+  ids, a label inside the link, an icon's `<svg><title>`, a `title`), listed with
+  their source in `names`; search engines do not read these as anchor text; often
+  fine for icon links such as cart, wishlist or account).
 - **CHECK-35, CHECK-36 and CHECK-37, on-page:** `title.multiple`,
   `meta-description.multiple`, `title.same-as-h1`, `h2.missing`, `h2.too-long` and
   `h2.duplicate`.
@@ -669,6 +672,69 @@ check:
   toward page weight, mixed content or `resources.broken`. On a `fetchResources: false`
   crawl `social.image-broken` judges only relative or malformed image addresses, and
   `resources.not-fetched` says the images' status was not asked.
+
+**Six rules joined at ruleset 0.22.0, and five of them need a crawl from Phase 26c
+on** (the sixth, the marker `hreflang.declarations-incomplete`, reads part of its
+answer on any crawl; see CHECK-24 below). The crawler now records extraction version 3 (over-long addresses, the
+og:image:secure_url tag, a link's wider name, hreflang from the HTTP `Link` header)
+and every sitemap listing and `xhtml:link` alternate. On an older crawl, a 26b crawl
+included, `extraction.not-recorded` fires with `requiredVersion: 3` and
+`sitemapFactsRecorded`, and every check it claims (CHECK-08 and CHECK-28 among them
+now) is NOT MEASURED, never a PASS. The remedy is a re-crawl. By check:
+
+- **CHECK-08, sitemap structure:** `sitemap.oversized` (warning) is a sitemap over the
+  protocol's 50 MB uncompressed. The URLs read before the limit are kept and crawled,
+  but search engines reject the whole file, so the fix is to split it.
+  `sitemap.url-in-multiple` (info) is a URL listed in more than one sitemap document
+  (a repeat inside one document does not count). It is crawled once; the finding is
+  the redundancy, usually two generators, so report it once with the documents it
+  names. `sitemap.structure` now carries `totalMemberships` beside `totalUrls`, and
+  `docCountsExact`, `membershipLimited`, `hreflangLimited`, `overlongLocsSkipped` and
+  `alternatesCapped` (sitemap alternates past 200 in one `<url>`, read and not
+  recorded). If any cap is `true`, or `alternatesCapped` is above zero, say the
+  sitemap counts (or its hreflang) are a floor.
+- **CHECK-24, hreflang:** every hreflang rule now reads three sources, the page's
+  HTML, its `Link` header and its sitemap entry's alternates, and judges what they say
+  together, the way search engines do. Each finding that lists a declaration names
+  its `sources`, so you can tell the client which file to fix.
+  `hreflang.source-conflict` (warning) is one language code with different targets in
+  two sources: the HTML says `de` is `/de/`, the sitemap says `/de-de/`. A code one
+  source lists and another omits is not a conflict, because search engines union the
+  sources; such codes are listed in `onlyIn` for context. `hreflang.multiple-entries`
+  is now one code with several targets inside ONE source, so the two rules never
+  report one defect twice. Only a declaring page that served HTML with a 200 is
+  judged. A `Link` header on a PDF (or any non-HTML file) is recorded and counts
+  as that file's return link when an HTML page names it, but the file's own
+  declarations are never judged: a missing self-reference, an invalid code or a
+  source conflict on a PDF produces no finding. Check those by hand if the site
+  annotates its documents.
+  `hreflang.declarations-incomplete` (info) is a NOT MEASURED marker: some hreflang
+  was not read in full. Read its evidence (`reason` says which triggers fired)
+  before writing any reciprocity verdict. If
+  `hreflangLimited`, `entryLimited`, `docLimited` or `depthLimited` is `true`, or
+  `sitemapDocsOversized` is above zero, the sitemap walk was cut short and
+  `hreflang.missing-return-link`, `hreflang.missing-self-reference`,
+  `hreflang.missing-x-default` and `hreflang.self-only` did not run: those parts of
+  CHECK-24 and CHECK-25 are NOT MEASURED, never a PASS. If only `sitemapDocsFailed`
+  or `alternatesCapped` is above zero, the rules ran but a sitemap could not be
+  read (`sitemap.invalid` names it) or a sitemap entry listed more than 200
+  alternates, so confirm a sample of missing return links against the live sitemap.
+  `possiblyCappedPages` counts pages whose alternates in one source may have filled
+  the 200 kept (over-long targets and sitemap duplicates take a place too), which
+  those rules do not judge for an absence; check one by hand.
+- **CHECK-28, URL length:** `url.reference-too-long` (warning) is a page carrying a
+  link, file or hreflang target whose address is over 2,500 characters. The crawler
+  cannot index such an address, so it counts it on the page and stores it nowhere:
+  it is in no link, resource or hreflang listing, and the finding's counts are the
+  only trace. A sitemap `<loc>` that long is counted by `sitemap.url-too-long` as one
+  site finding with `skipped`, which also counts sitemap alternate targets that long
+  and listings whose URL and sitemap URL together are over 2,500 characters.
+- **CHECK-87, social sharing tags:** `social.image-insecure` (info) is an `https:`
+  page whose `og:image` is `http:` with no `https:` og:image:secure_url. No browser
+  loads a share image, so it is not mixed content: a platform that insists on https
+  may drop the preview. `social.image-broken` gains the problem `too-long`.
+- **CHECK-86, link hygiene:** `links.no-anchor-text` and `links.aria-label-only` read
+  a link's wider name (above), so they too need a 26c crawl.
 
 ---
 
@@ -877,7 +943,7 @@ broken there.
           "metricId": "sitemap.structure",
           "scope": "site",
           "scopeValue": "",
-          "value": { "docs": 6, "totalUrls": 4102, "urlCapBreaches": 0, "entryCapReached": false, "oversizedDocsSkipped": 0 }
+          "value": { "docs": 6, "totalUrls": 4102, "totalMemberships": 4102, "urlCapBreaches": 0, "entryCapReached": false, "oversizedDocsSkipped": 0, "docCountsExact": true, "membershipLimited": false, "hreflangLimited": false, "overlongLocsSkipped": 0, "alternatesCapped": 0 }
         }
       ]
     },

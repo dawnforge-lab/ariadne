@@ -28,6 +28,7 @@ const ogIncomplete = rule("social.og-incomplete");
 const ogMultiple = rule("social.og-multiple");
 const ogUrlMismatch = rule("social.og-url-mismatch");
 const xIncomplete = rule("social.x-incomplete");
+const imageInsecure = rule("social.image-insecure");
 
 /** The clean page's social set with `patch` applied to it. */
 function social(patch: (s: SocialFacts) => void): Partial<PageRecord> {
@@ -39,12 +40,13 @@ function social(patch: (s: SocialFacts) => void): Partial<PageRecord> {
 }
 
 describe("social page rule metadata", () => {
-  it("defines the four page rules, info, on-page, CHECK-87", () => {
+  it("defines the five page rules, info, on-page, CHECK-87", () => {
     expect(socialRules.map((r) => r.id)).toEqual([
       "social.og-incomplete",
       "social.og-multiple",
       "social.og-url-mismatch",
       "social.x-incomplete",
+      "social.image-insecure",
     ]);
     for (const r of socialRules) {
       expect(r.kind, r.id).toBe("page");
@@ -69,6 +71,10 @@ describe("social page rule metadata", () => {
       { key: "missing", label: "Missing X Tags" },
       { key: "viaProperty", label: "Given as property=" },
     ]);
+    expect(imageInsecure.columns).toEqual([
+      { key: "ogImage", label: "OG Image" },
+      { key: "secureUrl", label: "OG Image Secure URL" },
+    ]);
   });
 
   it("the required Open Graph set is title, type, image and url", () => {
@@ -76,7 +82,7 @@ describe("social page rule metadata", () => {
   });
 });
 
-describe("the four rules on the clean page and on a v1 row", () => {
+describe("the social rules on the clean page and on a v1 row", () => {
   it("are silent on the clean v2 page", () => {
     for (const r of socialRules) expect(r.run(mkPage()), r.id).toEqual([]);
   });
@@ -97,6 +103,7 @@ describe("the four rules on the clean page and on a v1 row", () => {
       social((s) => {
         s.conflicting = ["og:title"];
         s.og.url = "https://example.com/other";
+        s.og.image = "http://example.com/i.png";
       }),
     ];
     expectSilentOnNonOkFetches(socialRules, broken);
@@ -280,5 +287,82 @@ describe("social.x-incomplete", () => {
   it("fires on X tags given as property=, even with the set otherwise complete", () => {
     const f = xIncomplete.run(mkPage(social((s) => (s.xViaProperty = true))));
     expect(f[0]?.evidence).toEqual({ missing: [], viaProperty: true });
+  });
+});
+
+describe("social.image-insecure", () => {
+  const HTTP_IMAGE = "http://cdn.example.com/share.jpg";
+  const withImage = (image: string, secure?: string, extra: Partial<PageRecord> = {}) =>
+    mkPage({
+      ...extra,
+      ...social((s) => {
+        s.og.image = image;
+        if (secure !== undefined) s.og["image:secure_url"] = secure;
+      }),
+    });
+
+  it("fires on an https page whose og:image is http and has no secure_url", () => {
+    const f = imageInsecure.run(withImage(HTTP_IMAGE));
+    expect(f).toHaveLength(1);
+    expect(f[0]?.evidence).toEqual({ ogImage: HTTP_IMAGE });
+  });
+
+  it("fires when the secure_url is itself http, and quotes it", () => {
+    const f = imageInsecure.run(withImage(HTTP_IMAGE, "http://cdn.example.com/s.jpg"));
+    expect(f[0]?.evidence).toEqual({ ogImage: HTTP_IMAGE, secureUrl: "http://cdn.example.com/s.jpg" });
+  });
+
+  it("reads the scheme case-insensitively", () => {
+    expect(imageInsecure.run(withImage("HTTP://cdn.example.com/a.jpg"))).toHaveLength(1);
+    expect(imageInsecure.run(withImage(HTTP_IMAGE, "HTTPS://cdn.example.com/a.jpg"))).toEqual([]);
+  });
+
+  it("is silenced by an https secure_url (the lavishalice shape)", () => {
+    expect(imageInsecure.run(withImage(HTTP_IMAGE, "https://cdn.example.com/share.jpg"))).toEqual([]);
+  });
+
+  it("is silent on an http page, an https og:image, a relative one and no og:image", () => {
+    expect(imageInsecure.run(withImage(HTTP_IMAGE, undefined, { url: "http://example.com/page" }))).toEqual([]);
+    expect(imageInsecure.run(withImage("https://cdn.example.com/a.jpg"))).toEqual([]);
+    expect(imageInsecure.run(withImage("/a.jpg"))).toEqual([]);
+    expect(imageInsecure.run(mkPage(social((s) => delete s.og.image)))).toEqual([]);
+  });
+
+  it("is silent on a v2 row, which never recorded og:image:secure_url", () => {
+    expect(imageInsecure.run(withImage(HTTP_IMAGE, undefined, { extractionVersion: 2 }))).toEqual([]);
+  });
+
+  it("is silent on a v1 row and on a v3 row with no social set", () => {
+    expect(imageInsecure.run(mkV1Page())).toEqual([]);
+    expect(imageInsecure.run(mkPage({ social: null }))).toEqual([]);
+  });
+
+  it("is judged-cohort only, as the other social rules are", () => {
+    const shape = withImage(HTTP_IMAGE);
+    expectSilentOnNonOkFetches([imageInsecure], [shape]);
+    expectSilentOnNotJudged([imageInsecure], [shape]);
+  });
+
+  it("end to end: the analyzer's secure_url silences it, and og-multiple stays quiet on repeats", () => {
+    const url = "https://example.com/gallery";
+    const page = (head: string) => {
+      const a = analyzePage(`<html><head>${head}</head><body><p>x</p></body></html>`, url);
+      return mkPage({ url, social: a.social });
+    };
+    const bare = page(`<meta property="og:image" content="${HTTP_IMAGE}">`);
+    expect(imageInsecure.run(bare)).toHaveLength(1);
+    const secured = page(
+      `<meta property="og:image" content="${HTTP_IMAGE}">` +
+        `<meta property="og:image:secure_url" content="https://cdn.example.com/share.jpg">`,
+    );
+    expect(imageInsecure.run(secured)).toEqual([]);
+    // Open Graph makes og:image:secure_url an array alongside og:image.
+    const gallery = page(
+      `<meta property="og:image" content="http://a/1.jpg"><meta property="og:image" content="http://a/2.jpg">` +
+        `<meta property="og:image:secure_url" content="https://a/1.jpg">` +
+        `<meta property="og:image:secure_url" content="https://a/2.jpg">`,
+    );
+    expect(gallery.social?.conflicting).toEqual(["og:image", "og:image:secure_url"]);
+    expect(ogMultiple.run(gallery)).toEqual([]);
   });
 });

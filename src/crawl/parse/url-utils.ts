@@ -14,6 +14,20 @@
 import { isIP } from "node:net";
 
 /**
+ * The longest URL (characters of the serialized, ASCII-after-`normalizeUrl`
+ * form) any indexed column stores. Postgres refuses a btree entry over about
+ * 2,704 bytes; 2,500 leaves room for `crawl_id` and the tuple header, and sits
+ * above the sitemap protocol's 2,048 so `sitemap.url-too-long` still sees
+ * 2,049-2,500.
+ */
+export const INDEXED_URL_MAX = 2500;
+
+/** Whether a URL is short enough to be stored in an indexed column. */
+export function fitsIndex(url: string): boolean {
+  return url.length <= INDEXED_URL_MAX;
+}
+
+/**
  * **`normalizeUrl` is the single authority for frontier and dedupe keys.**
  * Two normalizers coexist in this codebase and they do not agree: url-policy's
  * start-URL normalization is *validation only* — it decides whether a URL may

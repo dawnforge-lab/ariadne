@@ -1,7 +1,8 @@
 import * as cheerio from "cheerio";
 import { describe, expect, it } from "vitest";
-import { analyzePage } from "../../src/crawl/parse/page-analyzer.js";
-import { HEAD_LOST_MAX, HEAD_SNIPPET_MAX } from "../../src/crawl/parse/page-facts.js";
+import { analyzePage, MAX_RESOURCE_REFS } from "../../src/crawl/parse/page-analyzer.js";
+import { ARIA_LABEL_MAX, HEAD_LOST_MAX, HEAD_SNIPPET_MAX } from "../../src/crawl/parse/page-facts.js";
+import { INDEXED_URL_MAX } from "../../src/crawl/parse/url-utils.js";
 
 const HTML = `<!doctype html><html><head>
 <title>Widget Shop</title>
@@ -36,6 +37,8 @@ describe("analyzePage", () => {
       href: "https://shop.example/a",
       anchor: "A",
       ariaLabel: null,
+      nameHint: null,
+      nameHintSource: null,
       rel: "nofollow",
       nofollow: true,
       position: 0,
@@ -1184,5 +1187,345 @@ describe("Phase 26b strings are storable in Postgres", () => {
     expect(a.social?.og.title).toBe("a�b");
     expect(a.h2Text).toBe("c�");
     expect(structureOf(`<head>x\uD800</head>`).closedEarly?.snippet).toBe("x�");
+  });
+});
+
+/**
+ * Phase 26c (Task 2): a reference whose resolved URL is over `INDEXED_URL_MAX`
+ * is counted in `overlongUrls`, never stored — a btree entry that large makes
+ * the insert throw. The check reads the URL the row would hold.
+ */
+describe("references too long to index (Phase 26c)", () => {
+  const PAGE = "https://x.test/p";
+  const LONG = `https://x.test/${"a".repeat(3000)}`;
+
+  it("counts an over-long link, image and hreflang target and keeps none of them", () => {
+    const a = analyzePage(
+      `<html><head><link rel="alternate" hreflang="de" href="${LONG}">` +
+        `<link rel="alternate" hreflang="en" href="/en"></head><body>` +
+        `<a href="${LONG}">long</a><a href="/short">short</a>` +
+        `<img src="${LONG}"><img src="/ok.png"></body></html>`,
+      PAGE,
+    );
+    expect(a.overlongUrls).toEqual({ links: 1, resources: 1, hreflang: 1 });
+    expect(a.links.map((l) => l.href)).toEqual(["https://x.test/short"]);
+    // Dense positions: the refused link consumed none.
+    expect(a.links[0]?.position).toBe(0);
+    expect(a.resourceRefs).toEqual([{ url: "https://x.test/ok.png", kind: "image" }]);
+    expect(a.hreflang).toEqual([{ code: "en", href: "/en" }]);
+  });
+
+  it("records zeros on a page with no over-long reference", () => {
+    const a = analyzePage(`<html><body><a href="/a">a</a><img src="/i.png"></body></html>`, PAGE);
+    expect(a.overlongUrls).toEqual({ links: 0, resources: 0, hreflang: 0 });
+  });
+
+  it("judges a reference by its resolved URL: a relative href that resolves over the limit is refused", () => {
+    // 2,490 characters of path, under the limit as written, over it once the
+    // page's origin is prefixed.
+    const relative = `/${"b".repeat(2490)}`;
+    expect(relative.length).toBeLessThanOrEqual(INDEXED_URL_MAX);
+    const a = analyzePage(
+      `<html><head><link rel="alternate" hreflang="de" href="${relative}"></head>` +
+        `<body><a href="${relative}">r</a><img src="${relative}"></body></html>`,
+      PAGE,
+    );
+    expect(a.overlongUrls).toEqual({ links: 1, resources: 1, hreflang: 1 });
+    expect(a.links).toEqual([]);
+    expect(a.hreflang).toEqual([]);
+  });
+
+  it("keeps a reference exactly at the limit", () => {
+    const base = "https://x.test/";
+    const atLimit = base + "c".repeat(INDEXED_URL_MAX - base.length);
+    const a = analyzePage(
+      `<html><head><link rel="alternate" hreflang="de" href="${atLimit}"></head>` +
+        `<body><a href="${atLimit}">x</a><img src="${atLimit}"></body></html>`,
+      PAGE,
+    );
+    expect(a.overlongUrls).toEqual({ links: 0, resources: 0, hreflang: 0 });
+    expect(a.links.map((l) => l.href)).toEqual([atLimit]);
+    expect(a.resourceRefs.map((r) => r.url)).toEqual([atLimit]);
+    expect(a.hreflang).toEqual([{ code: "de", href: atLimit }]);
+  });
+
+  it("an over-long og:image has no ref and is flagged; a short twitter:image keeps its ref", () => {
+    const a = analyzePage(
+      `<html><head><meta property="og:image" content="${LONG}">` +
+        `<meta name="twitter:image" content="https://x.test/x.png"></head></html>`,
+      PAGE,
+    );
+    expect(a.social?.imageRefs).toEqual({ og: null, x: "https://x.test/x.png" });
+    expect(a.social?.imageRefTooLong).toEqual({ og: true, x: false });
+    expect(a.socialImageRefs).toEqual(["https://x.test/x.png"]);
+  });
+
+  it("flags an over-long twitter:image the same way", () => {
+    const a = analyzePage(`<html><head><meta name="twitter:image" content="${LONG}"></head></html>`, PAGE);
+    expect(a.social?.imageRefs).toEqual({ og: null, x: null });
+    expect(a.social?.imageRefTooLong).toEqual({ og: false, x: true });
+    expect(a.socialImageRefs).toEqual([]);
+  });
+
+  it("does not flag a short, relative or absent share image", () => {
+    const a = analyzePage(
+      `<html><head><meta property="og:image" content="/og.png"></head></html>`,
+      PAGE,
+    );
+    expect(a.social?.imageRefTooLong).toEqual({ og: false, x: false });
+  });
+
+  it("a refused hreflang target still counts toward MAX_HREFLANG_PAIRS", () => {
+    const longPairs = Array.from(
+      { length: 200 },
+      (_, i) => `<link rel="alternate" hreflang="x${i}" href="${LONG}">`,
+    ).join("");
+    const a = analyzePage(
+      `<html><head>${longPairs}<link rel="alternate" hreflang="en" href="/en"></head></html>`,
+      PAGE,
+    );
+    expect(a.overlongUrls.hreflang).toBe(200);
+    expect(a.hreflang).toEqual([]);
+  });
+
+  it("a refused resource still counts toward MAX_RESOURCE_REFS", () => {
+    const longPath = `/${"d".repeat(INDEXED_URL_MAX)}`;
+    const longImages = Array.from(
+      { length: MAX_RESOURCE_REFS },
+      (_, i) => `<img src="${longPath}${i}">`,
+    ).join("");
+    const a = analyzePage(`<html><body>${longImages}<img src="/ok.png"></body></html>`, PAGE);
+    expect(a.overlongUrls.resources).toBe(MAX_RESOURCE_REFS);
+    expect(a.resourceRefs).toEqual([]);
+    expect(a.resourceRefsCapped).toBe(true);
+  });
+
+  it("a refused link still counts toward the per-page link cap (2,000)", () => {
+    const longPath = `/${"e".repeat(INDEXED_URL_MAX)}`;
+    const longLinks = Array.from({ length: 2_000 }, (_, i) => `<a href="${longPath}${i}">x</a>`).join("");
+    const a = analyzePage(`<html><body>${longLinks}<a href="/ok">ok</a></body></html>`, PAGE);
+    expect(a.overlongUrls.links).toBe(2_000);
+    expect(a.links).toEqual([]);
+  });
+});
+
+/**
+ * Phase 26c (Task 5): a link with no text and no `aria-label` of its own may
+ * still be named — by `aria-labelledby`, a label on an element inside it, an
+ * icon's `<svg><title>`, or its `title` attribute. The winning one is recorded,
+ * in that order (deviation 8: the `aria-labelledby` id list is stored as
+ * written, unresolved).
+ */
+describe("a link's wider name (Phase 26c)", () => {
+  const PAGE = "https://names.example/p";
+  const linkOf = (inner: string, attrs = "") =>
+    analyzePage(`<html><body><a href="/x"${attrs}>${inner}</a></body></html>`, PAGE).links[0];
+
+  it("records aria-labelledby as the trimmed id list, unresolved", () => {
+    expect(linkOf("", ` aria-labelledby="  cart-label  cart-count "`)).toMatchObject({
+      anchor: "",
+      ariaLabel: null,
+      nameHint: "cart-label  cart-count",
+      nameHintSource: "aria-labelledby",
+    });
+  });
+
+  it("records the first non-empty aria-label on an element inside the link", () => {
+    expect(
+      linkOf(`<span aria-label="  "></span><span aria-label=" Cart "><svg aria-label="Basket"></svg></span>`),
+    ).toMatchObject({ nameHint: "Cart", nameHintSource: "inner-aria-label" });
+  });
+
+  it("records the text of an icon's <svg><title>, whitespace collapsed", () => {
+    expect(linkOf(`<svg viewBox="0 0 1 1"><title> Shopping\n   cart </title><path d="M0"></path></svg>`)).toMatchObject({
+      anchor: "",
+      nameHint: "Shopping cart",
+      nameHintSource: "svg-title",
+    });
+  });
+
+  it("skips a blank svg title for a later non-empty one", () => {
+    expect(linkOf(`<svg><title>  </title></svg><svg><title>Menu</title></svg>`)).toMatchObject({
+      nameHint: "Menu",
+      nameHintSource: "svg-title",
+    });
+  });
+
+  it("records the link's title attribute", () => {
+    expect(linkOf("", ` title=" Account "`)).toMatchObject({ nameHint: "Account", nameHintSource: "title" });
+  });
+
+  it("ranks aria-labelledby, then an inner aria-label, then an svg title, then title", () => {
+    const svg = `<svg><title>Icon</title></svg>`;
+    const inner = `<span aria-label="Inner"></span>`;
+    expect(linkOf(`${svg}${inner}`, ` aria-labelledby="lbl" title="T"`)).toMatchObject({
+      nameHint: "lbl",
+      nameHintSource: "aria-labelledby",
+    });
+    // Document order does not decide: the inner label wins over an earlier svg title.
+    expect(linkOf(`${svg}${inner}`, ` title="T"`)).toMatchObject({
+      nameHint: "Inner",
+      nameHintSource: "inner-aria-label",
+    });
+    expect(linkOf(svg, ` title="T"`)).toMatchObject({ nameHint: "Icon", nameHintSource: "svg-title" });
+    // A blank higher source is no source.
+    expect(linkOf(`<span aria-label=" "></span>`, ` aria-labelledby="  " title="T"`)).toMatchObject({
+      nameHint: "T",
+      nameHintSource: "title",
+    });
+  });
+
+  it("records no hint on a link with text, image alt or its own aria-label", () => {
+    const named = [
+      linkOf(`Cart<svg><title>Cart icon</title></svg>`, ` title="Basket"`),
+      linkOf(`<img src="/c.png" alt="Cart">`, ` title="Basket"`),
+      linkOf(`<span aria-label="Inner"></span>`, ` aria-label="Cart" aria-labelledby="lbl"`),
+    ];
+    for (const link of named) expect(link).toMatchObject({ nameHint: null, nameHintSource: null });
+    expect(named[2]?.ariaLabel).toBe("Cart");
+  });
+
+  it("records no hint on a link nothing names", () => {
+    expect(linkOf(`<svg><path d="M0"></path></svg>`)).toMatchObject({ nameHint: null, nameHintSource: null });
+  });
+
+  it("caps a 500-character hint at ARIA_LABEL_MAX (200), from either an attribute or an svg title", () => {
+    const long = "n".repeat(500);
+    expect(ARIA_LABEL_MAX).toBe(200);
+    expect(linkOf("", ` title="${long}"`)?.nameHint).toBe("n".repeat(ARIA_LABEL_MAX));
+    expect(linkOf(`<svg><title>${long}</title></svg>`)?.nameHint).toBe("n".repeat(ARIA_LABEL_MAX));
+  });
+
+  it("an svg title inside a link is not a document title", () => {
+    const a = analyzePage(
+      `<html><head><title>Page</title></head><body><a href="/x"><svg><title>Icon</title></svg></a></body></html>`,
+      PAGE,
+    );
+    expect(a.title).toBe("Page");
+    expect(a.titleCount).toBe(1);
+    expect(a.titleOutsideHead).toBe(false);
+    expect(a.links[0]).toMatchObject({ nameHint: "Icon", nameHintSource: "svg-title" });
+    const bare = analyzePage(`<html><body><a href="/x"><svg><title>Icon</title></svg></a></body></html>`, PAGE);
+    expect(bare.title).toBeNull();
+    expect(bare.titleCount).toBe(0);
+    expect(bare.titleOutsideHead).toBe(false);
+  });
+
+  it("reads only inside the link: a loose svg title and the next link's labels are not this link's", () => {
+    const a = analyzePage(
+      `<html><body><svg><title>Loose</title></svg>` +
+        `<a href="/a"><span aria-label="A"></span><a href="/b"><svg><title>B</title></svg></a>` +
+        `<a href="/c"></a><span aria-label="After"></span></body></html>`,
+      PAGE,
+    );
+    expect(a.links.map((l) => [l.href, l.nameHint, l.nameHintSource])).toEqual([
+      ["https://names.example/a", "A", "inner-aria-label"],
+      ["https://names.example/b", "B", "svg-title"],
+      ["https://names.example/c", null, null],
+    ]);
+  });
+
+  it("ignores labels inside a <noscript>, as it ignores the text there", () => {
+    expect(linkOf(`<noscript><span aria-label="NS"></span></noscript>`)).toMatchObject({
+      nameHint: null,
+      nameHintSource: null,
+    });
+  });
+
+  it("ignores an svg title under aria-hidden: the icon names nothing", () => {
+    expect(linkOf(`<svg aria-hidden="true"><title>Cart</title></svg>`)).toMatchObject({
+      anchor: "",
+      ariaLabel: null,
+      nameHint: null,
+      nameHintSource: null,
+    });
+    // The value is read case-insensitively and trimmed, and the hidden subtree
+    // is any ancestor inside the link, not only the svg itself.
+    expect(linkOf(`<span aria-hidden=" TRUE "><svg><title>Cart</title></svg></span>`)).toMatchObject({
+      nameHint: null,
+      nameHintSource: null,
+    });
+    // aria-hidden="false" hides nothing.
+    expect(linkOf(`<svg aria-hidden="false"><title>Cart</title></svg>`)).toMatchObject({
+      nameHint: "Cart",
+      nameHintSource: "svg-title",
+    });
+  });
+
+  it("ignores an aria-label inside, or on, an aria-hidden element", () => {
+    expect(linkOf(`<span aria-hidden="true"><i aria-label="Cart"></i></span>`)).toMatchObject({
+      nameHint: null,
+      nameHintSource: null,
+    });
+    expect(linkOf(`<span aria-hidden="true" aria-label="Cart"></span>`)).toMatchObject({
+      nameHint: null,
+      nameHintSource: null,
+    });
+    // The hidden subtree ends at its own close: a later sibling still names the link,
+    // even when a same-named element nested inside the hidden one closed first.
+    expect(
+      linkOf(`<span aria-hidden="true"><span></span><span aria-label="Gone"></span></span><span aria-label="Cart"></span>`),
+    ).toMatchObject({ nameHint: "Cart", nameHintSource: "inner-aria-label" });
+    expect(linkOf(`<svg aria-hidden="true"><title>Gone</title></svg><svg><title>Menu</title></svg>`)).toMatchObject({
+      nameHint: "Menu",
+      nameHintSource: "svg-title",
+    });
+  });
+
+  it("an aria-hidden <a> takes no hint from its content, and keeps its own attributes", () => {
+    expect(linkOf(`<svg><title>Cart</title></svg><span aria-label="Inner"></span>`, ` aria-hidden="true"`)).toMatchObject({
+      nameHint: null,
+      nameHintSource: null,
+    });
+    expect(linkOf(`<svg><title>Cart</title></svg>`, ` aria-hidden="true" title="Account"`)).toMatchObject({
+      nameHint: "Account",
+      nameHintSource: "title",
+    });
+    expect(linkOf("", ` aria-hidden="true" aria-labelledby="lbl"`)).toMatchObject({
+      nameHint: "lbl",
+      nameHintSource: "aria-labelledby",
+    });
+    // The hidden state ends with the link: the next link is read as usual.
+    const a = analyzePage(
+      `<html><body><a href="/a" aria-hidden="true"><svg><title>A</title></svg></a>` +
+        `<a href="/b"><svg><title>B</title></svg></a></body></html>`,
+      PAGE,
+    );
+    expect(a.links.map((l) => [l.nameHint, l.nameHintSource])).toEqual([
+      [null, null],
+      ["B", "svg-title"],
+    ]);
+  });
+
+  it("ignores <template> content: it is inert and names nothing", () => {
+    expect(linkOf(`<template><span aria-label="Cart"></span></template>`)).toMatchObject({
+      nameHint: null,
+      nameHintSource: null,
+    });
+    expect(linkOf(`<template><svg><title>Cart</title></svg></template>`)).toMatchObject({
+      nameHint: null,
+      nameHintSource: null,
+    });
+    // After the template closes, content names the link again.
+    expect(linkOf(`<template><span aria-label="Gone"></span></template><span aria-label="Cart"></span>`)).toMatchObject({
+      nameHint: "Cart",
+      nameHintSource: "inner-aria-label",
+    });
+  });
+
+  it("a visible svg title still names the link", () => {
+    expect(linkOf(`<svg role="img"><title>Cart</title></svg>`)).toMatchObject({
+      nameHint: "Cart",
+      nameHintSource: "svg-title",
+    });
+  });
+
+  it("the first link to a target supplies the hint, as it supplies the anchor", () => {
+    const a = analyzePage(
+      `<html><body><a href="/x" title="First"></a><a href="/x" title="Second"></a></body></html>`,
+      PAGE,
+    );
+    expect(a.links).toHaveLength(1);
+    expect(a.links[0]).toMatchObject({ nameHint: "First", nameHintSource: "title" });
   });
 });

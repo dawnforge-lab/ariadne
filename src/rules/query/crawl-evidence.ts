@@ -252,7 +252,11 @@ function parseDiscovery(value: unknown, ruleId: string, crawlId: string): Discov
     // because those are the three a rule reads (`sitemap.invalid`, and
     // `sitemap.structure`'s site row). The counters beside them are carried
     // through as stored: a rule that starts branching on one of them must add
-    // its check above rather than trusting this cast.
+    // its check above rather than trusting this cast. The one exception is
+    // `docLimited` / `depthLimited`, which the hreflang completeness reading
+    // checks itself on a Phase 26c crawl only (`readSitemapHreflang`, src/rules/
+    // query/hreflang-completeness.ts): hand-built rows older than that need
+    // not carry them, and every other reader of this blob ignores them.
     truncation: truncation as unknown as DiscoveryTruncation,
     docsFetched: value["docsFetched"],
   };

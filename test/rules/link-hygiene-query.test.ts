@@ -113,6 +113,8 @@ describe("the link-hygiene rules against the database", () => {
     target: string;
     anchor?: string | null;
     ariaLabel?: string | null;
+    nameHint?: string | null;
+    nameHintSource?: string | null;
     nofollow?: boolean;
     internal?: boolean;
   }
@@ -129,6 +131,8 @@ describe("the link-hygiene rules against the database", () => {
         targetPageId: null,
         anchor: s.anchor === undefined ? "a descriptive anchor" : s.anchor,
         ariaLabel: s.ariaLabel ?? null,
+        nameHint: s.nameHint ?? null,
+        nameHintSource: s.nameHintSource ?? null,
         rel: s.nofollow === true ? "nofollow" : null,
         isInternal: s.internal ?? !absolute,
         isNofollow: s.nofollow ?? false,
@@ -541,11 +545,11 @@ describe("the link-hygiene rules against the database", () => {
 
   describe("links.no-anchor-text", () => {
     const ID = "links.no-anchor-text";
-    const V2 = { extractionVersion: 2 };
+    const V3 = { extractionVersion: 3 };
 
     it("fires on empty, whitespace-only and no-break-space anchors, one finding per page", async () => {
       const crawlId = await newCrawl();
-      const ids = await addPages(crawlId, [{ path: "/", ...V2 }, { path: "/b", ...V2 }]);
+      const ids = await addPages(crawlId, [{ path: "/", ...V3 }, { path: "/b", ...V3 }]);
       await addLinks(crawlId, ids.get("/")!, [
         { target: "/z", anchor: "" },
         { target: "/a", anchor: "  \t " },
@@ -565,7 +569,7 @@ describe("the link-hygiene rules against the database", () => {
 
     it("a link with no text, no alt and no aria-label is a warning; an aria-label-only link is not this rule's (O1)", async () => {
       const crawlId = await newCrawl();
-      const ids = await addPages(crawlId, [{ path: "/", ...V2 }]);
+      const ids = await addPages(crawlId, [{ path: "/", ...V3 }]);
       await addLinks(crawlId, ids.get("/")!, [
         { target: "/nothing", anchor: "" },
         { target: "/blank-label", anchor: "", ariaLabel: "   " },
@@ -585,7 +589,7 @@ describe("the link-hygiene rules against the database", () => {
 
     it("an image link with alt (stored as the anchor) is not textless, one without alt is", async () => {
       const crawlId = await newCrawl();
-      const ids = await addPages(crawlId, [{ path: "/", ...V2 }]);
+      const ids = await addPages(crawlId, [{ path: "/", ...V3 }]);
       await addLinks(crawlId, ids.get("/")!, [
         { target: "/with-alt", anchor: "Company logo" },
         { target: "/no-alt", anchor: "" },
@@ -595,16 +599,16 @@ describe("the link-hygiene rules against the database", () => {
       expect(found[0]!.evidence).toEqual({ count: 1, targets: [url("/no-alt")] });
     });
 
-    it("refuses a crawl with any page below extraction 2: the marker speaks, this is silent", async () => {
+    it("refuses a crawl with any page below extraction 3: the marker speaks, this is silent", async () => {
       const crawlId = await newCrawl();
-      const ids = await addPages(crawlId, [{ path: "/", ...V2 }, { path: "/old", extractionVersion: 1 }]);
+      const ids = await addPages(crawlId, [{ path: "/", ...V3 }, { path: "/old", extractionVersion: 2 }]);
       await addLinks(crawlId, ids.get("/")!, [{ target: "/z", anchor: "" }]);
       expect(await run(ID, crawlId)).toHaveLength(0);
     });
 
     it("lists at most SAMPLE_SOURCES targets, counts every link, and caps the listing", async () => {
       const crawlId = await newCrawl();
-      const specs = Array.from({ length: 3 }, (_, i) => ({ path: `/p${i}`, ...V2 }));
+      const specs = Array.from({ length: 3 }, (_, i) => ({ path: `/p${i}`, ...V3 }));
       const ids = await addPages(crawlId, specs);
       const n = SAMPLE_SOURCES + 4;
       await addLinks(
@@ -625,11 +629,11 @@ describe("the link-hygiene rules against the database", () => {
 
   describe("links.aria-label-only", () => {
     const ID = "links.aria-label-only";
-    const V2 = { extractionVersion: 2 };
+    const V3 = { extractionVersion: 3 };
 
     it("fires on an internal link named only by aria-label, with its label (O1)", async () => {
       const crawlId = await newCrawl();
-      const ids = await addPages(crawlId, [{ path: "/", ...V2 }, { path: "/b", ...V2 }]);
+      const ids = await addPages(crawlId, [{ path: "/", ...V3 }, { path: "/b", ...V3 }]);
       await addLinks(crawlId, ids.get("/")!, [
         { target: "/cart", anchor: "", ariaLabel: "Cart" },
         { target: "/wishlist", anchor: "  ", ariaLabel: "Wishlist" },
@@ -647,7 +651,10 @@ describe("the link-hygiene rules against the database", () => {
       expect(found[0]!.evidence).toEqual({
         count: 3,
         targets: [url("/basket"), url("/cart"), url("/wishlist")],
-        labels: ["Cart", "Wishlist"],
+        names: [
+          { source: "aria-label", value: "Cart" },
+          { source: "aria-label", value: "Wishlist" },
+        ],
       });
       // The same rows: the link nothing names is no-anchor-text's, and only it.
       const unnamed = await run("links.no-anchor-text", crawlId);
@@ -659,7 +666,7 @@ describe("the link-hygiene rules against the database", () => {
 
     it("an image alt with no text, and text with an aria-label, fire neither rule", async () => {
       const crawlId = await newCrawl();
-      const ids = await addPages(crawlId, [{ path: "/", ...V2 }]);
+      const ids = await addPages(crawlId, [{ path: "/", ...V3 }]);
       await addLinks(crawlId, ids.get("/")!, [
         { target: "/logo", anchor: "Company logo", ariaLabel: "Home" },
         { target: "/both", anchor: "Sign in", ariaLabel: "Account" },
@@ -668,16 +675,71 @@ describe("the link-hygiene rules against the database", () => {
       expect(await run("links.no-anchor-text", crawlId)).toEqual([]);
     });
 
-    it("refuses a crawl with any page below extraction 2: the marker speaks, this is silent", async () => {
+    it("refuses a crawl with any page below extraction 3: the marker speaks, this is silent", async () => {
       const crawlId = await newCrawl();
-      const ids = await addPages(crawlId, [{ path: "/", ...V2 }, { path: "/old", extractionVersion: 1 }]);
+      const ids = await addPages(crawlId, [{ path: "/", ...V3 }, { path: "/old", extractionVersion: 2 }]);
       await addLinks(crawlId, ids.get("/")!, [{ target: "/cart", anchor: "", ariaLabel: "Cart" }]);
       expect(await run(ID, crawlId)).toHaveLength(0);
     });
 
+    it("a link named by a wider name moves from no-anchor-text to this rule, with each name's source (Phase 26c)", async () => {
+      const crawlId = await newCrawl();
+      const ids = await addPages(crawlId, [{ path: "/", ...V3 }]);
+      await addLinks(crawlId, ids.get("/")!, [
+        { target: "/labelledby", anchor: "", nameHint: "Label-cart", nameHintSource: "aria-labelledby" },
+        { target: "/inner", anchor: "", nameHint: "Basket", nameHintSource: "inner-aria-label" },
+        { target: "/svg", anchor: "", nameHint: "Menu", nameHintSource: "svg-title" },
+        { target: "/title", anchor: "\u00a0", nameHint: "Account", nameHintSource: "title" },
+        // A row carrying both is named by both; the evidence lists each.
+        { target: "/both", anchor: "", ariaLabel: "Cart", nameHint: "Label-cart", nameHintSource: "aria-labelledby" },
+        // A blank hint is no name, as a blank aria-label is none.
+        { target: "/blank-hint", anchor: "", nameHint: " \u00a0 ", nameHintSource: "title" },
+        { target: "/nothing", anchor: "" },
+        { target: "/text", anchor: "Pricing", nameHint: "Prices", nameHintSource: "title" },
+      ]);
+      const found = await run(ID, crawlId);
+      expect(found).toHaveLength(1);
+      expect(found[0]!.evidence).toEqual({
+        count: 5,
+        targets: [url("/both"), url("/inner"), url("/labelledby"), url("/svg"), url("/title")],
+        names: [
+          { source: "title", value: "Account" },
+          { source: "inner-aria-label", value: "Basket" },
+          { source: "aria-label", value: "Cart" },
+          { source: "aria-labelledby", value: "Label-cart" },
+          { source: "svg-title", value: "Menu" },
+        ],
+      });
+      const unnamed = await run("links.no-anchor-text", crawlId);
+      expect(unnamed).toHaveLength(1);
+      expect(unnamed[0]!.evidence).toEqual({
+        count: 2,
+        targets: [url("/blank-hint"), url("/nothing")],
+      });
+    });
+
+    it("a name hint stored without its source is a loud error, never a name of unknown origin", async () => {
+      const crawlId = await newCrawl();
+      const ids = await addPages(crawlId, [{ path: "/", ...V3 }]);
+      await addLinks(crawlId, ids.get("/")!, [{ target: "/orphan-hint", anchor: "", nameHint: "Account" }]);
+      await expect(run(ID, crawlId)).rejects.toThrow(/name_hint "Account" with no name_hint_source/);
+    });
+
+    it("a crawl written by extraction 2 gets neither finding: the marker speaks", async () => {
+      const crawlId = await newCrawl();
+      const ids = await addPages(crawlId, [{ path: "/", extractionVersion: 2 }]);
+      await addLinks(crawlId, ids.get("/")!, [
+        { target: "/cart", anchor: "", ariaLabel: "Cart" },
+        { target: "/title", anchor: "", nameHint: "Account", nameHintSource: "title" },
+        { target: "/nothing", anchor: "" },
+      ]);
+      expect(await run(ID, crawlId)).toEqual([]);
+      expect(await run("links.no-anchor-text", crawlId)).toEqual([]);
+    });
+
     it("samples targets and their labels to SAMPLE_SOURCES, counts every link, and caps the listing", async () => {
       const crawlId = await newCrawl();
-      const specs = Array.from({ length: 3 }, (_, i) => ({ path: `/p${i}`, ...V2 }));
+      const specs = Array.from({ length: 3 }, (_, i) => ({ path: `/p${i}`, ...V3 }));
       const ids = await addPages(crawlId, specs);
       const n = SAMPLE_SOURCES + 4;
       await addLinks(
@@ -695,11 +757,14 @@ describe("the link-hygiene rules against the database", () => {
       expect(all).toHaveLength(3);
       expect(all[0]!.evidence["count"]).toBe(n);
       const targets = all[0]!.evidence["targets"] as string[];
-      const labels = all[0]!.evidence["labels"] as string[];
+      const names = all[0]!.evidence["names"] as { source: string; value: string }[];
       expect(targets.length).toBe(SAMPLE_SOURCES);
-      // The labels of the LISTED targets, and only those.
-      expect(labels).toEqual(
-        Array.from({ length: SAMPLE_SOURCES }, (_, i) => `Label ${String(i).padStart(3, "0")}`),
+      // The names of the LISTED targets, and only those.
+      expect(names).toEqual(
+        Array.from({ length: SAMPLE_SOURCES }, (_, i) => ({
+          source: "aria-label",
+          value: `Label ${String(i).padStart(3, "0")}`,
+        })),
       );
       const capped = await run(ID, crawlId, { listing: 2 });
       expect(capped).toHaveLength(2);

@@ -351,7 +351,8 @@ answered from, and its verdict is the confidence interval around all of them.
   `h1.duplicate-skipped`, `links.orphan-skipped`, `robots.check-skipped`,
   `host.probe-skipped`, `resources.not-recorded`, `resources.not-fetched`,
   `resources.all-unknown`, `resources.partial-unknown`,
-  `hreflang.alternates-not-crawled`, `content.near-duplicate-skipped`,
+  `hreflang.alternates-not-crawled`, `hreflang.declarations-incomplete`,
+  `content.near-duplicate-skipped`,
   `security.headers-not-recorded`, `extraction.not-recorded`,
   and the per-page `crawl.blocked` and `crawl.unreadable-encoding`. Each one
   is the engine saying a check below could not be answered on this crawl. The four
@@ -920,7 +921,10 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
     port, or scheme — never attempted by design; the evidence's `offOrigin` flag
     marks these), or attempted and no response came back. NOT MEASURED, not clean.
   Three more rules read the entry itself, not the page it names:
-  - `sitemap.url-too-long` (info) — a `<loc>` over 2,048 characters
+  - `sitemap.url-too-long` (info) — a `<loc>` over 2,048 characters. A `<loc>` over
+    2,500 characters is not stored; one site row (no URL, evidence `{skipped, max}`)
+    counts them, together with alternate targets over 2,500 characters and listings
+    whose URL and sitemap URL together are over 2,500 (also not stored)
   - `sitemap.cross-host-loc` (warning) — a `<loc>` whose scheme or host (www and port
     included) is neither its sitemap document's nor the crawled site's. A document on
     another host (a CDN) that lists the crawled site's own URLs is an allowed
@@ -930,7 +934,9 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
     in the future when the sitemap was read (`reason: "future"`; a date-only value on
     the crawl's own UTC day is not future)
   `issue_urls` per rule for the URL lists; `metrics_get` with
-  `metricId: "sitemap.structure"` gives `totalUrls` for the denominator.
+  `metricId: "sitemap.structure"` gives `totalUrls` for the denominator: distinct
+  sitemap URLs, a URL listed in several documents counted once (not
+  `totalMemberships`, which counts every listing).
 - **Evaluate**:
   - FAIL if non-indexable URLs > 0
   - WARN if `sitemap.cross-host-loc` (warning) > 0: entries on a host the sitemap may
@@ -944,22 +950,39 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
 ### CHECK-08: Sitemap structure (large sites)
 - **Priority**: Medium | **Requires**: Engine (metric and rule)
 - **Engine**: `metrics_get` with `metricId: "sitemap.structure"` for the shape, and
-  `issues_list` with `checkId: "CHECK-08"` for one finding rule:
-  `sitemap.over-50k-urls` (warning), one site-scoped finding per sitemap document
-  with more than 50,000 entries. Its count is a LOWER BOUND: a URL listed in two
-  documents is stored, and counted, once, and the crawl's entry cap can stop reading
-  before a document's end. No finding is not proof of a clean sitemap when
-  `entryCapReached` is true. The metric's rows:
-  - the `site` row: `{docs, totalUrls, urlCapBreaches, entryCapReached, oversizedDocsSkipped}`
+  `issues_list` with `checkId: "CHECK-08"` for three finding rules:
+  - `sitemap.over-50k-urls` (warning) — one site-scoped finding per sitemap document
+    with more than 50,000 entries. The count is EXACT: it counts the document's own
+    membership rows, so a URL listed in two documents counts once in each
+  - `sitemap.oversized` (warning) — one finding per document larger than 50 MB
+    uncompressed, with `{sitemapUrl, bytesRead, urlsKept, max}`. Search engines reject
+    the whole file; the crawl kept the URLs it read before the limit
+  - `sitemap.url-in-multiple` (info) — one finding per URL listed in more than one
+    sitemap document: `{url, sitemaps (up to 10), count}`; `membershipLimited: true`
+    says the crawl's membership cap was reached and later listings were not recorded
+  The metric's rows:
+  - the `site` row: `{docs, totalUrls (distinct URLs), totalMemberships (listings,
+    null on an older crawl), urlCapBreaches, entryCapReached,
+    oversizedDocsSkipped, docCountsExact, membershipLimited, hreflangLimited,
+    overlongLocsSkipped, alternatesCapped}`. `alternatesCapped` counts the sitemap
+    `xhtml:link` alternates past 200 in one `<url>`: read, never recorded, so the
+    sitemap's hreflang for those URLs is a floor when it is above zero.
+    `docCountsExact: false` is a crawl made before memberships were recorded: its
+    counts come from the deduplicated entry list and the four walk-cap fields are
+    null (not recorded)
   - one `sitemap_doc` row per document (`scopeValue` is the document's URL) with
     `{urls, breaches50k}` — the largest 50 are listed
   - `entryCapReached: true` means every count here is a FLOOR, not a total: say so
     rather than quoting the numbers flat
+- **Crawl-level marker**: `extraction.not-recorded` (info) is the NOT MEASURED marker for the facts this check reads from extraction version 3: on a crawl extracted before them (or one mixing old and new pages), or on a crawl whose discovery predates the recorded sitemap facts, the rules that read those facts (`sitemap.oversized`, `sitemap.url-in-multiple`, `sitemap.over-50k-urls`) did not run, so their part of this check is NOT MEASURED, never a pass. The remedy is a re-crawl.
 - **Evaluate**:
   - PASS if sitemaps split logically by type (products, collections, blog, pages)
   - WARN if single flat sitemap on site >5k URLs
   - WARN if `sitemap.over-50k-urls` (warning) > 0: a document over the 50,000-entry limit
-    is not read past it. Quote the count as a floor when `entryCapReached` is true
+    is not read past it. Quote the counts as floors when `entryCapReached` is true
+  - WARN if `sitemap.oversized` (warning) > 0: a document over 50 MB is rejected whole by
+    search engines
+  - INFO if `sitemap.url-in-multiple` (info) > 0: redundant listings, name the count
   - Record: sitemap structure description
 
 ### CHECK-09: URLs not found in sitemaps
@@ -1569,19 +1592,72 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
      of them. **When it is present, the return-link answer above covers only the
      alternates that were fetched** — mark this check SKIP for the rest rather than
      reading the silence as reciprocal.
-  5. `issues_list` with `checkId: "CHECK-24"` — four integrity rules over the
-     declarations in the page's HTML, each filed with the evidence that names the
-     fix:
+  5. `issues_list` with `checkId: "CHECK-24"` — five integrity rules over the
+     page's declarations from every source (its HTML, its HTTP `Link` header and its
+     sitemap entry, read together as search engines read them), each filed with the
+     evidence that names the fix. Every hreflang finding that lists a declaration
+     carries `sources` (`html`, `header`, `sitemap`): where the annotation lives, and
+     so where it is fixed. `hreflang.unlinked-target` is the exception; its `sources`
+     are the declaring pages. Only a declaring page fetched as HTML with a 200 is
+     judged. A `Link` header on a non-HTML file (a PDF) is recorded and counts as
+     that file's return link for the HTML pages naming it, but the file's own
+     declarations are never judged: no finding on a PDF says its set is broken, so
+     a site that annotates documents needs a manual look before this check passes.
+     A sitemap `<url>` is read for at most 200 alternates;
+     the rest are counted, not recorded, in the `sitemap.structure` site row's
+     `alternatesCapped` (CHECK-08), so above zero the sitemap source is a floor.
      - `hreflang.inconsistent-return-code` (warning) — page A lists B, B links back to
        A, and the code B uses for A differs from the code A uses for itself.
        `x-default` is not read as a language; a page with no self-reference is
        left to `hreflang.missing-self-reference`.
      - `hreflang.multiple-entries` (warning) — one page gives one code to two or
-       more different URLs (spellings of one URL are not different).
+       more different URLs within ONE source (spellings of one URL are not
+       different); `sources` names the source(s) at fault.
      - `hreflang.self-only` (info) — every declaration names the page itself, so no
        alternate is named.
      - `hreflang.unlinked-target` (info) — a crawled alternate no other page links
        to, filed on the alternate with up to 10 declaring pages and the exact count.
+     - `hreflang.source-conflict` (warning) — a page annotated in two or more places
+       where one code points to different URLs in two of them (the HTML says `de` is
+       `/de/`, the sitemap says `/de-de/`). The disagreement BETWEEN sources is this
+       rule's and the ambiguity WITHIN one is `hreflang.multiple-entries`', so one
+       defect never fires both. Evidence: the first such `code` with each source's
+       targets (`bySource`), the number of disagreeing codes (`conflictingCodes`),
+       and `onlyIn`, the codes only one source lists, per source (at most 20 each,
+       `onlyInTruncated` when cut). A code one source omits is not a conflict,
+       because search engines union the sources. It needs a crawl from Phase 26c
+       on; on an older one `extraction.not-recorded` is on file instead.
+  6. `issues_list` with `checkId: "CHECK-24"` — `hreflang.declarations-incomplete`
+     (info) is a NOT MEASURED marker, not a finding about the site: some hreflang
+     declarations were not read in full. It fires once for the crawl, with
+     `{reason, hreflangLimited, entryLimited, docLimited, depthLimited,
+     sitemapDocsFailed, sitemapDocsOversized, alternatesCapped,
+     possiblyCappedPages}`, in four cases (`reason` names, in words, only the
+     ones that fired):
+     - **The sitemap walk was cut short** (`hreflangLimited`, `entryLimited`,
+       `docLimited` or `depthLimited` true, or `sitemapDocsOversized` above 0).
+       Then `hreflang.missing-return-link`, `hreflang.missing-self-reference`,
+       `hreflang.missing-x-default` and `hreflang.self-only` **do not run** on this
+       crawl: a crawled page's sitemap alternates may never have been read, and an
+       absence there is not a fault. Mark those parts of this check (and the
+       x-default part of CHECK-25) NOT MEASURED, never PASS.
+     - **A sitemap could not be read** (`sitemapDocsFailed` above 0; the documents
+       are named by `sitemap.invalid`, CHECK-08). The four rules still run, but a
+       return link or self-reference they report missing may sit in the unread
+       file: confirm a sample against the live sitemap before reporting them as
+       FAIL, and fix the sitemap first.
+     - **A sitemap `<url>` listed more than 200 alternates** (`alternatesCapped`,
+       the alternates past 200 summed over every such entry). Which URLs is not
+       recorded, so the four rules still run; treat the sitemap source as a floor,
+       as for a sitemap that could not be read.
+     - **A page may have filled the 200-alternate limit** in one source
+       (`possiblyCappedPages`, on any crawl, any status): its stored HTML or
+       header pairs plus its over-long hreflang targets, or its staged sitemap
+       alternates, reach 200. Such a page is not judged for a missing
+       self-reference, x-default or alternate, and is never reported as failing
+       to return a link; check a sample by hand.
+     On a crawl from before Phase 26c the seven sitemap keys are `null` and only
+     `possiblyCappedPages` is judged.
 - **Important**: Don't just check for hreflang errors — also assess **coverage**:
   1. How many internal indexable URLs have hreflang tags vs how many should?
   2. If the site has multiple language/market versions, ALL equivalent pages should have hreflang
@@ -1592,12 +1668,18 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
   real one, and search engines read hreflang on the canonical, so an inherited
   alternates block on a tracking-parameter variant is not judged at all. Its
   canonical is reported by CHECK-17 where it belongs.
-- **Crawl-level marker**: `extraction.not-recorded` (info) is the NOT MEASURED marker for the page facts this check reads from extraction version 2: on a crawl extracted before them (or one mixing old and new pages) the rules that read those facts did not run, so their part of this check is NOT MEASURED, never a pass. The remedy is a re-crawl.
+- **Crawl-level marker**: `extraction.not-recorded` (info) is the NOT MEASURED marker for the page facts this check reads from extraction version 2 (version 3, and the recorded sitemap facts, for `hreflang.source-conflict`, which compares the HTML with the `Link` header and the sitemap): on a crawl extracted before them (or one mixing old and new pages) the rules that read those facts did not run, so their part of this check is NOT MEASURED, never a pass. The remedy is a re-crawl.
 - **Evaluate**:
   - FAIL if missing return links > 0
   - FAIL if pages missing their own self-reference > 0
   - FAIL if significant coverage gap (many pages that should have hreflang don't)
-  - WARN if hreflang only in sitemap (not in HTML)
+  - WARN if hreflang only in sitemap (not in HTML): read the `sources` evidence on
+    the hreflang findings (a declaration whose `sources` is `["sitemap"]`) and the
+    `onlyIn` of `hreflang.source-conflict`. A page whose sitemap-only hreflang breaks
+    no rule produces no finding, so this is a floor: say so rather than reporting
+    "none"
+  - WARN if `hreflang.source-conflict` (warning) > 0: the sources disagree about
+    where a language lives, and the set may be ignored
   - WARN if `hreflang.inconsistent-return-code` (warning) or `hreflang.multiple-entries`
     (warning) > 0: the cluster disagrees with itself and a search engine may discard it
   - INFO if `hreflang.self-only` (info) or `hreflang.unlinked-target` (info) > 0:
@@ -1609,8 +1691,12 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
 - **Priority**: High | **Requires**: Engine
 - **Engine**: `issues_list` with `checkId: "CHECK-25"` — three rules:
   - `hreflang.invalid-code` (critical) — a declared code that is not a valid
-    language, or language-region, value
-  - `hreflang.missing-x-default` (info) — a cluster with no `x-default` member
+    language, or language-region, value, on a page that served content (a 200);
+    a redirect's or an error page's annotations are not judged, as in CHECK-24
+  - `hreflang.missing-x-default` (info) — a cluster with no `x-default` member.
+    It does not run when the sitemap walk was cut short, and skips a page at the
+    200-alternate limit: read `hreflang.declarations-incomplete` (CHECK-24) before
+    reporting the x-default as present
   - `hreflang.html-lang-mismatch` (info) — a page whose `<html lang>` primary language
     differs from its own self-referencing hreflang codes (region is not compared)
   `issue_urls` per rule for the affected URLs and the codes they declared.
@@ -1667,6 +1753,14 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
   URL-length check of its own: it is the one URL-shape rule, an indexable,
   self-canonical page whose stored URL is over 115 characters, which is usually a
   tracking or session parameter or a repeated folder.
+  `url.reference-too-long` (warning) sits beside it: a page that links to, loads
+  or names as an hreflang alternate an address over 2,500 characters (the one
+  limit for every indexed URL). The crawl neither followed nor checked those
+  references; the evidence counts them per kind (`links`, `resources`,
+  `hreflang`, one per reference) with `max: 2500`. It reads the page whatever its
+  index status. Over-long share images are `social.image-broken`'s `too-long`
+  problem (CHECK-87).
+- **Crawl-level marker**: `extraction.not-recorded` (info) is the NOT MEASURED marker for the facts this check reads from extraction version 3: on a crawl extracted before them (or one mixing old and new pages) the rules that read those facts did not run, so their part of this check is NOT MEASURED, never a pass. The remedy is a re-crawl.
 - **Evaluate**:
   - FAIL if tracking param URLs are indexable without canonical to clean URL
   - Record: count, sample URLs
@@ -2074,17 +2168,22 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
     another origin, and a same-origin new-tab link is not reported.
   - `links.no-anchor-text` (warning) — a page with an INTERNAL link that nothing names:
     its stored anchor is empty after whitespace is removed AND it has no `aria-label`
-    (absent or blank). The stored anchor includes the alt text of an image inside the
+    (absent or blank) AND no wider name: no `aria-labelledby`, no `aria-label` on an
+    element inside the link, no `<title>` in an `<svg>` inside it and no `title`
+    attribute. The stored anchor includes the alt text of an image inside the
     link, so an image link with alt text is not textless and one without is. Only the
     first anchor per target is stored, so a target reached first by a textless link
     and later by a text link is listed too.
   - `links.aria-label-only` (info) — a page with an INTERNAL link whose anchor is empty
-    but which carries a non-blank `aria-label`; the row lists the targets and their
-    labels. The label names the link for screen readers, but search engines document
-    visible text and image alt as anchor text, not `aria-label`, so the link passes no
-    anchor relevance. Often fine for icon links (cart, wishlist, account); where the
-    target matters for search, the fix is visible text or an image alt.
-- **Crawl-level marker**: `extraction.not-recorded` (info) is the NOT MEASURED marker for the page facts this check reads from extraction version 2: on a crawl extracted before them (or one mixing old and new pages) the rules that read those facts did not run, so their part of this check is NOT MEASURED, never a pass. The remedy is a re-crawl.
+    but which is named by attributes: a non-blank `aria-label`, or a wider name (in
+    order: `aria-labelledby`, recorded as the ids it points to and not the text they
+    hold; an `aria-label` on an element inside the link; an icon's `<svg><title>`;
+    the `title` attribute). The row lists the targets and their `names`, each with
+    its source. These name the link for screen readers, but search engines document
+    visible text and image alt as anchor text, not these attributes, so the link
+    passes no anchor relevance. Often fine for icon links (cart, wishlist, account);
+    where the target matters for search, the fix is visible text or an image alt.
+- **Crawl-level marker**: `extraction.not-recorded` (info) is the NOT MEASURED marker for the page facts this check reads from extraction version 2 (version 3 for `links.no-anchor-text` and `links.aria-label-only`, which read a link's wider name): on a crawl extracted before them (or one mixing old and new pages) the rules that read those facts did not run, so their part of this check is NOT MEASURED, never a pass. The remedy is a re-crawl.
 - **Evaluate**:
   - PASS if no link points at a private host and generic anchors are rare
   - WARN if any link points at `localhost` or a private address, any internal link has
@@ -2101,7 +2200,7 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
   reads the recorded fetch of the image. These facts exist only for crawls written by
   extraction version 2 or later: on an older crawl `extraction.not-recorded` (info) is the
   NOT MEASURED marker, and silence says the crawl never measured them, not that the
-  site is clean. The remedy is a re-crawl. Seven rules answer it, all on judged pages
+  site is clean. The remedy is a re-crawl. Eight rules answer it, all on judged pages
   (indexable, self-canonical):
   - `social.og-incomplete` (info): og:title, og:type, og:image or og:url missing or
     empty; evidence `{missing, none}`, `none` true when the page has no Open Graph
@@ -2122,12 +2221,20 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
     too, so it judges every crawl.
   - `social.image-broken` (warning): per page, the first og:image and the first
     twitter:image, each if relative or malformed, answered non-200, or over 5 MB;
-    evidence `{images: [{tag, url, problem, statusCode?, bytes?, fetchClass?}]}`. A
+    evidence `{images: [{tag, url, problem, statusCode?, bytes?, fetchClass?, max?}]}`.
+    A `problem` of `too-long` (pages crawled since Phase 26c only) is an address
+    over `max` (2,500) characters, which the crawl neither stored nor fetched. A
     `problem` of `not-fetched` appears only on a crawl whose file check ran, and means this
     image was skipped by it (a budget, no record) or its request got no answer
     (`fetchClass` says which): report it as NOT CHECKED for that image, never as
     broken and never as a pass. When the file check asked about nothing on the
     whole crawl, no image is listed for that reason; the marker below says it once.
+  - `social.image-insecure` (info): an https page whose `og:image` is an `http:`
+    address and whose og:image:secure_url is absent or not `https:`; evidence
+    `{ogImage, secureUrl}` (`secureUrl` only when given). It is not mixed content, as
+    no browser loads an og:image; a platform that insists on https may drop the
+    preview. Pages crawled since Phase 26c only: it reads a tag older extractions did
+    not record, so `extraction.not-recorded` speaks for an older crawl.
   - `head.tags-outside-head` (warning): `social` in its `elements` when any Open
     Graph or X tag came after the head ended.
 - **Crawl-level markers**: `extraction.not-recorded` (info) as above, and for the

@@ -17,7 +17,7 @@ import { eq, sql } from "drizzle-orm";
 
 import { closeDb, createDb, type Db } from "../../src/db/client.js";
 import { runMigrations } from "../../src/db/migrate.js";
-import { issues, links, pages, sitemapUrls } from "../../src/db/schema.js";
+import { issues, links, pages, sitemapMemberships, sitemapUrls } from "../../src/db/schema.js";
 import {
   crawlMetrics,
   SITEMAP_DOC_ROWS_CAP,
@@ -429,7 +429,10 @@ describe("the crawl metrics against the database", () => {
       // and dropped whole for their size, so their entries are in none of these
       // counts — which is what that column is for.
       const crawlId = await newCrawl(
-        mkDiscovery({ truncation: { oversizedDocsSkipped: 2, docsFetched: 5 } }),
+        mkDiscovery({
+          sitemapFacts: null,
+          truncation: { oversizedDocsSkipped: 2, docsFetched: 5 },
+        }),
       );
       await addEntries(crawlId, [
         { path: "/p1", source: doc("sitemap-products.xml") },
@@ -446,6 +449,12 @@ describe("the crawl metrics against the database", () => {
         oversizedDocsSkipped: 2,
         urlCapBreaches: 0,
         entryCapReached: false,
+        totalMemberships: null,
+        docCountsExact: false,
+        membershipLimited: null,
+        hreflangLimited: null,
+        overlongLocsSkipped: null,
+        alternatesCapped: null,
       });
 
       // Ordered by entries descending, ties by source URL ascending.
@@ -459,7 +468,9 @@ describe("the crawl metrics against the database", () => {
     it("says so when the walk's entry cap stopped collection", async () => {
       // Every count in the table is then a floor, and a `breaches50k` of false
       // may be a false negative — so the flag travels with the numbers.
-      const crawlId = await newCrawl(mkDiscovery({ truncation: { entryLimited: true } }));
+      const crawlId = await newCrawl(
+        mkDiscovery({ sitemapFacts: null, truncation: { entryLimited: true } }),
+      );
       await addEntries(crawlId, [{ path: "/p1", source: doc("sitemap.xml") }]);
       expect((await site(ID, crawlId))["entryCapReached"]).toBe(true);
     });
@@ -468,7 +479,7 @@ describe("the crawl metrics against the database", () => {
       // The one assertion that cannot be made with a handful of rows: a column
       // that is always false is a column that never says anything, so the cap
       // is crossed for real. One statement, generated in Postgres.
-      const crawlId = await newCrawl();
+      const crawlId = await newCrawl(mkDiscovery({ sitemapFacts: null }));
       const big = doc("sitemap-everything.xml");
       const small = doc("sitemap-extra.xml");
       const over = SITEMAP_URL_CAP + 1;
@@ -489,6 +500,12 @@ describe("the crawl metrics against the database", () => {
         oversizedDocsSkipped: 0,
         urlCapBreaches: 1,
         entryCapReached: false,
+        totalMemberships: null,
+        docCountsExact: false,
+        membershipLimited: null,
+        hreflangLimited: null,
+        overlongLocsSkipped: null,
+        alternatesCapped: null,
       });
       expect(await docRows(crawlId)).toEqual([
         [big, { urls: over, breaches50k: true }],
@@ -499,7 +516,7 @@ describe("the crawl metrics against the database", () => {
     it("lists the fifty largest documents and says how many there are", async () => {
       // Fifty-two documents of one entry each: every document ties, so the
       // source URL decides, and the same crawl always names the same fifty.
-      const crawlId = await newCrawl();
+      const crawlId = await newCrawl(mkDiscovery({ sitemapFacts: null }));
       const names = Array.from({ length: 52 }, (_, i) => `sitemap-${String(i).padStart(2, "0")}.xml`);
       await addEntries(
         crawlId,
@@ -512,6 +529,12 @@ describe("the crawl metrics against the database", () => {
         oversizedDocsSkipped: 0,
         urlCapBreaches: 0,
         entryCapReached: false,
+        totalMemberships: null,
+        docCountsExact: false,
+        membershipLimited: null,
+        hreflangLimited: null,
+        overlongLocsSkipped: null,
+        alternatesCapped: null,
       });
       const rows = await docRows(crawlId);
       expect(rows).toHaveLength(SITEMAP_DOC_ROWS_CAP);
@@ -527,10 +550,105 @@ describe("the crawl metrics against the database", () => {
       expect(rows[0]!.value).toEqual({
         docs: 0,
         totalUrls: 0,
+        totalMemberships: 0,
         oversizedDocsSkipped: 0,
         urlCapBreaches: 0,
         entryCapReached: false,
+        docCountsExact: true,
+        membershipLimited: false,
+        hreflangLimited: false,
+        overlongLocsSkipped: 0,
+        alternatesCapped: 0,
       });
+    });
+
+    // THE 26c PATH (Deviation 7): the per-document rows come from the
+    // membership table, so a URL listed in two documents counts in both.
+    async function addMemberships(
+      crawlId: string,
+      entries: { path: string; source: string }[],
+    ): Promise<void> {
+      await db.insert(sitemapMemberships).values(
+        entries.map((e) => ({
+          crawlId,
+          url: url(e.path),
+          urlNormalised: normalised(url(e.path)),
+          sitemapSource: e.source,
+        })),
+      );
+    }
+
+    it("counts a document's entries from memberships when the crawl recorded them", async () => {
+      const crawlId = await newCrawl(
+        mkDiscovery({
+          sitemapFacts: {
+            membershipLimited: true,
+            hreflangLimited: true,
+            overlongLocsSkipped: 3,
+            alternatesCapped: 5,
+          },
+        }),
+      );
+      // sitemap_urls: first source wins, so /shared sits under products only.
+      await addEntries(crawlId, [
+        { path: "/shared", source: doc("sitemap-products.xml") },
+        { path: "/p1", source: doc("sitemap-products.xml") },
+      ]);
+      await addMemberships(crawlId, [
+        { path: "/shared", source: doc("sitemap-products.xml") },
+        { path: "/p1", source: doc("sitemap-products.xml") },
+        { path: "/shared", source: doc("sitemap-blog.xml") },
+      ]);
+      expect(await site(ID, crawlId)).toEqual({
+        docs: 2,
+        // Distinct sitemap URLs (/shared, /p1) keep their meaning; the three
+        // listings are the memberships.
+        totalUrls: 2,
+        totalMemberships: 3,
+        oversizedDocsSkipped: 0,
+        urlCapBreaches: 0,
+        entryCapReached: false,
+        docCountsExact: true,
+        membershipLimited: true,
+        hreflangLimited: true,
+        overlongLocsSkipped: 3,
+        alternatesCapped: 5,
+      });
+      expect(await docRows(crawlId)).toEqual([
+        [doc("sitemap-products.xml"), { urls: 2, breaches50k: false }],
+        [doc("sitemap-blog.xml"), { urls: 1, breaches50k: false }],
+      ]);
+    });
+
+    it("throws re-crawl on 26c sitemap facts without alternatesCapped (final review I5)", async () => {
+      const discovery = mkDiscovery();
+      const { alternatesCapped: _dropped, ...older } = discovery.sitemapFacts!;
+      const crawlId = await newCrawl({ ...discovery, sitemapFacts: older });
+      await expect(rule(ID).run(db, crawlId)).rejects.toThrow(
+        /sitemapFacts has a non-count alternatesCapped; re-crawl the site/,
+      );
+    });
+
+    it("flags a document over 50,000 memberships even when its URLs sit under another source", async () => {
+      const crawlId = await newCrawl();
+      const a = doc("a.xml");
+      const b = doc("b.xml");
+      await db.execute(sql`
+        insert into sitemap_memberships (crawl_id, url, url_normalised, sitemap_source)
+        select ${crawlId}, ${`${SITE}/m/`} || g, ${`${SITE}/m/`} || g, src
+        from generate_series(1, ${SITEMAP_URL_CAP + 1}) g, unnest(array[${a}, ${b}]::text[]) src`);
+      const s = await site(ID, crawlId);
+      expect(s).toMatchObject({
+        docs: 2,
+        urlCapBreaches: 2,
+        docCountsExact: true,
+        totalUrls: 0,
+        totalMemberships: 2 * (SITEMAP_URL_CAP + 1),
+      });
+      expect((await docRows(crawlId)).map(([, v]) => v)).toEqual([
+        { urls: SITEMAP_URL_CAP + 1, breaches50k: true },
+        { urls: SITEMAP_URL_CAP + 1, breaches50k: true },
+      ]);
     });
 
     it("refuses a crawl whose discovery evidence is missing", async () => {

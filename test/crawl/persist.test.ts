@@ -21,8 +21,9 @@ import {
   leaseBatch,
 } from "../../src/crawl/frontier.js";
 import type { FetchResult } from "../../src/crawl/fetch-page.js";
-import { analyzePage, type PageAnalysis } from "../../src/crawl/parse/page-analyzer.js";
+import { analyzePage, type PageAnalysis, type PageLink } from "../../src/crawl/parse/page-analyzer.js";
 import { HEAD_SNIPPET_MAX } from "../../src/crawl/parse/page-facts.js";
+import { fitsIndex, INDEXED_URL_MAX } from "../../src/crawl/parse/url-utils.js";
 
 function databaseUrl(): string {
   const url = process.env.DATABASE_URL;
@@ -60,11 +61,22 @@ function makeAnalysis(overrides: Partial<PageAnalysis> = {}): PageAnalysis {
     footerLinkCount: 4,
     frameworkMarkers: ["__NEXT_DATA__"],
     links: [
-      { href: `${SITE}/one`, anchor: "one", ariaLabel: null, rel: null, nofollow: false, position: 0 },
+      {
+        href: `${SITE}/one`,
+        anchor: "one",
+        ariaLabel: null,
+        nameHint: null,
+        nameHintSource: null,
+        rel: null,
+        nofollow: false,
+        position: 0,
+      },
       {
         href: `${SITE}/two`,
         anchor: "",
         ariaLabel: "Wishlist",
+        nameHint: null,
+        nameHintSource: null,
         rel: "nofollow",
         nofollow: true,
         position: 1,
@@ -73,6 +85,8 @@ function makeAnalysis(overrides: Partial<PageAnalysis> = {}): PageAnalysis {
         href: "https://other.example/three",
         anchor: "three",
         ariaLabel: null,
+        nameHint: null,
+        nameHintSource: null,
         rel: null,
         nofollow: false,
         position: 2,
@@ -131,6 +145,8 @@ function makeAnalysis(overrides: Partial<PageAnalysis> = {}): PageAnalysis {
     relNextCount: 0,
     relPrevCount: 0,
     htmlStructure: { htmlTags: 1, headTags: 1, bodyTags: 1, headBeforeBody: true, closedEarly: null },
+    // Phase 26c (extraction 3): no reference refused for its length.
+    overlongUrls: { links: 0, resources: 0, hreflang: 0 },
     ...overrides,
   };
 }
@@ -150,6 +166,7 @@ function makeFetch(url: string, overrides: Partial<FetchResult> = {}): FetchResu
     xRobotsTag: null,
     platformHint: null,
     responseHeaders: null,
+    headerHreflang: [],
     disallowedReason: null,
     ...overrides,
   };
@@ -228,6 +245,8 @@ describe("PageWriter", () => {
       href: `${SITE}/l/${i}`,
       anchor: `l${i}`,
       ariaLabel: null,
+      nameHint: null,
+      nameHintSource: null,
       rel: null,
       nofollow: false,
       position: i,
@@ -434,6 +453,49 @@ describe("PageWriter", () => {
     expect(byTarget.get("https://other.example/three")?.position).toBe(2);
   });
 
+  it("writes a link's name hint and its source as the analyzer gave them, nulls included (Phase 26c)", async () => {
+    const crawlId = await newCrawl();
+    const writer = new PageWriter(db, crawlId);
+    const url = `${SITE}/named`;
+    const link = (path: string, position: number, nameHint: string | null, nameHintSource: PageLink["nameHintSource"]) => ({
+      href: `${SITE}${path}`,
+      anchor: "",
+      ariaLabel: null,
+      nameHint,
+      nameHintSource,
+      rel: null,
+      nofollow: false,
+      position,
+    });
+    await writer.addPage(
+      item(url),
+      makeFetch(url),
+      makeAnalysis({
+        links: [
+          link("/labelledby", 0, "cart-label cart-count", "aria-labelledby"),
+          link("/inner", 1, "Cart", "inner-aria-label"),
+          link("/svg", 2, "Menu", "svg-title"),
+          link("/title", 3, "Account", "title"),
+          link("/nothing", 4, null, null),
+        ],
+      }),
+      { complete: true },
+    );
+    await writer.flush();
+
+    const rows = await db
+      .select({ targetUrl: links.targetUrl, nameHint: links.nameHint, nameHintSource: links.nameHintSource })
+      .from(links)
+      .where(eq(links.crawlId, crawlId));
+    expect(Object.fromEntries(rows.map((r) => [r.targetUrl, [r.nameHint, r.nameHintSource]]))).toEqual({
+      [`${SITE}/labelledby`]: ["cart-label cart-count", "aria-labelledby"],
+      [`${SITE}/inner`]: ["Cart", "inner-aria-label"],
+      [`${SITE}/svg`]: ["Menu", "svg-title"],
+      [`${SITE}/title`]: ["Account", "title"],
+      [`${SITE}/nothing`]: [null, null],
+    });
+  });
+
   it("writes the fetch-side columns and a normalised url", async () => {
     const crawlId = await newCrawl();
     const writer = new PageWriter(db, crawlId);
@@ -461,7 +523,7 @@ describe("PageWriter", () => {
     expect(row?.h2Count).toBe(2);
   });
 
-  it("stamps extraction_version 2 on every row it writes, a robots-blocked row included", async () => {
+  it("stamps the current extraction_version (3) on every row it writes, a robots-blocked row included", async () => {
     const crawlId = await newCrawl();
     const writer = new PageWriter(db, crawlId);
     await writer.addPage(item(`${SITE}/a`), makeFetch(`${SITE}/a`), makeAnalysis(), {
@@ -477,8 +539,8 @@ describe("PageWriter", () => {
 
     const rows = await db.select().from(pages).where(eq(pages.crawlId, crawlId));
     expect(rows).toHaveLength(3);
-    expect(EXTRACTION_VERSION).toBe(2);
-    for (const row of rows) expect(row.extractionVersion, row.url).toBe(2);
+    expect(EXTRACTION_VERSION).toBe(3);
+    for (const row of rows) expect(row.extractionVersion, row.url).toBe(3);
     const blocked = rows.find((r) => r.url === `${SITE}/blocked`);
     expect(blocked?.fetchClass).toBe("disallowed");
     expect(blocked?.responseHeaders).toBeNull();
@@ -820,6 +882,7 @@ describe("PageWriter", () => {
       outsideHead: true,
       xViaProperty: true,
       imageRefs: { og: `${SITE}/og.png`, x: null },
+      imageRefTooLong: { og: false, x: false },
     };
     await writer.addPage(
       item(url),
@@ -934,6 +997,178 @@ describe("PageWriter", () => {
         inNoscript: true,
         lost: [],
       },
+    });
+  });
+
+  // Phase 26c (Task 2): the 26b crash was a 3,000-character `src` reaching the
+  // `resources` btree. Every indexed URL column has the same limit, so a page
+  // carrying an over-long link, image, hreflang target and share image must
+  // write whole, with the counts on its row and none of the four anywhere.
+  it("writes a page with four over-long references and records the counts (migration 0029)", async () => {
+    const crawlId = await newCrawl();
+    const writer = new PageWriter(db, crawlId);
+    const url = `${SITE}/overlong`;
+    const long = `${SITE}/${"z".repeat(3000)}`;
+    const analysis = analyzePage(
+      `<html><head><meta property="og:image" content="${long}">` +
+        `<link rel="alternate" hreflang="de" href="${long}"></head>` +
+        `<body><a href="${long}">l</a><img src="${long}"><a href="/fine">f</a></body></html>`,
+      url,
+    );
+    await writer.addPage(item(url), makeFetch(url), analysis, { complete: true });
+    await writer.flush();
+
+    const [row] = await db.select().from(pages).where(eq(pages.crawlId, crawlId));
+    expect(row?.overlongUrls).toEqual({ links: 1, resources: 1, hreflang: 1 });
+    expect(row?.social?.imageRefTooLong).toEqual({ og: true, x: false });
+    expect(row?.social?.imageRefs).toEqual({ og: null, x: null });
+    expect(await countOf(links, crawlId)).toBe(1);
+    expect(await countOf(hreflang, crawlId)).toBe(0);
+    expect(await countOf(resources, crawlId)).toBe(0);
+    expect(await countOf(pageResources, crawlId)).toBe(0);
+  });
+
+  // Phase 26c (Task 6): the Link header is read on every classified response,
+  // so a row with a status and no analysis measured its header hreflang.
+  it("writes zero counts on a classified row with no analysis, and null where no response was classified", async () => {
+    const crawlId = await newCrawl();
+    const writer = new PageWriter(db, crawlId);
+    const gone = `${SITE}/no-analysis-overlong`;
+    const hung = `${SITE}/no-response-overlong`;
+    await writer.addPage(item(gone), makeFetch(gone, { fetchClass: "client_error", statusCode: 404, body: null }), null, {
+      complete: true,
+    });
+    await writer.addPage(item(hung), makeFetch(hung, { fetchClass: "timeout", statusCode: null, body: null }), null, {
+      complete: true,
+    });
+    await writer.flush();
+    const rows = await db
+      .select({ url: pages.url, overlongUrls: pages.overlongUrls })
+      .from(pages)
+      .where(eq(pages.crawlId, crawlId));
+    const byUrl = new Map(rows.map((r) => [r.url, r.overlongUrls]));
+    expect(byUrl.get(gone)).toEqual({ links: 0, resources: 0, hreflang: 0 });
+    expect(byUrl.get(hung)).toBeNull();
+  });
+
+  describe("hreflang from the Link header (Phase 26c, Task 6)", () => {
+    const LINK_PAIRS = [
+      { code: "de", href: "https://s.example/de/doc.pdf" },
+      { code: "en", href: "https://s.example/en/doc.pdf" },
+    ];
+
+    async function headerRows(crawlId: string) {
+      return db
+        .select({ code: hreflang.hreflangCode, target: hreflang.targetUrl, source: hreflang.source })
+        .from(hreflang)
+        .where(eq(hreflang.crawlId, crawlId));
+    }
+
+    it("writes two source='header' rows for a non_html PDF page", async () => {
+      const crawlId = await newCrawl();
+      const writer = new PageWriter(db, crawlId);
+      const url = `${SITE}/en/doc.pdf`;
+      await writer.addPage(
+        item(url),
+        makeFetch(url, {
+          fetchClass: "non_html",
+          contentType: "application/pdf",
+          body: null,
+          headerHreflang: LINK_PAIRS,
+        }),
+        null,
+        { complete: true },
+      );
+      await writer.flush();
+
+      const rows = await headerRows(crawlId);
+      expect(rows.sort((a, b) => a.code.localeCompare(b.code))).toEqual([
+        { code: "de", target: "https://s.example/de/doc.pdf", source: "header" },
+        { code: "en", target: "https://s.example/en/doc.pdf", source: "header" },
+      ]);
+      expect(writer.stats().hreflang).toBe(2);
+      const [row] = await db.select().from(pages).where(eq(pages.crawlId, crawlId));
+      expect(row?.overlongUrls).toEqual({ links: 0, resources: 0, hreflang: 0 });
+    });
+
+    it("counts an over-long header target on a PDF row, after resolving, and stores none", async () => {
+      const crawlId = await newCrawl();
+      const writer = new PageWriter(db, crawlId);
+      const url = `${SITE}/en/doc.pdf`;
+      // Under the limit as written, over it once resolved against the page:
+      // the length measured is the length the row would hold (ruling R5).
+      const relative = `/${"z".repeat(INDEXED_URL_MAX - 1)}`;
+      expect(fitsIndex(relative)).toBe(true);
+      await writer.addPage(
+        item(url),
+        makeFetch(url, {
+          fetchClass: "non_html",
+          contentType: "application/pdf",
+          body: null,
+          headerHreflang: [{ code: "de", href: relative }, LINK_PAIRS[1]!],
+        }),
+        null,
+        { complete: true },
+      );
+      await writer.flush();
+
+      expect(await headerRows(crawlId)).toEqual([
+        { code: "en", target: "https://s.example/en/doc.pdf", source: "header" },
+      ]);
+      const [row] = await db.select().from(pages).where(eq(pages.crawlId, crawlId));
+      expect(row?.overlongUrls).toEqual({ links: 0, resources: 0, hreflang: 1 });
+      expect(writer.stats().hreflangUnresolved).toBe(0);
+    });
+
+    it("writes header rows beside html rows, resolved against the page, adding to the analyzer's counts", async () => {
+      const crawlId = await newCrawl();
+      const writer = new PageWriter(db, crawlId);
+      const url = `${SITE}/de/seite`;
+      await writer.addPage(
+        item(url),
+        makeFetch(url, {
+          headerHreflang: [
+            { code: "fr", href: "../fr/page" },
+            { code: "es", href: "http://[bad" },
+            { code: "it", href: `${SITE}/${"z".repeat(3000)}` },
+          ],
+        }),
+        makeAnalysis({
+          hreflang: [{ code: "en", href: "/en/page" }],
+          overlongUrls: { links: 2, resources: 1, hreflang: 1 },
+        }),
+        { complete: true },
+      );
+      await writer.flush();
+
+      const rows = await headerRows(crawlId);
+      expect(rows.sort((a, b) => a.code.localeCompare(b.code))).toEqual([
+        { code: "en", target: `${SITE}/en/page`, source: "html" },
+        { code: "fr", target: `${SITE}/fr/page`, source: "header" },
+      ]);
+      expect(writer.stats().hreflangUnresolved).toBe(1);
+      const [row] = await db.select().from(pages).where(eq(pages.crawlId, crawlId));
+      expect(row?.overlongUrls).toEqual({ links: 2, resources: 1, hreflang: 2 });
+    });
+
+    it("writes header rows on a redirect row too: the declaration is the response's", async () => {
+      const crawlId = await newCrawl();
+      const writer = new PageWriter(db, crawlId);
+      const url = `${SITE}/old`;
+      await writer.addPage(
+        item(url),
+        makeFetch(url, {
+          statusCode: 301,
+          fetchClass: "redirect",
+          body: null,
+          redirectUrl: `${SITE}/new`,
+          headerHreflang: LINK_PAIRS,
+        }),
+        null,
+        { complete: true },
+      );
+      await writer.flush();
+      expect(await headerRows(crawlId)).toHaveLength(2);
     });
   });
 
@@ -1060,6 +1295,7 @@ describe("PageWriter", () => {
           outsideHead: false,
           xViaProperty: false,
           imageRefs: { og: null, x: null },
+          imageRefTooLong: { og: false, x: false },
         },
       }),
       { complete: true },
@@ -1153,6 +1389,8 @@ describe("PageWriter", () => {
             href: `${SITE}/one`,
             anchor: "one",
             ariaLabel: null,
+            nameHint: null,
+            nameHintSource: null,
             rel: null,
             nofollow: false,
             position: 3_000_000_000,
@@ -1654,6 +1892,76 @@ describe("PageWriter", () => {
       expect(edges).toEqual([{ url: `${SITE}/img/logo.png` }]);
       expect(writer.stats().resources).toBe(2);
       expect(writer.stats().pageResources).toBe(1);
+    });
+
+    /**
+     * Task 3 (Phase 26c): the row says it is a share image, by itself. The flag
+     * is set on conflict, so it holds whichever page named the URL first and
+     * whether or not any page also loads it.
+     */
+    it("marks a share-image row share_image = true and a page-only row false", async () => {
+      const crawlId = await newCrawl();
+      const writer = new PageWriter(db, crawlId);
+      const url = `${SITE}/flagged`;
+      const analysis = analyzePage(
+        `<html><head><meta property="og:image" content="${SITE}/og/only.png"></head>` +
+          `<body><img src="/img/page-only.png" alt="x"></body></html>`,
+        url,
+      );
+      await writer.addPage(item(url), makeFetch(url), analysis, { complete: true });
+      await writer.flush();
+      const rows = await db
+        .select({ url: resources.url, shareImage: resources.shareImage })
+        .from(resources)
+        .where(eq(resources.crawlId, crawlId))
+        .orderBy(resources.url);
+      expect(rows).toEqual([
+        { url: `${SITE}/img/page-only.png`, shareImage: false },
+        { url: `${SITE}/og/only.png`, shareImage: true },
+      ]);
+    });
+
+    it("sets share_image on a URL one page loads as an <img> and another uses as og:image", async () => {
+      for (const order of [["loads", "shares"], ["shares", "loads"]] as const) {
+        const crawlId = await newCrawl();
+        const writer = new PageWriter(db, crawlId, { batchSize: 1 });
+        const shared = `${SITE}/img/both.png`;
+        for (const role of order) {
+          const url = `${SITE}/${role}`;
+          const analysis =
+            role === "loads"
+              ? makeAnalysis({ resourceRefs: [{ url: shared, kind: "image" }] })
+              : makeAnalysis({ resourceRefs: [], socialImageRefs: [shared] });
+          await writer.addPage(item(url), makeFetch(url), analysis, { complete: true });
+        }
+        await writer.flush();
+        const rows = await db
+          .select({ url: resources.url, shareImage: resources.shareImage })
+          .from(resources)
+          .where(eq(resources.crawlId, crawlId));
+        expect(rows, order.join(">")).toEqual([{ url: shared, shareImage: true }]);
+        expect(await countOf(pageResources, crawlId), order.join(">")).toBe(1);
+        expect(writer.stats().resources, order.join(">")).toBe(1);
+      }
+    });
+
+    it("writes one row when many pages in one batch name the same share image", async () => {
+      const crawlId = await newCrawl();
+      const writer = new PageWriter(db, crawlId, { batchSize: 100 });
+      const shared = `${SITE}/og/default.png`;
+      for (const path of ["/p1", "/p2", "/p3"]) {
+        const url = `${SITE}${path}`;
+        await writer.addPage(item(url), makeFetch(url), makeAnalysis({ resourceRefs: [], socialImageRefs: [shared] }), {
+          complete: true,
+        });
+      }
+      await writer.flush();
+      const rows = await db
+        .select({ url: resources.url, shareImage: resources.shareImage })
+        .from(resources)
+        .where(eq(resources.crawlId, crawlId));
+      expect(rows).toEqual([{ url: shared, shareImage: true }]);
+      expect(writer.stats().resources).toBe(1);
     });
 
     it("writes no resources row for a relative or non-http(s) share image", async () => {

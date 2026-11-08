@@ -12,9 +12,13 @@ import { eq, sql } from "drizzle-orm";
 
 import { closeDb, createDb, type Db } from "../../src/db/client.js";
 import { runMigrations } from "../../src/db/migrate.js";
-import { crawls, pages, sitemapUrls } from "../../src/db/schema.js";
+import { crawls, pages, sitemapMemberships, sitemapUrls } from "../../src/db/schema.js";
 import { sitemapEntryRules } from "../../src/rules/query/sitemap-entries.js";
 import type { Finding, QueryRule, RuleCaps } from "../../src/rules/registry/types.js";
+import { INDEXED_URL_MAX } from "../../src/crawl/parse/url-utils.js";
+import { SITEMAP_MAX_BYTES } from "../../src/crawl/sitemap-stream.js";
+import { pageFactsRules } from "../../src/rules/query/page-facts.js";
+import { sitemapRules } from "../../src/rules/query/sitemap.js";
 import { SITEMAP_LOC_MAX, SITEMAP_URL_CAP } from "../../src/rules/thresholds.js";
 import { mkDiscovery } from "./mk-discovery.js";
 import { normalised } from "./mk-page.js";
@@ -40,6 +44,8 @@ describe("sitemapEntryRules metadata", () => {
       Object.fromEntries(sitemapEntryRules.map((r) => [r.id, [r.checkIds, r.severity, r.category]])),
     ).toEqual({
       "sitemap.over-50k-urls": [["CHECK-08"], "warning", "sitemap"],
+      "sitemap.oversized": [["CHECK-08"], "warning", "sitemap"],
+      "sitemap.url-in-multiple": [["CHECK-08"], "info", "sitemap"],
       "sitemap.url-too-long": [["CHECK-07"], "info", "sitemap"],
       "sitemap.cross-host-loc": [["CHECK-07"], "warning", "sitemap"],
       "sitemap.lastmod-invalid": [["CHECK-07"], "info", "sitemap"],
@@ -57,6 +63,7 @@ describe("the sitemap entry rules against the database", () => {
   async function newCrawl(
     startedAt?: Date,
     finishedAt: Date | null = startedAt ?? new Date(),
+    discovery: ReturnType<typeof mkDiscovery> = mkDiscovery(),
   ): Promise<string> {
     const id = `crawl_${randomUUID()}`;
     await db.insert(crawls).values({
@@ -66,7 +73,7 @@ describe("the sitemap entry rules against the database", () => {
       rulesetVersion: "test",
       status: "finished",
       pagesCrawled: 1,
-      discovery: mkDiscovery(),
+      discovery,
       finishedAt,
       ...(startedAt === undefined ? {} : { startedAt }),
     });
@@ -89,6 +96,20 @@ describe("the sitemap entry rules against the database", () => {
     );
   }
 
+  async function addMemberships(
+    crawlId: string,
+    rows: { url: string; source: string; normalised?: string }[],
+  ): Promise<void> {
+    await db.insert(sitemapMemberships).values(
+      rows.map((r) => ({
+        crawlId,
+        url: r.url,
+        urlNormalised: r.normalised ?? normalised(r.url),
+        sitemapSource: r.source,
+      })),
+    );
+  }
+
   const run = (id: string, crawlId: string, caps?: RuleCaps): Promise<Finding[]> =>
     rule(id).run(db, crawlId, caps);
 
@@ -107,10 +128,13 @@ describe("the sitemap entry rules against the database", () => {
     const crawlId = await newCrawl();
     const big = `${SITE}/big.xml`;
     await db.execute(sql`
-      insert into sitemap_urls (crawl_id, url, url_normalised, sitemap_source)
+      insert into sitemap_memberships (crawl_id, url, url_normalised, sitemap_source)
       select ${crawlId}, ${SITE + "/p/"} || g, ${SITE + "/p/"} || g, ${big}
       from generate_series(1, ${SITEMAP_URL_CAP + 1}) g`);
-    await add(crawlId, [{ url: `${SITE}/small-1` }, { url: `${SITE}/small-2` }]);
+    await addMemberships(crawlId, [
+      { url: `${SITE}/small-1`, source: SOURCE },
+      { url: `${SITE}/small-2`, source: SOURCE },
+    ]);
 
     const found = await run("sitemap.over-50k-urls", crawlId);
     expect(found).toHaveLength(1);
@@ -126,10 +150,217 @@ describe("the sitemap entry rules against the database", () => {
   it("is silent at exactly the cap", async () => {
     const crawlId = await newCrawl();
     await db.execute(sql`
-      insert into sitemap_urls (crawl_id, url, url_normalised, sitemap_source)
+      insert into sitemap_memberships (crawl_id, url, url_normalised, sitemap_source)
       select ${crawlId}, ${SITE + "/p/"} || g, ${SITE + "/p/"} || g, ${SOURCE}
       from generate_series(1, ${SITEMAP_URL_CAP}) g`);
     expect(await run("sitemap.over-50k-urls", crawlId)).toHaveLength(0);
+  });
+
+  it("counts a URL listed in two documents once per document (exact, not a lower bound)", async () => {
+    const crawlId = await newCrawl();
+    const a = `${SITE}/a.xml`;
+    const b = `${SITE}/b.xml`;
+    // Both documents list the same URLs. `sitemap_urls` would keep each URL
+    // under its first source only, so document b would read as empty there;
+    // memberships hold one row per URL per document.
+    await db.execute(sql`
+      insert into sitemap_memberships (crawl_id, url, url_normalised, sitemap_source)
+      select ${crawlId}, ${SITE + "/p/"} || g, ${SITE + "/p/"} || g, src
+      from generate_series(1, ${SITEMAP_URL_CAP + 1}) g, unnest(array[${a}, ${b}]::text[]) src`);
+    const found = await run("sitemap.over-50k-urls", crawlId);
+    expect(found.map((f) => f.evidence)).toEqual([
+      { sitemap: a, entries: SITEMAP_URL_CAP + 1 },
+      { sitemap: b, entries: SITEMAP_URL_CAP + 1 },
+    ]);
+  });
+
+  it("says membershipLimited on its evidence when the membership cap was hit (the count is a floor)", async () => {
+    const crawlId = await newCrawl(
+      undefined,
+      undefined,
+      mkDiscovery({ sitemapFacts: { membershipLimited: true } }),
+    );
+    await db.execute(sql`
+      insert into sitemap_memberships (crawl_id, url, url_normalised, sitemap_source)
+      select ${crawlId}, ${SITE + "/p/"} || g, ${SITE + "/p/"} || g, ${SOURCE}
+      from generate_series(1, ${SITEMAP_URL_CAP + 1}) g`);
+    const [finding] = await run("sitemap.over-50k-urls", crawlId);
+    expect(finding!.evidence).toEqual({
+      sitemap: SOURCE,
+      entries: SITEMAP_URL_CAP + 1,
+      membershipLimited: true,
+    });
+  });
+
+  it("refuses a crawl without sitemapFacts (returns nothing) and the marker speaks", async () => {
+    const crawlId = await newCrawl(undefined, undefined, mkDiscovery({ sitemapFacts: null }));
+    await db.execute(sql`
+      insert into sitemap_urls (crawl_id, url, url_normalised, sitemap_source)
+      select ${crawlId}, ${SITE + "/p/"} || g, ${SITE + "/p/"} || g, ${SOURCE}
+      from generate_series(1, ${SITEMAP_URL_CAP + 1}) g`);
+    expect(await run("sitemap.over-50k-urls", crawlId)).toEqual([]);
+    expect(await run("sitemap.oversized", crawlId)).toEqual([]);
+    expect(await run("sitemap.url-in-multiple", crawlId)).toEqual([]);
+    const marker = pageFactsRules.find((r) => r.id === "extraction.not-recorded");
+    if (marker === undefined) throw new Error("no marker");
+    const speaks = await marker.run(db, crawlId);
+    expect(speaks).toHaveLength(1);
+    expect(speaks[0]!.evidence).toMatchObject({ sitemapFactsRecorded: false });
+  });
+
+  // ------------------------------------------------------ oversized
+
+  it("reports each oversized document with its bytes read and URLs kept", async () => {
+    const big = `${SITE}/huge.xml`;
+    const other = `${SITE}/huge-2.xml`;
+    const crawlId = await newCrawl(
+      undefined,
+      undefined,
+      mkDiscovery({
+        truncation: { oversizedDocsSkipped: 2 },
+        sitemapFacts: {
+          oversizedDocs: [
+            { url: big, bytesRead: SITEMAP_MAX_BYTES, urlsKept: 123 },
+            { url: other, bytesRead: SITEMAP_MAX_BYTES + 10, urlsKept: 4 },
+          ],
+        },
+      }),
+    );
+    const found = await run("sitemap.oversized", crawlId);
+    expect(found).toHaveLength(2);
+    expect(found[0]).toMatchObject({
+      ruleId: "sitemap.oversized",
+      severity: "warning",
+      pageId: null,
+      dedupeKey: big,
+    });
+    expect(found.map((f) => f.evidence)).toEqual([
+      { sitemapUrl: big, bytesRead: SITEMAP_MAX_BYTES, urlsKept: 123, max: SITEMAP_MAX_BYTES },
+      { sitemapUrl: other, bytesRead: SITEMAP_MAX_BYTES + 10, urlsKept: 4, max: SITEMAP_MAX_BYTES },
+    ]);
+  });
+
+  it("is silent when no document ran past the cap", async () => {
+    expect(await run("sitemap.oversized", await newCrawl())).toEqual([]);
+  });
+
+  // ------------------------------------------------------ url-in-multiple
+
+  it("fires once per URL listed in more than one document, not for a repeat in one document", async () => {
+    const crawlId = await newCrawl();
+    const a = `${SITE}/a.xml`;
+    const b = `${SITE}/b.xml`;
+    const c = `${SITE}/c.xml`;
+    await addMemberships(crawlId, [
+      { url: `${SITE}/shared`, source: a },
+      { url: `${SITE}/shared`, source: b },
+      { url: `${SITE}/shared`, source: c },
+      { url: `${SITE}/only-a`, source: a },
+      { url: `${SITE}/only-b`, source: b },
+      // One document, two spellings of one URL: still one source.
+      { url: `${SITE}/twice`, source: a },
+      { url: `${SITE}/twice#frag`, source: a, normalised: `${SITE}/twice` },
+    ]);
+    const found = await run("sitemap.url-in-multiple", crawlId);
+    expect(found).toHaveLength(1);
+    expect(found[0]).toMatchObject({
+      ruleId: "sitemap.url-in-multiple",
+      severity: "info",
+      dedupeKey: `${SITE}/shared`,
+    });
+    expect(found[0]!.evidence).toEqual({ url: `${SITE}/shared`, sitemaps: [a, b, c], count: 3 });
+  });
+
+  it("caps the listed sitemaps at 10 and keeps the true count", async () => {
+    const crawlId = await newCrawl();
+    await addMemberships(
+      crawlId,
+      Array.from({ length: 12 }, (_, i) => ({
+        url: `${SITE}/shared`,
+        source: `${SITE}/s${String(i).padStart(2, "0")}.xml`,
+      })),
+    );
+    const [finding] = await run("sitemap.url-in-multiple", crawlId);
+    const evidence = finding!.evidence as { sitemaps: string[]; count: number };
+    expect(evidence.sitemaps).toHaveLength(10);
+    expect(evidence.count).toBe(12);
+  });
+
+  it("attaches the finding to the crawled page, spends the listing cap and notes the total", async () => {
+    const crawlId = await newCrawl();
+    const pageId = `page_${randomUUID()}`;
+    await db.insert(pages).values({
+      id: pageId, crawlId, url: `${SITE}/u1`, urlNormalised: `${SITE}/u1`,
+      fetchClass: "ok", statusCode: 200, depth: 0, discoveredVia: "sitemap",
+    });
+    const rows = [1, 2, 3].flatMap((n) => [
+      { url: `${SITE}/u${n}`, source: `${SITE}/a.xml` },
+      { url: `${SITE}/u${n}`, source: `${SITE}/b.xml` },
+    ]);
+    await addMemberships(crawlId, rows);
+    const found = await run("sitemap.url-in-multiple", crawlId, { listing: 2 });
+    expect(found).toHaveLength(2);
+    expect(found[0]!.pageId).toBe(pageId);
+    expect(JSON.stringify(found.at(-1))).toContain('"total":3');
+  });
+
+  it("says membershipLimited on its evidence when the membership cap was hit", async () => {
+    const crawlId = await newCrawl(
+      undefined,
+      undefined,
+      mkDiscovery({ sitemapFacts: { membershipLimited: true } }),
+    );
+    await addMemberships(crawlId, [
+      { url: `${SITE}/shared`, source: `${SITE}/a.xml` },
+      { url: `${SITE}/shared`, source: `${SITE}/b.xml` },
+    ]);
+    const [finding] = await run("sitemap.url-in-multiple", crawlId);
+    expect(finding!.evidence).toMatchObject({ membershipLimited: true });
+  });
+
+  // ------------------------------------------------------ overlong locs skipped
+
+  it("reports the over-long locs discovery refused to store, once, beside the stored ones", async () => {
+    const crawlId = await newCrawl(
+      undefined,
+      undefined,
+      mkDiscovery({ sitemapFacts: { overlongLocsSkipped: 7 } }),
+    );
+    await add(crawlId, [{ url: `${SITE}/${"a".repeat(SITEMAP_LOC_MAX)}` }]);
+    const found = await run("sitemap.url-too-long", crawlId);
+    expect(found).toHaveLength(2);
+    const skipped = found.find((f) => f.pageUrl === null);
+    expect(skipped).toMatchObject({ pageId: null, dedupeKey: "overlong-locs-skipped" });
+    expect(skipped!.evidence).toEqual({ skipped: 7, max: INDEXED_URL_MAX });
+  });
+
+  it("states no skipped-locs finding when none was skipped, or on a pre-26c crawl", async () => {
+    expect(await run("sitemap.url-too-long", await newCrawl())).toEqual([]);
+    const old = await newCrawl(undefined, undefined, mkDiscovery({ sitemapFacts: null }));
+    expect(await run("sitemap.url-too-long", old)).toEqual([]);
+  });
+
+  // ------------------------------------------------------ sitemap.invalid
+
+  it("sitemap.invalid lists an oversized document from an old crawl's failures only", async () => {
+    const failures = [{ url: `${SITE}/old-huge.xml`, reason: "document over the size limit" }];
+    const old = await newCrawl(
+      undefined,
+      undefined,
+      mkDiscovery({ sitemapFacts: null, truncation: { failures, oversizedDocsSkipped: 1 } }),
+    );
+    const invalid = sitemapRules.find((r) => r.id === "sitemap.invalid");
+    if (invalid === undefined) throw new Error("no sitemap.invalid");
+    expect((await invalid.run(db, old))[0]!.evidence).toMatchObject({ failures });
+    const fresh = await newCrawl(
+      undefined,
+      undefined,
+      mkDiscovery({
+        truncation: { oversizedDocsSkipped: 1 },
+        sitemapFacts: { oversizedDocs: [{ url: `${SITE}/huge.xml`, bytesRead: 1, urlsKept: 1 }] },
+      }),
+    );
+    expect(await invalid.run(db, fresh)).toEqual([]);
   });
 
   // ------------------------------------------------------ url-too-long

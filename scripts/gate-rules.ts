@@ -541,6 +541,10 @@ async function main(): Promise<number> {
       console.log(
         line("fixture site", `${pages.toLocaleString()} URLs, crawl budget ${budget.toLocaleString()}`),
       );
+      // Phase 26c: which fixture shape ran (GATE_SITEMAP_HREFLANG, read by the fixture).
+      console.log(
+        line("sitemap hreflang", site.sitemapHreflang ? "on (xhtml:link alternates)" : "off"),
+      );
       console.log("");
       console.log("— crawl phase —");
 

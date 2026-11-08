@@ -137,6 +137,33 @@
  * the tree, so it is shared rather than re-derived, on `parseRefresh`'s
  * precedent.
  *
+ * Phase 26c (P26c-T2) moved the oracle in step with the port's indexed-URL
+ * limit: a link whose resolved target is over `INDEXED_URL_MAX` is no link row
+ * and takes a slot under the 2,000 cap, and the social set carries
+ * `imageRefTooLong` with a null `imageRefs` entry for an over-long share image,
+ * both written from the fields' contracts with the shared constant. The new
+ * `overlongUrls` counts are stripped (see `EXTENSION_FIELDS`).
+ *
+ * Phase 26c (P26c-T4) adds `og:image:secure_url` to the social tags the oracle
+ * reads (first value, count, conflict, capped as a URL), written from the
+ * field's contract.
+ *
+ * Phase 26c (P26c-T5) adds each link's `nameHint` / `nameHintSource`, read off
+ * the same `a[href]` element as the anchor, and only when the anchor and the
+ * element's own `aria-label` are both empty: its `aria-labelledby` (the id list,
+ * unresolved, deviation 8), else the first non-blank `[aria-label]` under it,
+ * else the first non-blank `svg title` under it, else its `title`. Trimmed,
+ * storable and capped at `ARIA_LABEL_MAX`, written from the field's contract.
+ * The oracle's anchor text moved once more, to the port's existing contract:
+ * text under a script, style, noscript or svg element is not anchor text.
+ * `.text()` read it, and no compared link carried any until an icon's
+ * `<svg><title>` became a name hint.
+ *
+ * Phase 26c (final review I1): an inner aria-label or svg title is no candidate
+ * when it or an ancestor inside the link (the `<a>` included) is
+ * `aria-hidden="true"`, or when it sits in `<template>` content, written from
+ * the field's contract (`inertCandidate`).
+ *
  * Cheerio is a devDependency and appears here only: it is the parity oracle,
  * never a crawl-path parser.
  */
@@ -151,7 +178,7 @@ import {
 } from "./page-analyzer.js";
 import { simhash64 } from "./simhash.js";
 import { storableCap } from "../storable-text.js";
-import { normalizeUrl, isSameOrigin } from "./url-utils.js";
+import { INDEXED_URL_MAX, normalizeUrl, isSameOrigin } from "./url-utils.js";
 import {
   ALT_TEXT_LONG_CHARS,
   ARIA_LABEL_MAX,
@@ -226,11 +253,20 @@ const EXTENSION_FIELDS = [
   // after the candidate in the TOKEN stream, which the normalised tree erases.
   // Covered by value, cheerio-free, in test/crawl/page-analyzer.test.ts.
   "htmlStructure",
+  // Phase 26c's refused-reference counts. Two of the three are counts over
+  // fields already stripped (`resourceRefs`, `hreflang`), and all three are a
+  // statement about the port's own limit and caps, `resourceRefsCapped`'s
+  // case. What the DOM CAN be held to is modelled: the oracle's links skip an
+  // over-long target (it takes a cap slot), and the social set's
+  // `imageRefTooLong` is compared. Counts covered in
+  // test/crawl/page-analyzer.test.ts.
+  "overlongUrls",
 ] as const;
 
-/** The ten social tags `PageAnalysis.social` reads, as the oracle lists them. */
+/** The eleven social tags `PageAnalysis.social` reads, as the oracle lists them. */
 const SOCIAL_TAG_NAMES: readonly string[] = [
-  "og:title", "og:description", "og:image", "og:url", "og:type", "og:site_name",
+  "og:title", "og:description", "og:image", "og:image:secure_url", "og:url", "og:type",
+  "og:site_name",
   "twitter:card", "twitter:title", "twitter:description", "twitter:image",
 ] satisfies SocialTag[];
 
@@ -633,8 +669,14 @@ function analyzeHtmlWithCheerio(html: string, pageUrl: string): UpstreamShape {
   // sits: an image link's alt is its anchor text (Phase 26b). Every other node
   // contributes what `.text()` gives it, so the anchors with no image agree
   // with the oracle's earlier reading exactly.
+  // No text under a script, style, noscript or svg element is anchor text (a
+  // template's is): the port's `suppressDepth` contract, written here once
+  // Phase 26c put an `<svg><title>` inside a compared link. `.text()` would
+  // read it, and it is the link's name hint, never its anchor.
+  const anchorSkipped = new Set(["script", "style", "noscript", "svg"]);
   const anchorText = (node: DomNode): string => {
     if (node.type === "text") return node.data ?? "";
+    if (node.name !== undefined && anchorSkipped.has(node.name)) return "";
     const alt = node.type === "tag" && node.name === "img" ? node.attribs?.["alt"]?.trim() : undefined;
     // A non-empty alt is a word of its own, spaced off from the text around it
     // (final review I2); the whitespace collapse below folds the spaces.
@@ -642,15 +684,69 @@ function analyzeHtmlWithCheerio(html: string, pageUrl: string): UpstreamShape {
     return altWords + (node.children ?? []).map(anchorText).join("");
   };
 
+  // A label as the link row stores it: trimmed, storable and capped, null when
+  // absent or blank (owner call O1; Phase 26c's hints share it).
+  const labelOf = (raw: string | undefined): string | null => {
+    const trimmed = raw?.trim() ?? "";
+    return trimmed === "" ? null : storableCap(trimmed, ARIA_LABEL_MAX);
+  };
+  // Phase 26c (P26c-T5), from the field's contract: the first of, in order,
+  // the `<a>`'s `aria-labelledby` (the id list, unresolved), the first
+  // non-blank `aria-label` on a descendant, the first non-blank text of a
+  // `<title>` under an `<svg>` in the link (whitespace collapsed), and the
+  // `<a>`'s `title`.
+  // Final review I1, from the field's contract: an inner candidate is out when
+  // it, or an ancestor up to and including the `<a>`, is `aria-hidden="true"`
+  // (trimmed, case-insensitive), or when it sits in `<template>` content
+  // anywhere above it, the link's own enclosing template included. `.find()`
+  // never enters a template's content fragment, so a template inside the link
+  // is excluded by the walk's absence; the ancestor walk covers a link that is
+  // itself in a template (the fragment's parent is the `<template>`).
+  type Walkable = { name?: string; attribs?: Record<string, string>; parent?: Walkable | null };
+  const inertCandidate = (candidate: unknown, link: unknown): boolean => {
+    let hiddenScope = true;
+    for (let n = candidate as Walkable | null | undefined; n; n = n.parent) {
+      if (n.name === "template") return true;
+      if (hiddenScope && n.attribs?.["aria-hidden"]?.trim().toLowerCase() === "true") return true;
+      if (n === link) hiddenScope = false;
+    }
+    return false;
+  };
+  type Hint = Pick<RawPageAnalysis["links"][number], "nameHint" | "nameHintSource">;
+  const nameHintOf = (el: Parameters<typeof $>[0]): Hint => {
+    const labelledBy = labelOf($(el).attr("aria-labelledby"));
+    if (labelledBy !== null) return { nameHint: labelledBy, nameHintSource: "aria-labelledby" };
+    for (const d of $(el).find("[aria-label]").toArray()) {
+      if (inertCandidate(d, el)) continue;
+      const inner = labelOf($(d).attr("aria-label"));
+      if (inner !== null) return { nameHint: inner, nameHintSource: "inner-aria-label" };
+    }
+    for (const t of $(el).find("svg title").toArray()) {
+      if (inertCandidate(t, el)) continue;
+      const svgTitle = labelOf($(t).text().replace(/\s+/g, " "));
+      if (svgTitle !== null) return { nameHint: svgTitle, nameHintSource: "svg-title" };
+    }
+    const title = labelOf($(el).attr("title"));
+    if (title !== null) return { nameHint: title, nameHintSource: "title" };
+    return { nameHint: null, nameHintSource: null };
+  };
+
   const linksByTarget = new Map<string, RawPageAnalysis["links"][number]>();
+  // Phase 26c: a target over the indexed-URL limit is no link row, and takes
+  // a slot under the cap as a kept one does.
+  let overlongLinks = 0;
   $("a[href]").each((_, el) => {
     const href = $(el).attr("href");
     if (!href) return;
     if (/^(javascript:|mailto:|tel:|#)/.test(href)) return;
     const resolved = normalizeUrl(href, pageUrl);
     if (!resolved) return;
+    if (linksByTarget.size + overlongLinks >= 2_000) return;
+    if (resolved.length > INDEXED_URL_MAX) {
+      overlongLinks += 1;
+      return;
+    }
     if (linksByTarget.has(resolved)) return;
-    if (linksByTarget.size >= 2_000) return;
     const anchor = anchorText(el as unknown as DomNode)
       .replace(/\s+/g, " ")
       .trim()
@@ -658,11 +754,16 @@ function analyzeHtmlWithCheerio(html: string, pageUrl: string): UpstreamShape {
     const rel = fold($(el).attr("rel")) ?? null;
     // Owner call O1: the `aria-label` of the same element the anchor is read
     // from, trimmed, storable and capped, null when absent or blank.
-    const ariaRaw = $(el).attr("aria-label")?.trim() ?? "";
+    const ariaLabel = labelOf($(el).attr("aria-label"));
+    // Phase 26c: the link's wider name, only when neither the anchor nor its
+    // own aria-label names it.
+    const hint: Hint =
+      anchor === "" && ariaLabel === null ? nameHintOf(el) : { nameHint: null, nameHintSource: null };
     linksByTarget.set(resolved, {
       href: resolved,
       anchor,
-      ariaLabel: ariaRaw === "" ? null : storableCap(ariaRaw, ARIA_LABEL_MAX),
+      ariaLabel,
+      ...hint,
       rel,
       nofollow: (rel ?? "").split(/\s+/).includes("nofollow"),
       isInternal: isSameOrigin(resolved, pageUrl),
@@ -768,8 +869,13 @@ function analyzeHtmlWithCheerio(html: string, pageUrl: string): UpstreamShape {
     const counts: Record<string, number> = {};
     const conflicting: string[] = [];
     for (const [tag, values] of socialValues) {
-      const [group, key] = tag.split(":") as [string, string];
-      const isUrl = tag === "og:url" || tag === "og:image" || tag === "twitter:image";
+      // The key is everything after the first colon (`og:image:secure_url`).
+      const colon = tag.indexOf(":");
+      const group = tag.slice(0, colon);
+      const key = tag.slice(colon + 1);
+      const isUrl =
+        tag === "og:url" || tag === "og:image" || tag === "og:image:secure_url" ||
+        tag === "twitter:image";
       const first = storableCap(values[0]!, isUrl ? SOCIAL_URL_MAX : SOCIAL_TEXT_MAX);
       (group === "og" ? og : x)[key] = first;
       counts[tag] = values.length;
@@ -781,11 +887,18 @@ function analyzeHtmlWithCheerio(html: string, pageUrl: string): UpstreamShape {
     // value, another scheme or an empty one has none. Written from
     // `SocialFacts.imageRefs`' contract, not by calling the port's
     // `shareImageRef`.
-    const imageRef = (tag: string): string | null => {
+    // Phase 26c: a resolved address over the indexed-URL limit is no key; the
+    // ref is null and `imageRefTooLong` says why.
+    const resolvedImage = (tag: string): string | null => {
       const first = socialValues.get(tag)?.[0];
       if (first === undefined || !/^https?:/i.test(first)) return null;
       return normalizeUrl(first, pageUrl);
     };
+    const tooLong = (tag: string): boolean => {
+      const resolved = resolvedImage(tag);
+      return resolved !== null && resolved.length > INDEXED_URL_MAX;
+    };
+    const imageRef = (tag: string): string | null => (tooLong(tag) ? null : resolvedImage(tag));
     social = {
       og,
       x,
@@ -794,6 +907,7 @@ function analyzeHtmlWithCheerio(html: string, pageUrl: string): UpstreamShape {
       outsideHead: socialOutsideHead,
       xViaProperty,
       imageRefs: { og: imageRef("og:image"), x: imageRef("twitter:image") },
+      imageRefTooLong: { og: tooLong("og:image"), x: tooLong("twitter:image") },
     } as RawPageAnalysis["social"];
   }
 
@@ -877,6 +991,7 @@ function expectParity(html: string) {
     headClosedBy: _headClosedBy,
     socialImageRefs: _socialImageRefs,
     htmlStructure: _htmlStructure,
+    overlongUrls: _overlongUrls,
     ...streamed
   } = analyzeHtml(html, PAGE_URL);
   const reference = analyzeHtmlWithCheerio(html, PAGE_URL);
@@ -1451,6 +1566,15 @@ describe("the Phase 26b head facts and social set, against the DOM", () => {
       </head><body><p>x</p></body></html>`);
   });
 
+  it("agrees on og:image:secure_url: first value, conflict, count, cap", () => {
+    expectParity(`<html><head>
+      <meta property="og:image" content="http://x/a.jpg">
+      <meta property="og:image:secure_url" content="https://x/a.jpg">
+      <meta property="og:image:secure_url" content="https://x/b.jpg">
+      <meta property="og:image:secure_url" content="https://x/${"s".repeat(1_500)}.jpg">
+      </head><body><p>x</p></body></html>`);
+  });
+
   it("agrees on social tags after the head ends, in a template and in a noscript", () => {
     expectParity(`<html><head><meta property="og:title" content="t">
       <template><meta property="og:type" content="article"></template>
@@ -1589,6 +1713,60 @@ describe("the Phase 26b body facts, against the DOM", () => {
       <img src="/long.png" alt="${"a".repeat(101)}"><img src="/ok.png" alt="${"b".repeat(100)}">
       <img src="/${"s".repeat(600)}">${imgs}
       <noscript><img src="/ns.png"></noscript>
+      </body></html>`);
+  });
+});
+
+/** Phase 26c's indexed-URL limit, on the two facts the oracle models. */
+describe("the Phase 26c indexed-URL limit, against the DOM", () => {
+  const long = `https://example.com/${"q".repeat(3000)}`;
+
+  it("agrees that an over-long link is no link row and a short one keeps position 0", () => {
+    expectParity(`<html><body><a href="${long}">long</a><a href="/short">short</a>
+      <a href="${long}">again</a></body></html>`);
+  });
+
+  it("agrees on imageRefTooLong and the null ref of an over-long share image", () => {
+    expectParity(`<html><head><meta property="og:image" content="${long}">
+      <meta name="twitter:image" content="https://example.com/x.png"></head><body></body></html>`);
+    expectParity(`<html><head><meta name="twitter:image" content="${long}"></head></html>`);
+  });
+});
+
+/** Phase 26c (P26c-T5): a link's wider name, on the link rows. */
+describe("the Phase 26c link name hint, against the DOM", () => {
+  it("agrees on a link's wider name, its source and its precedence (P26c-T5)", () => {
+    expectParity(`<html><head><title>Page</title></head><body>
+      <a href="/lb" aria-labelledby="  lbl-a  lbl-b " title="T"><svg><title>S</title></svg><span aria-label="I"></span></a>
+      <a href="/inner" title="T"><svg><title>S</title></svg><span aria-label=" "></span><i aria-label=" Inner "></i></a>
+      <a href="/svg" title="T"><svg viewBox="0 0 1 1"><title>  </title></svg><svg><title> Shopping
+        cart </title><path d="M0"></path></svg></a>
+      <a href="/title" aria-labelledby="  " title=" Account "></a>
+      <a href="/text" title="T">Text<svg><title>S</title></svg></a>
+      <a href="/alt" title="T"><img src="/a.png" alt="Logo"></a>
+      <a href="/own" aria-label="Own" title="T"></a>
+      <a href="/nothing"><svg><path d="M0"></path></svg></a>
+      <a href="/long" title="${"t".repeat(500)}"></a>
+      <a href="/long-svg"><svg><title>${"s".repeat(500)}</title></svg></a>
+      <a href="/ns"><noscript><span aria-label="NS"></span></noscript></a>
+      <svg><title>Loose</title></svg><a href="/first" title="First"></a><a href="/first" title="Second"></a>
+      </body></html>`);
+  });
+
+  it("agrees that aria-hidden subtrees and template content name nothing (final review I1)", () => {
+    expectParity(`<html><head><title>Page</title></head><body>
+      <a href="/cart"><svg aria-hidden="true"><title>Cart</title></svg></a>
+      <a href="/span-hidden"><span aria-hidden=" TRUE "><i aria-label="Cart"></i><svg><title>S</title></svg></span></a>
+      <a href="/self-hidden"><span aria-hidden="true" aria-label="Cart"></span></a>
+      <a href="/not-hidden"><svg aria-hidden="false"><title>Shown</title></svg></a>
+      <a href="/after"><span aria-hidden="true"><span></span><span aria-label="Gone"></span></span><span aria-label="After"></span></a>
+      <a href="/svg-after"><svg aria-hidden="true"><title>Gone</title></svg><svg><title>Menu</title></svg></a>
+      <a href="/a-hidden" aria-hidden="true"><svg><title>Cart</title></svg><span aria-label="Inner"></span></a>
+      <a href="/a-hidden-title" aria-hidden="true" title="Account"><svg><title>Cart</title></svg></a>
+      <a href="/template"><template><span aria-label="Cart"></span><svg><title>S</title></svg></template></a>
+      <a href="/template-after"><template><span aria-label="Gone"></span></template><span aria-label="Kept"></span></a>
+      <template><a href="/in-template" title="T"><span aria-label="Inner"></span><svg><title>S</title></svg></a></template>
+      <a href="/visible"><svg role="img"><title>Cart</title></svg></a>
       </body></html>`);
   });
 });

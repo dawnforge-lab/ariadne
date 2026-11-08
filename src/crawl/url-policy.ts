@@ -24,7 +24,12 @@
  *    sends Ariadne's user agent.
  *  - The test-only allowPrivate escape hatch has a floor it cannot lift:
  *    cloud metadata hosts and 169.254.0.0/16 stay refused.
+ *  - Phase 26c: `isUrlAllowed` refuses a URL over `INDEXED_URL_MAX` with the
+ *    reason `too_long`. Every column a URL is keyed by is btree-indexed, and
+ *    Postgres refuses an entry that large, so such a URL can be neither queued
+ *    nor recorded; refusing it here keeps it off every fetch path at once.
  */
+import { fitsIndex, INDEXED_URL_MAX } from "./parse/url-utils.js";
 
 /**
  * Hosts that are never crawlable, whatever they resolve to. Exported so the
@@ -579,6 +584,15 @@ export async function isUrlAllowed(
 
   if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
     return { allowed: false, reason: `unsupported scheme (${parsed.protocol})` };
+  }
+
+  // Measured on the serialized URL, the ASCII form a row would hold. Not a
+  // host question, so `allowPrivate` does not relax it.
+  if (!fitsIndex(parsed.href)) {
+    return {
+      allowed: false,
+      reason: `too_long (${parsed.href.length} characters; the limit is ${INDEXED_URL_MAX})`,
+    };
   }
 
   const host = normalizeHost(parsed.hostname);

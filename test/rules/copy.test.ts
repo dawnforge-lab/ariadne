@@ -31,6 +31,7 @@ import {
   META_PX_MIN,
 } from "../../src/rules/thresholds.js";
 import { CHAIN_HOPS } from "../../src/rules/query/redirects.js";
+import { MAX_HREFLANG_PAIRS } from "../../src/crawl/parse/page-analyzer.js";
 import {
   DUPLICATE_SAMPLE_URLS,
   NEAR_DUPLICATE_COUNT_CAP,
@@ -76,6 +77,8 @@ import {
   IMAGE_WEIGHT_WARN,
   UNCACHED_SAMPLE_RESOURCES,
 } from "../../src/rules/query/resources.js";
+import { INDEXED_URL_MAX } from "../../src/crawl/parse/url-utils.js";
+import { SITEMAP_MAX_BYTES } from "../../src/crawl/sitemap-stream.js";
 
 /**
  * THE CLIENT-FACING COPY, PINNED.
@@ -917,6 +920,16 @@ describe("copy: URL shape (26a)", () => {
     const list = `${INTERNAL_SEARCH_PARAMS.slice(0, -1).join(", ")} or ${INTERNAL_SEARCH_PARAMS.at(-1)}`;
     expect(copy("url.internal-search").explanation).toContain(`(${list})`);
   });
+
+  // Phase 26c: one limit for every indexed URL, quoted from its constant, and
+  // the count is of references, as the analyzer counts them.
+  it("quotes the indexed-URL limit in the reference rule and in the share-image rule", () => {
+    const limit = `${INDEXED_URL_MAX.toLocaleString("en-US")} characters`;
+    expect(copy("url.reference-too-long").title).toContain(limit);
+    expect(copy("url.reference-too-long").explanation).toContain(limit);
+    expect(copy("url.reference-too-long").explanation).toMatch(/one per reference/);
+    expect(copy("social.image-broken").explanation).toContain(limit);
+  });
 });
 
 describe("copy: sitemap entries (26a)", () => {
@@ -931,11 +944,25 @@ describe("copy: sitemap entries (26a)", () => {
     );
   });
 
-  it("says the entry count is a lower bound", () => {
+  it("says the entry count is exact, per document, and what a pre-membership crawl gets", () => {
     const text = copy("sitemap.over-50k-urls").explanation;
-    expect(text).toMatch(/lower bound/);
-    expect(text).toMatch(/counted once/);
-    expect(text).toMatch(/entry cap/);
+    expect(text).not.toMatch(/lower bound/);
+    expect(text).toMatch(/exact/);
+    expect(text).toMatch(/counts once in each/);
+    expect(text).toMatch(/re-crawl/);
+  });
+
+  it("quotes the 26c limits from their constants", () => {
+    const mb = SITEMAP_MAX_BYTES / (1024 * 1024);
+    expect(copy("sitemap.oversized").title).toContain(`${mb} MB`);
+    expect(copy("sitemap.oversized").explanation).toContain(
+      `${mb} MB (${SITEMAP_MAX_BYTES.toLocaleString("en-US")} bytes)`,
+    );
+    expect(copy("sitemap.oversized").explanation).toMatch(/reject the whole file/);
+    expect(copy("sitemap.url-too-long").explanation).toContain(
+      `${INDEXED_URL_MAX.toLocaleString("en-US")} characters`,
+    );
+    expect(copy("sitemap.url-in-multiple").explanation).toContain("10 of the documents");
   });
 
   it("names the cross-submission exception the cross-host rule honours", () => {
@@ -1439,7 +1466,7 @@ describe("copy: metric tables", () => {
     const text = copy("sitemap.structure").explanation;
     expect(text, "docs").toMatch(/how many documents|number of documents/i);
     expect(text, "totalUrls").toMatch(/total entries|entries/i);
-    expect(text, "oversizedDocsSkipped").toMatch(/dropped for size|too large/i);
+    expect(text, "oversizedDocsSkipped").toMatch(/documents over the 50 MB limit \(read up to the limit/i);
     expect(text, "urlCapBreaches").toMatch(/over the 50,000|past 50,000/i);
     // `entryCapReached` changes what every other number means, so it is copy
     // rather than a footnote.
@@ -1452,6 +1479,8 @@ describe("copy: metric tables", () => {
       new RegExp(`largest ${SITEMAP_DOC_ROWS_CAP} documents`, "i"),
     );
     expect(text, "an entry in several documents").toMatch(/counted once/i);
+    expect(text, "alternatesCapped").toContain(`hreflang alternates past ${MAX_HREFLANG_PAIRS} in one URL entry`);
+    expect(text, "overlongLocsSkipped").toMatch(/too long to store \(a location, an alternate's target/i);
   });
 
   // The Phase 5 metric, whose shape is two-sided — what the selection decided,
@@ -1879,6 +1908,7 @@ describe("copy rubric: a threshold belongs in the title", () => {
     "links.high-outlinks": HIGH_INTERNAL_OUTLINKS.toLocaleString("en-US"),
     "sitemap.url-too-long": SITEMAP_LOC_MAX.toLocaleString("en-US"),
     "sitemap.over-50k-urls": SITEMAP_URL_CAP.toLocaleString("en-US"),
+    "sitemap.oversized": String(SITEMAP_MAX_BYTES / (1024 * 1024)),
     "title.pixel-too-long": String(TITLE_PX_MAX),
     "title.pixel-too-short": String(TITLE_PX_MIN),
     "meta-description.pixel-too-long": String(META_PX_MAX),
@@ -1887,6 +1917,8 @@ describe("copy rubric: a threshold belongs in the title", () => {
     // in megabytes as the title writes it ("over 5 MB").
     "social.image-broken": String(SOCIAL_IMAGE_MAX_BYTES / (1024 * 1024)),
     "images.alt-too-long": String(IMAGE_ALT_MAX),
+    // Phase 26c: the one indexed-URL limit, as the title spells it.
+    "url.reference-too-long": INDEXED_URL_MAX.toLocaleString("en-US"),
   };
 
   it("states the number in the title of every rule that fires on one", () => {
@@ -1958,5 +1990,47 @@ describe("copy rubric: marker reasons", () => {
         /\bre-?crawl|re-?run|crawl(?:ing)?\b|raise|enable|turn(?:ed)? on|allow|supply|resume|fix|add\b/i,
       );
     }
+  });
+});
+
+// Final review of Phase 26c: two copy defects, pinned at the end of the file
+// so the line citations in docs/talos-surface.md above stay where they are.
+describe("copy: Phase 26c final review", () => {
+  it("M4: the url-too-long summary row counts every address not stored, not only long locs", () => {
+    const text = copy("sitemap.url-too-long").explanation;
+    expect(text).toMatch(/locs and alternate targets over 2,500 characters/);
+    expect(text).toMatch(/listings whose URL and sitemap URL together are over 2,500 characters/);
+  });
+
+  it("M5: multiple-entries names source-conflict in a sentence of its own", () => {
+    const said = sentences(copy("hreflang.multiple-entries").explanation);
+    expect(said).toHaveLength(3);
+    expect(said[2]).toMatch(/^Two sources that each give the code one different URL are not this finding/);
+    expect(said[2]).toMatch(/Hreflang: Sources disagree on an alternate URL\.?$/);
+    // The not-fetched fact stays, in the sentence about what is compared.
+    expect(said[0]).toMatch(/alternates are not fetched/);
+    expect(said[2]).not.toMatch(/not fetched/);
+  });
+});
+
+// PR #24 review (rulings R20, R21): the marker for hreflang not read in full.
+describe("copy: hreflang declarations not read in full", () => {
+  it("quotes the pair limit and the sitemap size limit from their constants", () => {
+    const c = copy("hreflang.declarations-incomplete");
+    expect(c.explanation).toContain(`${MAX_HREFLANG_PAIRS} or more alternates`);
+    expect(c.explanation).toContain(`first ${MAX_HREFLANG_PAIRS} are kept`);
+    expect(c.howToFix).toContain(`over ${SITEMAP_MAX_BYTES / (1024 * 1024)} MB`);
+  });
+
+  it("says which checks were not run and that a sitemap that could not be read silences none", () => {
+    const said = sentences(copy("hreflang.declarations-incomplete").explanation);
+    expect(said[1]).toMatch(/only partly read/);
+    expect(said[1]).toMatch(/were not checked/);
+    expect(said[1]).toMatch(/could not be read those checks did run/);
+    expect(said[2]).toMatch(/never reported as failing to return a link/);
+    // It names the finding that reports the unreadable sitemap, by its title.
+    expect(copy("hreflang.declarations-incomplete").howToFix).toContain(
+      copy("sitemap.invalid").title,
+    );
   });
 });

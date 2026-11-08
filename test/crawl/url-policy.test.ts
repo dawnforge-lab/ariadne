@@ -7,6 +7,7 @@ import {
   UrlPolicyError,
   type AddressResolver,
 } from "../../src/crawl/url-policy.js";
+import { INDEXED_URL_MAX } from "../../src/crawl/parse/url-utils.js";
 
 describe("isUrlAllowed", () => {
   it("refuses non-http(s) schemes", async () => {
@@ -268,6 +269,26 @@ describe("isUrlAllowed", () => {
       "169.254.0.0/16",
     );
     expect((await isUrlAllowed("gopher://x/")).reason).toContain("gopher:");
+  });
+
+  // Phase 26c: a URL no indexed column can hold is refused like any other
+  // refused URL (hard rule 5), so it never reaches the frontier, a redirect
+  // target or a fetch.
+  it("refuses a URL over INDEXED_URL_MAX with the reason too_long, and admits one at the limit", async () => {
+    const base = "https://example.com/";
+    const atLimit = base + "a".repeat(INDEXED_URL_MAX - base.length);
+    expect(atLimit).toHaveLength(INDEXED_URL_MAX);
+    expect(await isUrlAllowed(atLimit)).toEqual({ allowed: true, reason: null });
+
+    const over = `${atLimit}a`;
+    expect(over).toHaveLength(2501);
+    const verdict = await isUrlAllowed(over);
+    expect(verdict.allowed).toBe(false);
+    expect(verdict.reason).toMatch(/^too_long /);
+    expect(verdict.reason).toContain("2501");
+    expect(verdict.reason).toContain(String(INDEXED_URL_MAX));
+    // The test-only escape hatch relaxes the host check, never the length.
+    expect((await isUrlAllowed(over, { allowPrivate: true })).allowed).toBe(false);
   });
 });
 

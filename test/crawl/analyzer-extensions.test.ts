@@ -1101,7 +1101,24 @@ describe("social: the Open Graph and X set", () => {
       outsideHead: false,
       xViaProperty: false,
       imageRefs: { og: null, x: null },
+      imageRefTooLong: { og: false, x: false },
     });
+  });
+
+  it("records og:image:secure_url beside og:image, capped like any social URL (Phase 26c)", () => {
+    const a = headPage(
+      `<meta property="og:image" content="http://x/a.jpg">` +
+        `<meta property="og:image:secure_url" content="https://x/a.jpg">` +
+        `<meta property="og:image:secure_url" content="https://x/b.jpg">`,
+    );
+    expect(a.social?.og).toEqual({ image: "http://x/a.jpg", "image:secure_url": "https://x/a.jpg" });
+    expect(a.social?.counts).toEqual({ "og:image": 1, "og:image:secure_url": 2 });
+    expect(a.social?.conflicting).toEqual(["og:image:secure_url"]);
+    // It is not the judged share image: no ref, no resources row.
+    expect(a.social?.imageRefs).toEqual({ og: "http://x/a.jpg", x: null });
+    const long = `https://x/${"a".repeat(2000)}`;
+    const b = headPage(`<meta property="og:image:secure_url" content="${long}">`);
+    expect(b.social?.og["image:secure_url"]).toHaveLength(1024);
   });
 
   it("fills the legacy og columns from the element the social set reads (PR #23 P9)", () => {
@@ -1414,6 +1431,7 @@ describe("the fixture site's default social set reads as complete and consistent
       outsideHead: false,
       xViaProperty: false,
       imageRefs: { og: `http://127.0.0.1:4000${SHARED_IMAGE_PATH}`, x: null },
+      imageRefTooLong: { og: false, x: false },
     });
     expect(a.socialImageRefs).toEqual([`http://127.0.0.1:4000${SHARED_IMAGE_PATH}`]);
   });

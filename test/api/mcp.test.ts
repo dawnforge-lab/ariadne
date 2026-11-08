@@ -2890,8 +2890,8 @@ describe("the two transports answer with one shape", () => {
     const lines = file.trimEnd().split("\r\n");
     expect(lines).toHaveLength(5);
     expect(lines[0]).toBe(
-      "url,kind,fetchClass,status,bytes,bytesSource,contentType,cacheControl," +
-        "fetchReason,referencingPages",
+      "url,kind,shareImage,fetchClass,status,bytes,bytesSource,contentType," +
+        "cacheControl,fetchReason,referencingPages",
     );
     expect(written["rows"]).toBe(4);
     expect(file).toContain(",resource-cap,1");

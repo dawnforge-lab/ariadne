@@ -489,11 +489,48 @@ describe("checklist coverage", () => {
   //   page    69 + 1 = 70
   //   query   98
   //   total   181 + 1 = 182
-  it("pins the ruleset split: 182 rules = 70 page + 98 query + 14 metric", () => {
+  //
+  // Phase 26c Task 2 adds ONE page rule, `url.reference-too-long` (CHECK-28,
+  // already claimed), in `src/rules/page/on-page.ts`.
+  //
+  //   page    70 + 1 = 71
+  //   query   98
+  //   total   182 + 1 = 183
+  //
+  // Phase 26c Task 4 adds ONE page rule, `social.image-insecure` (CHECK-87,
+  // already claimed), in `src/rules/page/social.ts`.
+  //
+  //   page    71 + 1 = 72
+  //   query   98
+  //   total   183 + 1 = 184
+  //
+  // Phase 26c Task 9 adds TWO query rules in `src/rules/query/sitemap-entries.ts`,
+  // `sitemap.oversized` and `sitemap.url-in-multiple` (both CHECK-08, already
+  // claimed).
+  //
+  //   page    72
+  //   query   98 + 2 = 100
+  //   total   184 + 2 = 186
+  //
+  // Phase 26c Task 10 adds ONE query rule, `hreflang.source-conflict`
+  // (CHECK-24, already claimed), in `src/rules/query/hreflang-integrity.ts`.
+  //
+  //   page    72
+  //   query   100 + 1 = 101
+  //   total   186 + 1 = 187
+  //
+  // The PR #24 review adds ONE query rule, the marker
+  // `hreflang.declarations-incomplete` (CHECK-24, already claimed), in
+  // `src/rules/query/hreflang.ts`.
+  //
+  //   page    72
+  //   query   101 + 1 = 102
+  //   total   187 + 1 = 188
+  it("pins the ruleset split: 188 rules = 72 page + 102 query + 14 metric", () => {
     const registry = buildRegistry();
-    expect(registry.all()).toHaveLength(182);
-    expect(registry.byKind("page")).toHaveLength(70);
-    expect(registry.byKind("query")).toHaveLength(98);
+    expect(registry.all()).toHaveLength(188);
+    expect(registry.byKind("page")).toHaveLength(72);
+    expect(registry.byKind("query")).toHaveLength(102);
     // The link-graph five, the two content metrics and hreflang coverage, plus
     // the URL-parameter, redirect-volume and sitemap-structure metrics, plus
     // the render pass's coverage, the health rollup, and the page-weight table.

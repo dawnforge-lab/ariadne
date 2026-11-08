@@ -2,7 +2,9 @@ import { createHash } from "node:crypto";
 import { sql } from "drizzle-orm";
 
 import type { Db } from "../../db/client.js";
+import { MAX_HREFLANG_PAIRS } from "../../crawl/parse/page-analyzer.js";
 import { normalizeUrl } from "../../crawl/parse/url-utils.js";
+import { SITEMAP_MAX_BYTES } from "../../crawl/sitemap-stream.js";
 import {
   CANONICALISED_ELSEWHERE,
   FETCHED_OK,
@@ -21,6 +23,17 @@ import {
 } from "../registry/registry.js";
 import type { RuleCaps } from "../registry/types.js";
 import { capsOr, noteAtLeastTruncation, noteTruncation } from "./crawl-evidence.js";
+import {
+  cutShort,
+  PAGE_IDS,
+  PAGE_URLS,
+  POSSIBLY_CAPPED_PAGES,
+  readSitemapHreflang,
+  sitemapHreflangCutShort,
+  sitemapIncomplete,
+  type SitemapHreflangReading,
+} from "./hreflang-completeness.js";
+import { INVALID as SITEMAP_INVALID } from "./sitemap.js";
 
 /**
  * BCP-47-lite: a 2–3 letter language, optionally followed by a region that is
@@ -50,6 +63,7 @@ const RETURN_LINK: RuleIdentity = { id: "hreflang.missing-return-link", severity
 const NON_INDEXABLE: RuleIdentity = { id: "hreflang.non-indexable-target", severity: "critical" };
 const SELF_REFERENCE: RuleIdentity = { id: "hreflang.missing-self-reference", severity: "warning" };
 const NOT_CRAWLED: RuleIdentity = { id: "hreflang.alternates-not-crawled", severity: "info" };
+const INCOMPLETE: RuleIdentity = { id: "hreflang.declarations-incomplete", severity: "info" };
 
 /**
  * Target hosts the not-crawled marker lists before it stops naming them. The
@@ -122,6 +136,11 @@ function isXDefault(code: string): boolean {
  * `targets` is the distinct, sorted comparison keys — two codes naming one URL
  * are one member of the cluster and one relationship to judge, so the rules
  * work from this rather than from the raw declaration rows.
+ *
+ * Every source is read (HTML, `Link` header, sitemap): the set is their union,
+ * which is what a search engine reads. Where each declaration came from is
+ * kept beside it, because a finding about a declaration is fixed where the
+ * declaration lives (Phase 26c).
  */
 interface DeclarationSet {
   pageId: string;
@@ -131,9 +150,20 @@ interface DeclarationSet {
   targets: string[];
   /** The distinct declared codes, trimmed and sorted — the evidence's `codes`. */
   codes: string[];
+  /** The distinct sources of every declaration in the set, sorted. */
+  sources: string[];
+  /** Per target key, the distinct sources that name it, sorted. */
+  sourcesByTarget: ReadonlyMap<string, string[]>;
   hasXDefault: boolean;
   /** `isAuditable` for the DECLARING page: fetched OK as HTML with a 200. */
   auditable: boolean;
+  /**
+   * One of the page's sources may have filled the `MAX_HREFLANG_PAIRS` cap
+   * (`POSSIBLY_CAPPED_PAGES`, src/rules/query/hreflang-completeness.ts), so the
+   * set may have lost pairs at extraction. What the set NAMES is still true; what it does
+   * not name is unknown, so no rule reads an absence from it.
+   */
+  capped: boolean;
 }
 
 /**
@@ -158,9 +188,22 @@ interface TargetContext {
   page: (target: string) => TargetPage | undefined;
   /** The target keys that crawled page itself declares — empty when it declares none. */
   declares: (target: string) => ReadonlySet<string>;
+  /**
+   * Whether that crawled page's own set may have filled the pair cap in one
+   * source (`POSSIBLY_CAPPED_PAGES`), so a key missing from `declares` may only
+   * be missing from what was kept.
+   */
+  capped: (target: string) => boolean;
 }
 
 const NO_TARGETS: ReadonlySet<string> = new Set<string>();
+
+/** The context of a walk that does not look its targets up. */
+const NO_CONTEXT: TargetContext = {
+  page: () => undefined,
+  declares: () => NO_TARGETS,
+  capped: () => false,
+};
 
 /**
  * Walk the crawl's hreflang declarations, one page's set at a time.
@@ -210,17 +253,21 @@ async function eachDeclarationSet(
       canonical_header: string | null;
       hreflang_code: string;
       target_url: string;
+      source: string;
+      possibly_capped: boolean;
     }>(sql`
       select h.page_id, p.url as page_url, p.fetch_class, p.status_code,
              p.canonical_html, p.canonical_header,
-             h.hreflang_code, h.target_url
+             h.hreflang_code, h.target_url, h.source,
+             -- One hashed sub-plan over this batch's pages, not the crawl's.
+             h.page_id in (${POSSIBLY_CAPPED_PAGES(crawlId, PAGE_IDS(pageIds))}) as possibly_capped
       from hreflang h
       join pages p on p.id = h.page_id
       where h.crawl_id = ${crawlId}
         and h.page_id = any(${sql.param(pageIds)}::text[])`);
 
     const sets = new Map<string, DeclarationSet>();
-    const members = new Map<string, Set<string>>();
+    const members = new Map<string, Map<string, Set<string>>>();
     const codes = new Map<string, Set<string>>();
     /** Declaring pages dropped as canonicalised elsewhere, so the test runs once each. */
     const invisible = new Set<string>();
@@ -251,28 +298,41 @@ async function eachDeclarationSet(
           pageKey: targetKey(pageUrl),
           targets: [],
           codes: [],
+          sources: [],
+          sourcesByTarget: new Map(),
           hasXDefault: false,
+          capped: false,
           auditable: isAuditable({
             fetchClass: String(row.fetch_class),
             statusCode: row.status_code === null ? null : Number(row.status_code),
           }),
         };
         sets.set(pageId, set);
-        members.set(pageId, new Set<string>());
+        members.set(pageId, new Map<string, Set<string>>());
         codes.set(pageId, new Set<string>());
       }
-      members.get(pageId)!.add(targetKey(String(row.target_url)));
+      const member = targetKey(String(row.target_url));
+      const memberSources = members.get(pageId)!;
+      const named = memberSources.get(member) ?? new Set<string>();
+      named.add(String(row.source));
+      memberSources.set(member, named);
       codes.get(pageId)!.add(String(row.hreflang_code).trim());
       if (isXDefault(String(row.hreflang_code))) set.hasXDefault = true;
+      if (row.possibly_capped === true) set.capped = true;
     }
     for (const set of sets.values()) {
-      set.targets = [...members.get(set.pageId)!].sort();
+      const memberSources = members.get(set.pageId)!;
+      set.targets = [...memberSources.keys()].sort();
       set.codes = [...codes.get(set.pageId)!].sort();
+      set.sourcesByTarget = new Map(
+        [...memberSources].map(([member, named]) => [member, [...named].sort()]),
+      );
+      set.sources = [...new Set([...memberSources.values()].flatMap((named) => [...named]))].sort();
     }
 
     const context = opts.withTargets
       ? await targetContext(db, crawlId, [...sets.values()])
-      : { page: () => undefined, declares: () => NO_TARGETS };
+      : NO_CONTEXT;
     for (const set of sets.values()) {
       if (visit(set, context) === "stop") return;
     }
@@ -286,9 +346,7 @@ async function targetContext(
   sets: DeclarationSet[],
 ): Promise<TargetContext> {
   const wanted = [...new Set(sets.flatMap((s) => s.targets))];
-  if (wanted.length === 0) {
-    return { page: () => undefined, declares: () => NO_TARGETS };
-  }
+  if (wanted.length === 0) return NO_CONTEXT;
 
   // One array parameter rather than one placeholder per URL, so Postgres can
   // reuse the plan across batches (the link-targets pattern).
@@ -300,9 +358,13 @@ async function targetContext(
     is_indexable: boolean | null;
     canonical_html: string | null;
     canonical_header: string | null;
+    possibly_capped: boolean;
   }>(sql`
     select p.id, p.url, p.fetch_class, p.status_code, p.is_indexable,
-           p.canonical_html, p.canonical_header
+           p.canonical_html, p.canonical_header,
+           -- Read here rather than from the target's declarations: a target
+           -- whose every slot went to an over-long href stored no row to read.
+           p.id in (${POSSIBLY_CAPPED_PAGES(crawlId, PAGE_URLS(wanted))}) as possibly_capped
     from pages p
     where p.crawl_id = ${crawlId} and p.url = any(${sql.param(wanted)}::text[])
       -- A robots-blocked row (Phase 23 T3) was recorded and NEVER REQUESTED,
@@ -310,6 +372,8 @@ async function targetContext(
       -- from this map, and counted by hreflang.alternates-not-crawled.
       and not ${ROBOTS_BLOCKED("p")}`);
   const byUrl = new Map<string, TargetPage>();
+  /** Crawled targets whose own set may have filled the pair cap in one source. */
+  const atCap = new Set<string>();
   for (const row of targetRows.rows) {
     // The other half of the canonical exclusion: a target that canonicalises
     // elsewhere is not a cluster member, so it is left out of this map and
@@ -331,6 +395,7 @@ async function targetContext(
       statusCode: row.status_code === null ? null : Number(row.status_code),
       isIndexable: row.is_indexable,
     });
+    if (row.possibly_capped === true) atCap.add(String(row.url));
   }
 
   // What each crawled target declares back. Only the targets that HAVE a page
@@ -356,6 +421,7 @@ async function targetContext(
   return {
     page: (target) => byUrl.get(target),
     declares: (target) => back.get(target) ?? NO_TARGETS,
+    capped: (target) => atCap.has(target),
   };
 }
 
@@ -373,6 +439,9 @@ async function targetContext(
  * about it grows with what is kept — so the count behind the cap is exact
  * (`noteTruncation`): only the LISTING stops at the cap, never the counting.
  * An uncapped run keeps every pair and writes no note.
+ *
+ * Every finding's evidence ends with `sources`: where the page declared that
+ * member (HTML, `Link` header, sitemap), which is where the annotation is fixed.
  */
 async function declarationFindings(
   self: RuleIdentity,
@@ -388,11 +457,19 @@ async function declarationFindings(
   const findings: Finding[] = [];
   let total = 0;
   await eachDeclarationSet(db, crawlId, { withTargets: true }, (set, context) => {
+    // The declaring page must serve content (`isAuditable`), as for
+    // `missing-self-reference`. Since Phase 26c a declaration also arrives from
+    // a `Link` header on any classified response (a 301, a 404) and from a
+    // sitemap entry tied to whatever page row its loc matched (a redirect, a
+    // robots-blocked row): none of those is a version anyone can rank, and its
+    // own row already says why.
+    if (!set.auditable) return;
     for (const member of set.targets) {
       const target = context.page(member);
       if (target === undefined) continue;
-      const evidence = fires(set, target, context);
-      if (evidence === null) continue;
+      const fired = fires(set, target, context);
+      if (fired === null) continue;
+      const evidence = { ...fired, sources: set.sourcesByTarget.get(member)! };
       total += 1;
       if (caps.listing !== null && findings.length >= caps.listing) continue;
       findings.push(
@@ -452,10 +529,19 @@ async function missingXDefaultFindings(
   crawlId: string,
   caps: RuleCaps,
 ): Promise<Finding[]> {
+  // A cut-short sitemap walk may have left the x-default unread; the marker
+  // `hreflang.declarations-incomplete` speaks instead (ruling R21).
+  if (await sitemapHreflangCutShort(db, crawlId, X_DEFAULT.id)) return [];
   const incomplete = new Map<string, IncompleteSet>();
   /** 1 once the walk has seen a cluster it could not keep, 0 while it fits. */
   let beyondCap = 0;
   await eachDeclarationSet(db, crawlId, { withTargets: false }, (set) => {
+    // Only a declaring page that serves content states a cluster (see
+    // `declarationFindings`): a redirect's header or a robots-blocked row's
+    // sitemap entry is not one.
+    if (!set.auditable) return;
+    // A set cut at the pair cap may have lost its x-default (PR #24 review).
+    if (set.capped) return;
     // A page naming one URL is not a cluster: there is no other version to
     // fall back FROM, so there is nothing missing.
     if (set.hasXDefault || set.targets.length < 2) return;
@@ -525,10 +611,14 @@ async function missingSelfReferenceFindings(
   crawlId: string,
   caps: RuleCaps,
 ): Promise<Finding[]> {
+  // As for the x-default: refused when the sitemap walk was cut short, and a
+  // set cut at the pair cap may have lost its self-reference (PR #24 review).
+  if (await sitemapHreflangCutShort(db, crawlId, SELF_REFERENCE.id)) return [];
   const findings: Finding[] = [];
   let total = 0;
   await eachDeclarationSet(db, crawlId, { withTargets: false }, (set) => {
     if (!set.auditable) return;
+    if (set.capped) return;
     if (set.targets.includes(set.pageKey)) return;
     total += 1;
     if (caps.listing !== null && findings.length >= caps.listing) return;
@@ -546,7 +636,10 @@ async function missingSelfReferenceFindings(
         // language, and the crawl stores no language for a page (`pages` has no
         // `lang` column), so the field would be a guess. The copy says so rather
         // than the evidence carrying a null nobody can read.
-        evidence: { codes: set.codes, targets: set.targets },
+        //
+        // `sources` is every source that annotated the page: the fix is to add
+        // the self-reference wherever the set is generated.
+        evidence: { codes: set.codes, targets: set.targets, sources: set.sources },
         dedupeKey: set.pageUrl,
       }),
     );
@@ -660,6 +753,116 @@ async function alternatesNotCrawledFindings(db: Db, crawlId: string): Promise<Fi
 }
 
 /**
+ * The NOT MEASURED marker for hreflang declarations this crawl did not read in
+ * full (PR #24 review, rulings R20 and R21; src/rules/query/
+ * hreflang-completeness.ts says what cuts them short and why).
+ *
+ * One site finding when either holds:
+ *
+ *  (a) on a crawl that recorded its sitemap facts (Phase 26c on), the sitemap
+ *      walk was cut short (`cutShort`: the four absence-based rules refused),
+ *      or a sitemap document could not be read (`sitemapDocsFailed`), or a
+ *      `<url>` lost alternates past the per-URL cap (`alternatesCapped`,
+ *      ruling R22): in those two the rules ran, and the sitemap source is a
+ *      floor (`sitemapIncomplete`);
+ *  (b) on any crawl, a page the rules skip for a possible cap — one whose
+ *      declarations may have filled `MAX_HREFLANG_PAIRS` in one source
+ *      (`POSSIBLY_CAPPED_PAGES`) — counted over the cohort the TARGET skip
+ *      reads: every crawled page (not robots-blocked) not canonicalised
+ *      elsewhere, whatever its status, since a 404 at the cap is skipped as a
+ *      target too (ruling R23). The declarer skips (a 200 page) are a subset,
+ *      so no skip is invisible (`possiblyCappedPages`, counted in SQL: hard
+ *      rule 3).
+ *
+ * A crawl before the sitemap facts staged no sitemap alternates, so it is
+ * judged on (b) alone and its sitemap keys are `null` — "not recorded", the
+ * convention `sitemap.structure`'s cap columns keep — never `false`.
+ *
+ * `reason` says, in words, only what fired (`incompleteReason`): the rule's
+ * static `marker` sentence cannot know which of the four it was.
+ */
+async function declarationsIncompleteFindings(db: Db, crawlId: string): Promise<Finding[]> {
+  // Throws for a crawl that does not exist (`readSitemapFacts`).
+  const reading = await readSitemapHreflang(db, crawlId, INCOMPLETE.id);
+  const capped = await db.execute<{ n: number }>(sql`
+    select count(*)::int as n
+    from (${POSSIBLY_CAPPED_PAGES(
+      crawlId,
+      (p) => sql`not ${ROBOTS_BLOCKED(p)} and not ${CANONICALISED_ELSEWHERE(p)}`,
+    )}) x`);
+  // A count with no `group by` always answers one row (hard rule 7).
+  const row = capped.rows[0];
+  if (row === undefined) throw new Error(`${INCOMPLETE.id}: aggregate returned no row`);
+  const possiblyCappedPages = Number(row.n);
+
+  if (!sitemapIncomplete(reading) && possiblyCappedPages === 0) return [];
+  return [
+    queryFinding(INCOMPLETE, {
+      pageId: null,
+      pageUrl: null,
+      evidence: {
+        reason: incompleteReason(reading, possiblyCappedPages),
+        hreflangLimited: reading?.hreflangLimited ?? null,
+        entryLimited: reading?.entryLimited ?? null,
+        docLimited: reading?.docLimited ?? null,
+        depthLimited: reading?.depthLimited ?? null,
+        sitemapDocsFailed: reading?.sitemapDocsFailed ?? null,
+        sitemapDocsOversized: reading?.sitemapDocsOversized ?? null,
+        alternatesCapped: reading?.alternatesCapped ?? null,
+        possiblyCappedPages,
+      },
+      dedupeKey: "site",
+    }),
+  ];
+}
+
+/** `count` and the word for it, singular or plural. */
+function counted(count: number, one: string, many: string): string {
+  return `${count} ${count === 1 ? one : many}`;
+}
+
+/**
+ * The marker's `reason`: one sentence per trigger that FIRED, in the order the
+ * columns list them, and nothing about a trigger that did not (ruling R23: a
+ * crawl whose only trigger is a page at the pair cap is not told to fix its
+ * sitemaps). Called only when the marker fires, so an empty reason is a defect
+ * in the caller, and loud.
+ */
+function incompleteReason(
+  reading: SitemapHreflangReading | null,
+  possiblyCappedPages: number,
+): string {
+  const said: string[] = [];
+  if (cutShort(reading)) {
+    said.push(
+      "The sitemaps were only partly read because a size, entry, file-count or nesting limit was reached, so missing return links, missing self-references, missing x-default and sets naming only the page itself were not checked.",
+    );
+  }
+  if (reading !== null && reading.sitemapDocsFailed > 0) {
+    const n = reading.sitemapDocsFailed;
+    said.push(
+      `${counted(n, "sitemap", "sitemaps")} could not be read, so a return link or self-reference reported missing may be in the unread ${n === 1 ? "file" : "files"}; fix the ${n === 1 ? "sitemap" : "sitemaps"} reported as ${copyFor(SITEMAP_INVALID.id).title} and re-crawl.`,
+    );
+  }
+  if (reading !== null && reading.alternatesCapped > 0) {
+    const n = reading.alternatesCapped;
+    said.push(
+      `${counted(n, "sitemap alternate", "sitemap alternates")} past the ${MAX_HREFLANG_PAIRS} kept for one URL ${n === 1 ? "was" : "were"} not read, so a return link or self-reference reported missing may be among them.`,
+    );
+  }
+  if (possiblyCappedPages > 0) {
+    const n = possiblyCappedPages;
+    said.push(
+      `${counted(n, "page lists", "pages list")} ${MAX_HREFLANG_PAIRS} or more alternates in one place (its HTML, its HTTP Link header or its sitemap entries), more than are kept, so ${n === 1 ? "it is" : "they are"} not checked for a missing self-reference, x-default or alternate and never reported as failing to return a link.`,
+    );
+  }
+  if (said.length === 0) {
+    throw new Error(`${INCOMPLETE.id}: the marker fired with no trigger to name`);
+  }
+  return said.join(" ");
+}
+
+/**
  * Hreflang rules are `kind: "query"` rather than page rules because hreflang
  * declarations live in their own table, one row per declaration — they are not
  * a column on `pages` a page rule could read.
@@ -676,15 +879,22 @@ export const hreflangRules: QueryRule[] = [
       { key: "targetUrl", label: "Alternate URL" },
       { key: "occurrences", label: "Occurrences" },
       { key: "targetUrls", label: "Alternate URLs", optional: true },
-      { key: "sources", label: "Declaration Source", optional: true },
+      { key: "sources", label: "Declaration Source" },
     ],
     ...copyFor(INVALID_CODE.id),
     rulesetVersion: RULESET_VERSION,
-    // The validity test runs in JS over the crawl's hreflang rows, streamed
-    // once — acceptable at this scale. A site with millions of declarations
-    // would want the pattern pushed into SQL.
+    // The validity test runs in JS over the crawl's hreflang rows, read in
+    // keyset batches of `HREFLANG_PAGE_BATCH` declaring pages (final review
+    // I6): Phase 26c's header and sitemap sources can triple the table, so one
+    // unbounded read is O(declarations). A page's rows all land in one batch,
+    // so its (page, code) groups are whole there; RAM is O(batch + findings).
+    //
+    // Only a declaring page that serves content is judged (`FETCHED_OK`,
+    // ruling R14), as in every other rule in this file: a 301's `Link` header,
+    // a 404's inherited block and a robots-blocked row's sitemap entry are not
+    // a version anyone ranks, and their own rows already say why.
     run: async (db, crawlId): Promise<Finding[]> => {
-      const res = await db.execute<{
+      type Row = {
         page_id: string;
         hreflang_code: string;
         target_url: string;
@@ -692,11 +902,7 @@ export const hreflangRules: QueryRule[] = [
         page_url: string;
         canonical_html: string | null;
         canonical_header: string | null;
-      }>(sql`
-        select h.page_id, h.hreflang_code, h.target_url, h.source, p.url as page_url,
-               p.canonical_html, p.canonical_header
-        from hreflang h join pages p on p.id = h.page_id
-        where h.crawl_id = ${crawlId}`);
+      };
 
       // ONE FINDING PER DISTINCT (page, trimmed code) — not per declaration
       // row, which is what this used to be.
@@ -728,10 +934,11 @@ export const hreflangRules: QueryRule[] = [
       const groups = new Map<string, Group>();
       // The canonical exclusion, per page rather than per row: this rule does
       // not use the declaration-set walk, so it applies the same test itself.
-      const canonicalised = new Map<string, boolean>();
-      for (const row of res.rows) {
+      // Reset per batch: a page id is in exactly one batch.
+      let canonicalised = new Map<string, boolean>();
+      const judge = (row: Row): void => {
         const code = String(row.hreflang_code).trim();
-        if (isXDefault(code) || HREFLANG_CODE.test(code)) continue;
+        if (isXDefault(code) || HREFLANG_CODE.test(code)) return;
         const pageUrl = String(row.page_url);
         const pageId = String(row.page_id);
         let elsewhere = canonicalised.get(pageId);
@@ -743,7 +950,7 @@ export const hreflangRules: QueryRule[] = [
           });
           canonicalised.set(pageId, elsewhere);
         }
-        if (elsewhere) continue;
+        if (elsewhere) return;
         const dedupeKey = `${pageUrl}#${code}`;
         let group = groups.get(dedupeKey);
         if (group === undefined) {
@@ -760,6 +967,31 @@ export const hreflangRules: QueryRule[] = [
         group.occurrences += 1;
         group.targets.add(String(row.target_url));
         group.sources.add(String(row.source));
+      };
+
+      // The `eachDeclarationSet` keyset: page ids first, the cursor advanced
+      // from them, then that batch's rows.
+      let cursor = "";
+      for (;;) {
+        const ids = await db.execute<{ page_id: string }>(sql`
+          select distinct h.page_id
+          from hreflang h
+          join pages p on p.id = h.page_id
+          where h.crawl_id = ${crawlId} and h.page_id > ${cursor}
+            and ${FETCHED_OK("p")}
+          order by h.page_id
+          limit ${HREFLANG_PAGE_BATCH}`);
+        if (ids.rows.length === 0) break;
+        const pageIds = ids.rows.map((r) => String(r.page_id));
+        cursor = pageIds[pageIds.length - 1]!;
+        const batch = await db.execute<Row>(sql`
+          select h.page_id, h.hreflang_code, h.target_url, h.source, p.url as page_url,
+                 p.canonical_html, p.canonical_header
+          from hreflang h join pages p on p.id = h.page_id
+          where h.crawl_id = ${crawlId}
+            and h.page_id = any(${sql.param(pageIds)}::text[])`);
+        canonicalised = new Map<string, boolean>();
+        for (const row of batch.rows) judge(row);
       }
 
       return [...groups].map(([dedupeKey, group]) => {
@@ -776,11 +1008,13 @@ export const hreflangRules: QueryRule[] = [
             targetUrl: targets[0]!,
             // The multiplicity, carried rather than dropped: a code declared
             // three times is three lines of template to fix, and the report
-            // would otherwise say "one". The extra lists appear only when they
-            // hold something the single fields do not.
+            // would otherwise say "one". `targetUrls` appears only when it
+            // holds something `targetUrl` does not.
             occurrences: group.occurrences,
             ...(targets.length > 1 ? { targetUrls: targets } : {}),
-            ...(sources.length > 1 ? { sources } : {}),
+            // Always, since Phase 26c: a code only the sitemap or a Link
+            // header declares is fixed there, not in the template.
+            sources,
           },
           dedupeKey,
         });
@@ -821,22 +1055,29 @@ export const hreflangRules: QueryRule[] = [
     columns: [
       { key: "target", label: "URL Not Returning Link" },
       { key: "targetHasHreflang", label: "Target Declares hreflang" },
+      { key: "sources", label: "Declaration Source" },
     ],
     ...copyFor(RETURN_LINK.id),
     rulesetVersion: RULESET_VERSION,
-    run: (db, crawlId, caps) =>
-      declarationFindings(
+    run: async (db, crawlId, caps) => {
+      // Refused when the sitemap walk was cut short: a crawled target's
+      // sitemap alternates may never have been read (ruling R21).
+      if (await sitemapHreflangCutShort(db, crawlId, RETURN_LINK.id)) return [];
+      return declarationFindings(
         RETURN_LINK,
         db,
         crawlId,
         (set, target, context) => {
           const back = context.declares(target.url);
-          return back.has(set.pageKey)
-            ? null
-            : { target: target.url, targetHasHreflang: back.size > 0 };
+          if (back.has(set.pageKey)) return null;
+          // A target whose own set reached the pair cap may name this page in
+          // a pair that was not kept: unknown, not a finding.
+          if (context.capped(target.url)) return null;
+          return { target: target.url, targetHasHreflang: back.size > 0 };
         },
         capsOr(caps),
-      ),
+      );
+    },
   }),
 
   // An alternate that points at a redirect or at a page excluded from the
@@ -866,6 +1107,7 @@ export const hreflangRules: QueryRule[] = [
       { key: "target", label: "URL Not Returning Link" },
       { key: "targetFetchClass", label: "Target Fetch Class" },
       { key: "targetIndexable", label: "Target Indexable" },
+      { key: "sources", label: "Declaration Source" },
     ],
     ...copyFor(NON_INDEXABLE.id),
     rulesetVersion: RULESET_VERSION,
@@ -899,6 +1141,7 @@ export const hreflangRules: QueryRule[] = [
     columns: [
       { key: "codes", label: "hreflang" },
       { key: "targets", label: "Alternate URLs" },
+      { key: "sources", label: "Declaration Source" },
     ],
     ...copyFor(SELF_REFERENCE.id),
     rulesetVersion: RULESET_VERSION,
@@ -933,5 +1176,40 @@ export const hreflangRules: QueryRule[] = [
     marker:
       "The hreflang alternates these pages declare were not requested by this crawl, so their return links and indexability were not checked; crawl those domains or add them as start URLs.",
     run: (db, crawlId) => alternatesNotCrawledFindings(db, crawlId),
+  }),
+
+  // A check we could not run in full is visible, never silent (hard rule 7):
+  // hreflang declarations the crawl did not read whole, because the sitemap
+  // walk was cut short or failed, or a page reached the pair cap. Info: it
+  // reports the boundary of this crawl's evidence, not a fault of the site.
+  // CHECK-24, whose return-link and self-reference halves read an absence.
+  defineRule<QueryRule>({
+    kind: "query",
+    id: INCOMPLETE.id,
+    checkIds: ["CHECK-24"],
+    category: CATEGORY,
+    severity: INCOMPLETE.severity,
+    columns: [
+      { key: "reason", label: "Reason" },
+      { key: "hreflangLimited", label: "Sitemap Alternates Limit Reached" },
+      { key: "entryLimited", label: "Sitemap Entry Limit Reached" },
+      { key: "docLimited", label: "Sitemap Document Limit Reached" },
+      { key: "depthLimited", label: "Sitemap Depth Limit Reached" },
+      { key: "sitemapDocsFailed", label: "Sitemaps Not Read" },
+      { key: "sitemapDocsOversized", label: `Sitemaps Over ${SITEMAP_MAX_BYTES / (1024 * 1024)} MB` },
+      {
+        key: "alternatesCapped",
+        label: `Sitemap Alternates Past ${MAX_HREFLANG_PAIRS} per URL`,
+      },
+      {
+        key: "possiblyCappedPages",
+        label: `Pages at the ${MAX_HREFLANG_PAIRS}-Alternate Limit`,
+      },
+    ],
+    ...copyFor(INCOMPLETE.id),
+    rulesetVersion: RULESET_VERSION,
+    marker:
+      "Some of this site's hreflang annotations were not read in full, so missing return links and self-references cannot be ruled out everywhere; act on the causes the finding's Reason names and re-crawl.",
+    run: (db, crawlId) => declarationsIncompleteFindings(db, crawlId),
   }),
 ];

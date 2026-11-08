@@ -163,10 +163,10 @@ export function mkPage(overrides: Partial<PageRecord> = {}): PageRecord {
       },
       truncated: [],
     },
-    // Extraction 2 (Phase 26b): a clean v2 page carries a clean value for every
-    // new fact, so no later rule fires on it. A v1 row (every new column null) is
-    // `mkV1Page`.
-    extractionVersion: 2,
+    // Extraction 3 (Phase 26c): a clean page carries a clean value for every
+    // 26b and 26c fact, so no later rule fires on it. A v1 row (every new column
+    // null) is `mkV1Page`.
+    extractionVersion: 3,
     htmlLang: "en",
     social: {
       og: {
@@ -184,6 +184,7 @@ export function mkPage(overrides: Partial<PageRecord> = {}): PageRecord {
       outsideHead: false,
       xViaProperty: false,
       imageRefs: { og: `${url}/share.png`, x: null },
+      imageRefTooLong: { og: false, x: false },
     },
     h2Text: "A short section heading",
     titleCount: 1,
@@ -200,6 +201,8 @@ export function mkPage(overrides: Partial<PageRecord> = {}): PageRecord {
     htmlStructure: {
       htmlTags: 1, headTags: 1, bodyTags: 1, headBeforeBody: true, closedEarly: null,
     },
+    // Always an object on a v3 row the analyzer wrote; zeros on a clean page.
+    overlongUrls: { links: 0, resources: 0, hreflang: 0 },
     renderVersion: null,
     renderConsole: null,
     ...overrides,
@@ -228,6 +231,7 @@ export function mkV1Page(overrides: Partial<PageRecord> = {}): PageRecord {
     relNextCount: null,
     relPrevCount: null,
     htmlStructure: null,
+    overlongUrls: null,
     ...overrides,
   });
 }

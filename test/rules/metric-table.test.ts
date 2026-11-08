@@ -116,33 +116,59 @@ describe("perScope", () => {
   // are empty on a document row, which is exactly the null rule above.
   it("reads a two-key column from whichever key the row carries", () => {
     const shaped = shapeMetricTable("sitemap.structure", tableOf("sitemap.structure"), [
-      site({ docs: 5, totalUrls: 376, urlCapBreaches: 0, oversizedDocsSkipped: 0, entryCapReached: false }),
+      site({
+        docs: 5,
+        totalUrls: 376,
+        totalMemberships: 400,
+        urlCapBreaches: 0,
+        oversizedDocsSkipped: 0,
+        entryCapReached: false,
+        docCountsExact: true,
+        membershipLimited: false,
+        hreflangLimited: false,
+        overlongLocsSkipped: 0, alternatesCapped: 2,
+      }),
       { scope: "sitemap_doc", scopeValue: "https://site/sitemap-1.xml", value: { urls: 5, breaches50k: false } },
     ]);
     expect(labels(shaped)).toEqual([
       "Sitemap",
-      "Entries",
+      "URLs (Site) / Listings (Document)",
       "Over 50,000 Entries",
+      "Listings (All Documents)",
       "Documents",
-      "Documents Dropped For Size",
+      "Documents Over 50 MB",
       "Entry Cap Reached",
+      "Counts Exact",
+      "Membership Cap Reached",
+      "Hreflang Cap Reached",
+      "Addresses Too Long To Store", "Alternates Over Per-URL Cap",
     ]);
     expect(shaped.rows).toEqual([
       {
         scope: "Site",
         entries: 376,
         over50kEntries: 0,
+        totalMemberships: 400,
         docs: 5,
         oversizedDocsSkipped: 0,
         entryCapReached: false,
+        docCountsExact: true,
+        membershipLimited: false,
+        hreflangLimited: false,
+        overlongLocsSkipped: 0, alternatesCapped: 2,
       },
       {
         scope: "https://site/sitemap-1.xml",
         entries: 5,
         over50kEntries: false,
+        totalMemberships: null,
         docs: null,
         oversizedDocsSkipped: null,
         entryCapReached: null,
+        docCountsExact: null,
+        membershipLimited: null,
+        hreflangLimited: null,
+        overlongLocsSkipped: null, alternatesCapped: null,
       },
     ]);
   });

@@ -708,7 +708,189 @@ const KINDS = ["page", "query", "metric"] as const satisfies readonly AnyRule["k
 //     `html.structure-invalid` is kept as it is, and
 //     an `http:` share image on an `https:` page waits for Phase 26c, which
 //     must record `og:image:secure_url` first.
-export const RULESET_VERSION = "0.21.0";
+// 0.22.0: Phase 26c, multi-source hreflang, streamed sitemaps and the parked 26b
+//     items. Items are added task by task.
+//  1. (T1) `EXTRACTION_VERSION` moves 2 to 3 and migration 0029 lands every
+//     column and table the phase writes (`links.name_hint*`,
+//     `resources.share_image`, `pages.overlong_urls`, `sitemap_memberships`,
+//     `sitemap_hreflang`). `v3Gate` sits beside `v2Gate`. The marker
+//     `extraction.not-recorded` now demands version 3: it fires on any page
+//     below it, carries `requiredVersion: 3`, and claims CHECK-08 and CHECK-28
+//     as well. `INDEXED_URL_MAX` (2,500) and `fitsIndex` are the one URL length
+//     limit for every indexed column. 182 rules.
+//  2. (T2) A URL over `INDEXED_URL_MAX` never reaches an insert. `url-policy`
+//     refuses one with the reason `too_long`; the analyzer drops an over-long
+//     link, resource or hreflang target (measured after resolving, as the row
+//     would hold it) and counts it in `pages.overlong_urls`, a refusal taking
+//     a slot under its kind's per-page cap; an over-long share image gets a
+//     null ref and `social.imageRefTooLong`. New page rule
+//     `url.reference-too-long` (warning, CHECK-28, category `url`) reports the
+//     counts with `{links, resources, hreflang, max}`; it is silent on a v2
+//     row and, alone in on-page.ts, not gated on the judged cohort.
+//     `social.image-broken` gains the problem `too-long` on extraction-3 rows
+//     only, and a v3 social set without `imageRefTooLong` throws "re-crawl";
+//     a v2 row is judged as in 26b (ruling R3). 183 rules.
+//  3. (T3) A share image is named at the source: `resources.share_image` is
+//     set when an `og:image` / `twitter:image` URL is written, and set on
+//     conflict when a page also loads it. The census behind
+//     `resources.not-fetched` counts share-only rows as `share_image and not
+//     loaded by a page`. `crawl_status.resources` still counts every row, share
+//     images included, because the resource pass fetches them; the `resources`
+//     CSV view gains the column `shareImage` after `kind`. Migration 0030
+//     backfills the flag on every edge-less row (26b's own definition of a
+//     share image), so older crawls are judged as before. No rule change.
+//  4. (T4) `og:image:secure_url` is recorded as a social tag (`og["image:secure_url"]`,
+//     first value, count, conflict, capped at `SOCIAL_URL_MAX`) and is an
+//     array tag for `social.og-multiple` beside `og:image`, so repeating it
+//     beside a gallery stays silent as before. New page rule
+//     `social.image-insecure` (info, CHECK-87, category `on-page`): a judged
+//     https page whose `og:image` is `http:` and whose secure_url is absent or
+//     not `https:`, on extraction 3 only; evidence `{ogImage, secureUrl?}`.
+//     No browser loads an og:image, so it is a share-preview finding, not mixed
+//     content (owner decision: info). 184 rules.
+//  5. (T5) A link's wider name. A link with no anchor text and no aria-label
+//     of its own records `links.name_hint` / `name_hint_source`: the first of
+//     its `aria-labelledby` (the id list, unresolved: deviation 8), the first
+//     non-blank `aria-label` inside it, an icon's `<svg><title>`, and its
+//     `title`, capped at `ARIA_LABEL_MAX`. `links.no-anchor-text` now also needs
+//     the hint absent (`NAME_HINT_ABSENT`); `links.aria-label-only` fires on an
+//     aria-label OR a hint, is titled "Links: Named Only by Attributes" (id
+//     unchanged), and its evidence `labels` becomes `names: {source, value}[]`.
+//     Both open with `v3Gate` instead of `v2Gate`. 184 rules.
+//  6. (T6) Hreflang from the HTTP `Link` header. An RFC 8288 tokenizer
+//     (src/crawl/link-header.ts: commas inside `<…>` and quoted values,
+//     escaped quotes, malformed entries skipped and counted) reads the FULL
+//     header at fetch, not the stored copy cut at 2,048 characters (deviation
+//     2); `parseCanonicalLinkHeader` runs on it, `rel` now read as tokens.
+//     `alternate` entries with a non-empty `hreflang`, at most
+//     `MAX_HREFLANG_PAIRS`, become `hreflang` rows with `source = 'header'` on
+//     every classified page row, a PDF and a redirect included, resolved by
+//     `hreflangTarget` against the page URL. An over-long target is counted in
+//     `pages.overlong_urls.hreflang`; a classified row with no analysis now
+//     carries `{links: 0, resources: 0, hreflang: n}` (null only where no
+//     response was classified), so `url.reference-too-long` reports a PDF's
+//     header too. No rule change. 184 rules.
+//  7. (T7) A streaming sitemap parser (src/crawl/sitemap-stream.ts), not yet
+//     wired into discovery: gunzip by magic bytes (two rounds), a streaming
+//     `TextDecoder`, htmlparser2 in XML mode, each `<url>` / `<sitemap>`
+//     emitted as it closes, memory O(chunk + one entry). The cap is the
+//     protocol's 50 MB uncompressed (`SITEMAP_MAX_BYTES`); at the cap the
+//     stream stops `oversized` and keeps the entries read (deviation 3). Up to
+//     `MAX_HREFLANG_PAIRS` `xhtml:link` alternates per `<url>`. DOCTYPE and
+//     wrong-root refusals keep discovery's reason text; an unknown charset is
+//     refused. No rule change. 184 rules.
+//  8. (T8) Discovery reads every sitemap through that stream; fast-xml-parser
+//     is gone. A 10–50 MB sitemap is read whole; one over the cap (decompressed,
+//     or on the wire) keeps the URLs read before it and is named in
+//     `sitemapFacts.oversizedDocs` (at most 50) instead of
+//     `truncation.failures`, so `sitemap.invalid` no longer reports it;
+//     `oversizedDocsSkipped` still counts it. Each `<loc>` a urlset lists is a
+//     `sitemap_memberships` row (one per URL and document) and each alternate
+//     a `sitemap_hreflang` row (href resolved against the document), written
+//     through a sink the stream flushes after every chunk, capped at 800,000 and
+//     1,000,000 rows and 256 MB of stored strings each per crawl. A `<loc>` or
+//     alternate target over `INDEXED_URL_MAX`, or a membership whose URL and
+//     document URL together are over it (one primary-key entry), is counted in
+//     `sitemapFacts.overlongLocsSkipped` and stored nowhere; an `hreflang` code
+//     over 35 characters is a malformed entry (ruling R10).
+//     `discovery_jsonb.sitemapFacts` is written on every crawl. The marker
+//     `extraction.not-recorded` also fires when it is absent, with the new
+//     evidence key `sitemapFactsRecorded` (ruling R1). 184 rules.
+//  9. (T9) Sitemap rules on the recorded facts. Two query rules in
+//     `query/sitemap-entries.ts`, both CHECK-08: `sitemap.oversized` (warning,
+//     one finding per `sitemapFacts.oversizedDocs` entry, evidence
+//     `{sitemapUrl, bytesRead, urlsKept, max}`) and `sitemap.url-in-multiple`
+//     (info, a listing of URLs in more than one `sitemap_memberships` source,
+//     `{url, sitemaps (10), count}`). `sitemap.over-50k-urls` is now exact (it
+//     counts memberships per document, a URL in two documents counts in each)
+//     and, with the two new rules, refuses a crawl without `sitemapFacts` (it
+//     returns nothing; the marker speaks). `sitemap.url-too-long` adds one site
+//     finding `{skipped, max: INDEXED_URL_MAX}` for the over-long locs never
+//     stored. The `sitemap.structure` site row gains `docCountsExact`,
+//     `membershipLimited`, `hreflangLimited` and `overlongLocsSkipped`; its
+//     `sitemap_doc` rows count memberships when the crawl recorded them and
+//     `sitemap_urls` otherwise (Deviation 7; the three cap fields are null on
+//     an older crawl). 186 rules.
+// 10. (T10) Every hreflang rule reads all three sources. A fourth derivation,
+//     `deriveSitemapHreflang`, replaces a crawl's `source = 'sitemap'`
+//     `hreflang` rows from `sitemap_hreflang` (distinct, joined on
+//     `url_normalised = pages.url`; uncrawled locs stay staged). The integrity
+//     cohort (`DECLARATIONS`) drops its `source = 'html'` filter and groups on
+//     (page, `replace(lower(btrim(code)), '_', '-')`, target) with
+//     `sources`, so `en_GB` and `en-gb` are one code there.
+//     `hreflang.multiple-entries` counts targets within one source (deviation
+//     5); `self-only`, `inconsistent-return-code` and `html-lang-mismatch`
+//     read the union. Evidence gains `sources` on every rule that lists a
+//     declaration: those four, `missing-return-link`,
+//     `non-indexable-target`, `missing-self-reference`, and `invalid-code`
+//     (now always, not only when two sources). New query rule
+//     `hreflang.source-conflict` (warning, CHECK-24): one code, different
+//     target sets in two sources (deviation 4), evidence `{code, bySource,
+//     conflictingCodes, onlyIn, onlyInTruncated?}`, gated on `v3Gate` and
+//     `sitemapFactsRecorded`. 187 rules.
+// 11. (T11) No rule change. The surface docs, both skills and the checklist
+//     name the five new ids; the fixture site gains five `/p26c/` pages, a
+//     third declared sitemap (`/sitemap-extra.xml`) and `xhtml:link`
+//     alternates, so every new rule but `sitemap.oversized` (a 50 MB fixture)
+//     and `social.image-insecure` (an https page) fires end to end in the
+//     harness. `rules_catalog` re-measured at 191,474 bytes. 187 rules.
+// 12. (final review) No new rule, migration or version bump. Link name hints
+//     skip `aria-hidden="true"` subtrees and `<template>` content (an
+//     aria-hidden `<a>` keeps its own `aria-labelledby` / `title`).
+//     `hreflang.invalid-code` reads the table in page-id batches and judges
+//     only declaring pages fetched OK with a 200 (ruling R14). The sitemap
+//     stream caps a `<loc>`'s text at `INDEXED_URL_MAX` + 1 (past it, reported
+//     over-long, never cut) and a `<lastmod>`'s at 64 (kept with `…`), and
+//     counts alternates past `MAX_HREFLANG_PAIRS` per `<url>`:
+//     `sitemapFacts.alternatesCapped`, required by `readSitemapFacts`, and a
+//     new `sitemap.structure` site column (null before 26c). The
+//     `oversizedDocsSkipped` column reads "Documents Over 50 MB"; the
+//     `sitemap.url-too-long` summary row's column reads "Addresses Not Stored"
+//     and its copy names every address it counts; `hreflang.multiple-entries`'
+//     copy is split. A v3 social set with a partial `imageRefTooLong` throws
+//     "re-crawl". `rules_catalog` re-measured at 191,749 bytes. 187 rules.
+// 13. (T12) No new rule, migration or version bump. A sitemap index's child
+//     `<loc>` past the stream's read cap is a named `truncation.failures` entry
+//     again (ruling R18), `{url: <first 2,501 characters>…, reason: "refused by
+//     URL policy: too_long (2502+ characters; the limit is 2500)"}`, so
+//     `sitemap.invalid` reports it as it does a 2,501-character child refused
+//     at request time; it no longer counts in `malformedEntriesSkipped`. The
+//     `sitemap.structure` copy names `alternatesCapped`, and its
+//     `overlongLocsSkipped` column reads "Addresses Too Long To Store".
+//     `rules_catalog` re-measured at 191,912 bytes. 187 rules.
+// 14. (PR #24 review) No migration or version bump. Hreflang declarations the
+//     crawl did not read in full are no longer read as "not declared"
+//     (rulings R20 and R21; src/rules/query/hreflang-completeness.ts). When
+//     the sitemap walk was cut short (`sitemapFacts.hreflangLimited`,
+//     `truncation.entryLimited`, `docLimited` or `depthLimited`, or an
+//     oversized document), `hreflang.missing-return-link`,
+//     `missing-self-reference`, `missing-x-default` and `self-only` refuse
+//     (one shared condition, `sitemapHreflangCutShort`); a sitemap document
+//     that failed does not silence them. A declaration set with
+//     `MAX_HREFLANG_PAIRS` or more rows from one source, on any crawl, is never
+//     a declarer for the self-reference, x-default and self-only rules and
+//     never a target that "does not return the link". New query marker
+//     `hreflang.declarations-incomplete` (info, CHECK-24, category `hreflang`):
+//     one site finding when the walk was cut short, a sitemap document failed,
+//     a sitemap `<url>` lost alternates past the per-URL cap (ruling R22; like
+//     a failed document, marker only), or a judged page reached the pair cap,
+//     evidence `{hreflangLimited, entryLimited, docLimited, depthLimited,
+//     sitemapDocsFailed, sitemapDocsOversized, alternatesCapped,
+//     possiblyCappedPages}`, the first seven null on a crawl before the sitemap
+//     facts (judged on the pair cap alone).
+//     `rules_catalog` re-measured at 194,112 bytes. 188 rules.
+// 15. (PR #24 review, ruling R23) No new rule, migration or version bump.
+//     "Possibly capped" (`POSSIBLY_CAPPED_PAGES`, the one definition) counts
+//     the pair slots a source took, not only the rows it stored: HTML and
+//     header rows plus `pages.overlong_urls.hreflang` (per page, applied to
+//     each of the two), and a page's staged `sitemap_hreflang` rows before the
+//     derivation's DISTINCT. The marker's `possiblyCappedPages` counts every
+//     crawled page not canonicalised elsewhere, any status, so a 404 target
+//     skipped at the cap is counted. Its evidence gains `reason` (column
+//     "Reason", first): one sentence per trigger that fired; the static marker
+//     sentence and the fix copy no longer tell every crawl to fix failing
+//     sitemaps. `rules_catalog` re-measured at 194,186 bytes. 188 rules.
+export const RULESET_VERSION = "0.22.0";
 
 /**
  * The 47 crawl-derived checks (sf-audit checklist, Pre-Crawl + sections 1–11):

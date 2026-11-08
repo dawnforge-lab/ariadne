@@ -139,7 +139,13 @@ describe("buildRegistry", () => {
     expect(ids).toContain("links.aria-label-only");
     // Owner call O3 (2026-11-07): the early head close that loses nothing.
     expect(ids).toContain("html.head-closed-early-harmless");
-    expect(ids.length).toBe(182);
+    // Phase 26c Task 2: references too long to index.
+    expect(ids).toContain("url.reference-too-long");
+    // Phase 26c Task 10: one code, different URLs in two hreflang sources.
+    expect(ids).toContain("hreflang.source-conflict");
+    // PR #24 review: hreflang declarations not read in full.
+    expect(ids).toContain("hreflang.declarations-incomplete");
+    expect(ids.length).toBe(188);
   });
 
   it("registers every kind the runner drives", () => {
@@ -472,6 +478,8 @@ describe("runRules against the database", () => {
       "deriveClickDepth.unreachable": 1,
       "deriveClickDepth.maxDepth": 0,
       "deriveClickDepth.capped": 0,
+      // No sitemap alternate was staged, so no `source = 'sitemap'` row.
+      "deriveSitemapHreflang.rows": 0,
     });
     // And the column is written, not merely counted: the home page is the one
     // page at depth 0 and the listing has no depth at all.
@@ -529,7 +537,7 @@ describe("runRules against the database", () => {
   // test intermittently. A retry loop papered over that; it is gone, because
   // a per-call recording has no other writer to race with. No production seam:
   // the wrapper is a Proxy over the same Db, and `runRules` is unchanged.
-  it("analyzes every table the rules read, and the derivation-fed pair twice", async () => {
+  it("analyzes every table the rules read, and the derivation-fed tables twice", async () => {
     const crawlId = await newCrawl();
     const listing = mkRow(crawlId, "/list?colour=red", { depth: 0, discoveredVia: "seed" });
     await db.insert(pages).values([listing]);
@@ -575,7 +583,7 @@ describe("runRules against the database", () => {
     // rule reads, and the one across the derivation seam.
     expect(issued).toHaveLength(2);
     // Once per run, at the top, before the first rule reads them.
-    for (const table of ["links", "sitemap_urls", "hreflang", "issues"]) {
+    for (const table of ["links", "sitemap_urls", "issues", "sitemap_hreflang"]) {
       expect(perTable(table), `${table}: once per run`).toBe(1);
     }
     // Twice per run for the three tables the derivation phase rewrites
@@ -585,7 +593,9 @@ describe("runRules against the database", () => {
     // `pages` is in this list for the same reason one level down — its
     // `click_depth` column is entirely null when the top-of-run statement
     // samples it, and `structure.click-depth-distribution` groups by it.
-    for (const table of ["pages", "url_params", "structured_data"]) {
+    // `hreflang` gains its `source = 'sitemap'` rows across the seam
+    // (`deriveSitemapHreflang`).
+    for (const table of ["pages", "url_params", "structured_data", "hreflang"]) {
       expect(perTable(table), `${table}: twice per run`).toBe(2);
     }
     // `metrics` is deliberately absent from both statements: no rule reads it,

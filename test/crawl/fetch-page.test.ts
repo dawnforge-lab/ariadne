@@ -4,6 +4,7 @@ import { gzipSync } from "node:zlib";
 import { fetchPage, MAX_BODY, parseRetryAfter } from "../../src/crawl/fetch-page.js";
 import { analyzePage } from "../../src/crawl/parse/page-analyzer.js";
 import { closeFetchAgents, type DnsLookupFn } from "../../src/crawl/http.js";
+import { RESPONSE_HEADER_VALUE_CAP } from "../../src/crawl/response-headers.js";
 
 let server: Server;
 let base: string;
@@ -12,6 +13,19 @@ const OPTS = { userAgent: "AriadneBot-test", allowPrivate: true };
 
 /** The `accept-encoding` the last request to /echo-accept-encoding carried. */
 let lastAcceptEncoding: string | undefined;
+
+/** Two hreflang alternates in one `Link` value (Phase 26c, Task 6). */
+const HREFLANG_LINK =
+  '<https://ex.com/de>; rel="alternate"; hreflang="de", <https://ex.com/en>; rel="alternate"; hreflang="en"';
+
+/**
+ * Forty alternates, over `RESPONSE_HEADER_VALUE_CAP` (2,048) in one value: the
+ * stored copy is cut, the parsed pairs must not be (deviation 2).
+ */
+const LONG_HREFLANG_LINK = Array.from(
+  { length: 40 },
+  (_, i) => `<https://ex.com/locale-${String(i).padStart(2, "0")}/a-rather-long-path>; rel="alternate"; hreflang="l${i}"`,
+).join(", ");
 
 /** `<html>…</html>` padded to exactly `bytes`, so a length assertion is exact. */
 function htmlOfSize(bytes: number): string {
@@ -176,6 +190,50 @@ beforeAll(async () => {
         '<https://ex.com/prev>; rel="prev"',
         '<https://ex.com/c2>; rel="canonical"',
       ]);
+      res.end("<html></html>");
+    } else if (req.url === "/link-hreflang") {
+      res.setHeader("content-type", "text/html");
+      res.setHeader("link", HREFLANG_LINK);
+      res.end("<html></html>");
+    } else if (req.url === "/link-hreflang-pdf") {
+      res.setHeader("content-type", "application/pdf");
+      res.setHeader("link", HREFLANG_LINK);
+      res.end("%PDF-");
+    } else if (req.url === "/link-hreflang-moved") {
+      res.statusCode = 301;
+      res.setHeader("location", "/ok");
+      res.setHeader("link", HREFLANG_LINK);
+      res.end();
+    } else if (req.url === "/link-hreflang-long") {
+      res.setHeader("content-type", "text/html");
+      res.setHeader("link", LONG_HREFLANG_LINK);
+      res.end("<html></html>");
+    } else if (req.url === "/link-hreflang-many") {
+      res.setHeader("content-type", "text/html");
+      res.setHeader(
+        "link",
+        Array.from({ length: 205 }, (_, i) => `</l/${i}>; rel="alternate"; hreflang="x${i}"`).join(", "),
+      );
+      res.end("<html></html>");
+    } else if (req.url === "/link-mixed") {
+      res.setHeader("content-type", "text/html");
+      res.setHeader("link", [
+        '</p2>; rel="next", </de>; rel="Alternate Nofollow"; hreflang=de',
+        '</nolang>; rel="alternate", </empty>; rel="alternate"; hreflang=""',
+        '</c>; rel="canonical"; hreflang="fr"',
+      ]);
+      res.end("<html></html>");
+    } else if (req.url === "/link-trailing-semicolons") {
+      // Hand-written server configs end params with `;` (review I1).
+      res.setHeader("content-type", "text/html");
+      res.setHeader("link", [
+        '<https://ex.com/c3>; rel="canonical";',
+        '<https://ex.com/de>; rel="alternate"; hreflang="de";, <https://ex.com/en>; rel="alternate"; hreflang="en"; foo=',
+      ]);
+      res.end("<html></html>");
+    } else if (req.url === "/link-empty-canonical-first") {
+      res.setHeader("content-type", "text/html");
+      res.setHeader("link", "<>; rel=canonical, <https://ex.com/c4>; rel=canonical");
       res.end("<html></html>");
     } else if (req.url === "/no-canonical") {
       res.setHeader("content-type", "text/html");
@@ -570,6 +628,73 @@ describe("fetchPage", () => {
       "https://ex.com/c2",
     );
     expect((await fetchPage(`${base}/no-canonical`, OPTS)).canonicalHeader).toBeNull();
+  });
+
+  it("reads a canonical and hreflang pairs whose params end in a semicolon (review I1)", async () => {
+    const r = await fetchPage(`${base}/link-trailing-semicolons`, OPTS);
+    expect(r.canonicalHeader).toBe("https://ex.com/c3");
+    expect(r.headerHreflang).toEqual([
+      { code: "de", href: "https://ex.com/de" },
+      { code: "en", href: "https://ex.com/en" },
+    ]);
+  });
+
+  it("skips an empty canonical URI and takes the next canonical (review I1b)", async () => {
+    expect((await fetchPage(`${base}/link-empty-canonical-first`, OPTS)).canonicalHeader).toBe(
+      "https://ex.com/c4",
+    );
+  });
+
+  describe("hreflang from the Link header (Phase 26c)", () => {
+    const PAIRS = [
+      { code: "de", href: "https://ex.com/de" },
+      { code: "en", href: "https://ex.com/en" },
+    ];
+
+    it("yields one pair per alternate with an hreflang", async () => {
+      const r = await fetchPage(`${base}/link-hreflang`, OPTS);
+      expect(r.fetchClass).toBe("ok");
+      expect(r.headerHreflang).toEqual(PAIRS);
+    });
+
+    it("reads it on a non-HTML response and on a redirect", async () => {
+      const pdf = await fetchPage(`${base}/link-hreflang-pdf`, OPTS);
+      expect(pdf.fetchClass).toBe("non_html");
+      expect(pdf.headerHreflang).toEqual(PAIRS);
+      const moved = await fetchPage(`${base}/link-hreflang-moved`, OPTS);
+      expect(moved.fetchClass).toBe("redirect");
+      expect(moved.headerHreflang).toEqual(PAIRS);
+    });
+
+    it("parses the full header, not the stored copy cut at the cap", async () => {
+      expect(LONG_HREFLANG_LINK.length).toBeGreaterThan(RESPONSE_HEADER_VALUE_CAP);
+      const r = await fetchPage(`${base}/link-hreflang-long`, OPTS);
+      expect(r.responseHeaders?.truncated).toContain("link");
+      expect(r.headerHreflang).toHaveLength(40);
+      expect(r.headerHreflang[39]).toEqual({
+        code: "l39",
+        href: "https://ex.com/locale-39/a-rather-long-path",
+      });
+    });
+
+    it("keeps hrefs as written and caps the pairs at 200", async () => {
+      const r = await fetchPage(`${base}/link-hreflang-many`, OPTS);
+      expect(r.headerHreflang).toHaveLength(200);
+      expect(r.headerHreflang[0]).toEqual({ code: "x0", href: "/l/0" });
+      expect(r.headerHreflang[199]).toEqual({ code: "x199", href: "/l/199" });
+    });
+
+    it("takes rel as tokens, needs a non-empty hreflang, and leaves the canonical alone", async () => {
+      const r = await fetchPage(`${base}/link-mixed`, OPTS);
+      expect(r.headerHreflang).toEqual([{ code: "de", href: "/de" }]);
+      expect(r.canonicalHeader).toBe("/c");
+    });
+
+    it("is empty when no response headers were classified", async () => {
+      expect((await fetchPage(`${base}/ok`, OPTS)).headerHreflang).toEqual([]);
+      const timedOut = await fetchPage(`${base}/hang`, { ...OPTS, timeoutMs: 300 });
+      expect(timedOut.headerHreflang).toEqual([]);
+    });
   });
 
   it("classifies a timeout", async () => {

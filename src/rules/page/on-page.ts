@@ -1,3 +1,5 @@
+import type { OverlongUrls } from "../../crawl/parse/page-facts.js";
+import { INDEXED_URL_MAX } from "../../crawl/parse/url-utils.js";
 import { finding, isJudged, pageRule, present } from "../helpers.js";
 import type { PageRule } from "../registry/types.js";
 import {
@@ -25,6 +27,9 @@ export {
 
 const CATEGORY = "on-page";
 
+/** The extraction that measured `overlong_urls`; below it the column is null, "not measured". */
+const OVERLONG_EXTRACTION = 3;
+
 /** Equal after whitespace collapse and trim, ignoring case. */
 function sameText(a: string, b: string): boolean {
   const norm = (v: string): string => v.replace(/\s+/g, " ").trim().toLowerCase();
@@ -37,6 +42,7 @@ function sameText(a: string, b: string): boolean {
  * is not a page a search engine ranks, so a missing title, a duplicate
  * description or a broken heading outline on it is the other URL's problem or
  * nobody's. `site.health` counts both exclusions so the silence is visible.
+ * One exception, Phase 26c's `url.reference-too-long`: see its comment.
  */
 
 /**
@@ -311,6 +317,57 @@ export const onPageRules: PageRule[] = [
       isJudged(p) && p.url.length > URL_MAX
         ? [finding(self, p, { length: p.url.length, max: URL_MAX })]
         : [],
+  ),
+
+  /**
+   * References this page made that are too long to index (Phase 26c): links,
+   * files and hreflang targets whose resolved URL is over `INDEXED_URL_MAX`.
+   * The crawler counted them and stored none (`pages.overlong_urls`), so
+   * nothing behind them was crawled or checked.
+   *
+   * THE ONE RULE IN THIS FILE NOT GATED ON `isJudged`. An over-long reference
+   * was never followed whatever the page's index status, and the column says
+   * itself when there is something to judge: it is written on every row whose
+   * response was classified (the analyzer's counts, plus the `Link` header's
+   * hreflang targets on any row, a PDF included: Task 6), null where no
+   * response was classified. A v2 row (null, never measured)
+   * is silent; `extraction.not-recorded` speaks for it. A v3 count object
+   * missing a key is a defect in the write, and loud: re-crawl.
+   */
+  pageRule(
+    "url.reference-too-long",
+    ["CHECK-28"],
+    "url",
+    "warning",
+    [
+      { key: "links", label: "Links Over Limit" },
+      { key: "resources", label: "Files Over Limit" },
+      { key: "hreflang", label: "Hreflang Targets Over Limit" },
+      { key: "max", label: "Maximum Length" },
+    ],
+    (p, self) => {
+      if (p.extractionVersion === null || p.extractionVersion < OVERLONG_EXTRACTION) return [];
+      const counts = p.overlongUrls;
+      if (counts === null) return [];
+      for (const key of ["links", "resources", "hreflang"] as const) {
+        // jsonb is not checked against the type.
+        if (typeof (counts as Partial<OverlongUrls>)[key] !== "number") {
+          throw new Error(
+            `${self.id}: page ${p.url} has overlong_urls without '${key}' ` +
+              `(extraction ${p.extractionVersion}); re-crawl`,
+          );
+        }
+      }
+      if (counts.links + counts.resources + counts.hreflang === 0) return [];
+      return [
+        finding(self, p, {
+          links: counts.links,
+          resources: counts.resources,
+          hreflang: counts.hreflang,
+          max: INDEXED_URL_MAX,
+        }),
+      ];
+    },
   ),
 
   /**
