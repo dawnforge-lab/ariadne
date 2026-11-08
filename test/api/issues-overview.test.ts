@@ -8,7 +8,7 @@ import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { eq, sql } from "drizzle-orm";
+import { and, eq, inArray, sql } from "drizzle-orm";
 
 import { ApiService, ServiceError } from "../../src/api/service.js";
 import { closeDb, createDb, type Db } from "../../src/db/client.js";
@@ -36,6 +36,8 @@ const crawlId = `crawl_issues_overview_${runId}`;
 const unjudgedId = `crawl_issues_overview_unjudged_${runId}`;
 const staleRuleId = `crawl_issues_overview_stale_${runId}`;
 const malformedId = `crawl_issues_overview_malformed_${runId}`;
+const MANY_URLS = "sitemap.uncrawled";
+const NO_URL = "links.orphan-skipped";
 const extraCrawls = [unjudgedId, staleRuleId, malformedId];
 
 async function seedCrawl(id: string, paths: string[]): Promise<void> {
@@ -70,6 +72,21 @@ async function setJudgement(block: unknown): Promise<void> {
   await db.update(crawls).set({ judgement: block }).where(eq(crawls.id, crawlId));
 }
 
+/** Every distinct URL `issue_urls` lists for a rule, paged to the end. */
+async function issueUrlsDistinct(ruleId: string): Promise<number> {
+  const urls = new Set<string>();
+  let cursor: string | undefined;
+  for (;;) {
+    const page = await service.listIssueUrls(crawlId, ruleId, {
+      limit: 2,
+      ...(cursor === undefined ? {} : { cursor }),
+    });
+    for (const item of page.items) urls.add(item.url ?? "");
+    if (page.nextCursor === null) return urls.size;
+    cursor = page.nextCursor;
+  }
+}
+
 async function csvLines(): Promise<string[]> {
   const stream = await service.prepareCsvExport(crawlId, { view: "issues_overview" });
   const out: string[] = [];
@@ -85,6 +102,31 @@ beforeAll(async () => {
 
   await seedCrawl(crawlId, ["/", "/long", "/no-meta"]);
   await service.runRulesForCrawl(crawlId);
+
+  // Site-wide findings shaped as the real ones are: `page_id` null, the URL in
+  // `details.pageUrl`. Three distinct URLs over four findings (one URL twice),
+  // and a rule whose only finding names no URL at all.
+  await db
+    .delete(issues)
+    .where(and(eq(issues.crawlId, crawlId), inArray(issues.ruleId, [MANY_URLS, NO_URL])));
+  await db.insert(issues).values([
+    ...["/a", "/b", "/c", "/c"].map((path, i) => ({
+      crawlId,
+      ruleId: MANY_URLS,
+      pageId: null,
+      severity: "info",
+      dedupeKey: `seed-${i}`,
+      details: { pageUrl: `${SITE}${path}` },
+    })),
+    {
+      crawlId,
+      ruleId: NO_URL,
+      pageId: null,
+      severity: "info",
+      dedupeKey: "seed-0",
+      details: {},
+    },
+  ]);
 
   await seedCrawl(unjudgedId, ["/"]);
 
@@ -111,43 +153,37 @@ afterAll(async () => {
 });
 
 describe("issues_overview rows", () => {
-  it("counts each rule's distinct pages plus one for a site-wide finding", async () => {
+  it("counts each rule's distinct URLs as issue_urls lists them, for every rule", async () => {
     await setJudgement({});
     const overview = await service.issuesOverview(crawlId, {});
-    const oracle = await db.execute<{ rule_id: string; n: number }>(sql`
-      select rule_id,
-             (count(distinct page_id) + case when bool_or(page_id is null) then 1 else 0 end)::int as n
-        from issues where crawl_id = ${crawlId} group by rule_id`);
-    expect(oracle.rows.length).toBeGreaterThan(0);
-    expect(overview.rows.map((r) => r.ruleId).sort()).toEqual(
-      oracle.rows.map((r) => r.rule_id).sort(),
-    );
-    for (const row of oracle.rows) {
-      expect(overview.rows.find((r) => r.ruleId === row.rule_id)?.urls, row.rule_id).toBe(row.n);
+    expect(overview.rows.length).toBeGreaterThan(2);
+    for (const row of overview.rows) {
+      expect(row.urls, row.ruleId).toBe(await issueUrlsDistinct(row.ruleId));
     }
   });
 
-  it("agrees with issues_list and issue_urls on a page rule", async () => {
+  it("counts a page rule's URLs and agrees with issues_list on it", async () => {
     const overview = await service.issuesOverview(crawlId, {});
     const list = await service.listIssues(crawlId, { limit: 200 });
-    const group = list.items.find((g) => g.ruleId === "title.too-long");
     const row = overview.rows.find((r) => r.ruleId === "title.too-long");
-    expect(group).toBeDefined();
-    expect(row?.urls).toBe(group?.count);
-    const urlPage = await service.listIssueUrls(crawlId, "title.too-long", { limit: 200 });
-    expect(row?.urls).toBe(urlPage.items.length);
+    expect(row?.urls).toBe(1);
+    expect(row?.urls).toBe(list.items.find((g) => g.ruleId === "title.too-long")?.count);
   });
 
-  it("counts a site-wide finding as one URL", async () => {
-    const siteWide = await db.execute<{ rule_id: string; n: number }>(sql`
-      select rule_id, count(distinct page_id)::int as n from issues
-       where crawl_id = ${crawlId}
-       group by rule_id having bool_or(page_id is null)`);
-    expect(siteWide.rows.length).toBeGreaterThan(0);
+  it("counts every distinct URL of a site-wide rule, not one", async () => {
     const overview = await service.issuesOverview(crawlId, {});
-    for (const w of siteWide.rows) {
-      expect(overview.rows.find((r) => r.ruleId === w.rule_id)?.urls, w.rule_id).toBe(w.n + 1);
-    }
+    const row = overview.rows.find((r) => r.ruleId === MANY_URLS);
+    expect(row?.urls).toBe(3);
+    expect(await issueUrlsDistinct(MANY_URLS)).toBe(3);
+    // issues_list counts FINDINGS: four, over three URLs.
+    const list = await service.listIssues(crawlId, { limit: 200 });
+    expect(list.items.find((g) => g.ruleId === MANY_URLS)?.count).toBe(4);
+  });
+
+  it("counts a site-wide finding that names no URL as one", async () => {
+    const overview = await service.issuesOverview(crawlId, {});
+    expect(overview.rows.find((r) => r.ruleId === NO_URL)?.urls).toBe(1);
+    expect(await issueUrlsDistinct(NO_URL)).toBe(1);
   });
 
   it("takes pagesJudged from the stored site.health metric and computes the percentage", async () => {

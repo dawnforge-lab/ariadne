@@ -11,10 +11,13 @@
  * answer is bounded by the rule count (at most 174 finding rules), which is why
  * ordering the aggregate in code is not an unbounded structure.
  *
- * `urls` is the number of distinct pages the rule fired on, plus one when the
- * rule has a site-wide finding (`page_id` null) — a site-wide finding is one
- * thing wrong with the site, and a rule whose only finding is site-wide must
- * not read as zero.
+ * `urls` is the number of DISTINCT URLs, as `issue_urls` lists them: the
+ * distinct `details.pageUrl` (the key `issue_urls` pages on), with every finding
+ * that names no URL standing for one site-wide entry (the `''` bucket, counted
+ * as 1). A site-wide rule that carries many URLs (`sitemap.uncrawled`) therefore
+ * counts them all, and a rule whose only finding names no URL still reads 1.
+ * `issues_list.count` counts FINDINGS and can exceed `urls` when a rule fires
+ * more than once per URL (e.g. `social.og-duplicate`).
  */
 import { sql } from "drizzle-orm";
 
@@ -34,6 +37,7 @@ export interface IssuesOverviewRow {
   severity: Severity;
   category: RuleCategory;
   checkIds: string[];
+  /** Distinct URLs, as `issue_urls` lists them (site-wide entry counts 1). */
   urls: number;
   percentOfJudged: number | null;
   marker?: true;
@@ -102,17 +106,16 @@ export async function buildIssuesOverview(
   const pagesJudged = await storedPagesJudged(db, crawlId);
   const copy = copyRenderer(view.copyThresholds);
 
-  const result = await db.execute<{ rule_id: string; pages: number; site_wide: boolean }>(sql`
+  const result = await db.execute<{ rule_id: string; urls: number }>(sql`
     select i.rule_id,
-           count(distinct i.page_id)::int as pages,
-           coalesce(bool_or(i.page_id is null), false) as site_wide
+           count(distinct coalesce(i.details_jsonb->>'pageUrl', ''))::int as urls
       from issues i
      where i.crawl_id = ${crawlId} and ${notDisabled(view.disabledRules)}
      group by i.rule_id`);
 
   const counts = new Map<string, number>();
   for (const r of result.rows) {
-    counts.set(r.rule_id, r.pages + (r.site_wide ? 1 : 0));
+    counts.set(r.rule_id, r.urls);
   }
 
   const rowFor = (ruleId: string, urls: number): IssuesOverviewRow => {
