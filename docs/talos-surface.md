@@ -52,7 +52,7 @@ no finding moves. Four tools and four routes are new:
   reads the judgement (`crawl_status`, `crawl_config_get`, `issues_list`, the two
   overviews, `issue_urls`, `issue_inlinks`, `metrics_get`, `metric_table`,
   `rules_catalog` with a crawl id, `crawl_compare`, the `issues` JSONL dataset
-  and the `issues`, `issue_urls` and two overview CSV views), naming the rule; `crawl_config_set` with `{rules: {<id>: null}}` is the repair, and is
+  and the `issues`, `issue_urls` and two overview CSV views), naming the rule; `crawl_config_set` with `{judgement: {rules: {<id>: null}}}` is the repair, and is
   the one surface that accepts the crawl in that state. `issue_urls` and
   `issue_inlinks` of a disabled rule are a 409 too (§4.4).
 - `crawl_compare` gains the caveat code `judgement-overrides` (§7.2).
