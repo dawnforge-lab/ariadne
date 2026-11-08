@@ -834,6 +834,21 @@ const KINDS = ["page", "query", "metric"] as const satisfies readonly AnyRule["k
 //     alternates, so every new rule but `sitemap.oversized` (a 50 MB fixture)
 //     and `social.image-insecure` (an https page) fires end to end in the
 //     harness. `rules_catalog` re-measured at 191,474 bytes. 187 rules.
+// 12. (final review) No new rule, migration or version bump. Link name hints
+//     skip `aria-hidden="true"` subtrees and `<template>` content (an
+//     aria-hidden `<a>` keeps its own `aria-labelledby` / `title`).
+//     `hreflang.invalid-code` reads the table in page-id batches and judges
+//     only declaring pages fetched OK with a 200 (ruling R14). The sitemap
+//     stream caps a `<loc>`'s text at `INDEXED_URL_MAX` + 1 (past it, reported
+//     over-long, never cut) and a `<lastmod>`'s at 64 (kept with `…`), and
+//     counts alternates past `MAX_HREFLANG_PAIRS` per `<url>`:
+//     `sitemapFacts.alternatesCapped`, required by `readSitemapFacts`, and a
+//     new `sitemap.structure` site column (null before 26c). The
+//     `oversizedDocsSkipped` column reads "Documents Over 50 MB"; the
+//     `sitemap.url-too-long` summary row's column reads "Addresses Not Stored"
+//     and its copy names every address it counts; `hreflang.multiple-entries`'
+//     copy is split. A v3 social set with a partial `imageRefTooLong` throws
+//     "re-crawl". `rules_catalog` re-measured at 191,749 bytes. 187 rules.
 export const RULESET_VERSION = "0.22.0";
 
 /**

@@ -708,12 +708,15 @@ argument nobody allowed, naming it").
 
 **Not paginated, on purpose:** `rules_catalog` and `crawl_compare`. Both are
 bounded by the **ruleset** (187 rows at 0.22.0) rather than by the crawl. The
-catalog is ~187 KB (**191,474 bytes**, measured 2026-11-07 at the end of Phase 26c
-over all 187 rows of ruleset 0.22.0 by serialising what `rulesCatalog` answers
-with no crawl id — 15 markers at 2,286 bytes, the `marker` values JSON-serialised
-as one array, and the fourteen tables at 5,559 the same way, `sitemap.structure`'s
-five new columns among them; the same measurement over the Phase 26b code
-reproduces its 183,585 to the byte; the 183,585 before it was re-measured
+catalog is ~187 KB (**191,749 bytes**, measured 2026-11-08 after the Phase 26c
+final review over all 187 rows of ruleset 0.22.0 by serialising what `rulesCatalog`
+answers with no crawl id — 15 markers at 2,286 bytes, the `marker` values
+JSON-serialised as one array, and the fourteen tables at 5,618 the same way,
+`sitemap.structure`'s six new columns among them; the same measurement over the
+pre-review code reproduces its 191,474 (tables 5,559) to the byte; the 191,474
+before it was measured 2026-11-07 at the end of Phase 26c, and the same
+measurement over the Phase 26b code reproduces its 183,585 to the byte; the
+183,585 before it was re-measured
 2026-11-07 after the owner calls
 over all 182 rows of ruleset 0.21.0 the same way — 15 markers at 2,274 bytes and
 the fourteen tables at 5,239; the 180,545 before it was measured the same day at the end
