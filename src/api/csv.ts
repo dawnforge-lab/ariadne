@@ -65,6 +65,8 @@ import { sql, type SQL } from "drizzle-orm";
 
 import { indexabilityOf } from "../rules/helpers.js";
 import { MAX_REDIRECT_HOPS } from "../rules/query/redirects.js";
+import type { IssueType, Priority } from "../rules/registry/types.js";
+import { notDisabled } from "./judgement-view.js";
 
 /** The datasets `export_crawl`'s CSV half can write, and the `view` vocabulary. */
 export const CSV_VIEWS = [
@@ -284,6 +286,9 @@ export interface CsvRuleCopy {
   title: string;
   category: string;
   checkIds: readonly string[];
+  /** The rule's type and priority after the crawl's overrides (Phase 27a). */
+  type: IssueType;
+  priority: Priority;
   /**
    * The rule's report, column by column — the four standard columns and then the
    * rule's own (`columnsFor`, src/api/service.ts). The `issue_urls` view's HEADER
@@ -325,8 +330,19 @@ export interface CsvView {
   readonly start: readonly string[];
   /** Whether the view is about one rule and cannot be built without its id. */
   readonly needsRuleId: boolean;
-  /** One bounded, ordered batch after `cursor`. */
-  query(crawlId: string, cursor: readonly string[], limit: number, ruleId: string | null): SQL;
+  /**
+   * One bounded, ordered batch after `cursor`. `disabledRules` is the crawl's
+   * judgement's disabled set: the two findings views leave those rules' stored
+   * rows out in SQL (Phase 27a); every other view is not about findings and
+   * ignores it.
+   */
+  query(
+    crawlId: string,
+    cursor: readonly string[],
+    limit: number,
+    ruleId: string | null,
+    disabledRules: readonly string[],
+  ): SQL;
   /** The cursor that follows this row. */
   next(row: Record<string, unknown>): string[];
   /** The row's cells, in header order. */
@@ -345,7 +361,13 @@ function defineCsvView<Row extends Record<string, unknown>>(view: {
   keyset: readonly string[];
   start: readonly string[];
   needsRuleId?: boolean;
-  query(crawlId: string, cursor: readonly string[], limit: number, ruleId: string | null): SQL;
+  query(
+    crawlId: string,
+    cursor: readonly string[],
+    limit: number,
+    ruleId: string | null,
+    disabledRules: readonly string[],
+  ): SQL;
   next(row: Row): string[];
   cells(row: Row, ctx: CsvViewContext): string[];
 }): CsvView {
@@ -366,7 +388,9 @@ function orEmpty(value: string | number | boolean | null | undefined): string {
   return value === null || value === undefined ? "" : String(value);
 }
 
-const ISSUE_HEADER = ["ruleId", "severity", "category", "checkIds", "url", "title", "evidence"];
+const ISSUE_HEADER = [
+  "ruleId", "severity", "type", "priority", "category", "checkIds", "url", "title", "evidence",
+];
 
 /**
  * The header of the always-present last column of `issue_urls`, and the only
@@ -587,19 +611,23 @@ function linkNext(row: LinkRow): string[] {
 export const CSV_VIEW_DEFS: Record<CsvQueryViewName, CsvView> = {
   /**
    * Every finding of a judged crawl, one row each — the same rows, in the same
-   * order, as the `issues` JSONL dataset, with the evidence flattened.
+   * order, as the `issues` JSONL dataset, with the evidence flattened. Since
+   * Phase 27a the rule's type and priority (after the crawl's overrides) follow
+   * the severity, and the findings of a rule the crawl's judgement disables are
+   * left out, in SQL.
    */
   issues: defineCsvView<IssueRow>({
     header: ISSUE_HEADER,
     keyset: ["rule_id", "dedupe_key"],
     start: ["", ""],
-    query: (crawlId, cursor, limit) => sql`
+    query: (crawlId, cursor, limit, _ruleId, disabledRules) => sql`
       select i.rule_id, i.severity,
              i.details_jsonb->>'pageUrl' as url,
              i.details_jsonb as evidence,
              i.dedupe_key
       from issues i
       where i.crawl_id = ${crawlId}
+        and ${notDisabled(disabledRules)}
         and (i.rule_id, i.dedupe_key) > (${cursor[0] ?? ""}::text, ${cursor[1] ?? ""}::text)
       order by i.rule_id asc, i.dedupe_key asc
       limit ${limit}`,
@@ -609,6 +637,8 @@ export const CSV_VIEW_DEFS: Record<CsvQueryViewName, CsvView> = {
       return [
         row.rule_id,
         row.severity,
+        rule.type,
+        rule.priority,
         rule.category,
         rule.checkIds.join(LIST_SEPARATOR),
         orEmpty(row.url),
@@ -654,7 +684,10 @@ export const CSV_VIEW_DEFS: Record<CsvQueryViewName, CsvView> = {
     // The left join is `listIssueUrls`' — a finding names a page, names a URL
     // with no page row, or names nothing, and an inner join would drop two of
     // those three silently.
-    query: (crawlId, cursor, limit, ruleId) => sql`
+    // A disabled rule is refused before this view is built (the service's
+    // `refuseIfDisabled`); the clause is the same SQL filter the `issues` view
+    // applies, so the view never depends on the caller having checked.
+    query: (crawlId, cursor, limit, ruleId, disabledRules) => sql`
       select i.rule_id, i.severity,
              i.details_jsonb->>'pageUrl' as url,
              i.details_jsonb as evidence,
@@ -667,6 +700,7 @@ export const CSV_VIEW_DEFS: Record<CsvQueryViewName, CsvView> = {
       -- listIssueUrls (src/api/service.ts) for why.
       left join pages p on p.id = i.page_id and p.crawl_id = ${crawlId}
       where i.crawl_id = ${crawlId} and i.rule_id = ${ruleId ?? ""}
+        and ${notDisabled(disabledRules)}
         and i.dedupe_key > ${cursor[0] ?? ""}::text
       order by i.dedupe_key asc
       limit ${limit}`,

@@ -37,11 +37,18 @@
  *                                      wrote; `truncated` + `total`|`atLeast`
  *                                      appear when the rule capped its listing,
  *                                      and their absence means the count is the
- *                                      whole number (see `listIssues`).
+ *                                      whole number (see `listIssues`). The
+ *                                      crawl's judgement is applied: each group
+ *                                      carries `type` / `priority` after its
+ *                                      overrides, a disabled rule's group is
+ *                                      left out and named in `disabledRules`,
+ *                                      and `judgementStale` says whether the
+ *                                      judgement moved since the last rules run
  *   GET  /crawls/:id/issues/:rule/urls one rule's findings as a table:
  *                                      `{columns, items, nextCursor}`, each row
  *                                      the four standard columns plus the rule's
- *                                      own evidence
+ *                                      own evidence. 409 for a rule the crawl's
+ *                                      judgement disables (so is /inlinks)
  *   GET  /crawls/:id/issues/:rule/inlinks the links that point at what the three
  *                                      target rules found (links.broken-internal,
  *                                      links.to-server-error,
@@ -66,7 +73,14 @@
  *                                      issues route. `measuresOnly: true` marks
  *                                      a metric rule, whose 0 is structural —
  *                                      it measures rather than finds and writes
- *                                      no issues at all (see `RuleFired`)
+ *                                      no issues at all (see `RuleFired`).
+ *                                      Every finding rule carries `type` and
+ *                                      `priority`; with `?crawlId=` they are the
+ *                                      crawl's, `disabled: true` marks a rule
+ *                                      its judgement disables, the copy renders
+ *                                      from the thresholds it was judged with,
+ *                                      and `thresholds` + `judgementStale` ride
+ *                                      the answer (see `RulesCatalog`)
  *   GET  /crawls/:id/export            write a dataset to disk, answer with the
  *                                      path. `?format=csv&view=` STREAMS instead:
  *                                      `text/csv`, chunked, one of six spreadsheet

@@ -924,6 +924,16 @@ const KINDS = ["page", "query", "metric"] as const satisfies readonly AnyRule["k
 //     an override shows up in the text. At the defaults every entry renders
 //     byte for byte as 0.22.0 wrote it; an unknown or leftover placeholder
 //     throws, naming the rule.
+//  5. (T5) The read surfaces apply a crawl's judgement, through one loader
+//     (src/api/judgement-view.ts): `issues_list`, the issues CSV and the
+//     JSONL issues export leave out a disabled rule's stored findings IN SQL
+//     and name the disabled set; `issue_urls` / `issue_inlinks` (and the
+//     `issue_urls` CSV) refuse a disabled rule with a 409; groups, CSV rows
+//     and catalog rows carry type and priority after overrides; copy renders
+//     from the thresholds the findings were judged with (the stamp; the
+//     current block on an unjudged crawl); `judgementStale` rides the
+//     listing and the catalog. All additive; no finding moves.
+//     `rules_catalog` re-measured at 200,260 bytes (no crawl). 188 rules.
 export const RULESET_VERSION = "0.23.0";
 
 /**

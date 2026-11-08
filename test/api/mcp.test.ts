@@ -241,7 +241,21 @@ async function seedCrawl(row: {
     rulesetVersion: "0.0.0-test",
     status: row.status,
     ...(row.discovery === undefined ? {} : { discovery: row.discovery }),
-    ...(row.judged === true ? { rulesRunAt: new Date("2026-08-30T09:00:00.000Z") } : {}),
+    // Since Phase 27a a judged crawl also carries the stamp of what its run was
+    // judged with, which the read surfaces require beside `rules_run_at` (hard
+    // rule 7) — migration 0032's backfill: no overrides, the config's cap.
+    ...(row.judged === true
+      ? {
+          rulesRunAt: new Date("2026-08-30T09:00:00.000Z"),
+          rulesJudgedWith: {
+            disabledRules: [],
+            thresholds: {},
+            ...(row.config !== undefined && "findingCap" in row.config
+              ? { findingCap: row.config["findingCap"] }
+              : {}),
+          },
+        }
+      : {}),
   });
   createdCrawls.push(row.id);
   return row.id;
@@ -2504,7 +2518,9 @@ describe("export_crawl — the CSV views", () => {
     // caller compared it against findingsCount.
     expect(body["rows"]).toBe(5);
     const text = read(body);
-    expect(text.split("\r\n")[0]).toBe("ruleId,severity,category,checkIds,url,title,evidence");
+    expect(text.split("\r\n")[0]).toBe(
+      "ruleId,severity,type,priority,category,checkIds,url,title,evidence",
+    );
     expect(text.trimEnd().split("\r\n")).toHaveLength(6);
     // A path and a count, never the contents (the JSONL half's contract).
     expect(JSON.stringify(body)).not.toContain("links.orphan");

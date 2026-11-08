@@ -50,11 +50,13 @@ function ruleCtx(): CsvViewContext {
   return {
     rule: (ruleId) => {
       const rule = registry.all().find((r) => r.id === ruleId);
-      if (rule === undefined) throw new Error(`no rule ${ruleId}`);
+      if (rule === undefined || rule.kind === "metric") throw new Error(`no finding rule ${ruleId}`);
       return {
         title: rule.title,
         category: rule.category,
         checkIds: rule.checkIds,
+        type: rule.type,
+        priority: rule.priority,
         columns: columnsFor(rule),
       };
     },
@@ -188,7 +190,7 @@ describe("the view definitions", () => {
   const dialect = new PgDialect();
   const rendered = (view: CsvQueryViewName): string =>
     dialect.sqlToQuery(
-      CSV_VIEW_DEFS[view].query("crawl_x", CSV_VIEW_DEFS[view].start, 500, "title.missing"),
+      CSV_VIEW_DEFS[view].query("crawl_x", CSV_VIEW_DEFS[view].start, 500, "title.missing", []),
     ).sql;
 
   it("defines exactly the eight keyset views the surface advertises", () => {
@@ -297,7 +299,7 @@ describe("the view definitions", () => {
   it("parameterises the crawl id rather than interpolating it into the SQL", () => {
     for (const view of CSV_QUERY_VIEWS) {
       const { params } = new PgDialect().sqlToQuery(
-        CSV_VIEW_DEFS[view].query("crawl_x", CSV_VIEW_DEFS[view].start, 500, "title.missing"),
+        CSV_VIEW_DEFS[view].query("crawl_x", CSV_VIEW_DEFS[view].start, 500, "title.missing", []),
       );
       expect(params, `${view} does not parameterise its crawl id`).toContain("crawl_x");
       expect(rendered(view), `${view} interpolates its crawl id`).not.toContain("crawl_x");

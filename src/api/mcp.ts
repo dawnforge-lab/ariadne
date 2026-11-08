@@ -681,10 +681,20 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
       title: "Findings, grouped by rule",
       description:
         "The triage view of a judged crawl: one row per rule that found " +
-        "something — {ruleId, checkIds, severity, category, title, count, " +
-        "sampleUrls}. Ordered by severity (critical, warning, info) then rule id. " +
+        "something — {ruleId, checkIds, severity, type, priority, category, title, " +
+        "count, sampleUrls}. Ordered by severity (critical, warning, info) then rule id. " +
         "sampleUrls is at most five URLs and is a SAMPLE, not the list; get the " +
         "full list from issue_urls.\n\n" +
+        "THE CRAWL'S JUDGEMENT IS APPLIED. type is issue | warning | opportunity " +
+        "and priority is high | medium | low, after the crawl's overrides; " +
+        "typeOverridden: true / priorityOverridden: true appear only where the " +
+        "crawl's judgement sets that value. A rule the judgement disables still " +
+        "ran and its findings are stored, but its group is left out here — the " +
+        "answer's disabledRules names every such rule, so 'filtered out' and 'did " +
+        "not fire' stay distinguishable. judgementStale {stale, reasons} says " +
+        "whether the crawl's judgement has changed since its last rules run " +
+        "(reasons: overrides | thresholds | findingCap); re-run crawl_rules to " +
+        "clear it.\n\n" +
         "COUNTS AND CAPS. Some rules stop listing at a cap, so 'count' is the " +
         "number of rows the rule wrote. A capped row carries 'truncated': true " +
         "and one magnitude field: 'total' — the exact number of cases, of which " +
@@ -705,8 +715,8 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "findings belong to no cohort and are excluded by this filter.\n" +
         "ruleId, checkId and category intersect; a combination that can select no " +
         "rule is refused rather than answered with an empty page.\n\n" +
-        `Paginated: {items, nextCursor}; limit defaults to ${PAGE_SIZE_DEFAULT}, ` +
-        `maximum ${PAGE_SIZE_MAX}.`,
+        `Paginated: {items, nextCursor, disabledRules, judgementStale}; limit ` +
+        `defaults to ${PAGE_SIZE_DEFAULT}, maximum ${PAGE_SIZE_MAX}.`,
       inputSchema: z.strictObject({
         crawlId: crawlIdField(),
         severity: z
@@ -787,6 +797,10 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "robots.blocks-internal-urls there is a companion report: issue_inlinks " +
         "lists the links that POINT AT what this one found, which is where the " +
         "fix is made.\n\n" +
+        "A rule the crawl's judgement disables is refused (409) rather than " +
+        "answered with an empty page: its findings are stored, and an empty page " +
+        "would read as 'this rule found nothing'. issues_list's disabledRules " +
+        "names them.\n\n" +
         `Paginated: {items, nextCursor}; limit defaults to ${PAGE_SIZE_DEFAULT}, ` +
         `maximum ${PAGE_SIZE_MAX}. A large rule can have thousands of rows — ` +
         "follow the cursors, or use export_crawl if you want all of them at once.",
@@ -831,6 +845,8 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "report here — which is also where the two reports stop lining up: on a " +
         "capped run this one can name a destination issue_urls never listed, " +
         "because the rule's listing stopped before reaching it.\n\n" +
+        "A rule the crawl's judgement disables is refused (409), as issue_urls " +
+        "refuses it.\n\n" +
         `Paginated: {items, nextCursor}; limit defaults to ${PAGE_SIZE_DEFAULT}, ` +
         `maximum ${PAGE_SIZE_MAX}. A site with many broken links has thousands ` +
         "of rows — follow the cursors, or export the links_to_4xx / links_to_5xx " +
@@ -1143,9 +1159,12 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
       title: "Every rule this engine can apply",
       description:
         "The whole ruleset, with the client-facing copy each rule would report " +
-        "with: {rulesetVersion, rules: [{id, kind, severity, category, checkIds, " +
-        "title, explanation, howToFix, columns?, table?, marker?}]}. kind is page | query | metric, severity " +
-        "is critical | warning | info, and checkIds trace each rule to the audit " +
+        "with: {rulesetVersion, rules: [{id, kind, severity, type?, priority?, " +
+        "category, checkIds, title, explanation, howToFix, columns?, table?, " +
+        "marker?}]}. kind is page | query | metric, severity " +
+        "is critical | warning | info, type is issue | warning | opportunity and " +
+        "priority is high | medium | low (both absent on a metric rule, which " +
+        "has no findings to triage), and checkIds trace each rule to the audit " +
         "checklist. The rules that FIND are ordered by severity then rule id — the " +
         "order issues_list returns its groups in. The METRIC rules follow them as " +
         "one block, in the order their tables declare (table.order, lower first, " +
@@ -1197,6 +1216,18 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "check the site passed — the flag is on the payload so it cannot be missed. " +
         "Its numbers are in metrics_get (which is also what issue_urls tells you " +
         "when you name a metric rule there).\n\n" +
+        "WITH crawlId, the crawl's judgement is applied as well. type and " +
+        "priority are that crawl's, after its overrides, with typeOverridden: " +
+        "true / priorityOverridden: true where its judgement sets the value. " +
+        "disabled: true marks a rule the crawl's judgement disables: it still " +
+        "ran, and fired.count still counts its stored findings, which every " +
+        "findings listing and export leaves out until it is re-enabled. The " +
+        "copy is rendered with the thresholds the crawl's findings were judged " +
+        "with, and the answer adds thresholds (those values, by name) and " +
+        "judgementStale {stale, reasons} — stale when the crawl's judgement has " +
+        "changed since its last rules run (reasons: overrides | thresholds | " +
+        "findingCap), so a threshold override is in the copy only after " +
+        "crawl_rules re-runs.\n\n" +
         "The copy is always the CURRENT ruleset's (rulesetVersion says which), " +
         "including when the named crawl was judged by an older one. A crawl " +
         "holding findings for a rule this ruleset no longer defines is refused " +
@@ -1205,7 +1236,7 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "Not paginated: the ruleset is a fixed list that does not grow with the " +
         "size of a crawl — but it is not small, and there is no cursor to take it " +
         "in pieces. Every rule's full copy is tens of kilobytes in one answer " +
-        "(about 92KB, roughly 23k tokens, at this ruleset), so spend the context " +
+        "(about 200KB, roughly 50k tokens, at this ruleset), so spend the context " +
         "deliberately: if you only need the rules that FOUND something, " +
         "issues_list is a fraction of the size.",
       inputSchema: z.strictObject({
@@ -1365,7 +1396,10 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "TWO FORMATS, TWO VOCABULARIES.\n" +
         `  format=jsonl.gz (the default) writes a gzipped JSONL file of one DATASET: ` +
         `${EXPORT_DATASETS.join(", ")} (default issues) — one JSON object per line, ` +
-        "evidence intact. Answers {dataset, path, rows, bytes}.\n" +
+        "evidence intact. Answers {dataset, path, rows, bytes}, plus disabledRules " +
+        "on the issues dataset: the rules the crawl's judgement disables, whose " +
+        "findings the file leaves out (the issues and issue_urls CSV views leave " +
+        "them out too, and issue_urls of a disabled rule is refused).\n" +
         `  format=csv writes a spreadsheet of one VIEW: ${CSV_VIEWS.join(", ")} ` +
         "(default issues). issue_urls is one rule's findings and needs a ruleId; " +
         "metric_table is one metric's table and needs a metricId; the other seven " +

@@ -27,9 +27,12 @@ and honest about what it left out.
 
 ## What the engine gives you and what it does not
 
-`issues_list` answers `{ruleId, checkIds, severity, category, title, count,
-sampleUrls}` per rule that found something. `issue_urls` answers `{url, evidence}`
-per finding, paginated. That is the tab body, and it is a fact.
+`issues_list` answers `{ruleId, checkIds, severity, type, priority, typeOverridden,
+priorityOverridden, category, title, count, sampleUrls}` per rule that found
+something (the two `…Overridden` flags only where the crawl's judgement sets the
+value; a rule the judgement disables is left out and named in the answer's
+`disabledRules`). `issue_urls` answers `{url, evidence}` per finding, paginated.
+That is the tab body, and it is a fact.
 
 **There is no impact field, and there is not going to be one.** `severity` is the
 rule's opinion in the abstract, formed before anyone knew whose site this is;
