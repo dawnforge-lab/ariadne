@@ -5,6 +5,7 @@ import { deriveClickDepth } from "./derive/click-depth.js";
 import { deriveFieldPresence } from "./derive/field-presence.js";
 import { deriveSitemapHreflang } from "./derive/sitemap-hreflang.js";
 import { deriveUrlParams } from "./derive/url-params.js";
+import { judgedWithOf, readStoredJudgement } from "./judgement.js";
 import { resolveRuleCaps, storedFindingCap } from "./query/crawl-evidence.js";
 import { RULESET_VERSION, type Registry } from "./registry/registry.js";
 import { METRIC_SCOPES, type Finding, type Metric } from "./registry/types.js";
@@ -124,7 +125,7 @@ export async function runRules(
   // first so a typo or a deleted crawl is an error rather than a green report
   // about nothing (hard rule 7).
   const crawl = await db
-    .select({ id: crawls.id, config: crawls.config })
+    .select({ id: crawls.id, config: crawls.config, judgement: crawls.judgement })
     .from(crawls)
     .where(eq(crawls.id, crawlId))
     .limit(1);
@@ -146,9 +147,20 @@ export async function runRules(
   // the cap is a crawl-start decision and `crawl_rules` has no argument to
   // restate it with. A stored value that is neither absent, null, nor a
   // positive integer throws here rather than being read as "the default".
-  const caps = resolveRuleCaps(
-    opts.findingCap !== undefined ? opts.findingCap : storedFindingCap(row.config, crawlId),
-  );
+  const capInput =
+    opts.findingCap !== undefined ? opts.findingCap : storedFindingCap(row.config, crawlId);
+  const caps = resolveRuleCaps(capInput);
+
+  // THE CRAWL'S JUDGEMENT BLOCK, read and validated before anything is deleted.
+  // A block that does not parse — or names a rule this registry does not have —
+  // throws here naming the crawl, so a run never judges a crawl under overrides
+  // it cannot read, and never as if there were none (hard rule 7). Up front, so
+  // the refusal leaves the previous judgement and its stamp exactly as they
+  // were. What the run was judged with is stamped beside `rules_run_at` at the
+  // end: the cap is the one the run took as input (absent when neither the call
+  // nor the crawl chose, i.e. the engine default applied).
+  const block = readStoredJudgement(row.judgement, crawlId, registry);
+  const judgedWith = judgedWithOf(block, capInput);
 
   // Planner statistics, before any rule reads a table.
   //
@@ -237,7 +249,12 @@ export async function runRules(
   // is on record rather than pointing at the run before it (hard rule 7).
   await db.transaction(async (tx) => {
     await tx.delete(issues).where(eq(issues.crawlId, crawlId));
-    await tx.update(crawls).set({ rulesRunAt: null }).where(eq(crawls.id, crawlId));
+    // The stamp of what the run was judged with goes with the timestamp: it
+    // describes the same completed pass, so it is null whenever that is.
+    await tx
+      .update(crawls)
+      .set({ rulesRunAt: null, rulesJudgedWith: null })
+      .where(eq(crawls.id, crawlId));
   });
 
   const summary: RunSummary = {
@@ -535,7 +552,14 @@ export async function runRules(
   // here is a failure to record a judgement that happened — which throws, and
   // leaves the marker null, which is the same "no complete pass on record"
   // the delete above established. Never the other way round.
-  await db.update(crawls).set({ rulesRunAt: new Date() }).where(eq(crawls.id, crawlId));
+  //
+  // The stamp of what this pass was judged with is written in the SAME update,
+  // so the two are never observable apart: a timestamp always comes with the
+  // inputs that produced the rows beside it.
+  await db
+    .update(crawls)
+    .set({ rulesRunAt: new Date(), rulesJudgedWith: judgedWith })
+    .where(eq(crawls.id, crawlId));
 
   return summary;
 }

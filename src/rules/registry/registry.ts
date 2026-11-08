@@ -902,6 +902,14 @@ const KINDS = ["page", "query", "metric"] as const satisfies readonly AnyRule["k
 //     filed as anything but warning / low fail registry load. No verdict,
 //     severity, finding or copy moves; this is client-facing judgement, which
 //     is why the version moves. 188 rules.
+//  2. (T2) The per-crawl judgement block (src/rules/judgement.ts): rule
+//     overrides (disable / retype / reprioritise; never severity, never a
+//     metric rule) and overrides of 20 allowlisted thresholds, stored in
+//     `crawls.judgement_jsonb` (0031). `runRules` validates the stored block
+//     up front and stamps what it judged with (disabled set, threshold
+//     overrides, cap) in `crawls.rules_judged_with_jsonb` beside
+//     `rules_run_at`, backfilled for older judged crawls (0032). No rule reads
+//     the block yet; no verdict, finding or copy moves.
 export const RULESET_VERSION = "0.23.0";
 
 /**

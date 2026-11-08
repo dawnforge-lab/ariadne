@@ -218,6 +218,20 @@
       "when": 1794083465246,
       "tag": "0030_share_image_backfill",
       "breakpoints": true
+    },
+    {
+      "idx": 31,
+      "version": "7",
+      "when": 1794157776914,
+      "tag": "0031_premium_newton_destine",
+      "breakpoints": true
+    },
+    {
+      "idx": 32,
+      "version": "7",
+      "when": 1794157782286,
+      "tag": "0032_rules_judged_with_backfill",
+      "breakpoints": true
     }
   ]
 }
