@@ -86,6 +86,7 @@ import {
   type Metric,
   type PageRecord,
 } from "../src/rules/registry/registry.js";
+import type { JudgementContext, RuleCaps } from "../src/rules/registry/types.js";
 import { runRules } from "../src/rules/run.js";
 import { startSiteServer } from "../test/gate/site-server.js";
 
@@ -405,10 +406,10 @@ class TimedRegistry extends Registry {
       case "page":
         this.register({
           ...rule,
-          run: (page: PageRecord): Finding[] => {
+          run: (page: PageRecord, ctx?: JudgementContext): Finding[] => {
             const started = performance.now();
             try {
-              return rule.run(page);
+              return rule.run(page, ctx);
             } finally {
               this.record(rule, performance.now() - started);
             }
@@ -418,10 +419,15 @@ class TimedRegistry extends Registry {
       case "query":
         this.register({
           ...rule,
-          run: async (db: Db, crawlId: string): Promise<Finding[]> => {
+          run: async (
+            db: Db,
+            crawlId: string,
+            caps?: RuleCaps,
+            ctx?: JudgementContext,
+          ): Promise<Finding[]> => {
             const started = performance.now();
             try {
-              return await rule.run(db, crawlId);
+              return await rule.run(db, crawlId, caps, ctx);
             } finally {
               this.record(rule, performance.now() - started);
             }
@@ -431,10 +437,10 @@ class TimedRegistry extends Registry {
       case "metric":
         this.register({
           ...rule,
-          run: async (db: Db, crawlId: string): Promise<Metric[]> => {
+          run: async (db: Db, crawlId: string, ctx?: JudgementContext): Promise<Metric[]> => {
             const started = performance.now();
             try {
-              return await rule.run(db, crawlId);
+              return await rule.run(db, crawlId, ctx);
             } finally {
               this.record(rule, performance.now() - started);
             }
