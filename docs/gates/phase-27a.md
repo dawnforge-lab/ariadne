@@ -45,6 +45,7 @@ rule for rule as before.
 | | |
 |---|---|
 | `npm test` (`DATABASE_URL` set) | **134 files / 3,759 tests, 0 failed, 0 skipped** (287.7 s, 2026-11-08 20:14 UTC, `gate27a/fullsuite-1.log`), on the final code and docs of this task. The known load flake (`test/crawl/renderer.test.ts` "never predicts a URL twice") did not appear |
+| after the final review's fixes | **136 files / 3,770 tests, 0 failed, 0 skipped** (301.1 s, `gate27a/fullsuite-final.log`); `tsc` clean (`gate27a/tsc-final.log`) |
 | `npx tsc --noEmit` | clean (`gate27a/tsc.log`) |
 | baseline at the branch point (`cb63104`) | 122 files / 3,495 tests |
 | phase delta | +12 files, +264 tests |
