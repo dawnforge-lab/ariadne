@@ -2497,8 +2497,11 @@ async function persistSitemap(
  * twice is one row (`onConflictDoNothing`). A staged alternate is not keyed —
  * two documents may state the same pair — and is the sitemap's own text (the
  * `hreflang` attribute), so both batches cross the storability boundary.
+ *
+ * Exported for scripts/probe-sitemap-50mb.ts, which measures `discover` with
+ * the sink the crawl uses rather than a stand-in.
  */
-class SitemapRowSink implements SitemapSink {
+export class SitemapRowSink implements SitemapSink {
   private readonly memberships: (typeof sitemapMemberships.$inferInsert)[] = [];
   private readonly alternates: (typeof sitemapHreflang.$inferInsert)[] = [];
 

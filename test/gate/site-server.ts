@@ -28,15 +28,64 @@
  *
  * Pages are ~15KB, which is a realistic mid-weight HTML document and, at 50k
  * pages, 750MB of HTML through a process that must stay under 512MB.
+ *
+ * SITEMAP HREFLANG (Phase 26c gate, `GATE_SITEMAP_HREFLANG=1`). Off by default,
+ * and off means every byte this server sends is what it sent before the switch
+ * existed, so a run without it compares like for like with the baseline. On,
+ * the sitemap shards — and nothing else — carry `xhtml:link` alternates on
+ * every `<url>`, so the sitemap stream, the `sitemap_hreflang` staging, the
+ * derivation into `hreflang` and the hreflang rules (`hreflang.invalid-code`
+ * among them) run at 50k scale. The shape:
+ *
+ *  - the index space is cut into LOCALE CLUSTERS of `LOCALE_CLUSTER` (11)
+ *    consecutive pages; the last, short cluster (fewer than 11 left over) joins
+ *    the one before it, so a cluster has 11 to 21 members (a site of fewer than
+ *    11 pages is one cluster of all of them);
+ *  - every member lists every member of its cluster, itself included, each
+ *    under its own code from `HREFLANG_LOCALES` (member k gets code k: `de-DE`,
+ *    `de-AT`, …), plus `x-default` pointing at the cluster's first member. So
+ *    each URL states 11 to 21 locales and `x-default`, every target is a page
+ *    this server serves (and the crawl fetches), and every cluster is fully
+ *    reciprocal, as a correct site's is;
+ *  - the codes are valid BCP 47 language-region pairs and never `en` or `fr`,
+ *    the two codes the page HTML states (`en` self, `fr` to a `/fr/…` URL that
+ *    404s). The sources therefore never disagree on one code's target, so the
+ *    switch adds no `hreflang.source-conflict` (deviation 4: a code one source
+ *    lists and the other omits is not a conflict).
+ *
+ * At 50,000 pages that is about 600,000 alternates, ~19 MB per shard: under the
+ * protocol's 50 MB, and under `MAX_SITEMAP_HREFLANG_ROWS` and its byte budget.
+ * A shard this size is STREAMED, in 64 KB writes that wait for the socket to
+ * drain, never built whole: the fixture runs in the gate's own process, and a
+ * 19 MB string per request would be the fixture's memory in the crawler's peak.
  */
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
+
+/** What the fixture serves beyond its fixed shape. */
+export interface SiteOptions {
+  /** Every sitemap `<url>` carries `xhtml:link` alternates. See the header. */
+  sitemapHreflang: boolean;
+}
+
+/**
+ * The `GATE_SITEMAP_HREFLANG` switch: unset, empty or `0` is off, `1` is on.
+ * Anything else is refused, so a typo never runs the gate in the other shape.
+ */
+export function sitemapHreflangSwitch(env: NodeJS.ProcessEnv = process.env): boolean {
+  const raw = env["GATE_SITEMAP_HREFLANG"];
+  if (raw === undefined || raw === "" || raw === "0") return false;
+  if (raw === "1") return true;
+  throw new RangeError(`GATE_SITEMAP_HREFLANG must be 1, 0 or unset, got ${JSON.stringify(raw)}`);
+}
 
 export interface GateSite {
   /** Origin, no trailing slash: `http://127.0.0.1:{port}`. */
   base: string;
   /** How many crawlable HTML URLs this site has, `/` included. */
   pages: number;
+  /** Whether the sitemap shards carry `xhtml:link` alternates. */
+  sitemapHreflang: boolean;
   /** A snapshot of what this server has answered so far. See `ServedCounts`. */
   served(): ServedCounts;
   close(): Promise<void>;
@@ -81,6 +130,23 @@ const LINK_STRIDE = 7;
 
 /** Sitemap shards under the index. */
 const SITEMAP_SHARDS = 3;
+
+/** Pages per locale cluster when `sitemapHreflang` is on. See the header. */
+const LOCALE_CLUSTER = 11;
+
+/**
+ * One code per member of a locale cluster, in member order: 21, the most a
+ * cluster can have (11 plus a short remainder of up to 10). Never `en` or `fr`,
+ * the codes the page HTML states (see the header).
+ */
+const HREFLANG_LOCALES = [
+  "de-DE", "de-AT", "de-CH", "es-ES", "es-MX", "it-IT", "nl-NL", "nl-BE",
+  "pt-PT", "pt-BR", "pl-PL", "sv-SE", "da-DK", "fi-FI", "nb-NO", "cs-CZ",
+  "hu-HU", "ro-RO", "el-GR", "tr-TR", "ja-JP",
+];
+
+/** How much shard XML is gathered before one write to the socket. */
+const STREAM_WRITE_BYTES = 64 * 1024;
 
 /** Roughly one page's worth of body copy, in bytes. */
 const FILLER_BYTES = 12_000;
@@ -322,19 +388,100 @@ ${shards}
  * every page, which is what makes it a real test of the discovery path rather
  * than decoration.
  */
-function sitemapShard(shard: number, site: Layout, base: string): string {
+function sitemapShard(shard: number, site: Layout, base: string, opts: SiteOptions): string {
+  return [...sitemapShardPieces(shard, site, base, opts)].join("");
+}
+
+/**
+ * The members of `index`'s locale cluster, as a half-open index range. Clusters
+ * are `LOCALE_CLUSTER` consecutive pages; the short remainder joins the last
+ * full cluster, and a site smaller than one cluster is one cluster.
+ */
+function localeCluster(index: number, site: Layout): { start: number; end: number } {
+  const clusters = Math.max(1, Math.floor(site.pages / LOCALE_CLUSTER));
+  const cluster = Math.min(Math.floor(index / LOCALE_CLUSTER), clusters - 1);
+  const start = cluster * LOCALE_CLUSTER;
+  const end = cluster === clusters - 1 ? site.pages : start + LOCALE_CLUSTER;
+  if (end - start > HREFLANG_LOCALES.length) {
+    throw new Error(
+      `site-server: a locale cluster of ${end - start} pages has more members than ` +
+        `the ${HREFLANG_LOCALES.length} codes in HREFLANG_LOCALES`,
+    );
+  }
+  return { start, end };
+}
+
+/** The `xhtml:link` alternates one `<url>` carries when the switch is on. */
+function sitemapAlternates(index: number, site: Layout, base: string): string {
+  const { start, end } = localeCluster(index, site);
+  const links: string[] = [];
+  for (let member = start; member < end; member++) {
+    const code = HREFLANG_LOCALES[member - start] as string;
+    links.push(
+      `<xhtml:link rel="alternate" hreflang="${code}" href="${base}${pathOfIndex(member, site)}"/>`,
+    );
+  }
+  links.push(
+    `<xhtml:link rel="alternate" hreflang="x-default" href="${base}${pathOfIndex(start, site)}"/>`,
+  );
+  return links.join("");
+}
+
+/**
+ * One shard as a run of pieces whose concatenation is the document: one per
+ * `<url>`, plus the head and the tail. With the switch off the concatenation is
+ * byte for byte the shard this fixture always served.
+ */
+function* sitemapShardPieces(
+  shard: number,
+  site: Layout,
+  base: string,
+  opts: SiteOptions,
+): Generator<string> {
   const per = Math.ceil(site.pages / SITEMAP_SHARDS);
   const start = shard * per;
   const end = Math.min(start + per, site.pages);
-  const urls: string[] = [];
+  const xhtml = opts.sitemapHreflang ? ' xmlns:xhtml="http://www.w3.org/1999/xhtml"' : "";
+  yield `<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"${xhtml}>
+`;
   for (let index = start; index < end; index++) {
-    urls.push(`<url><loc>${base}${pathOfIndex(index, site)}</loc><lastmod>2026-08-25</lastmod></url>`);
+    const alternates = opts.sitemapHreflang ? sitemapAlternates(index, site, base) : "";
+    yield `${index === start ? "" : "\n"}<url><loc>${base}${pathOfIndex(index, site)}</loc>` +
+      `<lastmod>2026-08-25</lastmod>${alternates}</url>`;
   }
-  return `<?xml version="1.0" encoding="UTF-8"?>
-<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
-${urls.join("\n")}
+  yield `
 </urlset>
 `;
+}
+
+/**
+ * Write a shard to the socket in `STREAM_WRITE_BYTES` pieces, waiting for each
+ * to drain, so the fixture holds O(one write) of it, never the document. A
+ * client that hangs up mid-shard ends the stream there.
+ */
+async function streamShard(res: ServerResponse, pieces: Iterable<string>): Promise<void> {
+  res.writeHead(200, { "content-type": "application/xml; charset=utf-8" });
+  let batch = "";
+  for (const piece of pieces) {
+    batch += piece;
+    if (batch.length < STREAM_WRITE_BYTES) continue;
+    const flushed = res.write(batch);
+    batch = "";
+    if (!flushed) {
+      await new Promise<void>((resolve) => {
+        const done = (): void => {
+          res.off("drain", done);
+          res.off("close", done);
+          resolve();
+        };
+        res.on("drain", done);
+        res.on("close", done);
+      });
+    }
+    if (res.destroyed) return;
+  }
+  res.end(batch);
 }
 
 function send(res: ServerResponse, status: number, contentType: string, body: string): void {
@@ -352,7 +499,13 @@ function send(res: ServerResponse, status: number, contentType: string, body: st
  * It also returns what it decided the path was, so the caller can count it
  * without re-deciding — one classification, one place (see `ServedCounts`).
  */
-function respond(path: string, site: Layout, base: string, res: ServerResponse): ServedClass {
+function respond(
+  path: string,
+  site: Layout,
+  base: string,
+  opts: SiteOptions,
+  res: ServerResponse,
+): ServedClass {
   if (path === "/robots.txt") {
     send(res, 200, "text/plain; charset=utf-8", robotsTxt(base));
     return "meta";
@@ -365,7 +518,13 @@ function respond(path: string, site: Layout, base: string, res: ServerResponse):
   if (shard !== null) {
     const n = Number(shard[1]);
     if (n < SITEMAP_SHARDS) {
-      send(res, 200, "application/xml; charset=utf-8", sitemapShard(n, site, base));
+      if (opts.sitemapHreflang) {
+        // A rejection is left unhandled on purpose: it ends the process loudly.
+        void streamShard(res, sitemapShardPieces(n, site, base, opts));
+      } else {
+        // Off: the response this fixture always sent, length and all.
+        send(res, 200, "application/xml; charset=utf-8", sitemapShard(n, site, base, opts));
+      }
       return "meta";
     }
   }
@@ -398,6 +557,8 @@ export const siteFixture = {
   robotsTxt,
   sitemapIndex,
   sitemapShard,
+  sitemapShardPieces,
+  hreflangLocales: HREFLANG_LOCALES,
 };
 
 /**
@@ -406,8 +567,14 @@ export const siteFixture = {
  * The listener binds 127.0.0.1 explicitly: the crawler will only be pointed at
  * this with `allowPrivate: true`, and a fixture that also answered on a routable
  * interface would be a fixture other people can reach.
+ *
+ * `opts` defaults to what `GATE_SITEMAP_HREFLANG` says, so every gate script
+ * takes the switch from its environment without a flag of its own.
  */
-export async function startSiteServer(pages: number): Promise<GateSite> {
+export async function startSiteServer(
+  pages: number,
+  opts: SiteOptions = { sitemapHreflang: sitemapHreflangSwitch() },
+): Promise<GateSite> {
   const site = layout(pages);
   let base = "";
 
@@ -417,7 +584,7 @@ export async function startSiteServer(pages: number): Promise<GateSite> {
     // Query strings and fragments are not part of this site's URL space; the
     // path alone decides the response, which is the determinism promise.
     const path = (req.url ?? "/").split("?")[0] ?? "/";
-    served[respond(path, site, base, res)] += 1;
+    served[respond(path, site, base, opts, res)] += 1;
     served.total += 1;
   });
 
@@ -440,6 +607,7 @@ export async function startSiteServer(pages: number): Promise<GateSite> {
   return {
     base,
     pages,
+    sitemapHreflang: opts.sitemapHreflang,
     // A copy, not the live object: a caller that took two readings and got the
     // same mutable reference twice would compare a number with itself.
     served: () => ({ ...served }),
