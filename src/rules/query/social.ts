@@ -254,14 +254,25 @@ async function imageBrokenFindings(
       // without one predates it, and is as loud as `imageRefs` above.
       let tooLong: SocialFacts["imageRefTooLong"] = { og: false, x: false };
       if (page.extractionVersion !== null && page.extractionVersion >= TOO_LONG_EXTRACTION) {
-        const flags = page.social.imageRefTooLong as SocialFacts["imageRefTooLong"] | undefined;
-        if (flags === undefined) {
+        // Both halves checked (final review M2): a partial or non-boolean flag
+        // object is not this engine's write, and a missing half must never
+        // read as false.
+        const flags = page.social.imageRefTooLong as unknown;
+        const f = flags as Record<string, unknown> | null | undefined;
+        if (
+          f === undefined ||
+          f === null ||
+          typeof f !== "object" ||
+          typeof f["og"] !== "boolean" ||
+          typeof f["x"] !== "boolean"
+        ) {
           throw new Error(
             `${self.id}: page ${page.url} is extraction ${page.extractionVersion} but its ` +
-              `social set has no imageRefTooLong (written before it was recorded); re-crawl`,
+              `social set has no well-formed imageRefTooLong (${JSON.stringify(flags) ?? "absent"}; ` +
+              `written before it was recorded); re-crawl`,
           );
         }
-        tooLong = flags;
+        tooLong = { og: f["og"], x: f["x"] };
       }
       const found: Candidate[] = [];
       const og = page.social.og.image;

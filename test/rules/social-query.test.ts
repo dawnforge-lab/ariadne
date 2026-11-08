@@ -490,6 +490,22 @@ describe("social query rules against the database", () => {
       await expect(imageBroken.run(db, crawlId)).rejects.toThrow(/imageRefTooLong.*re-crawl/);
     });
 
+    // Final review M2: a partial flag object is not read as false for the half
+    // it lacks; nor is a flag that is not a boolean.
+    it("throws re-crawl on a v3 row whose imageRefTooLong is partial or not boolean", async () => {
+      const shapes: unknown[] = [{ og: false }, { x: false }, {}, { og: "false", x: false }, { og: false, x: null }, null];
+      for (const flags of shapes) {
+        const partial = { ...images(OK), imageRefTooLong: flags } as unknown as SocialFacts;
+        const { crawlId } = await seed(
+          [{ path: "/a", social: partial, extractionVersion: 3 }],
+          [{ url: OK }],
+        );
+        await expect(imageBroken.run(db, crawlId), JSON.stringify(flags)).rejects.toThrow(
+          /imageRefTooLong.*re-crawl/,
+        );
+      }
+    });
+
     // Ruling R3: a v2 row is judged exactly as in Phase 26b. It never carries
     // the flag, so it neither throws nor reports `too-long`.
     it("judges a v2 row without imageRefTooLong as in 26b: no throw, no too-long", async () => {
