@@ -559,8 +559,10 @@ describe("hreflang.declarations-incomplete against the database", () => {
   it("does not add up sources: under the cap in each is not at the cap", async () => {
     const crawlId = await newCrawl(mkDiscovery());
     const ids = await addPages(crawlId, ["/split"]);
+    // HTML and header are capped per source (each kept its own 200), so 199 +
+    // 199 is two sets under the cap, not one over it.
     await addHreflang(crawlId, ids.get("/split")!, many(MAX_HREFLANG_PAIRS - 1, "h"), "html");
-    await addHreflang(crawlId, ids.get("/split")!, many(MAX_HREFLANG_PAIRS - 1, "s"), "sitemap");
+    await addHreflang(crawlId, ids.get("/split")!, many(MAX_HREFLANG_PAIRS - 1, "k"), "header");
     expect(await run(MARKER, crawlId)).toEqual([]);
     expect(await run(SELF_REFERENCE, crawlId)).toHaveLength(1);
   });
