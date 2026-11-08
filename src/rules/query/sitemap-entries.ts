@@ -262,6 +262,9 @@ export const sitemapEntryRules: QueryRule[] = [
   // A `<loc>` over `INDEXED_URL_MAX` is stored nowhere (it would not fit an
   // index entry), so discovery counts it in `sitemapFacts.overlongLocsSkipped`.
   // That count is one more site finding beside the stored 2,049-2,500 ones.
+  // `skipped` is the whole count, not only those locs (final review M4): an
+  // alternate target over the limit, and a listing whose URL and sitemap URL
+  // together are over it (one primary-key entry), are counted there too.
   defineRule<QueryRule>({
     kind: "query",
     id: TOO_LONG.id,
@@ -272,7 +275,7 @@ export const sitemapEntryRules: QueryRule[] = [
       { key: "sitemap", label: "Sitemap" },
       { key: "loc", label: "Loc" },
       { key: "length", label: "Length" },
-      { key: "skipped", label: "Locs Not Stored", optional: true },
+      { key: "skipped", label: "Addresses Not Stored", optional: true },
       { key: "max", label: "Storage Limit", optional: true },
     ],
     ...copyFor(TOO_LONG.id),

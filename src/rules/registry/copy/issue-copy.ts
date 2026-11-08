@@ -466,7 +466,7 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
   "hreflang.multiple-entries": {
     title: "Hreflang: Same code listed for different URLs",
     explanation:
-      "Pages whose HTML, HTTP Link header or sitemap entry gives one language code to two or more different URLs, each source read on its own; spellings of one URL that differ only by fragment, host case or query order count as one. Search engines cannot tell which URL the code stands for and may ignore both. Two sources giving the code one different URL each are reported as Hreflang: Sources disagree on an alternate URL, and the alternates are not fetched.",
+      "Pages whose HTML, HTTP Link header or sitemap entry gives one language code to two or more different URLs, each source read on its own; spellings of one URL that differ only by fragment, host case or query order count as one, and the alternates are not fetched. Search engines cannot tell which URL the code stands for and may ignore both. Two sources that each give the code one different URL are not this finding: that is reported as Hreflang: Sources disagree on an alternate URL.",
     howToFix:
       "Keep one URL per code and remove the stale or duplicate entry. Generate the block from one mapping so a code cannot be added twice.",
   },
@@ -938,7 +938,7 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
   "sitemap.url-too-long": {
     title: "Sitemaps: URL over 2,048 characters",
     explanation:
-      "Sitemap entries whose URL is longer than 2,048 characters. Search engines may drop or truncate entries that long. The row gives the start of the URL and its length, and one summary row counts the addresses over 2,500 characters, which the crawl does not store.",
+      "Sitemap entries whose URL is longer than 2,048 characters. Search engines may drop or truncate entries that long. The row gives the start of the URL and its length, and one summary row counts the sitemap addresses the crawl could not store: locs and alternate targets over 2,500 characters, and listings whose URL and sitemap URL together are over 2,500 characters.",
     howToFix:
       "Shorten the URL or remove the entry. A very long address is usually a filter or session parameter that should not be in the sitemap.",
   },

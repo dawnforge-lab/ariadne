@@ -922,7 +922,8 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
   Three more rules read the entry itself, not the page it names:
   - `sitemap.url-too-long` (info) — a `<loc>` over 2,048 characters. A `<loc>` over
     2,500 characters is not stored; one site row (no URL, evidence `{skipped, max}`)
-    counts them
+    counts them, together with alternate targets over 2,500 characters and listings
+    whose URL and sitemap URL together are over 2,500 (also not stored)
   - `sitemap.cross-host-loc` (warning) — a `<loc>` whose scheme or host (www and port
     included) is neither its sitemap document's nor the crawled site's. A document on
     another host (a CDN) that lists the crawled site's own URLs is an allowed

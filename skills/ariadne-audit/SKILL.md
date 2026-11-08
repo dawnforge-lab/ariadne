@@ -712,7 +712,8 @@ now) is NOT MEASURED, never a PASS. The remedy is a re-crawl. By check:
   cannot index such an address, so it counts it on the page and stores it nowhere:
   it is in no link, resource or hreflang listing, and the finding's counts are the
   only trace. A sitemap `<loc>` that long is counted by `sitemap.url-too-long` as one
-  site finding with `skipped`.
+  site finding with `skipped`, which also counts sitemap alternate targets that long
+  and listings whose URL and sitemap URL together are over 2,500 characters.
 - **CHECK-87, social sharing tags:** `social.image-insecure` (info) is an `https:`
   page whose `og:image` is `http:` with no `https:` og:image:secure_url. No browser
   loads a share image, so it is not mixed content: a platform that insists on https

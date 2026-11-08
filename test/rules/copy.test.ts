@@ -1989,3 +1989,23 @@ describe("copy rubric: marker reasons", () => {
     }
   });
 });
+
+// Final review of Phase 26c: two copy defects, pinned at the end of the file
+// so the line citations in docs/talos-surface.md above stay where they are.
+describe("copy: Phase 26c final review", () => {
+  it("M4: the url-too-long summary row counts every address not stored, not only long locs", () => {
+    const text = copy("sitemap.url-too-long").explanation;
+    expect(text).toMatch(/locs and alternate targets over 2,500 characters/);
+    expect(text).toMatch(/listings whose URL and sitemap URL together are over 2,500 characters/);
+  });
+
+  it("M5: multiple-entries names source-conflict in a sentence of its own", () => {
+    const said = sentences(copy("hreflang.multiple-entries").explanation);
+    expect(said).toHaveLength(3);
+    expect(said[2]).toMatch(/^Two sources that each give the code one different URL are not this finding/);
+    expect(said[2]).toMatch(/Hreflang: Sources disagree on an alternate URL\.?$/);
+    // The not-fetched fact stays, in the sentence about what is compared.
+    expect(said[0]).toMatch(/alternates are not fetched/);
+    expect(said[2]).not.toMatch(/not fetched/);
+  });
+});
