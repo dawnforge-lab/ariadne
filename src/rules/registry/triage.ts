@@ -136,10 +136,7 @@ export const TRIAGE: Readonly<Record<string, Readonly<TriageRow>>> = {
   // differs from SF: the same early close with no head tag after it, so nothing
   // is lost today; a latent hazard, not a page served wrongly.
   "html.head-closed-early-harmless": { type: "warning", priority: "low", sfIssue: "Validation: Invalid HTML Elements in <head>" },
-  // differs from SF: the head and body tags are optional in HTML and browsers
-  // infer both, so ours reports a structure that may misplace head tags, not a
-  // lost one (html.head-closed-early reports that).
-  "html.structure-invalid": { type: "warning", priority: "medium", sfIssue: "Validation: Missing <head> Tag" },
+  "html.structure-invalid": { type: "issue", priority: "high", sfIssue: "Validation: Missing <head> Tag" },
   "http.no-response": { type: "issue", priority: "high", sfIssue: "Response Codes: Internal No Response" },
   // differs from SF: the URL answered on re-check, so the failure was
   // intermittent and may not recur; a human checks it.
