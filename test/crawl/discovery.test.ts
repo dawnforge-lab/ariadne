@@ -1115,13 +1115,16 @@ describe("discover: memberships, alternates and sitemapFacts", () => {
       alternate() {},
       async flush() {
         flushes++;
-        await new Promise((r) => setTimeout(r, 150));
+        await new Promise((r) => setTimeout(r, 1_500));
       },
     };
+    // A 1,000 ms deadline (final review M6): wide enough that the fetch itself
+    // never runs out of time under suite contention, and every flush still
+    // outlasts it by half again, so the test still fails if the pause breaks.
     const d = await discover(bare, {
       ...OPTS,
       sink: slow,
-      timeoutMs: 100,
+      timeoutMs: 1_000,
       extraSitemaps: [`${bare}/cut.xml`],
     });
     // Several flushes, each longer than the whole deadline.
