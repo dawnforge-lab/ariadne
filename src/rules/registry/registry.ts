@@ -918,6 +918,12 @@ const KINDS = ["page", "query", "metric"] as const satisfies readonly AnyRule["k
 //     value. `site.health` skips findings of disabled rules; disabled rules
 //     still run and their findings are still stored. With no overrides every
 //     verdict is unchanged.
+//  4. (T4) Issue copy is a template. Titles, explanations and fixes quote the
+//     thresholds as `{NAME}` / `{NAME:n}` placeholders (src/rules/registry/copy)
+//     rendered by `renderCopy` from the thresholds a crawl was judged with, so
+//     an override shows up in the text. At the defaults every entry renders
+//     byte for byte as 0.22.0 wrote it; an unknown or leftover placeholder
+//     throws, naming the rule.
 export const RULESET_VERSION = "0.23.0";
 
 /**
