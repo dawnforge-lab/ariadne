@@ -168,6 +168,7 @@ import {
   buildIssuesOverview,
   type CrawlOverview,
   type IssuesOverview,
+  type SnapshotReader,
 } from "./overview.js";
 import {
   copyRenderer,
@@ -2541,18 +2542,30 @@ export class ApiService {
    * as one number, and none of them is interpreted through another.
    */
   async getCrawl(crawlId: string): Promise<CrawlDetail> {
-    const { row, findingsCount, pagesScanned } = await this.crawlRowWithCounts(crawlId);
+    return await this.crawlDetailOn(this.db, crawlId);
+  }
+
+  /**
+   * `getCrawl` over a given reader: the pool, or a transaction whose snapshot
+   * the caller needs the detail to share. The Crawl Overview reads its `urls`
+   * section through here INSIDE its snapshot, so those entries are
+   * `crawl_status`'s own fields and describe the same moment as every other
+   * section. On a transaction the statements below queue on its one
+   * connection; on the pool they run in parallel, as they always have.
+   */
+  private async crawlDetailOn(db: SnapshotReader, crawlId: string): Promise<CrawlDetail> {
+    const { row, findingsCount, pagesScanned } = await this.crawlRowWithCounts(crawlId, db);
     const [counts, liveLeases, blockedPages, robotsBlockedRows, resourceCounts, recheckCounts] =
       await Promise.all([
-        frontierCounts(this.db, crawlId),
-        this.liveLeaseCount(crawlId),
-        this.blockedPageCount(crawlId),
-        this.robotsBlockedCount(crawlId),
-        this.resourceCoverage(crawlId),
+        frontierCounts(db, crawlId),
+        this.liveLeaseCount(crawlId, db),
+        this.blockedPageCount(crawlId, db),
+        this.robotsBlockedCount(crawlId, db),
+        this.resourceCoverage(crawlId, db),
         // The crawl row's own stamp rides in rather than being read again: it
         // came out of the statement above, so the block's `passAt` and its
         // counts cannot describe two different runs of the pass.
-        this.recheckCoverage(crawlId, row.recheckPassAt),
+        this.recheckCoverage(crawlId, row.recheckPassAt, db),
       ]);
     return {
       crawlId: row.id,
@@ -2644,8 +2657,11 @@ export class ApiService {
    * written as an explicit list of classes would have needed editing — and would
    * have quietly dropped the new one until somebody did.
    */
-  private async resourceCoverage(crawlId: string): Promise<CrawlDetail["resources"]> {
-    const rows = await this.db.execute<{
+  private async resourceCoverage(
+    crawlId: string,
+    db: SnapshotReader = this.db,
+  ): Promise<CrawlDetail["resources"]> {
+    const rows = await db.execute<{
       seen: number;
       fetched: number;
       failed: number;
@@ -2736,6 +2752,7 @@ export class ApiService {
   private async recheckCoverage(
     crawlId: string,
     passAt: Date | null,
+    db: SnapshotReader = this.db,
   ): Promise<CrawlDetail["recheck"]> {
     // The set as a list, so the template renders it as an IN tuple of bound
     // parameters — never as text spliced into the statement.
@@ -2744,7 +2761,7 @@ export class ApiService {
     const noResponse = [...NO_RESPONSE_CLASSES];
     // The whole work list the pass walks, so the shared cap is read over it.
     const rechecked = [...RECHECK_CLASSES];
-    const rows = await this.db.execute<{
+    const rows = await db.execute<{
       server_errors: number;
       confirmed: number;
       cleared: number;
@@ -3967,14 +3984,24 @@ export class ApiService {
     crawlId: string,
     opts: { includeZero?: boolean } = {},
   ): Promise<IssuesOverview> {
-    const view = await this.judgementView(crawlId);
+    return (await this.issuesOverviewRead(crawlId, opts.includeZero === true)).overview;
+  }
+
+  /**
+   * The Issues Overview with the judgement view it was built from, both read
+   * inside the builder's one snapshot (Ruling 14). The CSV renders its copy
+   * from this same view instead of reading the crawl row a second time.
+   */
+  private async issuesOverviewRead(
+    crawlId: string,
+    includeZero: boolean,
+  ): Promise<{ overview: IssuesOverview; view: JudgementView }> {
     return await buildIssuesOverview(
       this.db,
       crawlId,
       this.registry,
-      view,
       (id) => this.ruleFor(id, crawlId, "issues"),
-      opts.includeZero === true,
+      includeZero,
     );
   }
 
@@ -3986,10 +4013,12 @@ export class ApiService {
    * `NOT_FOUND` `getCrawl` answers.
    */
   async crawlOverview(crawlId: string): Promise<CrawlOverview> {
-    const detail = await this.getCrawl(crawlId);
-    const view = await this.judgementView(crawlId);
-    return await buildCrawlOverview(this.db, crawlId, detail, view, (id) =>
-      this.ruleFor(id, crawlId, "issues"),
+    return await buildCrawlOverview(
+      this.db,
+      crawlId,
+      this.registry,
+      (reader) => this.crawlDetailOn(reader, crawlId),
+      (id) => this.ruleFor(id, crawlId, "issues"),
     );
   }
 
@@ -5075,8 +5104,7 @@ export class ApiService {
    * ruleset and not by the site.
    */
   private async issuesOverviewStream(crawlId: string): Promise<CsvStream> {
-    const view = await this.judgementView(crawlId);
-    const overview = await this.issuesOverview(crawlId, {});
+    const { overview, view } = await this.issuesOverviewRead(crawlId, false);
     const copy = copyRenderer(view.copyThresholds);
     return {
       view: "issues_overview",
@@ -5969,17 +5997,18 @@ export class ApiService {
    */
   private async crawlRowWithCounts(
     crawlId: string,
+    db: SnapshotReader = this.db,
   ): Promise<{ row: typeof crawls.$inferSelect; findingsCount: number; pagesScanned: number }> {
-    const findingRows = this.db
+    const findingRows = db
       .select({ n: sql<number>`count(*)::int` })
       .from(issues)
       .where(eq(issues.crawlId, crawls.id));
-    const pageRows = this.db
+    const pageRows = db
       .select({ n: sql<number>`count(*)::int` })
       .from(pages)
       .where(eq(pages.crawlId, crawls.id));
 
-    const rows = await this.db
+    const rows = await db
       .select({
         ...getTableColumns(crawls),
         findingsCount: sql<number>`(${findingRows})`,
@@ -6011,8 +6040,8 @@ export class ApiService {
    * leaves it at `render_pending` (see `heldRenderLeases`). "Is anyone working
    * this crawl" has to be true of both.
    */
-  private async liveLeaseCount(crawlId: string): Promise<number> {
-    const rows = await this.db
+  private async liveLeaseCount(crawlId: string, db: SnapshotReader = this.db): Promise<number> {
+    const rows = await db
       .select({ n: sql<number>`count(*)::int` })
       .from(frontier)
       .where(
@@ -6042,8 +6071,8 @@ export class ApiService {
    * had escalated to — so "crawl slower" and "this site refuses us" are
    * distinguishable from the listing rather than only from a re-crawl.
    */
-  private async blockedPageCount(crawlId: string): Promise<number> {
-    const rows = await this.db
+  private async blockedPageCount(crawlId: string, db: SnapshotReader = this.db): Promise<number> {
+    const rows = await db
       .select({ n: sql<number>`count(*)::int` })
       .from(pages)
       .where(and(eq(pages.crawlId, crawlId), eq(pages.fetchClass, "blocked")));
@@ -6059,8 +6088,8 @@ export class ApiService {
    * class AND the robots reason (`ROBOTS_BLOCKED`), so a url-policy refusal is
    * not counted as a robots.txt block.
    */
-  private async robotsBlockedCount(crawlId: string): Promise<number> {
-    const rows = await this.db.execute<{ n: number }>(sql`
+  private async robotsBlockedCount(crawlId: string, db: SnapshotReader = this.db): Promise<number> {
+    const rows = await db.execute<{ n: number }>(sql`
       select count(*)::int as n from pages p
       where p.crawl_id = ${crawlId} and ${ROBOTS_BLOCKED("p")}`);
     const n = rows.rows[0]?.n;

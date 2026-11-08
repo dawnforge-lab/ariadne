@@ -29,7 +29,13 @@ import type { RuleCategory, Severity, AnyRule, IssueType, Priority } from "../ru
 import { RULESET_VERSION, type Registry } from "../rules/registry/registry.js";
 import { INDEXABILITY_STATUS_SQL, ROBOTS_BLOCKED } from "../rules/helpers.js";
 import { RENDER_PASS_EVIDENCE } from "../rules/metric/render-metrics.js";
-import { copyRenderer, notDisabled, type JudgementStale, type JudgementView } from "./judgement-view.js";
+import {
+  copyRenderer,
+  loadJudgementView,
+  notDisabled,
+  type JudgementStale,
+  type JudgementView,
+} from "./judgement-view.js";
 import { ServiceError } from "./errors.js";
 
 export interface IssuesOverviewRow {
@@ -61,12 +67,34 @@ const TYPE_ORDER: Record<IssueType, number> = { issue: 0, warning: 1, opportunit
 const PRIORITY_ORDER: Record<Priority, number> = { high: 0, medium: 1, low: 2 };
 
 /**
+ * What an overview reads through: the snapshot transaction it opened (or, for a
+ * helper shared with other surfaces, the pool).
+ */
+export type SnapshotReader = Pick<Db, "select" | "execute">;
+
+/**
+ * ONE SNAPSHOT PER OVERVIEW CALL (Ruling 14). Each overview opens one
+ * `repeatable read, read only` transaction and reads EVERYTHING inside it: the
+ * judgement view (whose `rules_run_at` decides what is measured), the crawl
+ * detail, and every count. A `crawl_rules` re-run commits `delete issues` with
+ * `rules_run_at = null` as one step (src/rules/run.ts); a view read before that
+ * commit beside rows read after it would report a judged crawl with no
+ * findings: measured zeros where the truth is "not judged".
+ */
+async function inSnapshot<T>(db: Db, body: (tx: SnapshotReader) => Promise<T>): Promise<T> {
+  return await db.transaction(async (tx) => await body(tx), {
+    isolationLevel: "repeatable read",
+    accessMode: "read only",
+  });
+}
+
+/**
  * `site.health`'s Pages Judged (`urlsTotal`), as the rules run stored it.
  * Null when the crawl has no `site.health` row; a row whose value is not an
  * object with a non-negative integer `urlsTotal` throws, naming the crawl — a
  * malformed measurement is never read as "no measurement".
  */
-async function storedPagesJudged(db: Db, crawlId: string): Promise<number | null> {
+async function storedPagesJudged(db: SnapshotReader, crawlId: string): Promise<number | null> {
   const result = await db.execute<{ value: unknown }>(sql`
     select m.value_jsonb as value
       from metrics m
@@ -90,11 +118,29 @@ async function storedPagesJudged(db: Db, crawlId: string): Promise<number | null
 }
 
 /**
- * Build the overview. `ruleFor` is the service's read-time copy join: it throws
- * the 409 `issues_list` raises for a stored finding of a rule the registry lacks.
+ * Build the overview inside ONE snapshot (`inSnapshot`): the judgement view is
+ * read in it, then the counts. Answers the overview AND the view it was built
+ * with, so the CSV renders its copy from that same view rather than a second
+ * read that could describe another moment. `ruleFor` is the service's
+ * read-time copy join: it throws the 409 `issues_list` raises for a stored
+ * finding of a rule the registry lacks.
  */
 export async function buildIssuesOverview(
   db: Db,
+  crawlId: string,
+  registry: Registry,
+  ruleFor: (ruleId: string) => AnyRule,
+  includeZero: boolean,
+): Promise<{ overview: IssuesOverview; view: JudgementView }> {
+  return await inSnapshot(db, async (tx) => {
+    const view = await loadJudgementView(tx, crawlId, registry);
+    const overview = await issuesOverviewIn(tx, crawlId, registry, view, ruleFor, includeZero);
+    return { overview, view };
+  });
+}
+
+async function issuesOverviewIn(
+  db: SnapshotReader,
   crawlId: string,
   registry: Registry,
   view: JudgementView,
@@ -258,7 +304,7 @@ export interface CrawlOverviewDetail {
 }
 
 /** What a section's statements run on: the overview's snapshot transaction. */
-type Exec = Pick<Db, "execute">;
+type Exec = SnapshotReader;
 
 function percentOf(value: number, total: number): number | null {
   return total === 0 ? null : Math.round((value / total) * 1000) / 10;
@@ -691,15 +737,17 @@ async function issuesGridSection(
 }
 
 /**
- * Build the Crawl Overview. `detail` is `getCrawl`'s answer (the `urls`
- * section is its fields); `ruleFor` is the service's read-time join, which
- * throws the 409 `issues_list` raises for a stored finding of a rule the
- * registry lacks.
+ * Build the Crawl Overview inside ONE snapshot (`inSnapshot`, Ruling 14).
+ * `loadDetail` is the service's `getCrawl` over the given reader, so the `urls`
+ * entries are `crawl_status`'s own fields. It, the judgement view (whose
+ * `rules_run_at` decides whether click depth and the issues grid are measured)
+ * and every section are read in the snapshot, so they describe one moment even
+ * while a rules run is rewriting the crawl. `ruleFor` is the service's
+ * read-time join, which throws the 409 `issues_list` raises for a stored
+ * finding of a rule the registry lacks.
  *
- * The table-derived sections are read inside ONE `repeatable read, read only`
- * transaction, so on a crawl still being written every section counts the same
- * row set. Hard rule 3: each section is one bounded aggregate; no `pages`,
- * `links` or `issues` row is loaded.
+ * Hard rule 3: each section is one bounded aggregate; no `pages`, `links` or
+ * `issues` row is loaded.
  *
  * Unlike the Issues Overview, an unjudged crawl is answered: every crawl-level
  * section is there, and only what the rules run produces (`click-depth`,
@@ -708,42 +756,42 @@ async function issuesGridSection(
 export async function buildCrawlOverview(
   db: Db,
   crawlId: string,
-  detail: CrawlOverviewDetail,
-  view: JudgementView,
+  registry: Registry,
+  loadDetail: (reader: SnapshotReader) => Promise<CrawlOverviewDetail>,
   ruleFor: (ruleId: string) => AnyRule,
 ): Promise<CrawlOverview> {
-  const judged = view.judgedWith !== null;
-  const slowMs = view.copyThresholds.SLOW_MS;
+  return await inSnapshot(db, async (tx) => {
+    // The detail first: an unknown crawl is its NOT_FOUND.
+    const detail = await loadDetail(tx);
+    const view = await loadJudgementView(tx, crawlId, registry);
+    const judged = view.judgedWith !== null;
+    const slowMs = view.copyThresholds.SLOW_MS;
 
-  return await db.transaction(
-    async (tx) => {
-      const sections: OverviewSection[] = [];
-      const notMeasured: { id: string; reason: string }[] = [];
-      const skip = (id: NotMeasuredId): void => {
-        notMeasured.push({ id, reason: NOT_MEASURED_REASONS[id] });
-      };
+    const sections: OverviewSection[] = [];
+    const notMeasured: { id: string; reason: string }[] = [];
+    const skip = (id: NotMeasuredId): void => {
+      notMeasured.push({ id, reason: NOT_MEASURED_REASONS[id] });
+    };
 
-      sections.push(urlsSection(detail));
-      if (detail.robotsBlocked.dropped === null) skip("robots-blocked-dropped");
-      sections.push(await fetchClassSection(tx, crawlId));
-      sections.push(await statusClassSection(tx, crawlId));
-      sections.push(await contentSection(tx, crawlId));
-      sections.push(await indexabilitySection(tx, crawlId));
-      if (judged) sections.push(await clickDepthSection(tx, crawlId));
-      else skip("click-depth");
-      sections.push(await discoverySection(tx, crawlId));
-      sections.push(await responseTimeSection(tx, crawlId, slowMs));
-      if (detail.renderPassCount > 0) {
-        sections.push(await renderSection(tx, crawlId, judged));
-        if (!judged) skip("render-coverage");
-      } else {
-        skip("render");
-      }
-      if (judged) sections.push(await issuesGridSection(tx, crawlId, view, ruleFor));
-      else skip("issues-grid");
+    sections.push(urlsSection(detail));
+    if (detail.robotsBlocked.dropped === null) skip("robots-blocked-dropped");
+    sections.push(await fetchClassSection(tx, crawlId));
+    sections.push(await statusClassSection(tx, crawlId));
+    sections.push(await contentSection(tx, crawlId));
+    sections.push(await indexabilitySection(tx, crawlId));
+    if (judged) sections.push(await clickDepthSection(tx, crawlId));
+    else skip("click-depth");
+    sections.push(await discoverySection(tx, crawlId));
+    sections.push(await responseTimeSection(tx, crawlId, slowMs));
+    if (detail.renderPassCount > 0) {
+      sections.push(await renderSection(tx, crawlId, judged));
+      if (!judged) skip("render-coverage");
+    } else {
+      skip("render");
+    }
+    if (judged) sections.push(await issuesGridSection(tx, crawlId, view, ruleFor));
+    else skip("issues-grid");
 
-      return { crawlId, sections, notMeasured, judgementStale: view.judgementStale };
-    },
-    { isolationLevel: "repeatable read", accessMode: "read only" },
-  );
+    return { crawlId, sections, notMeasured, judgementStale: view.judgementStale };
+  });
 }

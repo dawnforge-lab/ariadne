@@ -40,7 +40,8 @@ const unjudgedId = `crawl_crawl_overview_unjudged_${runId}`;
 const renderedId = `crawl_crawl_overview_rendered_${runId}`;
 const renderedUnjudgedId = `crawl_crawl_overview_rendered_unjudged_${runId}`;
 const unknownRuleId = `crawl_crawl_overview_unknown_${runId}`;
-const allCrawls = [crawlId, unjudgedId, renderedId, renderedUnjudgedId, unknownRuleId];
+const racedId = `crawl_crawl_overview_raced_${runId}`;
+const allCrawls = [crawlId, unjudgedId, renderedId, renderedUnjudgedId, unknownRuleId, racedId];
 
 type Seed = { path: string } & Partial<PageRecord>;
 
@@ -217,6 +218,9 @@ beforeAll(async () => {
 
   await seedCrawl(unknownRuleId, [{ path: "/" }]);
   await service.runRulesForCrawl(unknownRuleId);
+
+  await seedCrawl(racedId, [{ path: "/" }, { path: "/slow", responseTimeMs: 5000 }]);
+  await service.runRulesForCrawl(racedId);
   await db.insert(issues).values({
     crawlId: unknownRuleId,
     ruleId: "no.such-rule",
@@ -478,6 +482,77 @@ describe("crawl_overview on other crawls", () => {
     } finally {
       await api.close();
     }
+  });
+});
+
+/**
+ * A `crawl_rules` re-run's first commit (run.ts) is `delete issues` together
+ * with `rules_run_at = null`. An overview must see that pair as ONE state: a
+ * judgement view read before it beside `issues` rows read after it reports a
+ * measured zero, where the truth is "not judged".
+ *
+ * DETERMINISTIC INTERLEAVING: the service under test runs on a `Db` whose
+ * `transaction` first commits exactly that state on the pool, then opens the
+ * real transaction. Any read made BEFORE the overview's snapshot opens (the
+ * pre-fix judgement view) saw the judged crawl; every read inside it sees the
+ * reset. An overview that reads everything inside its snapshot answers
+ * "not measured" (Crawl Overview) or refuses (Issues Overview), never zeros.
+ */
+describe("the overviews read the judgement inside their snapshot", () => {
+  let raced: ApiService;
+  let armed = false;
+
+  beforeAll(() => {
+    const resetLikeARulesRun = async (): Promise<void> => {
+      await db.transaction(async (tx) => {
+        await tx.delete(issues).where(eq(issues.crawlId, racedId));
+        await tx
+          .update(crawls)
+          .set({ rulesRunAt: null, rulesJudgedWith: null })
+          .where(eq(crawls.id, racedId));
+      });
+    };
+    const rigged = new Proxy(db, {
+      get(target, prop) {
+        const value = Reflect.get(target, prop) as unknown;
+        const bound =
+          typeof value === "function"
+            ? (value as (...args: unknown[]) => unknown).bind(target)
+            : value;
+        if (prop !== "transaction" || typeof bound !== "function") return bound;
+        return async (...args: unknown[]) => {
+          if (armed) {
+            armed = false;
+            await resetLikeARulesRun();
+          }
+          return await bound(...args);
+        };
+      },
+    }) as Db;
+    raced = new ApiService(rigged, { allowedDomains: [], exportDir, log: () => {} });
+  });
+
+  afterAll(async () => {
+    await raced.close();
+  });
+
+  it("crawl_overview names issues-grid and click-depth as not measured, never zeros", async () => {
+    expect((await service.getCrawl(racedId)).rulesRunAt).not.toBeNull();
+    armed = true;
+    const o = await raced.crawlOverview(racedId);
+    expect(armed).toBe(false); // the reset really landed mid-call
+    expect(o.sections.map((s) => s.id)).not.toContain("issues-grid");
+    expect(o.notMeasured.map((n) => n.id)).toEqual(
+      expect.arrayContaining(["click-depth", "issues-grid"]),
+    );
+  });
+
+  it("issues_overview refuses the crawl as unjudged rather than listing no rows", async () => {
+    await service.runRulesForCrawl(racedId);
+    expect((await service.issuesOverview(racedId, {})).rows.length).toBeGreaterThan(0);
+    armed = true;
+    await expect(raced.issuesOverview(racedId, {})).rejects.toMatchObject({ code: "CONFLICT" });
+    expect(armed).toBe(false);
   });
 });
 

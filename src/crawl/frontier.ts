@@ -522,9 +522,12 @@ export async function releaseLeases(
  * in a state no one writes means the schema and this file have diverged, and
  * silently reporting a smaller frontier than exists is the kind of quiet
  * wrongness that ends a crawl early (hard rule 7).
+ *
+ * `db` may be a transaction: the Crawl Overview reads these counts inside its
+ * snapshot, beside the rows its other sections count.
  */
 export async function frontierCounts(
-  db: Db,
+  db: Pick<Db, "select">,
   crawlId: string,
 ): Promise<FrontierCounts> {
   const rows = await db

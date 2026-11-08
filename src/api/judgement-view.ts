@@ -106,9 +106,13 @@ export interface JudgementRow {
  *    `configFindingCap` answers the same row;
  *  - any other malformed block, or a judged crawl with no or a malformed stamp:
  *    the loud error the rules layer threw, which a transport turns into a 500.
+ *
+ * `db` is the pool or a transaction: a surface whose answer must come out of
+ * one snapshot (the two overviews) reads the view INSIDE it, so the judged
+ * marker and the rows it vouches for cannot describe two different moments.
  */
 export async function loadJudgementView(
-  db: Db,
+  db: Pick<Db, "select">,
   crawlId: string,
   registry: Registry,
 ): Promise<JudgementView> {
