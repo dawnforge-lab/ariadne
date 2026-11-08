@@ -1432,6 +1432,94 @@ describe("a link's wider name (Phase 26c)", () => {
     });
   });
 
+  it("ignores an svg title under aria-hidden: the icon names nothing", () => {
+    expect(linkOf(`<svg aria-hidden="true"><title>Cart</title></svg>`)).toMatchObject({
+      anchor: "",
+      ariaLabel: null,
+      nameHint: null,
+      nameHintSource: null,
+    });
+    // The value is read case-insensitively and trimmed, and the hidden subtree
+    // is any ancestor inside the link, not only the svg itself.
+    expect(linkOf(`<span aria-hidden=" TRUE "><svg><title>Cart</title></svg></span>`)).toMatchObject({
+      nameHint: null,
+      nameHintSource: null,
+    });
+    // aria-hidden="false" hides nothing.
+    expect(linkOf(`<svg aria-hidden="false"><title>Cart</title></svg>`)).toMatchObject({
+      nameHint: "Cart",
+      nameHintSource: "svg-title",
+    });
+  });
+
+  it("ignores an aria-label inside, or on, an aria-hidden element", () => {
+    expect(linkOf(`<span aria-hidden="true"><i aria-label="Cart"></i></span>`)).toMatchObject({
+      nameHint: null,
+      nameHintSource: null,
+    });
+    expect(linkOf(`<span aria-hidden="true" aria-label="Cart"></span>`)).toMatchObject({
+      nameHint: null,
+      nameHintSource: null,
+    });
+    // The hidden subtree ends at its own close: a later sibling still names the link,
+    // even when a same-named element nested inside the hidden one closed first.
+    expect(
+      linkOf(`<span aria-hidden="true"><span></span><span aria-label="Gone"></span></span><span aria-label="Cart"></span>`),
+    ).toMatchObject({ nameHint: "Cart", nameHintSource: "inner-aria-label" });
+    expect(linkOf(`<svg aria-hidden="true"><title>Gone</title></svg><svg><title>Menu</title></svg>`)).toMatchObject({
+      nameHint: "Menu",
+      nameHintSource: "svg-title",
+    });
+  });
+
+  it("an aria-hidden <a> takes no hint from its content, and keeps its own attributes", () => {
+    expect(linkOf(`<svg><title>Cart</title></svg><span aria-label="Inner"></span>`, ` aria-hidden="true"`)).toMatchObject({
+      nameHint: null,
+      nameHintSource: null,
+    });
+    expect(linkOf(`<svg><title>Cart</title></svg>`, ` aria-hidden="true" title="Account"`)).toMatchObject({
+      nameHint: "Account",
+      nameHintSource: "title",
+    });
+    expect(linkOf("", ` aria-hidden="true" aria-labelledby="lbl"`)).toMatchObject({
+      nameHint: "lbl",
+      nameHintSource: "aria-labelledby",
+    });
+    // The hidden state ends with the link: the next link is read as usual.
+    const a = analyzePage(
+      `<html><body><a href="/a" aria-hidden="true"><svg><title>A</title></svg></a>` +
+        `<a href="/b"><svg><title>B</title></svg></a></body></html>`,
+      PAGE,
+    );
+    expect(a.links.map((l) => [l.nameHint, l.nameHintSource])).toEqual([
+      [null, null],
+      ["B", "svg-title"],
+    ]);
+  });
+
+  it("ignores <template> content: it is inert and names nothing", () => {
+    expect(linkOf(`<template><span aria-label="Cart"></span></template>`)).toMatchObject({
+      nameHint: null,
+      nameHintSource: null,
+    });
+    expect(linkOf(`<template><svg><title>Cart</title></svg></template>`)).toMatchObject({
+      nameHint: null,
+      nameHintSource: null,
+    });
+    // After the template closes, content names the link again.
+    expect(linkOf(`<template><span aria-label="Gone"></span></template><span aria-label="Cart"></span>`)).toMatchObject({
+      nameHint: "Cart",
+      nameHintSource: "inner-aria-label",
+    });
+  });
+
+  it("a visible svg title still names the link", () => {
+    expect(linkOf(`<svg role="img"><title>Cart</title></svg>`)).toMatchObject({
+      nameHint: "Cart",
+      nameHintSource: "svg-title",
+    });
+  });
+
   it("the first link to a target supplies the hint, as it supplies the anchor", () => {
     const a = analyzePage(
       `<html><body><a href="/x" title="First"></a><a href="/x" title="Second"></a></body></html>`,

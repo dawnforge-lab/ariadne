@@ -159,6 +159,11 @@
  * `.text()` read it, and no compared link carried any until an icon's
  * `<svg><title>` became a name hint.
  *
+ * Phase 26c (final review I1): an inner aria-label or svg title is no candidate
+ * when it or an ancestor inside the link (the `<a>` included) is
+ * `aria-hidden="true"`, or when it sits in `<template>` content, written from
+ * the field's contract (`inertCandidate`).
+ *
  * Cheerio is a devDependency and appears here only: it is the parity oracle,
  * never a crawl-path parser.
  */
@@ -690,15 +695,34 @@ function analyzeHtmlWithCheerio(html: string, pageUrl: string): UpstreamShape {
   // non-blank `aria-label` on a descendant, the first non-blank text of a
   // `<title>` under an `<svg>` in the link (whitespace collapsed), and the
   // `<a>`'s `title`.
+  // Final review I1, from the field's contract: an inner candidate is out when
+  // it, or an ancestor up to and including the `<a>`, is `aria-hidden="true"`
+  // (trimmed, case-insensitive), or when it sits in `<template>` content
+  // anywhere above it, the link's own enclosing template included. `.find()`
+  // never enters a template's content fragment, so a template inside the link
+  // is excluded by the walk's absence; the ancestor walk covers a link that is
+  // itself in a template (the fragment's parent is the `<template>`).
+  type Walkable = { name?: string; attribs?: Record<string, string>; parent?: Walkable | null };
+  const inertCandidate = (candidate: unknown, link: unknown): boolean => {
+    let hiddenScope = true;
+    for (let n = candidate as Walkable | null | undefined; n; n = n.parent) {
+      if (n.name === "template") return true;
+      if (hiddenScope && n.attribs?.["aria-hidden"]?.trim().toLowerCase() === "true") return true;
+      if (n === link) hiddenScope = false;
+    }
+    return false;
+  };
   type Hint = Pick<RawPageAnalysis["links"][number], "nameHint" | "nameHintSource">;
   const nameHintOf = (el: Parameters<typeof $>[0]): Hint => {
     const labelledBy = labelOf($(el).attr("aria-labelledby"));
     if (labelledBy !== null) return { nameHint: labelledBy, nameHintSource: "aria-labelledby" };
     for (const d of $(el).find("[aria-label]").toArray()) {
+      if (inertCandidate(d, el)) continue;
       const inner = labelOf($(d).attr("aria-label"));
       if (inner !== null) return { nameHint: inner, nameHintSource: "inner-aria-label" };
     }
     for (const t of $(el).find("svg title").toArray()) {
+      if (inertCandidate(t, el)) continue;
       const svgTitle = labelOf($(t).text().replace(/\s+/g, " "));
       if (svgTitle !== null) return { nameHint: svgTitle, nameHintSource: "svg-title" };
     }
@@ -1726,6 +1750,23 @@ describe("the Phase 26c link name hint, against the DOM", () => {
       <a href="/long-svg"><svg><title>${"s".repeat(500)}</title></svg></a>
       <a href="/ns"><noscript><span aria-label="NS"></span></noscript></a>
       <svg><title>Loose</title></svg><a href="/first" title="First"></a><a href="/first" title="Second"></a>
+      </body></html>`);
+  });
+
+  it("agrees that aria-hidden subtrees and template content name nothing (final review I1)", () => {
+    expectParity(`<html><head><title>Page</title></head><body>
+      <a href="/cart"><svg aria-hidden="true"><title>Cart</title></svg></a>
+      <a href="/span-hidden"><span aria-hidden=" TRUE "><i aria-label="Cart"></i><svg><title>S</title></svg></span></a>
+      <a href="/self-hidden"><span aria-hidden="true" aria-label="Cart"></span></a>
+      <a href="/not-hidden"><svg aria-hidden="false"><title>Shown</title></svg></a>
+      <a href="/after"><span aria-hidden="true"><span></span><span aria-label="Gone"></span></span><span aria-label="After"></span></a>
+      <a href="/svg-after"><svg aria-hidden="true"><title>Gone</title></svg><svg><title>Menu</title></svg></a>
+      <a href="/a-hidden" aria-hidden="true"><svg><title>Cart</title></svg><span aria-label="Inner"></span></a>
+      <a href="/a-hidden-title" aria-hidden="true" title="Account"><svg><title>Cart</title></svg></a>
+      <a href="/template"><template><span aria-label="Cart"></span><svg><title>S</title></svg></template></a>
+      <a href="/template-after"><template><span aria-label="Gone"></span></template><span aria-label="Kept"></span></a>
+      <template><a href="/in-template" title="T"><span aria-label="Inner"></span><svg><title>S</title></svg></a></template>
+      <a href="/visible"><svg role="img"><title>Cart</title></svg></a>
       </body></html>`);
   });
 });

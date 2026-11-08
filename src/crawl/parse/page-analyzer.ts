@@ -529,6 +529,16 @@
  * `ontext` above the `suppressDepth` return, by its own per-anchor state, so it
  * never reaches the anchor text, and `titleCount` / `titleOutsideHead` /
  * `titleDepth` keep their svg guard. `<noscript>` content names nothing.
+ * Phase 26c (final review I1): neither an `aria-hidden="true"` subtree (the
+ * value trimmed and case-insensitive; the hidden element itself included) nor
+ * `<template>` content offers an inner aria-label or svg title, since both are
+ * out of the accessibility tree; while `templateDepth > 0` no inner candidate is
+ * read, so a link inside a template keeps only its own attributes' hints. An
+ * `<a aria-hidden="true">` hides its content, so it takes no inner candidate,
+ * but its own `aria-labelledby` and `title` still count: the hint records what
+ * the link's own markup offers, as `ariaLabel` records its own `aria-label`
+ * whatever `aria-hidden` says (owner call O1), rather than computing the empty name
+ * accname gives a hidden root.
  */
 import { createHash } from "node:crypto";
 import { Parser } from "htmlparser2";
@@ -1358,6 +1368,17 @@ interface OpenAnchor {
   svgTitleParts: string[] | null;
   /** The first `<svg><title>` whose text is not blank, collapsed and capped. */
   svgTitle: string | null;
+  /**
+   * The `elementDepth` of each `aria-hidden="true"` element open in the link,
+   * the `<a>` itself included (final review I1): while any is open, no inner
+   * aria-label or svg title is a candidate. Popped by depth, never by name.
+   */
+  ariaHiddenOpenedAt: number[];
+}
+
+/** `aria-hidden="true"`, the value read trimmed and case-insensitively. */
+function ariaHidden(attribs: Record<string, string>): boolean {
+  return attribs["aria-hidden"]?.trim().toLowerCase() === "true";
 }
 
 /** An `aria-label` as `PageLink.ariaLabel` stores it: trimmed, capped, null when blank. */
@@ -2377,12 +2398,19 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
         // Phase 26c: an element inside an open link may name it. Below the
         // noscript return, so `<noscript>` content names nothing, as its text
         // is no anchor; never the `<a>` itself, which closes this one below.
+        // Final review I1: an `aria-hidden="true"` subtree (the element itself
+        // included) and `<template>` content are out of the accessibility tree,
+        // so neither offers a candidate; `templateDepth` already counts this
+        // tag's own `<template>` above.
         if (openAnchor && name !== "a") {
-          if (openAnchor.innerAriaLabel === null) {
+          if (ariaHidden(attribs)) openAnchor.ariaHiddenOpenedAt.push(elementDepth);
+          const inert = openAnchor.ariaHiddenOpenedAt.length > 0 || templateDepth > 0;
+          if (!inert && openAnchor.innerAriaLabel === null) {
             openAnchor.innerAriaLabel = ariaLabelOf(attribs["aria-label"]);
           }
           if (name === "svg") openAnchor.svgDepth += 1;
           else if (
+            !inert &&
             name === "title" &&
             openAnchor.svgDepth > 0 &&
             openAnchor.svgTitle === null &&
@@ -2580,6 +2608,9 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
                 svgDepth: 0,
                 svgTitleParts: null,
                 svgTitle: null,
+                // An aria-hidden `<a>` hides its content, not its own
+                // attributes (final review I1): see the module header.
+                ariaHiddenOpenedAt: ariaHidden(attribs) ? [elementDepth] : [],
               };
             }
             break;
@@ -2711,6 +2742,10 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
         // Phase 26c: the open-tag hook's mirror, below the noscript returns as
         // that hook is below its own.
         if (openAnchor) {
+          // `elementDepth` was lowered above, so the closing element opened at
+          // one deeper. The `<a>`'s own entry goes with the anchor itself.
+          const hiddenAt = openAnchor.ariaHiddenOpenedAt;
+          if (hiddenAt[hiddenAt.length - 1] === elementDepth + 1) hiddenAt.pop();
           if (name === "title" && openAnchor.svgTitleParts !== null) {
             openAnchor.svgTitle = ariaLabelOf(openAnchor.svgTitleParts.join("").replace(/\s+/g, " "));
             openAnchor.svgTitleParts = null;
