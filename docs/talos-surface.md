@@ -1327,7 +1327,7 @@ a reader acts on", `test/rules/helpers.test.ts:717` "names a block a block,
 whatever status the challenge was served with",
 `test/fixtures/harness.test.ts:1287` "declares a column for every evidence key it
 writes, and writes every column it declares",
-`test/rules/registry.test.ts:755` "finds one defining file per rule, and the key
+`test/rules/registry.test.ts:769` "finds one defining file per rule, and the key
 spelled inside it".
 
 ### 4.4a `issue_inlinks` → `{columns, items, nextCursor}` — the links that point at it

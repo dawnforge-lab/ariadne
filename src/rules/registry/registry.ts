@@ -1,7 +1,9 @@
 import { metricTableColumns, metricTableSummary, RESERVED_TABLE_KEYS } from "./metric-table.js";
-import type { AnyRule } from "./types.js";
+import { triageRow, type TriageLookup } from "./triage.js";
+import type { AnyRule, IssueType, Priority } from "./types.js";
 export * from "./metric-table.js";
 export * from "./types.js";
+export type { Triage, TriageLookup } from "./triage.js";
 
 export class RuleDefinitionError extends Error {
   // Explicit so the name survives transpilation and minification: callers that
@@ -890,7 +892,17 @@ const KINDS = ["page", "query", "metric"] as const satisfies readonly AnyRule["k
 //     "Reason", first): one sentence per trigger that fired; the static marker
 //     sentence and the fix copy no longer tell every crawl to fix failing
 //     sitemaps. `rules_catalog` re-measured at 194,186 bytes. 188 rules.
-export const RULESET_VERSION = "0.22.0";
+// 0.23.0: Phase 27a — (T1) type and priority on every finding rule (triage.ts).
+//  1. (T1) Every page and query rule carries `type` (issue | warning |
+//     opportunity) and `priority` (high | medium | low) beside its severity,
+//     attached by `defineRule` from the one table in
+//     src/rules/registry/triage.ts, referenced against Screaming Frog's Issue
+//     Type and Issue Priority where a rule maps to an SF issue. A rule that
+//     finds with no row, a metric rule with one, and a NOT MEASURED marker
+//     filed as anything but warning / low fail registry load. No verdict,
+//     severity, finding or copy moves; this is client-facing judgement, which
+//     is why the version moves. 188 rules.
+export const RULESET_VERSION = "0.23.0";
 
 /**
  * The 47 crawl-derived checks (sf-audit checklist, Pre-Crawl + sections 1–11):
@@ -926,7 +938,33 @@ export const CRAWL_CHECK_IDS: readonly string[] = [
  */
 export const AGENT_CHECKS: readonly string[] = ["CHECK-38", "CHECK-41", "CHECK-42"];
 
-export function defineRule<T extends AnyRule>(rule: T): T {
+/**
+ * A rule as its module writes it: every field but the triage (`type`,
+ * `priority`), which `defineRule` attaches from src/rules/registry/triage.ts.
+ * Distributive, so each kind keeps its own shape. A rule that is already
+ * defined is also a valid definition, which is how `Registry.register`
+ * re-checks one.
+ */
+export type RuleDefinition<T extends AnyRule = AnyRule> = T extends AnyRule
+  ? Omit<T, "type" | "priority"> & Partial<Pick<T, "type" | "priority">>
+  : never;
+
+/**
+ * Validate a rule's definition and return it with its triage attached: a NEW
+ * object for a rule that finds (the definition is not mutated), the definition
+ * itself for a metric rule.
+ *
+ * `triage` is how the table is read; production uses `triageRow`, and a test
+ * passes its own to exercise these checks on synthetic rules without editing
+ * `TRIAGE`.
+ */
+export function defineRule<T extends AnyRule>(
+  definition: RuleDefinition<T>,
+  triage: TriageLookup = triageRow,
+): T {
+  // The checks below read the definition as a rule; the triage fields are the
+  // only ones it may lack, and `attachTriage` is what supplies them.
+  const rule = definition as unknown as AnyRule;
   const fail = (msg: string): never => {
     throw new RuleDefinitionError(`rule '${rule.id ?? "<no id>"}': ${msg}`);
   };
@@ -947,7 +985,56 @@ export function defineRule<T extends AnyRule>(rule: T): T {
     fail("marker, when present, must be a non-empty reason string");
   validateColumns(rule, fail);
   validateTable(rule, fail);
-  return rule;
+  return attachTriage(rule, triage, fail) as T;
+}
+
+const ISSUE_TYPES = ["issue", "warning", "opportunity"] as const satisfies readonly IssueType[];
+const PRIORITIES = ["high", "medium", "low"] as const satisfies readonly Priority[];
+
+/**
+ * The triage half of `defineRule`. ONE TABLE decides every rule's type and
+ * priority, so:
+ *  - a metric rule has no row (it produces no findings) and carries neither;
+ *  - a rule that finds must have a row, or registry load fails, as missing copy
+ *    does;
+ *  - a NOT MEASURED marker's row is warning / low;
+ *  - a definition that already carries a type or priority (a rule defined
+ *    once, registered again) must agree with the row: a value written by hand
+ *    against the table is refused, never silently replaced.
+ * The row's values are checked too, because the lookup is a parameter and a
+ * value from JavaScript the type system did not see is not a judgement.
+ */
+function attachTriage(rule: AnyRule, lookup: TriageLookup, fail: (msg: string) => never): AnyRule {
+  const row = lookup(rule.id);
+  if (rule.kind === "metric") {
+    if (row !== undefined)
+      fail(
+        "a metric rule has no type or priority — it produces no findings — so it has no " +
+          "row in src/rules/registry/triage.ts",
+      );
+    if (rule.type !== undefined || rule.priority !== undefined)
+      fail("a metric rule carries no type or priority: it produces no findings");
+    return rule;
+  }
+  if (row === undefined)
+    return fail("no type or priority: add the rule's row to src/rules/registry/triage.ts");
+  const { type, priority } = row;
+  if (!(ISSUE_TYPES as readonly string[]).includes(type)) fail(`bad issue type '${type}'`);
+  if (!(PRIORITIES as readonly string[]).includes(priority)) fail(`bad priority '${priority}'`);
+  if (rule.marker !== undefined && (type !== "warning" || priority !== "low"))
+    fail(
+      `a NOT MEASURED marker is warning / low, and src/rules/registry/triage.ts files it ` +
+        `as ${type} / ${priority}`,
+    );
+  if (
+    (rule.type !== undefined && rule.type !== type) ||
+    (rule.priority !== undefined && rule.priority !== priority)
+  )
+    fail(
+      `type and priority come from src/rules/registry/triage.ts (${type} / ${priority}); ` +
+        `the definition says ${rule.type} / ${rule.priority}`,
+    );
+  return { ...rule, type, priority };
 }
 
 /**
@@ -1201,11 +1288,17 @@ function validateTable(rule: AnyRule, fail: (msg: string) => never): void {
 export class Registry {
   private rules = new Map<string, AnyRule>();
 
-  register(rule: AnyRule): void {
-    defineRule(rule);
-    if (this.rules.has(rule.id))
-      throw new RuleDefinitionError(`duplicate rule id '${rule.id}'`);
-    this.rules.set(rule.id, rule);
+  /**
+   * `triage` reads the type-and-priority table; a test registering synthetic
+   * rules passes its own (see `defineRule`).
+   */
+  constructor(private readonly triage: TriageLookup = triageRow) {}
+
+  register(rule: RuleDefinition): void {
+    const defined = defineRule(rule, this.triage);
+    if (this.rules.has(defined.id))
+      throw new RuleDefinitionError(`duplicate rule id '${defined.id}'`);
+    this.rules.set(defined.id, defined);
   }
   all(): AnyRule[] { return [...this.rules.values()]; }
   byKind<K extends AnyRule["kind"]>(kind: K): Extract<AnyRule, { kind: K }>[] {

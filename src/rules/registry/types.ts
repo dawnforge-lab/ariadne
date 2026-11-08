@@ -3,6 +3,20 @@ import type { pages } from "../../db/schema.js";
 import type { MetricTable } from "./metric-table.js";
 
 export type Severity = "critical" | "warning" | "info";
+/**
+ * What a finding IS, in Screaming Frog's Issue Type vocabulary (Phase 27a):
+ * a defect to fix, something a human must check because it may be fine, or a
+ * change that would help where nothing is broken. The rubric and every rule's
+ * value live in src/rules/registry/triage.ts.
+ */
+export type IssueType = "issue" | "warning" | "opportunity";
+/**
+ * What FIXING a finding is worth on the pages it hits (Phase 27a): high when it
+ * decides whether they are crawled, indexed or served correctly, medium when it
+ * moves how they rank or appear, low for hygiene. Not severity, which is the
+ * engine's fact about the rule (Phase 16) and is never overridden.
+ */
+export type Priority = "high" | "medium" | "low";
 export type PageRecord = typeof pages.$inferSelect;
 
 export interface Finding {
@@ -119,6 +133,15 @@ interface RuleMeta {
   howToFix: string;         // client-facing
   rulesetVersion: string;
   /**
+   * The rule's default issue type and priority (Phase 27a). REQUIRED on a rule
+   * that finds and ABSENT on a metric rule, which produces no findings; never
+   * written by a rule's module: `defineRule` attaches both from the one table,
+   * src/rules/registry/triage.ts, and refuses a definition that disagrees with
+   * it. A crawl's overrides apply at read time, not here.
+   */
+  type?: IssueType;
+  priority?: Priority;
+  /**
    * Present ONLY on a NOT MEASURED marker — a rule whose whole purpose is to be
    * read, because it reports that a check below COULD NOT BE ANSWERED on this
    * crawl (`content.thin-skipped`, `resources.not-fetched`, `host.probe-skipped`
@@ -205,6 +228,9 @@ interface RuleMeta {
 
 export interface PageRule extends RuleMeta {
   kind: "page";
+  /** Attached by `defineRule` from triage.ts — see `RuleMeta.type`. */
+  type: IssueType;
+  priority: Priority;
   /** Required on a rule that finds — see `RuleMeta.columns`. Empty is an answer. */
   columns: ReadonlyArray<RuleColumn>;
   /** NEVER PRESENT on a rule that finds — see `MetricRule.table`. */
@@ -265,6 +291,9 @@ export interface RuleCaps {
 
 export interface QueryRule extends RuleMeta {
   kind: "query";
+  /** Attached by `defineRule` from triage.ts — see `RuleMeta.type`. */
+  type: IssueType;
+  priority: Priority;
   /** Required on a rule that finds — see `RuleMeta.columns`. Empty is an answer. */
   columns: ReadonlyArray<RuleColumn>;
   /** NEVER PRESENT on a rule that finds — see `MetricRule.table`. */
@@ -278,6 +307,9 @@ export interface QueryRule extends RuleMeta {
 }
 export interface MetricRule extends RuleMeta {
   kind: "metric";
+  /** NEVER PRESENT: a metric produces no findings to triage — see `RuleMeta.type`. */
+  type?: undefined;
+  priority?: undefined;
   /**
    * NEVER PRESENT. Narrowed to `undefined` rather than left inherited so the
    * type says what `defineRule` refuses: a metric writes rows into `metrics`,
