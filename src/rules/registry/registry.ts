@@ -908,8 +908,16 @@ const KINDS = ["page", "query", "metric"] as const satisfies readonly AnyRule["k
 //     `crawls.judgement_jsonb` (0031). `runRules` validates the stored block
 //     up front and stamps what it judged with (disabled set, threshold
 //     overrides, cap) in `crawls.rules_judged_with_jsonb` beside
-//     `rules_run_at`, backfilled for older judged crawls (0032). No rule reads
-//     the block yet; no verdict, finding or copy moves.
+//     `rules_run_at`, backfilled for older judged crawls (0032). No verdict,
+//     finding or copy moves.
+//  3. (T3) The block reaches the rules. `runRules` builds one `JudgementContext`
+//     per run (effective thresholds + disabled set) and passes it to every
+//     page, query and metric rule, so the 20 thresholds are read per run rather
+//     than imported: a threshold override takes effect at the crawl's next
+//     rules run, and evidence that quotes a threshold quotes the effective
+//     value. `site.health` skips findings of disabled rules; disabled rules
+//     still run and their findings are still stored. With no overrides every
+//     verdict is unchanged.
 export const RULESET_VERSION = "0.23.0";
 
 /**

@@ -146,6 +146,7 @@ import {
 import { assertCrawl } from "../query/crawl-evidence.js";
 import { perScope } from "../registry/metric-table.js";
 import type { Metric, MetricRule, Severity } from "../registry/registry.js";
+import type { JudgementContext } from "../registry/types.js";
 import { nullableNum, num } from "./cohort.js";
 
 /**
@@ -224,13 +225,22 @@ type HealthRow = {
  * buckets are `filter`ed counts over the result. A crawl with 17,659 findings
  * over 441 pages is one statement, not 441.
  */
-async function siteHealth(db: Db, crawlId: string, self: MetricIdentity): Promise<Metric[]> {
+async function siteHealth(
+  db: Db,
+  crawlId: string,
+  self: MetricIdentity,
+  judgement: JudgementContext,
+): Promise<Metric[]> {
   // A crawl id nothing knows has no pages, which aggregates to a census of zero
   // and a null ratio — the same answer an empty crawl gives. Two facts sharing
   // one shape is the silent failure hard rule 7 forbids.
   await assertCrawl(db, crawlId, self.id);
 
   const severities = sql.param([...SEVERITY_ORDER]);
+  // A rule the crawl's judgement disables ran and stored its findings, but is
+  // not an issue HERE, so it does not decide a page's bucket. `= any(…::text[])`
+  // with a bound array (drizzle spreads a bare one); an empty set binds as `{}`.
+  const disabled = sql.param([...judgement.disabledRules]);
   // `when 'critical' then 1 when 'warning' then 2 when 'info' then 3` — built
   // from the list above so the ranking and the guard below cannot disagree. The
   // rank is `sql.raw` because it is an array index rather than input, and a
@@ -303,6 +313,7 @@ async function siteHealth(db: Db, crawlId: string, self: MetricIdentity): Promis
       from issues i
       join cohort c on c.id = i.page_id
       where i.crawl_id = ${crawlId}
+        and not (i.rule_id = any(${disabled}::text[]))
       group by i.page_id
     )
     select
@@ -448,6 +459,6 @@ export const healthMetrics: MetricRule[] = [
       { key: "urlsNoindex", label: "Noindex (set aside)" },
       { key: "urlsPaginated", label: "Paginated (duplicate checks only)" },
     ], 0),
-    async (db, crawlId, self) => siteHealth(db, crawlId, self),
+    async (db, crawlId, self, judgement) => siteHealth(db, crawlId, self, judgement),
   ),
 ];

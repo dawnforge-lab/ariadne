@@ -1,6 +1,6 @@
 import { finding, isAuditable, isJudged, pageRule } from "../helpers.js";
 import type { PageRule } from "../registry/types.js";
-import { IMAGE_ALT_MAX, SLOW_MS } from "../thresholds.js";
+import { IMAGE_ALT_MAX } from "../thresholds.js";
 
 /** Verdict thresholds live in `../thresholds.js`; re-exported so every existing import still resolves. */
 export { SLOW_MS } from "../thresholds.js";
@@ -176,9 +176,9 @@ export const technicalRules: PageRule[] = [
       { key: "responseTimeMs", label: "Response Time (ms)" },
       { key: "threshold", label: "Threshold (ms)" },
     ],
-    (p, self) =>
-      isJudged(p) && p.responseTimeMs !== null && p.responseTimeMs > SLOW_MS
-        ? [finding(self, p, { responseTimeMs: p.responseTimeMs, threshold: SLOW_MS })]
+    (p, self, j) =>
+      isJudged(p) && p.responseTimeMs !== null && p.responseTimeMs > j.thresholds.SLOW_MS
+        ? [finding(self, p, { responseTimeMs: p.responseTimeMs, threshold: j.thresholds.SLOW_MS })]
         : [],
   ),
 ];

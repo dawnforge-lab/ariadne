@@ -9,14 +9,13 @@ import {
   type Finding,
   type QueryRule,
 } from "../registry/registry.js";
-import type { RuleCaps } from "../registry/types.js";
+import { judgementOr, type RuleCaps } from "../registry/types.js";
 import {
   assertNormalisedSitemap,
   capsOr,
   limitTo,
   noteTruncation,
 } from "./crawl-evidence.js";
-import { DEEP_DEPTH } from "../thresholds.js";
 
 const ORPHAN: RuleIdentity = { id: "links.orphan", severity: "warning" };
 const SKIPPED: RuleIdentity = { id: "links.orphan-skipped", severity: "info" };
@@ -313,6 +312,7 @@ async function deepPageFindings(
   crawlId: string,
   state: Completeness,
   caps: RuleCaps,
+  deepDepth: number,
 ): Promise<Finding[]> {
   const rows = await db.execute<{
     id: string;
@@ -324,7 +324,7 @@ async function deepPageFindings(
     from pages p
     where p.crawl_id = ${crawlId}
       and ${INDEXABLE}
-      and p.click_depth > ${DEEP_DEPTH}
+      and p.click_depth > ${deepDepth}
     order by p.click_depth desc, p.url
     ${limitTo(caps.listing)}`);
 
@@ -335,7 +335,7 @@ async function deepPageFindings(
       pageUrl: String(row.url),
       evidence: {
         clickDepth: Number(row.click_depth),
-        threshold: DEEP_DEPTH,
+        threshold: deepDepth,
         ...(caveat === null ? {} : { caveat }),
       },
       dedupeKey: String(row.url),
@@ -475,9 +475,15 @@ export const linkGraphRules: QueryRule[] = [
     ],
     ...copyFor(DEEP.id),
     rulesetVersion: RULESET_VERSION,
-    run: async (db, crawlId, caps): Promise<Finding[]> => {
+    run: async (db, crawlId, caps, ctx): Promise<Finding[]> => {
       const state = await completeness(db, crawlId, DEEP.id);
-      return deepPageFindings(db, crawlId, state, capsOr(caps));
+      return deepPageFindings(
+        db,
+        crawlId,
+        state,
+        capsOr(caps),
+        judgementOr(ctx).thresholds.DEEP_DEPTH,
+      );
     },
   }),
 ];

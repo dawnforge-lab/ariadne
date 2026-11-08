@@ -5,10 +5,15 @@ import { deriveClickDepth } from "./derive/click-depth.js";
 import { deriveFieldPresence } from "./derive/field-presence.js";
 import { deriveSitemapHreflang } from "./derive/sitemap-hreflang.js";
 import { deriveUrlParams } from "./derive/url-params.js";
-import { judgedWithOf, readStoredJudgement } from "./judgement.js";
+import { effectiveThresholds, judgedWithOf, readStoredJudgement } from "./judgement.js";
 import { resolveRuleCaps, storedFindingCap } from "./query/crawl-evidence.js";
 import { RULESET_VERSION, type Registry } from "./registry/registry.js";
-import { METRIC_SCOPES, type Finding, type Metric } from "./registry/types.js";
+import {
+  METRIC_SCOPES,
+  type Finding,
+  type JudgementContext,
+  type Metric,
+} from "./registry/types.js";
 
 /**
  * Pages read per round trip — the memory contract: never the whole table.
@@ -161,6 +166,15 @@ export async function runRules(
   // nor the crawl chose, i.e. the engine default applied).
   const block = readStoredJudgement(row.judgement, crawlId, registry);
   const judgedWith = judgedWithOf(block, capInput);
+  // What every rule of THIS run reads its thresholds from. Built per call and
+  // passed down, never held in a module, because two runs of two crawls are in
+  // here at once (the finding cap's argument, and the concurrency test in
+  // test/rules/thresholds-override.test.ts). Disabled rules are in it for
+  // `site.health` alone: they still run and their findings are still stored.
+  const judgement: JudgementContext = {
+    thresholds: effectiveThresholds(block),
+    disabledRules: new Set(judgedWith.disabledRules),
+  };
 
   // Planner statistics, before any rule reads a table.
   //
@@ -320,7 +334,7 @@ export async function runRules(
       summary.pagesScanned += 1;
       for (const rule of pageRules) {
         try {
-          for (const f of rule.run(page)) record(f);
+          for (const f of rule.run(page, judgement)) record(f);
         } catch (error) {
           await flush();
           throw new Error(`rule '${rule.id}' threw on page ${page.url}`, { cause: error });
@@ -387,7 +401,7 @@ export async function runRules(
   for (const rule of registry.byKind("query")) {
     let produced: Finding[];
     try {
-      produced = await rule.run(db, crawlId, caps);
+      produced = await rule.run(db, crawlId, caps, judgement);
     } catch (error) {
       await flush();
       throw new Error(`rule '${rule.id}' threw`, { cause: error });
@@ -452,7 +466,7 @@ export async function runRules(
   for (const rule of registry.byKind("metric")) {
     let returned: unknown;
     try {
-      returned = await rule.run(db, crawlId);
+      returned = await rule.run(db, crawlId, judgement);
     } catch (error) {
       throw new Error(`rule '${rule.id}' threw`, { cause: error });
     }

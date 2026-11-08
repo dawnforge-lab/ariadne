@@ -1,6 +1,7 @@
 import type { Db } from "../../db/client.js";
 import type { pages } from "../../db/schema.js";
 import type { MetricTable } from "./metric-table.js";
+import { DEFAULT_THRESHOLDS, type Thresholds } from "../threshold-table.js";
 
 export type Severity = "critical" | "warning" | "info";
 /**
@@ -235,7 +236,7 @@ export interface PageRule extends RuleMeta {
   columns: ReadonlyArray<RuleColumn>;
   /** NEVER PRESENT on a rule that finds — see `MetricRule.table`. */
   table?: undefined;
-  run: (page: PageRecord) => Finding[];
+  run: (page: PageRecord, ctx?: JudgementContext) => Finding[];
 }
 /**
  * How much one rules run may LIST — the run-level budget every query rule is
@@ -289,6 +290,36 @@ export interface RuleCaps {
   listing: number | null;
 }
 
+/**
+ * What a rules run judges ONE crawl with (Phase 27a): its effective thresholds
+ * and the rules its block disables.
+ *
+ * Per-run state for the reason `RuleCaps` is: two runs of two crawls are inside
+ * `runRules` at once in one process, so a threshold a rule imports as a module
+ * constant could not differ between them. A rule reads
+ * `judgementOr(ctx).thresholds.NAME`; test/rules/threshold-guard.test.ts fails
+ * on a rule that still imports or names an overridable constant.
+ *
+ * Disabled rules still RUN and their findings are stored (a disable applies at
+ * read time); `disabledRules` is read only by `site.health`, which must not
+ * count a finding the agent has said is not an issue here.
+ */
+export interface JudgementContext {
+  thresholds: Thresholds;
+  disabledRules: ReadonlySet<string>;
+}
+
+/** The context of a crawl with no overrides. */
+export const DEFAULT_JUDGEMENT: JudgementContext = Object.freeze({
+  thresholds: DEFAULT_THRESHOLDS,
+  disabledRules: new Set<string>(),
+});
+
+/** `ctx ?? DEFAULT_JUDGEMENT`, named so every rule resolves it the same way (see `capsOr`). */
+export function judgementOr(ctx: JudgementContext | undefined): JudgementContext {
+  return ctx ?? DEFAULT_JUDGEMENT;
+}
+
 export interface QueryRule extends RuleMeta {
   kind: "query";
   /** Attached by `defineRule` from triage.ts — see `RuleMeta.type`. */
@@ -303,7 +334,12 @@ export interface QueryRule extends RuleMeta {
    * a rule without restating the engine's defaults; `capsOr` turns the absence
    * into `DEFAULT_RULE_CAPS`. `runRules` always passes a resolved value.
    */
-  run: (db: Db, crawlId: string, caps?: RuleCaps) => Promise<Finding[]>;
+  run: (
+    db: Db,
+    crawlId: string,
+    caps?: RuleCaps,
+    ctx?: JudgementContext,
+  ) => Promise<Finding[]>;
 }
 export interface MetricRule extends RuleMeta {
   kind: "metric";
@@ -322,6 +358,6 @@ export interface MetricRule extends RuleMeta {
    * src/rules/registry/metric-table.ts.
    */
   table: MetricTable;
-  run: (db: Db, crawlId: string) => Promise<Metric[]>;
+  run: (db: Db, crawlId: string, ctx?: JudgementContext) => Promise<Metric[]>;
 }
 export type AnyRule = PageRule | QueryRule | MetricRule;

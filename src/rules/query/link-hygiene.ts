@@ -30,12 +30,8 @@ import {
   type Finding,
   type QueryRule,
 } from "../registry/registry.js";
-import type { RuleCaps } from "../registry/types.js";
-import {
-  HIGH_EXTERNAL_OUTLINKS,
-  HIGH_INTERNAL_OUTLINKS,
-  NON_DESCRIPTIVE_ANCHORS,
-} from "../thresholds.js";
+import { judgementOr, type RuleCaps } from "../registry/types.js";
+import { NON_DESCRIPTIVE_ANCHORS } from "../thresholds.js";
 import { capsOr, limitTo, noteTruncation } from "./crawl-evidence.js";
 import { SAMPLE_SOURCES } from "./link-targets.js";
 import { v3Gate } from "./page-facts.js";
@@ -624,7 +620,13 @@ function namesOf(pageUrl: string, rows: { source: string | null; value: string }
  * the rule does not depend on that. `max` is the limit that was crossed (the
  * internal one when both were) and `crossed` says which.
  */
-async function highOutlinkFindings(db: Db, crawlId: string, caps: RuleCaps): Promise<Finding[]> {
+async function highOutlinkFindings(
+  db: Db,
+  crawlId: string,
+  caps: RuleCaps,
+  maxInternal: number,
+  maxExternal: number,
+): Promise<Finding[]> {
   const result = await db.execute<{
     page_id: string;
     page_url: string;
@@ -640,21 +642,21 @@ async function highOutlinkFindings(db: Db, crawlId: string, caps: RuleCaps): Pro
     join pages p on p.id = l.source_page_id and p.crawl_id = ${crawlId}
     where l.crawl_id = ${crawlId} and ${FETCHED_OK("p")}
     group by p.id, p.url
-    having count(distinct l.target_url) filter (where l.is_internal) > ${HIGH_INTERNAL_OUTLINKS}
-        or count(distinct l.target_url) filter (where not l.is_internal) > ${HIGH_EXTERNAL_OUTLINKS}
+    having count(distinct l.target_url) filter (where l.is_internal) > ${maxInternal}
+        or count(distinct l.target_url) filter (where not l.is_internal) > ${maxExternal}
     order by p.url
     ${limitTo(caps.listing)}`);
 
   const findings = result.rows.map((row) => {
-    const internalCrossed = row.internal_outlinks > HIGH_INTERNAL_OUTLINKS;
-    const externalCrossed = row.external_outlinks > HIGH_EXTERNAL_OUTLINKS;
+    const internalCrossed = row.internal_outlinks > maxInternal;
+    const externalCrossed = row.external_outlinks > maxExternal;
     return queryFinding(HIGH_OUTLINKS, {
       pageId: row.page_id,
       pageUrl: row.page_url,
       evidence: {
         internalOutlinks: row.internal_outlinks,
         externalOutlinks: row.external_outlinks,
-        max: internalCrossed ? HIGH_INTERNAL_OUTLINKS : HIGH_EXTERNAL_OUTLINKS,
+        max: internalCrossed ? maxInternal : maxExternal,
         crossed: internalCrossed && externalCrossed ? "both" : internalCrossed ? "internal" : "external",
       },
       dedupeKey: row.page_url,
@@ -770,6 +772,15 @@ export const linkHygieneRules: QueryRule[] = [
     ],
     ...copyFor(HIGH_OUTLINKS.id),
     rulesetVersion: RULESET_VERSION,
-    run: (db, crawlId, caps) => highOutlinkFindings(db, crawlId, capsOr(caps)),
+    run: (db, crawlId, caps, ctx) => {
+      const { thresholds } = judgementOr(ctx);
+      return highOutlinkFindings(
+        db,
+        crawlId,
+        capsOr(caps),
+        thresholds.HIGH_INTERNAL_OUTLINKS,
+        thresholds.HIGH_EXTERNAL_OUTLINKS,
+      );
+    },
   }),
 ];

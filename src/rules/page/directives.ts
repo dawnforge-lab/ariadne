@@ -7,7 +7,7 @@ import {
   unavailableAfterOf,
 } from "../helpers.js";
 import type { PageRecord, PageRule } from "../registry/types.js";
-import { RESTRICTIVE_DIRECTIVES, UNAVAILABLE_AFTER_WARN_DAYS } from "../thresholds.js";
+import { RESTRICTIVE_DIRECTIVES } from "../thresholds.js";
 
 const CATEGORY = "indexability";
 const DAY_MS = 86_400_000;
@@ -166,7 +166,7 @@ export const directiveRules: PageRule[] = [
       { key: "daysFromFetch", label: "Days From Fetch" },
       { key: "assumedUtc", label: "Assumed UTC", optional: true },
     ],
-    (p, self) => {
+    (p, self, j) => {
       // A fetched-OK page always has a `fetched_at`; null is a row from before
       // migration 0016, which has no time to judge the date against.
       if (!isAuditable(p) || p.fetchedAt === null) return [];
@@ -184,7 +184,7 @@ export const directiveRules: PageRule[] = [
       // says so.
       const earliest = parsed.reduce((a, b) => (b.at < a.at ? b : a));
       const fetched = p.fetchedAt.getTime();
-      if (earliest.at >= fetched + UNAVAILABLE_AFTER_WARN_DAYS * DAY_MS) return [];
+      if (earliest.at >= fetched + j.thresholds.UNAVAILABLE_AFTER_WARN_DAYS * DAY_MS) return [];
       return [
         finding(self, p, {
           unavailableAfter: earliest.raw,

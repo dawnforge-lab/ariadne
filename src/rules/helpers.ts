@@ -6,8 +6,10 @@ import { ROBOTS_BLOCKED_REASON_PREFIX } from "../crawl/discovery.js";
 import { copyFor } from "./registry/copy/index.js";
 import type { MetricTable } from "./registry/metric-table.js";
 import { defineRule, RULESET_VERSION } from "./registry/registry.js";
+import { judgementOr } from "./registry/types.js";
 import type {
   Finding,
+  JudgementContext,
   Metric,
   MetricRule,
   MetricScope,
@@ -1067,7 +1069,7 @@ export function pageRule(
   // rule whose report is the four standard columns and nothing else; see
   // `RuleMeta.columns`.
   columns: ReadonlyArray<RuleColumn>,
-  run: (page: PageRecord, self: RuleIdentity) => Finding[],
+  run: (page: PageRecord, self: RuleIdentity, judgement: JudgementContext) => Finding[],
   // The NOT MEASURED marker flag, threaded through so a page-rule marker
   // (`content.thin-skipped`) declares itself the same one way every other marker
   // does. See `RuleMeta.marker`: present only on a marker, the value its reason.
@@ -1084,7 +1086,7 @@ export function pageRule(
     ...copyFor(id),
     rulesetVersion: RULESET_VERSION,
     ...(marker === undefined ? {} : { marker }),
-    run: (page) => run(page, self),
+    run: (page, ctx) => run(page, self, judgementOr(ctx)),
   });
 }
 
@@ -1117,7 +1119,12 @@ export function metricRule(
   checkIds: string[],
   category: RuleCategory,
   table: MetricTable,
-  run: (db: Db, crawlId: string, self: MetricIdentity) => Promise<Metric[]>,
+  run: (
+    db: Db,
+    crawlId: string,
+    self: MetricIdentity,
+    judgement: JudgementContext,
+  ) => Promise<Metric[]>,
 ): MetricRule {
   const self: MetricIdentity = { id };
   return defineRule<MetricRule>({
@@ -1129,7 +1136,7 @@ export function metricRule(
     ...copyFor(id),
     rulesetVersion: RULESET_VERSION,
     table,
-    run: (db, crawlId) => run(db, crawlId, self),
+    run: (db, crawlId, ctx) => run(db, crawlId, self, judgementOr(ctx)),
   });
 }
 
