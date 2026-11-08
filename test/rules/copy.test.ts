@@ -1465,7 +1465,7 @@ describe("copy: metric tables", () => {
     const text = copy("sitemap.structure").explanation;
     expect(text, "docs").toMatch(/how many documents|number of documents/i);
     expect(text, "totalUrls").toMatch(/total entries|entries/i);
-    expect(text, "oversizedDocsSkipped").toMatch(/dropped for size|too large/i);
+    expect(text, "oversizedDocsSkipped").toMatch(/documents over the 50 MB limit \(read up to the limit/i);
     expect(text, "urlCapBreaches").toMatch(/over the 50,000|past 50,000/i);
     // `entryCapReached` changes what every other number means, so it is copy
     // rather than a footnote.

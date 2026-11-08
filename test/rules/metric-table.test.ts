@@ -136,7 +136,7 @@ describe("perScope", () => {
       "Over 50,000 Entries",
       "Listings (All Documents)",
       "Documents",
-      "Documents Dropped For Size",
+      "Documents Over 50 MB",
       "Entry Cap Reached",
       "Counts Exact",
       "Membership Cap Reached",

@@ -1647,7 +1647,7 @@ describe("GET /crawls/:id/metrics/:metricId", () => {
       "Over 50,000 Entries",
       "Listings (All Documents)",
       "Documents",
-      "Documents Dropped For Size",
+      "Documents Over 50 MB",
       "Entry Cap Reached",
       "Counts Exact",
       "Membership Cap Reached",
@@ -3130,7 +3130,7 @@ describe("GET /crawls/:id/export?format=csv", () => {
     expect(sitemap.records[0]).toEqual([
       "Sitemap", "URLs (Site) / Listings (Document)", "Over 50,000 Entries",
       "Listings (All Documents)", "Documents",
-      "Documents Dropped For Size", "Entry Cap Reached", "Counts Exact",
+      "Documents Over 50 MB", "Entry Cap Reached", "Counts Exact",
       "Membership Cap Reached", "Hreflang Cap Reached", "Over-Long Locs Not Stored", "Alternates Over Per-URL Cap",
     ]);
     expect(rows(sitemap)[1]).toEqual([

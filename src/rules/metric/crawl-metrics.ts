@@ -326,10 +326,12 @@ type SitemapRow = {
  *  - `totalMemberships` (Phase 26c) — listings across all documents, summed from
  *    `sitemap_memberships`: that same URL counts three times. Null on a crawl
  *    that recorded no memberships.
- *  - `oversizedDocsSkipped` — documents the walk fetched and DROPPED WHOLE for
- *    exceeding the read cap, from the crawl's discovery evidence. Their entries
- *    are in neither count above, and without this column their absence would be
- *    invisible.
+ *  - `oversizedDocsSkipped` — documents the walk fetched that ran past the 50 MB
+ *    read cap, from the crawl's discovery evidence (the key keeps its old name).
+ *    Since Phase 26c (deviation 3) each is read up to the cap and the entries
+ *    read before it are kept and counted above; `sitemap.oversized` names them.
+ *    On an older crawl each was dropped whole, its entries in neither count
+ *    above, and without this column their absence would be invisible.
  *  - `urlCapBreaches` — documents carrying more than `SITEMAP_URL_CAP` entries.
  *    Counted over EVERY document, not only the fifty listed below.
  *  - `entryCapReached` — the discovery walk stopped collecting at its entry cap
@@ -474,7 +476,7 @@ export const crawlMetrics: MetricRule[] = [
       },
       { key: "totalMemberships", label: "Listings (All Documents)" },
       { key: "docs", label: "Documents" },
-      { key: "oversizedDocsSkipped", label: "Documents Dropped For Size" },
+      { key: "oversizedDocsSkipped", label: "Documents Over 50 MB" },
       { key: "entryCapReached", label: "Entry Cap Reached" },
       { key: "docCountsExact", label: "Counts Exact" },
       { key: "membershipLimited", label: "Membership Cap Reached" },
