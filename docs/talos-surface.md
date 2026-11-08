@@ -689,9 +689,9 @@ Two properties make the double-transport claim below cheap to trust:
   cursor behaviour is pinned per transport, by walks that page a listing to a
   null cursor, but page two is not compared across the two. The three read
   tools Phase 27a added are not among the thirteen pairs; each has its own
-  route-equals-tool test instead (`test/api/judgement-config.test.ts:611`
+  route-equals-tool test instead (`test/api/judgement-config.test.ts:648`
   "crawl_config_get answers what GET /crawls/:id/config answers",
-  `test/api/crawl-overview.test.ts:467` "serves the same answer at GET
+  `test/api/crawl-overview.test.ts:468` "serves the same answer at GET
   /crawls/:id/overview/crawl"). `GET /crawls/:id/overview/issues` has no
   route test of its own: it is the same service call as the tool, and the
   Phase 27a gate compared the two live, with and without `includeZero`, and
@@ -944,7 +944,7 @@ name and is stored in the same place: given in both places they must agree,
 or the start is refused naming both (`test/api/judgement-config.test.ts:273`
 "is accepted, stored, and read back by GET /crawls/:id/config",
 `test/api/judgement-config.test.ts:347` "refuses findingCap at both levels when
-they disagree, naming both"; over MCP, `test/api/judgement-config.test.ts:627`
+they disagree, naming both"; over MCP, `test/api/judgement-config.test.ts:664`
 "crawl_start takes the judgement field").
 
 ### 4.1a `crawl_resume` → `{crawlId, status, queuePosition}`
@@ -1156,7 +1156,7 @@ A crawl whose stored judgement overrides a rule this ruleset does not define is 
 `crawl_config_set` removing that override is the repair (§4.9). A judged crawl
 with no stamp is a 500 (the server log names the crawl under the correlation
 id), never "not stale" (hard rule 7). Pinned:
-`test/api/judgement-config.test.ts:554` "judgementStale on crawl_status,
+`test/api/judgement-config.test.ts:591` "judgementStale on crawl_status,
 metrics_get and metric_table" (three tests), `test/api/judgement-config.test.ts:469`
 "can repair a stored override naming a rule the ruleset no longer has".
 
@@ -1512,12 +1512,12 @@ back with `click-depth`, `issues-grid`, `render` and `robots-blocked-dropped`
 named, and those sections and that entry absent rather than written as zeros
 (§5.7).
 
-Pinned: `test/api/crawl-overview.test.ts:241` "crawl_overview on a judged,
-unrendered crawl" (9 tests, among them `test/api/crawl-overview.test.ts:260`
+Pinned: `test/api/crawl-overview.test.ts:242` "crawl_overview on a judged,
+unrendered crawl" (9 tests, among them `test/api/crawl-overview.test.ts:261`
 "takes every urls entry from the crawl_status field it names"),
-`test/api/crawl-overview.test.ts:412` "crawl_overview on other crawls" (7 tests:
+`test/api/crawl-overview.test.ts:413` "crawl_overview on other crawls" (7 tests:
 the unjudged, rendered and pre-0020 crawls, and the route), and
-`test/api/crawl-overview.test.ts:501` "the overviews read the judgement inside
+`test/api/crawl-overview.test.ts:502` "the overviews read the judgement inside
 their snapshot".
 
 ### 4.4 `issue_urls` → `{columns, items, nextCursor}` — one rule as a table
@@ -1787,9 +1787,9 @@ stored, and `site.health` counted only the findings of the rules that run left
 enabled, so a stale judgement means these numbers predate the crawl's current
 settings: a rule disabled since is still in `site.health`'s counts, and a rule
 re-enabled since is still out of them, until `crawl_rules` re-runs
-(`test/api/judgement-config.test.ts:680` "brings the group back at once while
+(`test/api/judgement-config.test.ts:717` "brings the group back at once while
 site.health keeps the disabled run's value"; the flag itself,
-`test/api/judgement-config.test.ts:554` "judgementStale on crawl_status,
+`test/api/judgement-config.test.ts:591` "judgementStale on crawl_status,
 metrics_get and metric_table").
 `value` is the metric's own object — its shape belongs to the metric, and the
 copy travels with it. Scopes: `site | page_type | sitemap_doc` (`rule` was never
@@ -2021,20 +2021,22 @@ the gate crawl answered them, 2026-11-08):
 
 **The repair route.** A crawl whose STORED block overrides a rule this ruleset
 does not define (a rule removed by a later release) is a 409 on every surface
-that reads the judgement, `crawl_config_get` included, naming the rule (§4.2).
+that reads the judgement, `crawl_config_get` included, naming the rule (§4.2),
+and on `crawl_rules` too, with the same text, refused before the run claims the
+crawl or touches a finding or the stamp.
 `crawl_config_set` is the one surface that accepts the crawl in that state, so
 that `{judgement: {rules: {<id>: null}}}` can remove the override. A patch that
 leaves such an override in place is refused (400), naming its path.
 
 Pinned: `test/api/judgement-config.test.ts:378` "crawl_config_set — PATCH
-/crawls/:id/config" (11 tests: merge, removal, severity, unknown rule, repair,
-the 409 while the rules run), `test/api/judgement-config.test.ts:518`
+/crawls/:id/config" (12 tests: merge, removal, severity, unknown rule, repair,
+`crawl_rules` refusing a removed rule's override, the 409 while the rules run), `test/api/judgement-config.test.ts:555`
 "findingCap through crawl_config_set" (4 tests, including
-`test/api/judgement-config.test.ts:530` "null is uncapped, as at crawl_start —
-never a silent return to the default"), over MCP `test/api/judgement-config.test.ts:611`
+`test/api/judgement-config.test.ts:567` "null is uncapped, as at crawl_start —
+never a silent return to the default"), over MCP `test/api/judgement-config.test.ts:648`
 "crawl_config_get answers what GET /crawls/:id/config answers" and
-`test/api/judgement-config.test.ts:617` "crawl_config_set refuses severity with
-the HTTP route's text", `test/api/judgement-config.test.ts:680` "brings the group
+`test/api/judgement-config.test.ts:654` "crawl_config_set refuses severity with
+the HTTP route's text", `test/api/judgement-config.test.ts:717` "brings the group
 back at once while site.health keeps the disabled run's value",
 `test/api/judgement-surfaces.test.ts:265` "re-enabling brings the findings back
 at once, and the judgement is no longer stale" and
@@ -2474,13 +2476,13 @@ measurement (pages no internal link reaches); and the dropped entry's `null`
 percent means "not a share of Encountered", not "not measured". In the CSV view
 each `notMeasured` item is a row after the entries, `<id>,Not measured:
 <reason>,,` with empty Value and Percent cells. Pinned:
-`test/api/crawl-overview.test.ts:242` "lists the measured sections in order and
-names render as not measured", `test/api/crawl-overview.test.ts:435` "names
+`test/api/crawl-overview.test.ts:243` "lists the measured sections in order and
+names render as not measured", `test/api/crawl-overview.test.ts:436` "names
 render coverage as not measured on a rendered crawl no rules run judged",
-`test/api/crawl-overview.test.ts:446` "names an uncounted robots overflow
-(pre-0020 crawl) instead of writing 0", `test/api/crawl-overview.test.ts:539`
+`test/api/crawl-overview.test.ts:447` "names an uncounted robots overflow
+(pre-0020 crawl) instead of writing 0", `test/api/crawl-overview.test.ts:540`
 "crawl_overview names issues-grid and click-depth as not measured, never zeros",
-`test/api/crawl-overview.test.ts:560` "has the exact header and one row per JSON
+`test/api/crawl-overview.test.ts:561` "has the exact header and one row per JSON
 entry, then the not-measured rows".
 
 ---
@@ -2762,7 +2764,7 @@ A `crawls.site_url` that is not a URL is a **409** ("whether they are the same
 site cannot be decided"), never "different sites". So is a side whose stored
 judgement overrides a rule this ruleset does not define (Phase 27a, §4.2), naming
 the crawl and the rule; `crawl_config_set` on that crawl is the repair. Pinned
-for the caveat: `test/api/judgement-config.test.ts:640` "adds a
+for the caveat: `test/api/judgement-config.test.ts:677` "adds a
 judgement-overrides caveat naming the crawl and the count".
 
 **The self-compare 400 has a UI consequence Talos should design for.** A compare
