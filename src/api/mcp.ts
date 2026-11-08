@@ -855,7 +855,9 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "a finding that names no URL counts as one site-wide entry. issues_list's " +
         "count is FINDINGS and can exceed urls when a rule fires more than once per " +
         "URL. pagesJudged is site.health's Pages Judged as the rules " +
-        "run stored it, and percentOfJudged is urls over it to one decimal place; both " +
+        "run stored it, and percentOfJudged is urls over it to one decimal place (it " +
+        "can exceed 100 for a site-wide rule whose URLs are not judged pages, e.g. " +
+        "sitemap.uncrawled, which lists sitemap URLs the crawl never fetched); both " +
         "are null when the crawl has no site.health row (and percentOfJudged when " +
         "pagesJudged is 0). Rules the crawl's judgement disables are left out and " +
         "named in disabledRules; metric rules never appear. Not paginated: one row per " +
@@ -1582,7 +1584,9 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "TWO FORMATS, TWO VOCABULARIES.\n" +
         `  format=jsonl.gz (the default) writes a gzipped JSONL file of one DATASET: ` +
         `${EXPORT_DATASETS.join(", ")} (default issues) — one JSON object per line, ` +
-        "evidence intact. Answers {dataset, path, rows, bytes}, plus disabledRules " +
+        "evidence intact; an issues row carries the crawl's type and priority after " +
+        "its overrides, as the issues CSV view does. Answers {dataset, path, rows, " +
+        "bytes}, plus disabledRules " +
         "on the issues dataset: the rules the crawl's judgement disables, whose " +
         "findings the file leaves out (the issues and issue_urls CSV views leave " +
         "them out too, and issue_urls of a disabled rule is refused).\n" +

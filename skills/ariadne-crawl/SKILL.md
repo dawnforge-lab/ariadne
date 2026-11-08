@@ -423,7 +423,7 @@ What the fields mean when you are waiting:
   setting; a number is what was set. **Check it before running the rules on client
   work**: the cap lives on the crawl row and `crawl_rules` has no argument to restate
   it. A billed audit started at the default is fixed with `crawl_config_set`
-  (`{"findingCap": null}`) before `crawl_rules`, not with a re-crawl.
+  (`{"judgement": {"findingCap": null}}`) before `crawl_rules`, not with a re-crawl.
   A reported `200` does not distinguish an explicit `findingCap: 200` from an absent
   one, and since Phase 19 §11 there is nothing to distinguish: one budget, so the
   stated default and the absent one judge identically.
@@ -702,9 +702,9 @@ has judged the crawl); and
 
 `crawl_config_set` takes `{crawlId, judgement: <patch>}` and answers the same shape.
 The patch is a MERGE-PATCH of the stored block: objects merge key by key, and `null`
-removes a key — `{"rules": {"title.too-long": null}}` drops that rule's override,
-`{"thresholds": {"SLOW_MS": null}}` returns `SLOW_MS` to its default, and
-`{"rules": null, "thresholds": null}` clears everything. **The one exception is
+removes a key — `{"judgement": {"rules": {"title.too-long": null}}}` drops that rule's
+override, `{"judgement": {"thresholds": {"SLOW_MS": null}}}` returns `SLOW_MS` to its
+default, and `{"judgement": {"rules": null, "thresholds": null}}` clears everything. **The one exception is
 `findingCap`: `null` there means uncapped, exactly as at `crawl_start`, never "remove
 the key".** Send `200` to go back to the default cap.
 
@@ -733,7 +733,7 @@ is running over the crawl: wait for the run to answer, then set it.
 **A 409 naming an override on a rule "this ruleset does not define"** — on
 `crawl_status`, the listings, the metrics or `crawl_compare` — means the crawl's
 stored judgement names a rule a later engine release removed. `crawl_config_set` with
-`{"rules": {"<that id>": null}}` repairs it; it is the one tool that accepts the crawl
+`{"judgement": {"rules": {"<that id>": null}}}` repairs it; it is the one tool that accepts the crawl
 in that state.
 
 ## Step 5 — when things go wrong

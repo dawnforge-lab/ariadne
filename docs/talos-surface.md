@@ -22,8 +22,9 @@ no finding moves. Four tools and four routes are new:
   every divergence). Metric rules have neither. NOT MEASURED markers are always
   `warning` / `low`. Neither is stored per finding: both are joined from the
   registry, plus the crawl's overrides, when a surface reads them. They appear
-  on `issues_list` (§4.3), `issues_overview` (§4.3a), `rules_catalog` (§5.1) and
-  the `issues` CSV view (§12).
+  on `issues_list` (§4.3), `issues_overview` (§4.3a), `rules_catalog` (§5.1),
+  the `issues` CSV view (§12) and every row of the `issues` JSONL dataset
+  (`export_crawl`, the same reading as the CSV view's columns).
 - **The judgement block** (`crawl_config_get` / `crawl_config_set`, §4.9, and
   `crawl_start`'s `judgement` argument, §4.1): per crawl, an agent can disable,
   retype or reprioritise a rule, override 20 allowlisted thresholds, and set
@@ -1417,7 +1418,10 @@ its 46 rows, as they came back (2026-11-08):
   stop at what the rule wrote.
 - **`pagesJudged`** is `site.health`'s Pages Judged (`urlsTotal`) as the last
   rules run stored it, and **`percentOfJudged`** is `urls` over it, to one
-  decimal place. §5.7 says when each is `null`.
+  decimal place. §5.7 says when each is `null`. **It can exceed 100** for a
+  site-wide rule whose URLs are not judged pages: `sitemap.uncrawled` lists
+  sitemap URLs the crawl never fetched, so its `urls` is not a subset of Pages
+  Judged. Read it as a ratio, not a share, on such rules.
 - `typeOverridden`, `priorityOverridden` and `marker` behave as on the listings:
   present (`true`) or absent. A marker that fired is always a row, because "not
   measured" has to stay visible. Severity is the stored reading and is never
@@ -1482,6 +1486,13 @@ Its ten sections, in this order: `urls`, `fetch-class`, `status-class`,
   canonical predicate, which counts a page whose canonical is relative,
   non-ASCII or has dot segments as Indexable (ruling 8: the overview agrees with
   what the rules judge). `click-depth` is `0`–`9`, `10+` and `Unreachable`.
+  **It counts EVERY `pages` row**, like the other partitions, so `Unreachable`
+  (a null `click_depth`) includes redirects, error pages and robots-blocked rows,
+  not only orphaned HTML. That is a different population from the metric
+  `structure.click-depth-distribution`, which counts the judged cohort (fetched OK,
+  200, indexable, not canonicalised elsewhere; §6), so the two do not agree
+  bucket for bucket; read the metric when the question is
+  how deep the judged pages sit.
   `discovery` is one entry per `discovered_via`, then `In a sitemap` /
   `Not in a sitemap`.
 - **`response-time` buckets are fixed** (Deviation 5): `Under 250 ms`,
@@ -2046,9 +2057,9 @@ never a silent return to the default"), over MCP `test/api/judgement-config.test
 `test/api/judgement-config.test.ts:658` "crawl_config_set refuses severity with
 the HTTP route's text", `test/api/judgement-config.test.ts:721` "brings the group
 back at once while site.health keeps the disabled run's value",
-`test/api/judgement-surfaces.test.ts:300` "re-enabling brings the findings back
+`test/api/judgement-surfaces.test.ts:315` "re-enabling brings the findings back
 at once, and the judgement is no longer stale" and
-`test/api/judgement-surfaces.test.ts:313` "quotes the stamped value until the
+`test/api/judgement-surfaces.test.ts:328` "quotes the stamped value until the
 rules re-run, and reports the staleness".
 
 ---
@@ -2104,7 +2115,7 @@ rendered from those thresholds, so an override shows in the text only after
 "Response time over 1500 ms" with `SLOW_MS: 500` set and stale, and "over 500
 ms" after the re-run). Pinned: `test/api/judgement-surfaces.test.ts:182`
 "rules_catalog keeps the disabled rule, flags it, and still counts its stored
-findings", `test/api/judgement-surfaces.test.ts:336` "without a crawl the
+findings", `test/api/judgement-surfaces.test.ts:351` "without a crawl the
 catalog is the default rendering, with type and priority and no judgement
 fields".
 

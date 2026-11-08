@@ -5787,10 +5787,15 @@ export class ApiService {
         if (result.rows.length === 0) return;
         for (const row of result.rows) {
           const rule = this.ruleFor(row.rule_id, crawlId, "issues");
+          // The crawl's type and priority, after its overrides — the same
+          // `triageFields` reading the `issues` CSV view's columns take.
+          const triage = triageFields(view, row.rule_id);
           yield {
             ruleId: row.rule_id,
             checkIds: [...rule.checkIds],
             severity: row.severity,
+            type: triage.type,
+            priority: triage.priority,
             category: rule.category,
             title: copy(row.rule_id).title,
             url: row.url,

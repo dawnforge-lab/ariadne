@@ -265,6 +265,21 @@ describe("rule overrides apply at read time", () => {
     expect(rows.length).toBe(result.rows);
     expect(rows.some((r) => r["ruleId"] === "title.too-long")).toBe(false);
     expect(rows.some((r) => r["ruleId"] === "meta-description.missing")).toBe(true);
+    // Every row carries the crawl's type and priority, after its overrides,
+    // exactly as the `issues` CSV view's columns do.
+    const csv = (await csvLines("issues")).slice(1).map((line) => line.split(","));
+    const csvTriage = new Map(csv.map((cells) => [cells[0], `${cells[2]}/${cells[3]}`]));
+    for (const row of rows) {
+      expect(row, String(row["ruleId"])).toHaveProperty("type");
+      expect(row, String(row["ruleId"])).toHaveProperty("priority");
+      expect(`${String(row["type"])}/${String(row["priority"])}`).toBe(
+        csvTriage.get(String(row["ruleId"])),
+      );
+    }
+    const meta = rows.find((r) => r["ruleId"] === "meta-description.missing");
+    expect(meta).toMatchObject({ type: "opportunity", priority: "low" });
+    const marker = rows.find((r) => MARKERS.has(String(r["ruleId"])));
+    expect(marker).toMatchObject({ type: "warning", priority: "low" });
 
     // The other datasets are not about findings and carry no such field.
     const pagesExport = (await service.exportCrawl(crawlId, { dataset: "pages" })) as ExportResult;

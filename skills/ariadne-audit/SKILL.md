@@ -36,8 +36,8 @@ defaults: what that kind of finding usually is, and what fixing it is usually wo
 referenced against Screaming Frog's Issue Type and Issue Priority. They have not seen
 this site any more than severity has. Treat them as the opening bid: where this site
 says otherwise, record your reading on the crawl with `crawl_config_set` (for
-example `{"rules": {"images.missing-dimensions": {"priority": "high"}}}`), and every
-surface — `issues_list`, `issues_overview`, the CSV views — then serves your value
+example `{"judgement": {"rules": {"images.missing-dimensions": {"priority": "high"}}}}`),
+and every surface — `issues_list`, `issues_overview`, the CSV views — then serves your value
 with `typeOverridden` / `priorityOverridden` marking it as set by you. Severity cannot
 be overridden: it is the engine's fact about the rule; adjust it in the findings file
 with the reason in `notes`, as below.
@@ -45,11 +45,11 @@ with the reason in `notes`, as below.
 **Disabling a rule is how "this does not apply here" is recorded.** When a rule's
 findings are true but irrelevant to this site — `url.internal-search` on a site whose
 search pages are deliberately crawlable, a pagination rule on a template the client
-has retired — set `{"rules": {"<ruleId>": {"disabled": true}}}` with
+has retired — send `{"judgement": {"rules": {"<ruleId>": {"disabled": true}}}}` with
 `crawl_config_set`, and say why in that check's `notes`. The findings stay stored;
 every listing leaves them out and names the rule in `disabledRules`, `issue_urls` of
 that rule is refused rather than answered empty, and removing the override
-(`{"rules": {"<ruleId>": null}}`) brings them back at once. The decision is visible,
+(`{"judgement": {"rules": {"<ruleId>": null}}}`) brings them back at once. The decision is visible,
 reversible and on the crawl, not buried in your notes. Never disable a rule to make a
 real defect disappear; a check whose findings you disabled is a `SKIP` with its
 reason, or a `FAIL` you argue down, never a `PASS`.
@@ -300,7 +300,7 @@ of three ways:
   **Set it at `crawl_start`; change it with `crawl_config_set`.** `crawl_rules` has no
   cap argument: the choice lives on the crawl row so that re-judging the crawl months
   later produces the same listing. A billed audit started without it does not need a
-  re-crawl since Phase 27a: `crawl_config_set` with `{"findingCap": null}` (null is
+  re-crawl since Phase 27a: `crawl_config_set` with `{"judgement": {"findingCap": null}}` (null is
   uncapped there too — it is not "remove the key") and then `crawl_rules` re-judges it
   uncapped. Until that run, `crawl_status`'s `judgementStale` reads
   `{"stale": true, "reasons": ["findingCap"]}`: the stored listing is still the capped
