@@ -847,8 +847,10 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "type (issue, warning, opportunity), then priority (high, medium, low), then " +
         "urls descending, then ruleId. typeOverridden / priorityOverridden are present " +
         "(true) when the crawl's judgement sets them; severity is never overridable. " +
-        "urls is the number of distinct pages the rule fired on, plus one when it has " +
-        "a site-wide finding. pagesJudged is site.health's Pages Judged as the rules " +
+        "urls is the number of distinct URLs, as issue_urls lists them for the rule; " +
+        "a finding that names no URL counts as one site-wide entry. issues_list's " +
+        "count is FINDINGS and can exceed urls when a rule fires more than once per " +
+        "URL. pagesJudged is site.health's Pages Judged as the rules " +
         "run stored it, and percentOfJudged is urls over it to one decimal place; both " +
         "are null when the crawl has no site.health row (and percentOfJudged when " +
         "pagesJudged is 0). Rules the crawl's judgement disables are left out and " +
