@@ -665,14 +665,14 @@ afterAll(async () => {
 });
 
 describe("the tool surface", () => {
-  it("advertises exactly the eighteen tools of the agent surface, each described", async () => {
+  it("advertises exactly the twenty tools of the agent surface, each described", async () => {
     const listed = await client.listTools();
     expect(listed.tools.map((t) => t.name).sort()).toEqual(
       [
-        "compare_urls", "crawl_compare", "crawl_list", "crawl_mark_failed", "crawl_render",
-        "crawl_resume", "crawl_rules", "crawl_start", "crawl_status", "export_crawl",
-        "issue_inlinks", "issue_urls", "issues_list", "metric_table", "metrics_get",
-        "pages_query", "robots_get", "rules_catalog",
+        "compare_urls", "crawl_compare", "crawl_config_get", "crawl_config_set", "crawl_list",
+        "crawl_mark_failed", "crawl_render", "crawl_resume", "crawl_rules", "crawl_start",
+        "crawl_status", "export_crawl", "issue_inlinks", "issue_urls", "issues_list",
+        "metric_table", "metrics_get", "pages_query", "robots_get", "rules_catalog",
       ].sort(),
     );
     for (const tool of listed.tools) {
@@ -2138,7 +2138,7 @@ describe("crawl_compare / compare_urls", () => {
     // state.
     for (const code of [
       "ruleset-mismatch", "ruleset-unrecorded", "ruleset-mixed",
-      "finding-cap-differs", "severity-changed",
+      "finding-cap-differs", "severity-changed", "judgement-overrides",
     ]) {
       expect(text, `crawl_compare's description does not name '${code}'`).toContain(code);
     }

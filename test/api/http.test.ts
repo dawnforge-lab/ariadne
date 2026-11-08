@@ -1950,7 +1950,7 @@ describe("the judged-state marker across a re-judge", () => {
     // the old timestamp over the new run's half-written table.
     const id = await seedCrawl({ status: "finished", discovery: DISCOVERY });
     const before = new Date("2020-01-01T00:00:00.000Z");
-    await db.update(crawls).set({ rulesRunAt: before }).where(eq(crawls.id, id));
+    await db.update(crawls).set({ rulesRunAt: before, rulesJudgedWith: { disabledRules: [], thresholds: {} } }).where(eq(crawls.id, id));
 
     const stale = await call("GET", `/crawls/${id}`);
     expect(stale.body["rulesRunAt"]).toBe(before.toISOString());

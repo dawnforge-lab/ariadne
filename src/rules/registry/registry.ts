@@ -934,6 +934,15 @@ const KINDS = ["page", "query", "metric"] as const satisfies readonly AnyRule["k
 //     current block on an unjudged crawl); `judgementStale` rides the
 //     listing and the catalog. All additive; no finding moves.
 //     `rules_catalog` re-measured at 200,260 bytes (no crawl). 188 rules.
+//  6. (T6) The judgement is settable. `crawl_start` takes a `judgement` block
+//     (its `findingCap` written to `config_jsonb.findingCap`, refused if it
+//     disagrees with the top-level one); `crawl_config_get` /
+//     `GET /crawls/:id/config` reads it with every overridable threshold and
+//     the last run's stamp; `crawl_config_set` / `PATCH /crawls/:id/config`
+//     applies an RFC 7396 merge-patch (null removes a key, except findingCap,
+//     where null is uncapped), refused while the rules run. `judgementStale`
+//     rides `crawl_status`, `metrics_get` and `metric_table`; `crawl_compare`
+//     gains a `judgement-overrides` caveat. No finding moves. 188 rules.
 export const RULESET_VERSION = "0.23.0";
 
 /**

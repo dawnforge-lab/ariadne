@@ -34,6 +34,7 @@ import {
   readStamp,
   readStoredJudgement,
   staleReasons,
+  type JudgedWith,
   type JudgementBlock,
   type StaleReason,
   type Thresholds,
@@ -74,6 +75,22 @@ export interface JudgementView {
    */
   copyThresholds: Thresholds;
   judgementStale: JudgementStale;
+  /** What the last rules run was judged with (the stamp), or null when unjudged. */
+  judgedWith: JudgedWith | null;
+  /**
+   * `config_jsonb.findingCap` as stored: absent (`undefined`, the engine
+   * default), `null` (uncapped) or a positive integer. The block's own
+   * `findingCap` lives here and nowhere else (plan Deviation 1).
+   */
+  findingCap: number | null | undefined;
+}
+
+/** The columns of a `crawls` row a judgement view is built from. */
+export interface JudgementRow {
+  config: unknown;
+  judgement: unknown;
+  rulesJudgedWith: unknown;
+  rulesRunAt: Date | null;
 }
 
 /**
@@ -107,7 +124,20 @@ export async function loadJudgementView(
     .limit(1);
   const row = rows[0];
   if (row === undefined) throw new ServiceError("NOT_FOUND", `no such crawl '${clip(crawlId)}'`);
+  return judgementViewOf(row, crawlId, registry);
+}
 
+/**
+ * `loadJudgementView` over a crawl row the caller already holds — for a
+ * surface whose answer must come out of ONE read of the row (`crawl_status`,
+ * whose `rulesRunAt` and `judgementStale` describe the same instant, and
+ * `crawl_compare`, which reads both sides inside its snapshot). Same refusals.
+ */
+export function judgementViewOf(
+  row: JudgementRow,
+  crawlId: string,
+  registry: Registry,
+): JudgementView {
   let block: JudgementBlock | null;
   try {
     block = readStoredJudgement(row.judgement, crawlId, registry);
@@ -142,19 +172,22 @@ export async function loadJudgementView(
   };
   const overrides = block?.rules ?? {};
 
+  let cap: number | null | undefined;
+  try {
+    cap = storedFindingCap(row.config, crawlId);
+  } catch (error) {
+    throw new ServiceError("CONFLICT", error instanceof Error ? error.message : String(error));
+  }
+
   let judgementStale: JudgementStale = { stale: false, reasons: [] };
   let copyThresholds = effectiveThresholds(block);
+  let judgedWith: JudgedWith | null = null;
   if (row.rulesRunAt !== null) {
     const stamp = readStamp(row.rulesJudgedWith, crawlId);
-    let cap: number | null | undefined;
-    try {
-      cap = storedFindingCap(row.config, crawlId);
-    } catch (error) {
-      throw new ServiceError("CONFLICT", error instanceof Error ? error.message : String(error));
-    }
     const reasons = staleReasons(judgedWithOf(block, cap), stamp);
     judgementStale = { stale: reasons.length > 0, reasons };
     copyThresholds = effectiveThresholds({ thresholds: stamp.thresholds });
+    judgedWith = stamp;
   }
 
   return {
@@ -176,6 +209,8 @@ export async function loadJudgementView(
     },
     copyThresholds,
     judgementStale,
+    judgedWith,
+    findingCap: cap,
   };
 }
 
@@ -240,4 +275,49 @@ export function triageFields(
     ...(t.overridden ? { typeOverridden: true as const } : {}),
     ...(p.overridden ? { priorityOverridden: true as const } : {}),
   };
+}
+
+/** A JSON object — not null, not an array. */
+export function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/**
+ * RFC 7396 JSON Merge Patch: apply `patch` to `target` and return the result.
+ *
+ *  - an object patch merges key by key, recursively;
+ *  - a `null` value deletes the key (deleting a key that is not there is not
+ *    an error);
+ *  - anything that is not an object — an array, a string, a number — replaces
+ *    the target outright. Arrays are never merged element by element; the
+ *    judgement block allows none, so a patch that sends one is replaced in and
+ *    refused by `parseJudgement` afterwards.
+ *
+ * Pure: neither input is mutated. Validation is NOT this function's job; the
+ * caller parses the merged document.
+ */
+export function mergePatch(target: unknown, patch: unknown): unknown {
+  if (!isPlainObject(patch)) return patch;
+  const result: Record<string, unknown> = isPlainObject(target) ? { ...target } : {};
+  for (const [key, value] of Object.entries(patch)) {
+    if (value === null) delete result[key];
+    else result[key] = mergePatch(result[key], value);
+  }
+  return result;
+}
+
+/**
+ * A parsed block with its empty sections dropped: `{rules: {}}` — what a
+ * merge-patch that removes a crawl's last override leaves — is stored as `{}`,
+ * so "no overrides" has one spelling. `findingCap` is NOT carried: its bytes
+ * live in `config_jsonb.findingCap` (plan Deviation 1), and the caller writes
+ * them there.
+ */
+export function storableBlock(block: JudgementBlock): JudgementBlock {
+  const out: JudgementBlock = {};
+  if (block.rules !== undefined && Object.keys(block.rules).length > 0) out.rules = block.rules;
+  if (block.thresholds !== undefined && Object.keys(block.thresholds).length > 0) {
+    out.thresholds = block.thresholds;
+  }
+  return out;
 }

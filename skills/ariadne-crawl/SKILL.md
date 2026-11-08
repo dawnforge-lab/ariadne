@@ -227,7 +227,7 @@ target is not something this skill can crawl.
  queuePosition, liveLeases, blockedPages, hostSpacingMs, throttle,
  platform, platformProfile,
  robotsBlocked: {recorded, dropped},
- rulesRunAt, findingsCount, pagesScanned, fetchResources,
+ rulesRunAt, judgementStale, findingsCount, pagesScanned, fetchResources,
  resourceRefsCappedPages,
  resources: {seen, fetched, failed, skipped, robotsDenied, robotsUnreachable,
              capped},

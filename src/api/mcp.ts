@@ -1,6 +1,8 @@
 /**
- * The MCP transport: sixteen tools over the same service layer the HTTP routes
- * use.
+ * The MCP transport: twenty tools over the same service layer the HTTP routes
+ * use. Six of them change something (`crawl_start`, `crawl_resume`,
+ * `crawl_render`, `crawl_rules`, `crawl_mark_failed`, `crawl_config_set`);
+ * every other one only reads.
  *
  * This is a SECOND TRANSPORT, not a second API. Every tool below is a schema, a
  * description written for an agent, and one call into `ApiService` — there is no
@@ -104,6 +106,8 @@ export const TOOL_NAMES = [
   "crawl_resume",
   "crawl_render",
   "crawl_rules",
+  "crawl_config_get",
+  "crawl_config_set",
   "robots_get",
   "issues_list",
   "issue_urls",
@@ -247,7 +251,10 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "and its crawl-delay are honoured, the user agent is branded, and " +
         "perHostDelayMs has a floor of 250ms — below it the crawl is refused, " +
         "not slowed. Leave the pacing fields alone unless the site's owner has " +
-        "asked for something specific.",
+        "asked for something specific.\n\n" +
+        "judgement sets how this crawl is JUDGED from the start — the same block " +
+        "crawl_config_set changes later (see there for its shape). It is checked " +
+        "against the ruleset before the crawl is accepted.",
       inputSchema: z.strictObject(crawlStartShape()),
     },
     async (args) => run("crawl_start", () => service.startCrawl(parseStartCrawlInput(args))),
@@ -262,8 +269,8 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "counts (queued/leased/done/failed), the ruleset version it was judged " +
         "with, failureReason, queuePosition, liveLeases, blockedPages, robotsBlocked, " +
         "hostSpacingMs, throttle, platform, platformProfile, " +
-        "legacyHosts, sitemapUrls, findingCap, rulesRunAt, findingsCount, " +
-        "pagesScanned, fetchResources, resources and recheck.\n\n" +
+        "legacyHosts, sitemapUrls, findingCap, rulesRunAt, judgementStale, " +
+        "findingsCount, pagesScanned, fetchResources, resources and recheck.\n\n" +
         "WHY A FAILED CRAWL FAILED: failureReason, one sentence, and null on " +
         "every crawl that is not 'failed'. It is the difference between 'failed' " +
         "as a dead end and 'failed' as something you can act on — a crawl refused " +
@@ -284,6 +291,11 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "null is 'nobody has looked', and findingsCount 0 with a timestamp is " +
         "'looked, found nothing'. findingsCount is the live number of issue rows, " +
         "which is what issues_list's groups sum to.\n\n" +
+        "judgementStale {stale, reasons} says whether the crawl's judgement " +
+        "(crawl_config_set) has changed since that pass: reasons are overrides " +
+        "(the disabled set), thresholds and findingCap. Stale means the stored " +
+        "findings and metrics were judged under the OLD settings; re-run " +
+        "crawl_rules to clear it. Never stale on a crawl nobody has judged.\n\n" +
         "pagesScanned is how many pages a rules run over this crawl reads — the " +
         "crawl's page rows, which is exactly what crawl_rules counts as its own " +
         "pagesScanned. It describes the CRAWL, so it is answered on a crawl " +
@@ -673,6 +685,75 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
     async ({ crawlId }) => run("crawl_mark_failed", () => service.markCrawlFailed(crawlId)),
   );
 
+  server.registerTool(
+    named("crawl_config_get"),
+    {
+      title: "How a crawl is judged",
+      description:
+        "A crawl's JUDGEMENT — what you have changed about how its findings are " +
+        "judged — and what its last rules run used. Answers {crawlId, judgement, " +
+        "thresholds, judgedWith, judgementStale}.\n\n" +
+        "judgement is the crawl's block, {} when nothing is set: " +
+        "{rules?: {[ruleId]: {disabled?: true, type?, priority?}}, " +
+        "thresholds?: {[name]: number}, findingCap?: number | null}. findingCap " +
+        "appears when the crawl's config sets one (null is uncapped) and is absent " +
+        "when the default of 200 applies.\n\n" +
+        "thresholds lists EVERY overridable threshold as {value, default, min, max, " +
+        "overridden}: value is what the NEXT rules run will use, overridden is true " +
+        "where the block sets it.\n\n" +
+        "judgedWith is the stamp of the last completed rules run — {disabledRules, " +
+        "thresholds (its overrides), findingCap?} — or null on a crawl nobody has " +
+        "judged. judgementStale {stale, reasons} compares it with the current block " +
+        "(reasons: overrides | thresholds | findingCap).",
+      inputSchema: z.strictObject({ crawlId: crawlIdField() }),
+    },
+    async ({ crawlId }) => run("crawl_config_get", () => service.getCrawlConfig(crawlId)),
+  );
+
+  server.registerTool(
+    named("crawl_config_set"),
+    {
+      title: "Change how a crawl is judged",
+      description:
+        "Change a crawl's judgement block and answer the result, exactly as " +
+        "crawl_config_get does. judgement is a MERGE-PATCH (RFC 7396) of the " +
+        "stored block: objects merge key by key, and null REMOVES a key — " +
+        "{rules: {'title.too-long': null}} drops that rule's override, " +
+        "{thresholds: {SLOW_MS: null}} returns SLOW_MS to its default, " +
+        "{rules: null} clears every rule override. The one exception is findingCap, " +
+        "where null is a value as it is at crawl_start: uncapped. Send 200 to return " +
+        "to the default cap.\n\n" +
+        "What can be set, per rule: disabled: true (re-enable by removing it), " +
+        "type (issue | warning | opportunity) and priority (high | medium | low). " +
+        "SEVERITY CANNOT BE SET — it is the engine's fact about the rule; change its " +
+        "priority or disable it instead. Metric rules have no type or priority and " +
+        "cannot be disabled. thresholds takes the names crawl_config_get lists, " +
+        "each an integer within its bounds.\n\n" +
+        "WHEN IT TAKES EFFECT. Rule overrides act on what is READ: a disabled " +
+        "rule's findings leave issues_list, the CSV views and the exports at once, " +
+        "and come back at once when it is re-enabled — they are stored either way. " +
+        "Thresholds and findingCap change what a rules run PRODUCES, so they take " +
+        "effect at the next crawl_rules; until then judgementStale says so. " +
+        "Stored aggregates (site.health) are the last run's until the rules re-run.\n\n" +
+        "REFUSED, each by name: a block the ruleset cannot apply (the message " +
+        "names the path, e.g. rules.title.too-long.severity); and any change while " +
+        "crawl_rules is running over the crawl — wait for it to answer, then set it. " +
+        "Nothing is written when a change is refused.",
+      inputSchema: z.strictObject({
+        crawlId: crawlIdField(),
+        judgement: z
+          .record(z.string(), z.unknown())
+          .describe(
+            "The merge-patch to apply to the crawl's judgement block: {rules?, " +
+              "thresholds?, findingCap?}. Validated against the ruleset after merging; " +
+              "a refusal names the offending path.",
+          ),
+      }),
+    },
+    async ({ crawlId, judgement }) =>
+      run("crawl_config_set", () => service.setCrawlJudgement(crawlId, { judgement })),
+  );
+
   // -------------------------------------------------------------- the results
 
   server.registerTool(
@@ -890,8 +971,12 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         `  scope      — the cohort kind: ${METRIC_SCOPES_HINT}\n` +
         "  scopeValue — the cohort itself, e.g. a page type or a sitemap URL " +
         "(empty string for site scope)\n\n" +
-        `Paginated: {items, nextCursor}; limit defaults to ${PAGE_SIZE_DEFAULT}, ` +
-        `maximum ${PAGE_SIZE_MAX}.`,
+        "judgementStale {stale, reasons} rides the answer, as on crawl_status: a " +
+        "metric is a measurement the last rules run stored — site.health counted " +
+        "the rules that run left enabled — so a stale judgement means these numbers " +
+        "predate the crawl's current settings.\n\n" +
+        `Paginated: {items, nextCursor, judgementStale}; limit defaults to ` +
+        `${PAGE_SIZE_DEFAULT}, maximum ${PAGE_SIZE_MAX}.`,
       inputSchema: z.strictObject({
         crawlId: crawlIdField(),
         metricId: z
@@ -922,7 +1007,9 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
       title: "One metric as a table",
       description:
         "ONE METRIC, SHAPED INTO THE TABLE IT IS: {metricId, title, explanation, " +
-        "howToFix, summary, columns, rows, note?}. metrics_get serves a metric's " +
+        "howToFix, summary, columns, rows, note?, judgementStale}. judgementStale " +
+        "is crawl_status's flag: true when the crawl's judgement has changed since " +
+        "the rules run that wrote these rows. metrics_get serves a metric's " +
         "stored value verbatim, and its shape belongs to the metric — four " +
         "different shapes across the fourteen metrics, each needing its own " +
         "reader. This is the same numbers with the engine's own header on them.\n\n" +
@@ -1312,6 +1399,10 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "were actually cut on which side.\n" +
         "  severity-changed    — a rule is recorded at different severities on the " +
         "two sides. The row reports the HEAD severity, which is the current reading.\n" +
+        "  judgement-overrides — a side's judgement (crawl_config_set) disables rules; " +
+        "the message names the crawl and how many. Their stored findings ARE counted " +
+        "here, while that crawl's issues_list leaves them out. It does not change " +
+        "comparable.\n" +
         "This is a STATEMENT, NOT A REFUSAL: the counts are returned either way, and " +
         "it is for you to decide whether to quote a change. comparable true is the " +
         "weaker claim it sounds — it says the stamps agree, not that the numbers " +
@@ -1645,6 +1736,15 @@ function crawlStartShape() {
           "such a crawl reads as 'nothing was weighed' rather than 'nothing is " +
           "heavy'. The pass runs under the same politeness the page crawl earned; " +
           "turning it off is a decision about somebody's servers, not a speed knob.",
+      )
+      .optional(),
+    judgement: z
+      .record(z.string(), z.unknown())
+      .describe(
+        "How this crawl will be judged: {rules?: {[ruleId]: {disabled?: true, type?, " +
+          "priority?}}, thresholds?: {[name]: number}, findingCap?: number | null} — " +
+          "the block crawl_config_set changes later. findingCap may be given here " +
+          "instead of at the top level; given in both places, the two must agree.",
       )
       .optional(),
   };

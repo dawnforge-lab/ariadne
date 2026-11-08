@@ -32,6 +32,13 @@
  *                                      instead, replacing the automatic
  *                                      selection for that pass
  *   POST /crawls/:id/rules             run the rules
+ *   GET  /crawls/:id/config            the crawl's judgement block, every
+ *                                      overridable threshold, the last run's
+ *                                      stamp and `judgementStale`
+ *   PATCH /crawls/:id/config           `{judgement: {...}}`, an RFC 7396
+ *                                      merge-patch of the block (null removes a
+ *                                      key, except `findingCap`, where null is
+ *                                      uncapped). 409 while the rules run
  *   GET  /crawls/:id/issues            findings grouped by rule (the triage view).
  *                                      A group's `count` is the rows the rule
  *                                      wrote; `truncated` + `total`|`atLeast`
@@ -346,6 +353,27 @@ function buildRoutes(): Route[] {
         noBody(ctx);
         return { status: 200, body: await service.runRulesForCrawl(param(ctx, "id")) };
       },
+    },
+    {
+      method: "GET",
+      pattern: ["crawls", id, "config"],
+      query: [],
+      handler: async (service, ctx) => ({
+        status: 200,
+        body: await service.getCrawlConfig(param(ctx, "id")),
+      }),
+    },
+    {
+      method: "PATCH",
+      pattern: ["crawls", id, "config"],
+      query: [],
+      // The body is the patch, validated whole by the service: a missing body,
+      // a key other than `judgement`, or a block the ruleset cannot apply is a
+      // 400 naming what was wrong, and nothing is written.
+      handler: async (service, ctx) => ({
+        status: 200,
+        body: await service.setCrawlJudgement(param(ctx, "id"), ctx.body),
+      }),
     },
     // THE QUERY SURFACE. Every one of these is a GET whose whole body is
     // `{items, nextCursor}` — one pagination shape, so an agent that learns to

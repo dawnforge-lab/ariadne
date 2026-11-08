@@ -837,7 +837,7 @@ webhooks**: polling `crawl_status` is the contract until Talos asks otherwise.
 | `export_crawl` | `GET /crawls/:id/export` | `format` (`jsonl.gz` \| `csv`), `dataset` (jsonl.gz only), `view` + `ruleId` \| `metricId` (csv only) |
 
 Pinned: the tool list and every schema — `test/api/mcp.test.ts:668`
-("advertises exactly the eighteen tools of the agent surface"),
+("advertises exactly the twenty tools of the agent surface"),
 `test/api/mcp.test.ts:695` ("closes every input schema and describes every
 field"), `test/api/mcp.test.ts:727` ("names every member of the closed
 vocabulary each field enumerates"), `test/api/mcp.test.ts:756` ("advertises
@@ -2396,7 +2396,7 @@ Four postures a Talos integrator should know about rather than discover:
   contract.
 - **No tenancy isolation on listing** (§9.3) and no per-tenant credentials: one
   bearer token per server.
-- **No writes from a read surface.** Every query path runs read-only; the four
+- **No writes from a read surface.** Every query path runs read-only; the six
   command tools are the only things that change anything.
 
 ---

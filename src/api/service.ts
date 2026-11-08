@@ -54,7 +54,7 @@ import { join as joinPath, resolve as resolvePath, sep as pathSep } from "node:p
 import { PassThrough, type Duplex } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { createGzip } from "node:zlib";
-import { and, asc, desc, eq, getTableColumns, gt, isNotNull, sql, type SQL } from "drizzle-orm";
+import { and, asc, desc, eq, getTableColumns, gt, inArray, isNotNull, sql, type SQL } from "drizzle-orm";
 
 import type { Db } from "../db/client.js";
 import { crawls, frontier, issues, pages } from "../db/schema.js";
@@ -126,7 +126,16 @@ import {
   type RuleColumn,
   type Severity,
 } from "../rules/registry/types.js";
-import type { ThresholdName } from "../rules/judgement.js";
+import {
+  JudgementError,
+  OVERRIDABLE_THRESHOLDS,
+  effectiveThresholds,
+  parseJudgement,
+  readStoredJudgement,
+  type JudgedWith,
+  type JudgementBlock,
+  type ThresholdName,
+} from "../rules/judgement.js";
 import {
   indexabilityOf,
   ROBOTS_BLOCKED,
@@ -152,9 +161,13 @@ import {
 import { ServiceError, clip } from "./errors.js";
 import {
   copyRenderer,
+  isPlainObject,
+  judgementViewOf,
   loadJudgementView,
+  mergePatch,
   notDisabled,
   refuseIfDisabled,
+  storableBlock,
   triageFields,
   type JudgementStale,
   type JudgementView,
@@ -262,9 +275,16 @@ export interface StartCrawlInput {
   renderSamplePerType?: number;
   findingCap?: number | null;
   fetchResources?: boolean;
+  /**
+   * The crawl's judgement block (Phase 27a), as the caller sent it: checked to
+   * be a JSON object here and parsed against the ruleset by `startCrawl`
+   * (`parseJudgement`), which is where the registry is. Its `findingCap` is
+   * stored in `config_jsonb.findingCap`; the rest in `judgement_jsonb`.
+   */
+  judgement?: unknown;
 }
 
-type FieldKind = "string" | "number" | "boolean" | "string[]" | "number|null";
+type FieldKind = "string" | "number" | "boolean" | "string[]" | "number|null" | "object";
 
 /**
  * The wire's whole vocabulary for starting a crawl.
@@ -296,6 +316,7 @@ export const START_CRAWL_FIELDS: Record<keyof StartCrawlInput, FieldKind> = {
   renderSamplePerType: "number",
   findingCap: "number|null",
   fetchResources: "boolean",
+  judgement: "object",
 };
 
 /**
@@ -459,6 +480,11 @@ function assertKind(key: string, value: unknown, kind: FieldKind): void {
       if (value !== null && (typeof value !== "number" || !Number.isFinite(value))) {
         bad("a finite number, or null");
       }
+      return;
+    case "object":
+      // A JSON object and nothing else: a null here is not "no judgement" (an
+      // absent field is), and an array is not a block with no keys.
+      if (!isPlainObject(value)) bad("a JSON object");
       return;
   }
 }
@@ -688,6 +714,14 @@ export interface CrawlDetail extends CrawlListItem {
    * nothing". Those are different reports.
    */
   rulesRunAt: string | null;
+  /**
+   * Whether the crawl's judgement block has moved since the rules run that
+   * `rulesRunAt` records, and why (`overrides` | `thresholds` | `findingCap`).
+   * `{stale: false, reasons: []}` on a crawl nobody has judged — there is no
+   * judgement to be stale. Read off the same row as `rulesRunAt`, so the two
+   * describe one instant. Re-running the rules clears it.
+   */
+  judgementStale: JudgementStale;
   /**
    * Rows in the `issues` table for this crawl, counted live.
    *
@@ -1034,6 +1068,37 @@ export interface CrawlDetail extends CrawlListItem {
  * blob it is read out of is `jsonb` and everything else in that blob (the
  * sitemap walk's failures, its counters) belongs to other endpoints.
  */
+/** One overridable threshold as `crawl_config_get` reports it. */
+export interface ThresholdSetting {
+  /** The value the crawl's NEXT rules run will use: the override, else the default. */
+  value: number;
+  default: number;
+  /** The inclusive bounds an override must sit within. */
+  min: number;
+  max: number;
+  /** True when the crawl's block sets this threshold, whatever the value. */
+  overridden: boolean;
+}
+
+/**
+ * A crawl's judgement as `crawl_config_get` (`GET /crawls/:id/config`) and
+ * `crawl_config_set` answer it.
+ */
+export interface CrawlConfigOut {
+  crawlId: string;
+  /**
+   * The crawl's current block, `{}` when nothing is set. `findingCap` appears
+   * when the crawl's config carries one — null is uncapped — and is absent when
+   * the engine default (200) applies by omission.
+   */
+  judgement: JudgementBlock;
+  /** Every overridable threshold, as the block leaves it. */
+  thresholds: Record<ThresholdName, ThresholdSetting>;
+  /** What the last rules run was judged with, or null on a crawl nobody judged. */
+  judgedWith: JudgedWith | null;
+  judgementStale: JudgementStale;
+}
+
 export interface RobotsEvidence {
   crawlId: string;
   /**
@@ -1633,7 +1698,8 @@ export interface CompareCaveat {
     | "ruleset-unrecorded"
     | "ruleset-mixed"
     | "finding-cap-differs"
-    | "severity-changed";
+    | "severity-changed"
+    | "judgement-overrides";
   message: string;
 }
 
@@ -1747,6 +1813,12 @@ export interface MetricTableOut {
   columns: MetricColumn[];
   rows: Record<string, MetricCell>[];
   note?: string;
+  /**
+   * Whether the crawl's judgement block has moved since the rules run that
+   * wrote these rows (`CrawlDetail.judgementStale`). The rows are that run's,
+   * served as written.
+   */
+  judgementStale: JudgementStale;
 }
 
 /** One metric row, with the registry's copy joined — the quotable table. */
@@ -2280,7 +2352,24 @@ export class ApiService {
     // on every URL a client supplies, not only on the seed).
     await this.checkSitemapUrls(siteUrl, input.sitemapUrls, allowPrivate);
 
-    const crawlConfig = this.effectiveConfig(siteUrl, input);
+    // The judgement block is not crawl config: it is split off here, parsed
+    // against the ruleset, and its `findingCap` — the one key whose bytes live
+    // in `config_jsonb` (plan Deviation 1) — joins the crawl config.
+    const { judgement: rawJudgement, ...crawlInput } = input;
+    const block = rawJudgement === undefined ? null : this.parseJudgementInput(rawJudgement);
+    if (block?.findingCap !== undefined) {
+      if (crawlInput.findingCap !== undefined && crawlInput.findingCap !== block.findingCap) {
+        throw new ServiceError(
+          "VALIDATION",
+          `findingCap (${String(crawlInput.findingCap)}) and judgement.findingCap ` +
+            `(${String(block.findingCap)}) disagree: they are one setting, so send it once, ` +
+            "or send the same value in both places",
+        );
+      }
+      crawlInput.findingCap = block.findingCap;
+    }
+
+    const crawlConfig = this.effectiveConfig(siteUrl, crawlInput);
     try {
       validateCrawlConfig(crawlConfig);
     } catch (error) {
@@ -2297,6 +2386,9 @@ export class ApiService {
       // never reaches a row, so a resume of this crawl months from now cannot
       // inherit it (build-plan §7 item 3).
       config: storableConfig(crawlConfig),
+      // Null when the request named no judgement — "no overrides", the state
+      // every crawl before 27a is in.
+      judgement: block === null ? null : storableBlock(block),
       rulesetVersion: RULESET_VERSION,
       status: "queued",
     });
@@ -2484,6 +2576,9 @@ export class ApiService {
       sitemapUrls: configStringList(row.config, "sitemapUrls", crawlId),
       findingCap: configFindingCap(row.config, crawlId),
       rulesRunAt: row.rulesRunAt === null ? null : row.rulesRunAt.toISOString(),
+      // Off the SAME row as `rulesRunAt`, so the flag and the marker cannot
+      // describe two different runs.
+      judgementStale: judgementViewOf(row, crawlId, this.registry).judgementStale,
       findingsCount,
       pagesScanned,
       fetchResources: configFetchResources(row.config, crawlId),
@@ -3394,6 +3489,153 @@ export class ApiService {
   }
 
   /**
+   * A crawl's judgement: its current block (with `findingCap` folded in from
+   * the config, where its bytes live), every overridable threshold as that
+   * block leaves it, the stamp of the last rules run and whether the block has
+   * moved since. `crawl_config_get` and `GET /crawls/:id/config`.
+   *
+   * One read of the crawl row (`loadJudgementView`), so the block, the stamp
+   * and the staleness describe one instant. Refuses as the read surfaces do: a
+   * stored override of a rule this ruleset lacks is a 409 naming it, which
+   * `setCrawlJudgement` is the way out of.
+   */
+  async getCrawlConfig(crawlId: string): Promise<CrawlConfigOut> {
+    return crawlConfigOf(crawlId, await this.judgementView(crawlId));
+  }
+
+  /**
+   * Change a crawl's judgement: `crawl_config_set` and
+   * `PATCH /crawls/:id/config`, body `{judgement: {...}}`.
+   *
+   * `judgement` is an RFC 7396 merge-patch (`mergePatch`) of the stored block:
+   * objects merge key by key, and a `null` removes a key, so
+   * `rules: {"title.too-long": null}` drops that rule's override and
+   * `thresholds: {SLOW_MS: null}` returns the threshold to its default. The
+   * merged block is parsed against the ruleset (`parseJudgement`) before
+   * anything is written; a refusal writes nothing.
+   *
+   * ## `findingCap` is the one exception to "null removes"
+   *
+   * For this key null is a VALUE everywhere on the surface: uncapped, the
+   * billed-audit setting `crawl_start` documents and `crawl_status` reports.
+   * Reading `judgement.findingCap: null` as "remove the key" would turn an
+   * agent's "list everything" into the engine's default of 200 without a word,
+   * and the audit would come back truncated. So here, as at `crawl_start`,
+   * null sets uncapped, and the default is restored by naming it — 200 judges
+   * exactly as an absent key does (`resolveRuleCaps`, and `staleReasons`
+   * compares the resolved caps). Every state stays reachable and none is
+   * reached by accident. The cap is written to `config_jsonb.findingCap`,
+   * never into `judgement_jsonb` (plan Deviation 1).
+   *
+   * ## Refusals
+   *
+   *  - any key other than `judgement`: VALIDATION (crawl fields are Phase 27b);
+   *  - a `judgement` that is absent, null or not an object: VALIDATION — a null
+   *    here would mean "delete the whole block", including a cap whose null is
+   *    a value, so clearing is spelled per section instead;
+   *  - a merged block `parseJudgement` refuses: VALIDATION, naming the path;
+   *  - a rules run in flight for the crawl in this process: CONFLICT. Refused,
+   *    not queued — the run read its judgement when it started and stamps
+   *    what it read;
+   *  - no such crawl: NOT_FOUND.
+   *
+   * The read-merge-write is one transaction holding the crawl row
+   * (`for update`), so two concurrent patches cannot each lose the other's
+   * key. The in-flight check is in-process, as `runRulesForCrawl`'s own is
+   * (see there for why the hold is not in the database). A run that claims the
+   * crawl between that check and this write reads either block, and stamps the
+   * one it read, so `judgementStale` reports the outcome truthfully either way.
+   */
+  async setCrawlJudgement(crawlId: string, patch: unknown): Promise<CrawlConfigOut> {
+    if (!isPlainObject(patch)) {
+      throw new ServiceError("VALIDATION", "request body must be a JSON object");
+    }
+    const others = Object.keys(patch).filter((key) => key !== "judgement");
+    if (others.length > 0) {
+      throw new ServiceError(
+        "VALIDATION",
+        "only `judgement` can be set; crawl fields arrive in Phase 27b " +
+          `(refused: ${others.map(clip).join(", ")})`,
+      );
+    }
+    const judgementPatch = patch["judgement"];
+    if (judgementPatch === undefined) {
+      throw new ServiceError(
+        "VALIDATION",
+        "the body must carry `judgement`: the merge-patch to apply to the crawl's judgement block",
+      );
+    }
+    if (!isPlainObject(judgementPatch)) {
+      throw new ServiceError(
+        "VALIDATION",
+        "judgement must be a JSON object (a merge-patch of the block); to clear every " +
+          'override send {"rules": null, "thresholds": null}',
+      );
+    }
+    this.refuseWhileJudging(crawlId);
+
+    const { findingCap: capPatch, ...blockPatch } = judgementPatch;
+    await this.db.transaction(async (tx) => {
+      const rows = await tx
+        .select({ config: crawls.config, judgement: crawls.judgement })
+        .from(crawls)
+        .where(eq(crawls.id, crawlId))
+        .limit(1)
+        .for("update");
+      const row = rows[0];
+      if (row === undefined) throw new ServiceError("NOT_FOUND", `no such crawl '${clip(crawlId)}'`);
+
+      // The stored block is what the patch merges onto, so it must be one.
+      // The ONE refusal let through is an override of a rule this ruleset no
+      // longer defines: removing it is the repair the read surfaces point
+      // here for, and the merged block is parsed below either way — an
+      // override the patch leaves in place is refused there, naming it.
+      try {
+        readStoredJudgement(row.judgement, crawlId, this.registry);
+      } catch (error) {
+        if (!(error instanceof JudgementError && error.reason === "unknown-rule")) throw error;
+      }
+
+      const merged = mergePatch(row.judgement ?? {}, blockPatch) as Record<string, unknown>;
+      const block = this.parseJudgementInput(
+        capPatch === undefined ? merged : { ...merged, findingCap: capPatch },
+      );
+
+      let config: unknown = undefined;
+      if (block.findingCap !== undefined) {
+        // Read through the same validation every reader of the key uses, so a
+        // config this cannot read is refused rather than overwritten.
+        try {
+          storedFindingCap(row.config, crawlId);
+        } catch (error) {
+          throw new ServiceError("CONFLICT", messageOf(error));
+        }
+        config = { ...(row.config as Record<string, unknown>), findingCap: block.findingCap };
+      }
+
+      // Again, synchronously before the write: the check above was before an
+      // `await`, and a run may have claimed the crawl since.
+      this.refuseWhileJudging(crawlId);
+      await tx
+        .update(crawls)
+        .set({ judgement: storableBlock(block), ...(config === undefined ? {} : { config }) })
+        .where(eq(crawls.id, crawlId));
+    });
+    return await this.getCrawlConfig(crawlId);
+  }
+
+  /** The refusal `setCrawlJudgement` gives while this process is judging the crawl. */
+  private refuseWhileJudging(crawlId: string): void {
+    if (this.judging.has(crawlId)) {
+      throw new ServiceError(
+        "CONFLICT",
+        `rules are running for crawl ${crawlId}: its judgement cannot change under a run ` +
+          "that has already read it. Wait for crawl_rules to answer, then set it again",
+      );
+    }
+  }
+
+  /**
    * The whole ruleset as a catalog — and, when a crawl is named, what each rule
    * found on it. `GET /rules` and `rules_catalog`.
    *
@@ -4074,6 +4316,11 @@ export class ApiService {
         const rulesetAgrees = rulesetCaveat(baseSide, headSide, caveats);
         const capsAgree = capCaveat(baseSide, headSide, caveats);
         const comparable = rulesetAgrees && capsAgree;
+        // Not part of `comparable`: the counts above are the stored findings,
+        // disabled rules included, so they ARE comparable — but a reader who
+        // holds them beside either crawl's issues_list deserves to know why
+        // that listing is shorter. Read inside this snapshot.
+        await this.overridesCaveats(tx, [baseCrawlId, headCrawlId], caveats);
         // Severity caveats are appended above, inside the rule walk; sorting the
         // list puts the whole-comparison ones first whatever order they were
         // found in, so a reader meets the reason `comparable` is false before the
@@ -4083,6 +4330,46 @@ export class ApiService {
       },
       { isolationLevel: "repeatable read", accessMode: "read only" },
     );
+  }
+
+  /**
+   * The `judgement-overrides` caveat for each side whose stored judgement
+   * disables a rule, naming the crawl and how many. Inside the comparison's
+   * transaction, so the blocks are read from the same snapshot as the counts.
+   */
+  private async overridesCaveats(
+    tx: Pick<Db, "select">,
+    crawlIds: string[],
+    caveats: CompareCaveat[],
+  ): Promise<void> {
+    const ids = [...new Set(crawlIds)];
+    const rows = await tx
+      .select({
+        id: crawls.id,
+        config: crawls.config,
+        judgement: crawls.judgement,
+        rulesJudgedWith: crawls.rulesJudgedWith,
+        rulesRunAt: crawls.rulesRunAt,
+      })
+      .from(crawls)
+      .where(inArray(crawls.id, ids));
+    for (const id of ids) {
+      const row = rows.find((r) => r.id === id);
+      if (row === undefined) {
+        throw new Error(`compareCrawls: crawl ${id} vanished inside the comparison's snapshot`);
+      }
+      const { disabledRules } = judgementViewOf(row, id, this.registry);
+      if (disabledRules.length === 0) continue;
+      const n = disabledRules.length;
+      caveats.push({
+        code: "judgement-overrides",
+        message:
+          `crawl '${id}' has ${n} rule${n === 1 ? "" : "s"} disabled by its judgement ` +
+          `(${disabledRules.join(", ")}): their stored findings are counted in this ` +
+          "comparison, but issues_list and the exports leave them out of that crawl's " +
+          "listings, so the two will not agree for those rules",
+      });
+    }
   }
 
   /**
@@ -4157,8 +4444,15 @@ export class ApiService {
    * measurement, and reshaping one in the API layer would put a second opinion
    * about what was counted between the rule and the reader.
    */
-  async listMetrics(crawlId: string, opts: MetricQuery = {}): Promise<Page<MetricRow>> {
-    await this.assertCrawl(crawlId);
+  async listMetrics(
+    crawlId: string,
+    opts: MetricQuery = {},
+  ): Promise<Page<MetricRow> & { judgementStale: JudgementStale }> {
+    // The crawl's judgement, for `judgementStale` only: a metric is a stored
+    // measurement of the run that wrote it (`site.health` counted the rules
+    // that run left enabled), so the flag says whether the block has moved
+    // since — the rows themselves are served as written.
+    const view = await this.judgementView(crawlId);
     const limit = parseLimit(opts.limit);
     const cursor = opts.cursor === undefined ? null : decodeCursor(opts.cursor, 3);
 
@@ -4233,6 +4527,7 @@ export class ApiService {
         last === undefined
           ? null
           : encodeCursor(last.metric_id, last.scope, last.scope_value),
+      judgementStale: view.judgementStale,
     };
   }
 
@@ -4268,7 +4563,8 @@ export class ApiService {
    *    above.
    */
   async metricTable(crawlId: string, metricId: string): Promise<MetricTableOut> {
-    await this.assertCrawl(crawlId);
+    // `judgementStale` rides the table for `listMetrics`' reason.
+    const { judgementStale } = await this.judgementView(crawlId);
     const rule = this.rules.get(metricId);
     if (rule === undefined || rule.kind !== "metric") {
       throw new ServiceError(
@@ -4304,7 +4600,7 @@ export class ApiService {
       howToFix: rule.howToFix,
     };
 
-    if (shaped.rows.length > 0) return { ...copy, ...shaped };
+    if (shaped.rows.length > 0) return { ...copy, ...shaped, judgementStale };
 
     // Empty, so this answer has to say WHICH empty. The judged check is one
     // column and is only asked here, on the path where the difference matters.
@@ -4328,7 +4624,7 @@ export class ApiService {
           "empty because there was nothing to measure, not because nobody looked"
         : `metric '${metricId}' wrote ${stored.length} row(s) for crawl ${crawlId} and the ` +
           "list they expand into rows is empty: nothing was found to list";
-    return { ...copy, ...shaped, note };
+    return { ...copy, ...shaped, note, judgementStale };
   }
 
   /**
@@ -5239,7 +5535,22 @@ export class ApiService {
     return normalised;
   }
 
-  private effectiveConfig(siteUrl: string, input: StartCrawlInput): CrawlConfig {
+  /**
+   * A judgement block from a request (`crawl_start`, `crawl_config_set`),
+   * parsed against this server's ruleset. Every refusal — an unknown rule id
+   * included, which on a REQUEST is the caller's mistake rather than a stored
+   * row's drift — is a 400 carrying `parseJudgement`'s "<path>: <reason>".
+   */
+  private parseJudgementInput(raw: unknown): JudgementBlock {
+    try {
+      return parseJudgement(raw, this.registry);
+    } catch (error) {
+      if (error instanceof JudgementError) throw new ServiceError("VALIDATION", error.message);
+      throw error;
+    }
+  }
+
+  private effectiveConfig(siteUrl: string, input: Omit<StartCrawlInput, "judgement">): CrawlConfig {
     // Precedence, low to high: the engine's defaults, the API's own maxPages,
     // the process-trust overrides, then the request. `stripUndefined` on the
     // request half because an absent optional field must not overwrite a
@@ -5832,6 +6143,40 @@ function configFindingCap(config: unknown, crawlId: string): number | null {
 }
 
 /**
+ * `crawl_config_get`'s answer from a judgement view: the block with the
+ * config's `findingCap` folded back in (absent when the config has none), and
+ * every overridable threshold as the block leaves it.
+ */
+function crawlConfigOf(crawlId: string, view: JudgementView): CrawlConfigOut {
+  const block = view.block ?? {};
+  const effective = effectiveThresholds(view.block);
+  const thresholds = Object.fromEntries(
+    (Object.entries(OVERRIDABLE_THRESHOLDS) as [ThresholdName, (typeof OVERRIDABLE_THRESHOLDS)[ThresholdName]][]).map(
+      ([name, row]) => [
+        name,
+        {
+          value: effective[name],
+          default: row.default,
+          min: row.min,
+          max: row.max,
+          overridden: block.thresholds?.[name] !== undefined,
+        },
+      ],
+    ),
+  ) as Record<ThresholdName, ThresholdSetting>;
+  return {
+    crawlId,
+    judgement: {
+      ...block,
+      ...(view.findingCap === undefined ? {} : { findingCap: view.findingCap }),
+    },
+    thresholds,
+    judgedWith: view.judgedWith,
+    judgementStale: view.judgementStale,
+  };
+}
+
+/**
  * Whether this crawl ran the resource fetch pass, for `CrawlDetail`.
  *
  * RESOLVED, like `configFindingCap`: an absent key is the engine's default,
@@ -5874,6 +6219,7 @@ const CAVEAT_ORDER: CompareCaveat["code"][] = [
   "ruleset-unrecorded",
   "ruleset-mixed",
   "finding-cap-differs",
+  "judgement-overrides",
   "severity-changed",
 ];
 

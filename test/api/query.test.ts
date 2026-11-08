@@ -2182,10 +2182,10 @@ describe("GET /crawls/:id — the fields an audit checks itself against", () => 
 
   it("reports the stamp a completed rules run leaves, as an ISO timestamp", async () => {
     const stamped = new Date("2026-08-28T10:11:12.000Z");
-    await db.update(crawls).set({ rulesRunAt: stamped }).where(eq(crawls.id, crawlE));
+    await db.update(crawls).set({ rulesRunAt: stamped, rulesJudgedWith: { disabledRules: [], thresholds: {} } }).where(eq(crawls.id, crawlE));
     const res = await call(`/crawls/${crawlE}`);
     expect(res.body["rulesRunAt"]).toBe(stamped.toISOString());
-    await db.update(crawls).set({ rulesRunAt: null }).where(eq(crawls.id, crawlE));
+    await db.update(crawls).set({ rulesRunAt: null, rulesJudgedWith: null }).where(eq(crawls.id, crawlE));
   });
 
   // THE RESOURCE COVERAGE BLOCK (P11-T4). It is the evidence CHECK-83 is
