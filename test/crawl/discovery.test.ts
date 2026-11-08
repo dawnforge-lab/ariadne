@@ -255,6 +255,17 @@ beforeAll(async () => {
           `<xhtml:link rel="alternate" hreflang="en" href="${bare}/en/a"/>` +
           "</url></urlset>",
       );
+    } else if (path === "/index-long.xml") {
+      // Final review M3: an index whose first child URL is longer than any
+      // index can hold, and a second that is fine.
+      xml(
+        res,
+        '<?xml version="1.0" encoding="UTF-8"?>' +
+          '<sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">' +
+          `<sitemap><loc>${bare}/${"s".repeat(3_000)}.xml</loc></sitemap>` +
+          `<sitemap><loc>${bare}/alts.xml</loc></sitemap>` +
+          "</sitemapindex>",
+      );
     } else if (path === "/alts-capped.xml") {
       // Final review I5: two <url>s, past MAX_HREFLANG_PAIRS by 3 and by 1, and
       // a third whose loc is refused (not http), whose capped alternates are
@@ -971,6 +982,17 @@ describe("discover: memberships, alternates and sitemapFacts", () => {
     for (const m of sink.memberships) expect(m.url.length).toBeLessThanOrEqual(INDEXED_URL_MAX);
     // Not a malformed entry: it is a URL, just one no index can hold.
     expect(d.truncation.malformedEntriesSkipped).toBe(0);
+  });
+
+  it("counts an index's child <loc> past the read cap as a refused loc, never fetching a cut URL (final review M3)", async () => {
+    const sink = recordingSink();
+    const d = await discover(bare, { ...OPTS, sink, extraSitemaps: [`${bare}/index-long.xml`] });
+    // The index and its one readable child: the over-long child is never requested.
+    expect(d.truncation.docsFetched).toBe(2);
+    expect(d.truncation.failures).toEqual([]);
+    expect(d.truncation.malformedEntriesSkipped).toBe(1);
+    expect(d.sitemapFacts.overlongLocsSkipped).toBe(0);
+    expect(d.sitemapEntries.map((e) => e.url)).toEqual([`${bare}/en/a`]);
   });
 
   it("sums the alternates past MAX_HREFLANG_PAIRS over every kept <url> (final review I5)", async () => {

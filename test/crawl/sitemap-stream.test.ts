@@ -2,12 +2,17 @@ import { randomBytes } from "node:crypto";
 import { gzipSync } from "node:zlib";
 import { describe, expect, it } from "vitest";
 import {
+  appendFieldText,
+  emptyField,
+  LASTMOD_TEXT_MAX,
+  LOC_TEXT_MAX,
   parseSitemapStream,
   SITEMAP_MAX_BYTES,
   type SitemapStreamResult,
   type SitemapUrlEntry,
 } from "../../src/crawl/sitemap-stream.js";
 import { MAX_HREFLANG_PAIRS } from "../../src/crawl/parse/page-analyzer.js";
+import { INDEXED_URL_MAX } from "../../src/crawl/parse/url-utils.js";
 
 const MB = 1024 * 1024;
 const encoder = new TextEncoder();
@@ -24,6 +29,7 @@ interface Run {
   result: SitemapStreamResult;
   urls: SitemapUrlEntry[];
   sitemaps: { loc: string; lastmod: string | null }[];
+  overlong: ("url" | "sitemap")[];
   drains: number;
 }
 
@@ -33,17 +39,19 @@ async function run(
 ): Promise<Run> {
   const urls: SitemapUrlEntry[] = [];
   const sitemaps: { loc: string; lastmod: string | null }[] = [];
+  const overlong: ("url" | "sitemap")[] = [];
   let drains = 0;
   const result = await parseSitemapStream(body, {
     maxBytes: opts.maxBytes ?? SITEMAP_MAX_BYTES,
     charset: opts.charset ?? null,
     onUrl: (entry) => urls.push(entry),
     onSitemap: (loc, lastmod) => sitemaps.push({ loc, lastmod }),
+    onOverlongLoc: (entry) => overlong.push(entry),
     drain: async () => {
       drains++;
     },
   });
-  return { result, urls, sitemaps, drains };
+  return { result, urls, sitemaps, overlong, drains };
 }
 
 const URLSET = `<?xml version="1.0" encoding="UTF-8"?>
@@ -258,6 +266,9 @@ describe("parseSitemapStream", () => {
       charset: null,
       onUrl: () => undefined,
       onSitemap: () => undefined,
+      onOverlongLoc: (entry) => {
+        throw new Error(`unexpected over-long ${entry} loc`);
+      },
       drain: async () => {
         await new Promise((resolve) => setTimeout(resolve, 1));
         drained++;
@@ -309,6 +320,87 @@ describe("parseSitemapStream", () => {
     const { result, sitemaps } = await run(chunked(index, 5));
     expect(sitemaps).toEqual([{ loc: "https://x.example/s1.xml", lastmod: null }]);
     expect(result).toMatchObject({ kind: "index", malformedEntries: 1 });
+  });
+
+  // Final review M3: one entry's field text is capped, so one `<loc>` cannot
+  // hold the whole document.
+  describe("caps a field's text (final review M3)", () => {
+    it("states the caps: one character past the index limit, and 64 for a lastmod", () => {
+      expect(LOC_TEXT_MAX).toBe(INDEXED_URL_MAX + 1);
+      expect(LASTMOD_TEXT_MAX).toBe(64);
+    });
+
+    it("a 3 MB <loc> does not grow the accumulator beyond the cap", () => {
+      const field = emptyField(LOC_TEXT_MAX);
+      const piece = "a".repeat(64 * 1024);
+      for (let i = 0; i < 48; i++) {
+        appendFieldText(field, piece);
+        expect(field.text.length).toBeLessThanOrEqual(LOC_TEXT_MAX);
+      }
+      expect(field.text.length).toBe(LOC_TEXT_MAX);
+      expect(field.overflow).toBe(true);
+    });
+
+    it("spends no cap on leading whitespace, and none on trailing whitespace past it", () => {
+      const field = emptyField(8);
+      appendFieldText(field, "   \n  ");
+      appendFieldText(field, "  abc");
+      expect(field.text).toBe("abc");
+      appendFieldText(field, "defgh");
+      expect(field.text).toBe("abcdefgh");
+      // Whitespace past the cap may be the value's own trailing whitespace.
+      appendFieldText(field, "    \n");
+      expect(field.overflow).toBe(false);
+      // Anything else past it is more value: over the cap.
+      appendFieldText(field, "i");
+      expect(field.overflow).toBe(true);
+      expect(field.text).toBe("abcdefgh");
+    });
+
+    it("reports a 3 MB <loc> as over-long, emits nothing for it, and reads on", async () => {
+      const loc = `https://site.example/${"a".repeat(3 * MB)}`;
+      const doc = `<urlset><url><loc>${loc}</loc><xhtml:link rel="alternate" hreflang="de" href="/de"/></url>` +
+        `<url><loc>https://site.example/next</loc></url></urlset>`;
+      const { result, urls, overlong } = await run(chunked(doc, 64 * 1024));
+      expect(overlong).toEqual(["url"]);
+      expect(urls.map((u) => u.loc)).toEqual(["https://site.example/next"]);
+      // Not malformed: it is a URL, just one no index can hold.
+      expect(result).toMatchObject({ kind: "urlset", malformedEntries: 0 });
+    });
+
+    it("reads a short <loc> wrapped in thousands of whitespace characters", async () => {
+      const pad = " \n\t".repeat(1_000);
+      const doc = `<urlset><url><loc>${pad}https://site.example/p${pad}</loc></url></urlset>`;
+      const { urls, overlong } = await run(chunked(doc, 100));
+      expect(overlong).toEqual([]);
+      expect(urls.map((u) => u.loc)).toEqual(["https://site.example/p"]);
+    });
+
+    it("emits a <loc> of exactly the cap, for discovery to measure", async () => {
+      const loc = `https://site.example/${"b".repeat(LOC_TEXT_MAX - "https://site.example/".length)}`;
+      expect(loc.length).toBe(LOC_TEXT_MAX);
+      const { urls, overlong } = await run(chunked(`<urlset><url><loc>${loc}</loc></url></urlset>`, 777));
+      expect(overlong).toEqual([]);
+      expect(urls.map((u) => u.loc)).toEqual([loc]);
+    });
+
+    it("reports an index's over-long child <loc> as over-long, never a truncated URL", async () => {
+      const doc = `<sitemapindex><sitemap><loc>https://site.example/${"s".repeat(5_000)}.xml</loc></sitemap>` +
+        `<sitemap><loc>https://site.example/ok.xml</loc></sitemap></sitemapindex>`;
+      const { sitemaps, overlong } = await run(chunked(doc, 500));
+      expect(overlong).toEqual(["sitemap"]);
+      expect(sitemaps).toEqual([{ loc: "https://site.example/ok.xml", lastmod: null }]);
+    });
+
+    it("keeps a <lastmod> over 64 characters as its first 64 and an ellipsis", async () => {
+      const at64 = `2026-11-01T00:00:00.${"1".repeat(LASTMOD_TEXT_MAX - 20 - 6)}+00:00`;
+      expect(at64.length).toBe(LASTMOD_TEXT_MAX);
+      const long = `2026-11-01T00:00:00.${"9".repeat(1_000)}+00:00`;
+      const doc = `<urlset><url><loc>https://site.example/a</loc><lastmod>${at64}</lastmod></url>` +
+        `<url><loc>https://site.example/b</loc><lastmod> ${long} </lastmod></url></urlset>`;
+      const { urls } = await run(chunked(doc, 50));
+      expect(urls.map((u) => u.lastmod)).toEqual([at64, `${long.slice(0, LASTMOD_TEXT_MAX)}…`]);
+    });
   });
 
   describe("owns the body and releases it on every exit", () => {
@@ -452,6 +544,9 @@ describe("parseSitemapStream", () => {
           if (seen % 1000 === 0) peak = Math.max(peak, process.memoryUsage().rss);
         },
         onSitemap: () => undefined,
+        onOverlongLoc: (entry) => {
+          throw new Error(`unexpected over-long ${entry} loc`);
+        },
         drain: async () => undefined,
       });
       peak = Math.max(peak, process.memoryUsage().rss);
@@ -478,6 +573,9 @@ describe("parseSitemapStream", () => {
           seen++;
         },
         onSitemap: () => undefined,
+        onOverlongLoc: (entry) => {
+          throw new Error(`unexpected over-long ${entry} loc`);
+        },
         drain: async () => undefined,
       });
       expect(result).toEqual({
@@ -528,6 +626,9 @@ describe("parseSitemapStream", () => {
         seen++;
       },
       onSitemap: () => undefined,
+      onOverlongLoc: (entry) => {
+        throw new Error(`unexpected over-long ${entry} loc`);
+      },
       drain: async () => undefined,
     });
     const growth = process.memoryUsage().rss - baseline;

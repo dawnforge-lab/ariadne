@@ -6,9 +6,24 @@
  * sitemap was dropped. Here the body flows through, chunk by chunk —
  * gunzip (when the bytes say gzip), a streaming `TextDecoder`, and
  * htmlparser2's tokenizer in XML mode — and each `<url>` / `<sitemap>` is handed
- * to the caller the moment it closes. Memory is O(chunk + one entry), never
- * O(document) (hard rules 4 and 6). The caller's `drain` is awaited after every
- * chunk, so its sink flushes before the next chunk is read.
+ * to the caller the moment it closes. The caller's `drain` is awaited after
+ * every chunk, so its sink flushes before the next chunk is read.
+ *
+ * THE MEMORY BOUND, stated as it is (hard rules 4 and 6; final review M3):
+ * O(chunk + one entry), and one entry's own state is capped — its `<loc>` text
+ * at `LOC_TEXT_MAX` (`INDEXED_URL_MAX` + 1) characters, its `<lastmod>` at
+ * `LASTMOD_TEXT_MAX` (64), its alternates at `MAX_HREFLANG_PAIRS`, the rest
+ * counted. What this module does not cap is an attribute value or a tag name:
+ * htmlparser2 buffers each one whole until its tag ends, so one pathological
+ * `href` (and the up to 200 kept alternates holding such values) is bounded only
+ * by the document cap, `SITEMAP_MAX_BYTES`. A real sitemap's entry is a few
+ * hundred bytes; the worst case is 50 MB, never more.
+ *  - a `<loc>` whose text runs past `LOC_TEXT_MAX` (whitespace aside) is not
+ *    read further and the entry is reported through `onOverlongLoc`, never
+ *    emitted with a cut URL. Measured on the raw text, so a loc that would
+ *    resolve shorter (dot segments) is still over-long here;
+ *  - a `<lastmod>` past 64 characters is kept as its first 64 and `…`, which
+ *    no date-time pattern matches, so it is still reported invalid.
  *
  * Today's reading is kept wherever it is a judgement rather than a mechanism,
  * so discovery can swap this in without moving a reason string:
@@ -52,6 +67,7 @@ import { pipeline } from "node:stream/promises";
 import { createGunzip } from "node:zlib";
 import { Parser } from "htmlparser2";
 import { MAX_HREFLANG_PAIRS } from "./parse/page-analyzer.js";
+import { INDEXED_URL_MAX } from "./parse/url-utils.js";
 
 /** The sitemaps.org protocol's limit, on the uncompressed document. */
 export const SITEMAP_MAX_BYTES = 50 * 1024 * 1024;
@@ -198,20 +214,65 @@ async function decompressed(body: AsyncIterable<Uint8Array>): Promise<AsyncItera
   return source;
 }
 
+/**
+ * How much of a `<loc>`'s text is kept: one character past `INDEXED_URL_MAX`,
+ * so a kept value of this length is still measured over-long by discovery, and
+ * any more is over-long without being read (final review M3).
+ */
+export const LOC_TEXT_MAX = INDEXED_URL_MAX + 1;
+
+/**
+ * How much of a `<lastmod>`'s text is kept. The longest W3C date-time a site
+ * writes (nanoseconds and an offset) is 35 characters; 64 is generous.
+ */
+export const LASTMOD_TEXT_MAX = 64;
+
 /** A `<loc>` or `<lastmod>`: its text, and whether it is still a plain value. */
-interface FieldState {
+export interface FieldState {
+  /** The text from its first non-whitespace character, at most `max` long. */
   text: string;
   count: number;
   hasElement: boolean;
+  max: number;
+  /** Text other than whitespace arrived past `max`: the value is longer than kept. */
+  overflow: boolean;
 }
 
-const emptyField = (): FieldState => ({ text: "", count: 0, hasElement: false });
+export const emptyField = (max: number): FieldState => ({
+  text: "",
+  count: 0,
+  hasElement: false,
+  max,
+  overflow: false,
+});
+
+/**
+ * Append a text node to a field, never past its cap. Leading whitespace is not
+ * kept (the value is trimmed, and an indent must not spend the cap); whitespace
+ * past the cap may be the value's own trailing whitespace and changes nothing;
+ * anything else past it sets `overflow` and is dropped.
+ */
+export function appendFieldText(field: FieldState, text: string): void {
+  if (field.overflow) return;
+  const piece = field.text === "" ? text.trimStart() : text;
+  const room = field.max - field.text.length;
+  if (piece.length <= room) {
+    field.text += piece;
+    return;
+  }
+  field.text += piece.slice(0, room);
+  if (/\S/.test(piece.slice(room))) field.overflow = true;
+}
 
 /** fast-xml-parser's reading: one text-only element, trimmed, non-blank. */
 function fieldValue(field: FieldState): string | null {
   if (field.count !== 1 || field.hasElement) return null;
   const trimmed = field.text.trim();
-  return trimmed === "" ? null : trimmed;
+  if (trimmed === "") return null;
+  // Only a `<lastmod>` gets here overflowed (an over-long `<loc>` is reported,
+  // never read as a value): its first characters and an ellipsis, which no
+  // date-time pattern matches, so `sitemap.lastmod-invalid` still reports it.
+  return field.overflow ? `${trimmed}…` : trimmed;
 }
 
 /**
@@ -228,6 +289,13 @@ export async function parseSitemapStream(
     charset: string | null;
     onUrl: (e: SitemapUrlEntry) => void;
     onSitemap: (loc: string, lastmod: string | null) => void;
+    /**
+     * A finished entry whose one `<loc>` ran past `LOC_TEXT_MAX`: no index can
+     * hold it, and its text was not read past the cap, so it is reported here
+     * and never emitted (nor counted malformed). `"url"` in a urlset,
+     * `"sitemap"` in an index.
+     */
+    onOverlongLoc: (entry: "url" | "sitemap") => void;
     drain: () => Promise<void>;
   },
 ): Promise<SitemapStreamResult> {
@@ -255,8 +323,8 @@ export async function parseSitemapStream(
   let depth = 0;
   let inEntry = false;
   let field: FieldState | null = null;
-  let loc = emptyField();
-  let lastmod = emptyField();
+  let loc = emptyField(LOC_TEXT_MAX);
+  let lastmod = emptyField(LASTMOD_TEXT_MAX);
   let alternates: { hreflang: string; href: string }[] = [];
   let alternatesCapped = 0;
 
@@ -277,8 +345,8 @@ export async function parseSitemapStream(
         if (depth === 2) {
           if (local === (kind === "urlset" ? "url" : "sitemap")) {
             inEntry = true;
-            loc = emptyField();
-            lastmod = emptyField();
+            loc = emptyField(LOC_TEXT_MAX);
+            lastmod = emptyField(LASTMOD_TEXT_MAX);
             alternates = [];
             alternatesCapped = 0;
           }
@@ -305,7 +373,7 @@ export async function parseSitemapStream(
       },
       ontext(text) {
         if (ignoring()) return;
-        if (depth === 3 && field !== null) field.text += text;
+        if (depth === 3 && field !== null) appendFieldText(field, text);
       },
       onclosetag() {
         if (ignoring()) return;
@@ -313,6 +381,11 @@ export async function parseSitemapStream(
           field = null;
         } else if (depth === 2 && inEntry) {
           inEntry = false;
+          if (!ended && loc.count === 1 && !loc.hasElement && loc.overflow) {
+            opts.onOverlongLoc(kind === "urlset" ? "url" : "sitemap");
+            depth--;
+            return;
+          }
           const locValue = ended ? null : fieldValue(loc);
           if (locValue === null) {
             malformedEntries++;

@@ -315,7 +315,9 @@ export interface DiscoveryTruncation {
   /**
    * `<loc>` values that were empty, unparseable, or refused by the policy, and
    * (Phase 26c) alternates whose `href` does not resolve against the document
-   * or whose `hreflang` code is over MAX_HREFLANG_CODE_CHARS.
+   * or whose `hreflang` code is over MAX_HREFLANG_CODE_CHARS, and a sitemap
+   * index's child `<loc>` past `LOC_TEXT_MAX`, which the policy would refuse as
+   * too long (final review M3).
    */
   malformedEntriesSkipped: number;
   /** One line per document that was pointed at and could not be read. */
@@ -349,6 +351,8 @@ export type DiscoverySitemapFacts = {
    * `<loc>`s, and alternate targets, over `INDEXED_URL_MAX` in the spelling a
    * row would store, and memberships whose URL and document URL together are
    * over it (they share one primary-key entry): counted here, handed to nobody.
+   * A urlset `<loc>` whose raw text runs past `LOC_TEXT_MAX` is counted here
+   * without being read further or resolved (final review M3).
    */
   overlongLocsSkipped: number;
   /**
@@ -1003,6 +1007,7 @@ async function* wireCapped(
 interface SitemapHandlers {
   onUrl: (entry: SitemapUrlEntry) => void;
   onSitemap: (loc: string, lastmod: string | null) => void;
+  onOverlongLoc: (entry: "url" | "sitemap") => void;
   /** Hand what the last chunk produced to the sink, and flush it. */
   drain: () => Promise<void>;
 }
@@ -1052,6 +1057,7 @@ async function streamSitemap(
         charset: charsetOf(headerValue(response.headers, "content-type")),
         onUrl: handlers.onUrl,
         onSitemap: handlers.onSitemap,
+        onOverlongLoc: handlers.onOverlongLoc,
         drain: async () => {
           response.deadline.pause();
           try {
@@ -1412,6 +1418,18 @@ export async function discover(
           }
           queue.push({ url: resolved, depth: next.depth + 1 });
           doc.urlsKept++;
+        },
+        // Final review M3: a `<loc>` the stream stopped reading at
+        // `LOC_TEXT_MAX`. A urlset's is a URL no index can hold, counted as
+        // `acceptUrl` counts a measured one; an index's is a child document
+        // url-policy would refuse as too long, counted as a refused `<loc>`.
+        onOverlongLoc: (entry) => {
+          if (entry === "url") {
+            sitemapFacts.overlongLocsSkipped++;
+            return;
+          }
+          if (indexFull) return;
+          truncation.malformedEntriesSkipped++;
         },
         drain: drainPending,
       };
