@@ -498,16 +498,22 @@ export async function failUrl(
  * action for a crawl whose workers are known dead (a resume after a crash):
  * used while another worker is genuinely running, it hands that worker's URLs
  * to a second crawler. Returns the number of rows released.
+ *
+ * `refundAttempt` gives back the attempt each released row spent when it was
+ * leased: a URL put back because the crawl was paused was never really tried.
  */
 export async function releaseLeases(
   db: Db,
   crawlId: string,
   leaseId: string | null,
+  opts: { refundAttempt?: boolean } = {},
 ): Promise<number> {
+  const refund =
+    opts.refundAttempt === true ? sql`, attempts = greatest(attempts - 1, 0)` : sql``;
   const scope =
     leaseId === null ? sql`` : sql` and lease_id = ${leaseId}`;
   const res = await db.execute(sql`
-    update frontier set state = 'pending', lease_id = null, leased_until = null
+    update frontier set state = 'pending', lease_id = null, leased_until = null${refund}
     where crawl_id = ${crawlId} and state = 'leased'${scope}
     returning url`);
   return res.rows.length;

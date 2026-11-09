@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import { closeDb, createDb, type Db } from "../../src/db/client.js";
 import { runMigrations } from "../../src/db/migrate.js";
 import { crawls, frontier } from "../../src/db/schema.js";
@@ -216,6 +216,36 @@ describe("frontier", () => {
     // null means "every lease in this crawl" — the operator-driven reclaim.
     expect(await releaseLeases(db, crawlId, null)).toBe(1);
     expect((await frontierCounts(db, crawlId)).leased).toBe(0);
+  });
+
+  it("releaseLeases refunds the attempt only when asked", async () => {
+    const crawlId = await newCrawl();
+    const urls = ["r1", "r2", "r3"].map((p) => `${SITE}/${p}`);
+    await enqueueUrls(db, crawlId, urls.map((u) => seed(u)));
+    const rowsOf = async () =>
+      (await db.execute(sql`select state, attempts from frontier where crawl_id = ${crawlId}`)).rows as {
+        state: string;
+        attempts: number;
+      }[];
+
+    await leaseBatch(db, crawlId, "w", 3, 60);
+    expect((await rowsOf()).every((r) => r.attempts === 1)).toBe(true);
+    expect(await releaseLeases(db, crawlId, "w")).toBe(3);
+    expect((await rowsOf()).every((r) => r.attempts === 1)).toBe(true);
+
+    await leaseBatch(db, crawlId, "w", 3, 60); // attempts 2
+    expect(await releaseLeases(db, crawlId, "w", { refundAttempt: true })).toBe(3);
+    expect((await rowsOf()).every((r) => r.state === "pending" && r.attempts === 1)).toBe(true);
+  });
+
+  it("a refund never takes attempts below zero", async () => {
+    const crawlId = await newCrawl();
+    await enqueueUrls(db, crawlId, [seed(`${SITE}/z`)]);
+    await leaseBatch(db, crawlId, "w", 1, 60);
+    await db.execute(sql`update frontier set attempts = 0 where crawl_id = ${crawlId}`);
+    await releaseLeases(db, crawlId, "w", { refundAttempt: true });
+    const r = await db.execute(sql`select attempts from frontier where crawl_id = ${crawlId}`);
+    expect((r.rows[0] as { attempts: number }).attempts).toBe(0);
   });
 
   it("counts are per crawl", async () => {

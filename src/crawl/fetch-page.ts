@@ -234,8 +234,28 @@ export interface FetchResult {
   disallowedReason: string | null;
 }
 
+/**
+ * Thrown (never returned) when the caller's `FetchOpts.signal` aborts a fetch.
+ * An abort is not a fact about the target site, so it must never become a
+ * classified row: the loop catches this and puts the URL back in the frontier.
+ */
+export class FetchAbortedError extends Error {
+  readonly url: string;
+  constructor(url: string) {
+    super(`fetch of ${url} aborted by the crawl's signal`);
+    this.name = "FetchAbortedError";
+    this.url = url;
+  }
+}
+
 export interface FetchOpts {
   userAgent: string;
+  /**
+   * The crawl's control signal. Aborting it rejects `fetchPage` with
+   * FetchAbortedError — it never resolves to a FetchResult. The per-fetch
+   * deadline is separate and still yields a `timeout` row.
+   */
+  signal?: AbortSignal;
   /** Applied to connect, response headers, and inter-chunk body reads. */
   timeoutMs?: number;
   /**
@@ -512,6 +532,8 @@ export async function fetchPage(url: string, opts: FetchOpts): Promise<FetchResu
   const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const allowPrivate = opts.allowPrivate === true;
   const started = Date.now();
+  const callerSignal = opts.signal;
+  if (callerSignal?.aborted) throw new FetchAbortedError(url);
 
   const verdict = await isUrlAllowed(url, { allowPrivate });
   if (!verdict.allowed) {
@@ -533,6 +555,10 @@ export async function fetchPage(url: string, opts: FetchOpts): Promise<FetchResu
     deadlineHit = true;
     deadline.abort();
   }, timeoutMs);
+  const requestSignal =
+    callerSignal === undefined
+      ? deadline.signal
+      : AbortSignal.any([deadline.signal, callerSignal]);
 
   // Captured the moment response headers arrive, so the catch path can keep
   // them when the body then fails (a deadline expiring mid-body).
@@ -548,7 +574,7 @@ export async function fetchPage(url: string, opts: FetchOpts): Promise<FetchResu
       // are visible in the recorded rows instead of collapsed by the client.
       // undici follows nothing unless a redirect interceptor is installed on
       // the dispatcher, and ours has none — see newAgent.
-      signal: deadline.signal,
+      signal: requestSignal,
       headersTimeout: timeoutMs,
       bodyTimeout: timeoutMs,
     });
@@ -668,6 +694,9 @@ export async function fetchPage(url: string, opts: FetchOpts): Promise<FetchResu
           : retryAfter.note,
     };
   } catch (error) {
+    // The caller's abort wins over every classification, including a deadline
+    // that fired in the same tick: nothing aborted is ever written as a row.
+    if (callerSignal?.aborted) throw new FetchAbortedError(url);
     // Our bug, not theirs — surface it loudly instead of burying it in a
     // classified row. This is the only path out of fetchPage that throws.
     if (isProgrammerError(error)) throw error;
