@@ -62,6 +62,24 @@ export function listModeSkips(rules: readonly AnyRule[], sitemapsRead: boolean):
   return rules.filter((r) => skipsOnList(r, sitemapsRead)).map((r) => r.id).sort();
 }
 
+/**
+ * The ids a rules run of this crawl leaves out for list mode, sorted: what
+ * `runRules` skips and `crawl.list-mode` names, from the same two functions
+ * (`readListScope` over the stored row, then `listModeSkips`), so the read
+ * surfaces and the run cannot disagree. `[]` on a spider crawl. Throws, as
+ * `readListScope` does, on a stored mode or `sitemapsRead` of the wrong shape.
+ * The read surfaces' `notMeasured` (27c final wave M16).
+ */
+export function listModeNotMeasured(
+  rules: readonly AnyRule[],
+  config: unknown,
+  discovery: unknown,
+  crawlId: string,
+): string[] {
+  const scope = readListScope(config, discovery, crawlId);
+  return scope.mode === "list" ? listModeSkips(rules, scope.sitemapsRead) : [];
+}
+
 /** The ids that run on a list crawl but judge only the targets the list fetched, sorted. */
 export function listModePartials(rules: readonly AnyRule[]): string[] {
   return rules.filter((r) => r.listPartial === true).map((r) => r.id).sort();

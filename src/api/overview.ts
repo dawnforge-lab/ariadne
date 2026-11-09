@@ -60,6 +60,12 @@ export interface IssuesOverview {
   pagesJudged: number | null;
   rows: IssuesOverviewRow[];
   disabledRules: string[];
+  /**
+   * The rules this list crawl's rules run left out (`JudgementView.notMeasured`):
+   * never a row, not even with `includeZero` — a zero would read "clean" where
+   * nobody looked (27c final wave M16). `[]` on a spider crawl.
+   */
+  notMeasured: string[];
   judgementStale: JudgementStale;
 }
 
@@ -201,6 +207,7 @@ async function issuesOverviewIn(
     for (const rule of registry.all()) {
       if (rule.kind === "metric" || counts.has(rule.id)) continue;
       if (view.disabledRules.includes(rule.id)) continue;
+      if (view.notMeasured.includes(rule.id)) continue;
       rows.push(rowFor(rule.id, 0));
     }
   }
@@ -218,6 +225,7 @@ async function issuesOverviewIn(
     pagesJudged,
     rows,
     disabledRules: view.disabledRules,
+    notMeasured: view.notMeasured,
     judgementStale: view.judgementStale,
   };
 }

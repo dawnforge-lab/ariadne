@@ -238,6 +238,7 @@ import {
   notDisabled,
   readJudgementBlock,
   refuseIfDisabled,
+  refuseIfNotMeasured,
   storableBlock,
   triageFields,
   type JudgementStale,
@@ -1980,6 +1981,13 @@ export interface ExportResult {
    * fire".
    */
   disabledRules?: string[];
+  /**
+   * Beside `disabledRules`, always together: the rules the stored rules run
+   * left out because this is a list crawl (`JudgementView.notMeasured`), whose
+   * absence from the file is "not measured", never "clean"; `[]` on a spider
+   * crawl (27c final wave M16).
+   */
+  notMeasured?: string[];
 }
 
 /**
@@ -2008,6 +2016,8 @@ export interface CsvExportResult {
    * fire". Absent on the views that read no findings.
    */
   disabledRules?: string[];
+  /** Beside `disabledRules`, always together (`ExportResult.notMeasured`). */
+  notMeasured?: string[];
 }
 
 /** A prepared CSV stream: validated, not yet read. */
@@ -2023,6 +2033,8 @@ export interface CsvStream {
    * null on a view that reads no findings (`CsvExportResult.disabledRules`).
    */
   disabledRules: string[] | null;
+  /** Beside `disabledRules`, null with it (`ExportResult.notMeasured`). */
+  notMeasured: string[] | null;
   /**
    * The file, record by record, header first.
    *
@@ -4508,6 +4520,7 @@ export class ApiService {
     const rows = await this.db
       .select({
         config: crawls.config,
+        discovery: crawls.discovery,
         judgement: crawls.judgement,
         rulesJudgedWith: crawls.rulesJudgedWith,
         rulesRunAt: crawls.rulesRunAt,
@@ -5274,7 +5287,13 @@ export class ApiService {
   async listIssues(
     crawlId: string,
     opts: IssueQuery = {},
-  ): Promise<Page<IssueGroup> & { disabledRules: string[]; judgementStale: JudgementStale }> {
+  ): Promise<
+    Page<IssueGroup> & {
+      disabledRules: string[];
+      notMeasured: string[];
+      judgementStale: JudgementStale;
+    }
+  > {
     // The crawl's judgement, which also answers the 404 for a crawl nothing knows.
     const view = await this.judgementView(crawlId);
     const limit = parseLimit(opts.limit);
@@ -5359,6 +5378,9 @@ export class ApiService {
           ? null
           : encodeCursor(String(last.severity_rank), last.rule_id),
       disabledRules: view.disabledRules,
+      // A rule this list crawl did not run answers an empty page here, which
+      // is "not measured", not "clean" — named beside the disabled ones.
+      notMeasured: view.notMeasured,
       judgementStale: view.judgementStale,
     };
   }
@@ -5442,6 +5464,9 @@ export class ApiService {
     // A disabled rule is refused rather than answered: its findings are stored,
     // and an empty page would read as "this rule found nothing".
     refuseIfDisabled(view, crawlId, ruleId);
+    // So is a rule this list crawl did not run: an empty page would read
+    // "clean" where nobody looked (27c final wave M16).
+    refuseIfNotMeasured(view, crawlId, ruleId);
     const limit = parseLimit(opts.limit);
     const cursor = opts.cursor === undefined ? null : decodeCursor(opts.cursor, 2);
 
@@ -5816,6 +5841,7 @@ export class ApiService {
       .select({
         id: crawls.id,
         config: crawls.config,
+        discovery: crawls.discovery,
         judgement: crawls.judgement,
         rulesJudgedWith: crawls.rulesJudgedWith,
         rulesRunAt: crawls.rulesRunAt,
@@ -5916,11 +5942,14 @@ export class ApiService {
   async listMetrics(
     crawlId: string,
     opts: MetricQuery = {},
-  ): Promise<Page<MetricRow> & { judgementStale: JudgementStale }> {
-    // The crawl's judgement, for `judgementStale` only: a metric is a stored
-    // measurement of the run that wrote it (`site.health` counted the rules
-    // that run left enabled), so the flag says whether the block has moved
-    // since — the rows themselves are served as written.
+  ): Promise<Page<MetricRow> & { notMeasured: string[]; judgementStale: JudgementStale }> {
+    // The crawl's judgement, for `judgementStale` and `notMeasured` only: a
+    // metric is a stored measurement of the run that wrote it (`site.health`
+    // counted the rules that run left enabled), so the flag says whether the
+    // block has moved since — the rows themselves are served as written. A
+    // metric a list crawl's run did not measure has no rows, and
+    // `notMeasured` says so rather than letting the empty page read "clean"
+    // (27c final wave M16).
     const view = await this.judgementView(crawlId);
     const limit = parseLimit(opts.limit);
     const cursor = opts.cursor === undefined ? null : decodeCursor(opts.cursor, 3);
@@ -5996,6 +6025,7 @@ export class ApiService {
         last === undefined
           ? null
           : encodeCursor(last.metric_id, last.scope, last.scope_value),
+      notMeasured: view.notMeasured,
       judgementStale: view.judgementStale,
     };
   }
@@ -6033,7 +6063,7 @@ export class ApiService {
    */
   async metricTable(crawlId: string, metricId: string): Promise<MetricTableOut> {
     // `judgementStale` rides the table for `listMetrics`' reason.
-    const { judgementStale } = await this.judgementView(crawlId);
+    const { judgementStale, notMeasured } = await this.judgementView(crawlId);
     const rule = this.rules.get(metricId);
     if (rule === undefined || rule.kind !== "metric") {
       throw new ServiceError(
@@ -6087,8 +6117,14 @@ export class ApiService {
           "an empty table here would read as 'this site measured nothing'",
       );
     }
+    // A metric a list crawl's run left out wrote nothing because it did not
+    // run: the note says THAT, never "nothing to measure" (27c final wave M16).
     const note =
-      stored.length === 0
+      stored.length === 0 && notMeasured.includes(metricId)
+        ? `crawl ${crawlId} is a list crawl and metric '${metricId}' was not measured: it ` +
+          "needs the whole site or a sitemap read the crawl did not make (crawl.list-mode " +
+          "names it), so it did not run — the table is empty because nobody looked"
+        : stored.length === 0
         ? `crawl ${crawlId} was judged and metric '${metricId}' wrote no rows: the table is ` +
           "empty because there was nothing to measure, not because nobody looked"
         : `metric '${metricId}' wrote ${stored.length} row(s) for crawl ${crawlId} and the ` +
@@ -6230,6 +6266,7 @@ export class ApiService {
         rows: written - 1,
         bytes,
         ...(stream.disabledRules === null ? {} : { disabledRules: stream.disabledRules }),
+        ...(stream.notMeasured === null ? {} : { notMeasured: stream.notMeasured }),
       };
     }
 
@@ -6249,7 +6286,9 @@ export class ApiService {
       path,
       rows: written,
       bytes,
-      ...(view === null ? {} : { disabledRules: view.disabledRules }),
+      ...(view === null
+        ? {}
+        : { disabledRules: view.disabledRules, notMeasured: view.notMeasured }),
     };
   }
 
@@ -6435,7 +6474,10 @@ export class ApiService {
     // thresholds the findings were judged with. No other view reads findings.
     const judged =
       view === "issues" || view === "issue_urls" ? await this.judgementView(crawlId) : null;
-    if (judged !== null && ruleId !== null) refuseIfDisabled(judged, crawlId, ruleId);
+    if (judged !== null && ruleId !== null) {
+      refuseIfDisabled(judged, crawlId, ruleId);
+      refuseIfNotMeasured(judged, crawlId, ruleId);
+    }
     const disabledRules = judged === null ? [] : judged.disabledRules;
     const copy = judged === null ? null : copyRenderer(judged.copyThresholds);
     await this.assertViewAnswerable(crawlId, view, disabledRules);
@@ -6470,6 +6512,7 @@ export class ApiService {
       metricId: null,
       filename: csvFilename(slug(crawlId), view, ruleId === null ? null : slug(ruleId)),
       disabledRules: judged === null ? null : judged.disabledRules,
+      notMeasured: judged === null ? null : judged.notMeasured,
       async *records(): AsyncGenerator<string> {
         // THE HEADER IS UNCONDITIONAL. A zero-row CSV with no header is a file
         // that cannot say what it failed to contain, and a reader would have to
@@ -6509,6 +6552,7 @@ export class ApiService {
       metricId: null,
       filename: csvFilename(slug(crawlId), "issues_overview", null),
       disabledRules: overview.disabledRules,
+      notMeasured: overview.notMeasured,
       async *records(): AsyncGenerator<string> {
         yield csvRecord(ISSUES_OVERVIEW_HEADER);
         for (const row of overview.rows) {
@@ -6533,6 +6577,7 @@ export class ApiService {
       filename: csvFilename(slug(crawlId), "crawl_overview", null),
       // Its issues grid leaves the disabled rules' findings out.
       disabledRules: view.disabledRules,
+      notMeasured: view.notMeasured,
       async *records(): AsyncGenerator<string> {
         yield csvRecord(CRAWL_OVERVIEW_HEADER);
         for (const cells of crawlOverviewRecords(overview)) yield csvRecord(cells);
@@ -6570,6 +6615,7 @@ export class ApiService {
       metricId,
       filename: csvFilename(slug(crawlId), "metric_table", slug(metricId)),
       disabledRules: null,
+      notMeasured: null,
       async *records(): AsyncGenerator<string> {
         yield csvRecord(metricTableHeader(table));
         for (const row of table.rows) yield csvRecord(metricTableCells(table, row));

@@ -155,7 +155,11 @@ A crawl is fit to audit when:
   - every rule id in its `notMeasured` evidence did NOT run: the link graph, orphans,
     click depth, inlinks, sitemap coverage, unlinked canonical and hreflang targets,
     and, when `sitemapsRead` is false, every sitemap rule. Each check those rules claim
-    is SKIP, never PASS, however clean its listing looks;
+    is SKIP, never PASS, however clean its listing looks. The listings name them too:
+    `issues_list`, `issues_overview`, `metrics_get` and the exports carry the same ids
+    in `notMeasured` beside `disabledRules`, `issues_overview` never makes one a zero
+    row, `issue_urls` of one is refused (409), and `metric_table`'s `note` says it was
+    not measured;
   - every rule id in `partiallyMeasured` ran, but only against targets the list
     itself fetched (listed URLs and their redirect targets). Its findings are true; its
     silence about any other URL is not a pass, so a check it alone answers is SKIP
@@ -256,7 +260,9 @@ check, and the issues sweep is usually one call:
    its `checkIds`, `severity`, `type`, `priority`, `count` and five `sampleUrls`.
    Follow `nextCursor` to the end. Index the rows by check id. Read the answer's
    `disabledRules` too: a rule named there fired and was filtered out by the crawl's
-   judgement, which is not the same as finding nothing. `issues_overview` is the same
+   judgement, which is not the same as finding nothing. And `notMeasured`: on a list
+   crawl, a rule named there never ran, so its empty listing is SKIP, not PASS (`[]`
+   on a spider crawl). `issues_overview` is the same
    picture in one unpaginated call, one row per rule, ordered by type and then
    priority, with `urls` (distinct URLs) and `percentOfJudged` — a good first read,
    but it has no sample URLs and no check index of its own beyond `checkIds`.
@@ -427,8 +433,9 @@ of three ways:
   is a gate the credentials did not open: report it as an access problem of the crawl,
   not a site defect, until you have checked the credentials. `discoveredVia` says how
   the crawler reached each URL — `seed`, `link`, `sitemap`, `redirect` or (a list
-  crawl) `list` — which is the other half of the orphan finding: a page whose only discovery was `sitemap` was linked from nowhere the crawl
-  walked. Both are closed vocabularies and a value outside them is refused by name.
+  crawl) `list` — which is the other half of the orphan finding: a page whose only
+  discovery was `sitemap` was linked from nowhere the crawl walked. Both are closed
+  vocabularies and a value outside them is refused by name.
 - **The robots.txt the crawl obeyed is readable.** `robots_get` returns the stored
   file — `raw` (the text as served, `truncated` when it is only the first 500KB),
   `outcome` (`read` / `absent` / `unreachable`), `crawlDelaySec`, `sitemapSources`,

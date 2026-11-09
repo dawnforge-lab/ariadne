@@ -2842,7 +2842,7 @@ describe("the two transports answer with one shape", () => {
     // The MCP answer says where the file is (and, on a view that reads
     // findings, which rules the judgement left out); the HTTP answer IS the file.
     expect(Object.keys(written).sort()).toEqual([
-      "bytes", "disabledRules", "format", "path", "rows", "view",
+      "bytes", "disabledRules", "format", "notMeasured", "path", "rows", "view",
     ]);
     expect(written["disabledRules"]).toEqual([]);
     expect(streamed.body).toBeNull();

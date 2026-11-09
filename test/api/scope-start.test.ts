@@ -574,3 +574,66 @@ describe("a secret smuggled into a credential NAME (27c final wave M13)", () => 
     await cancel(id);
   });
 });
+
+describe("what a list crawl did not measure, on every listing (27c final wave M16)", () => {
+  it("issues_list and metrics_get name a skipped rule in notMeasured, on HTTP and MCP, and never read it as clean", async () => {
+    const res = await call(baseB, "POST", "/crawls", { siteUrl: `${site}/`, mode: "list", urls: [`${site}/p/1`, `${site}/p/2`] });
+    expect(res.status, res.text).toBe(202);
+    const id = String(res.body["crawlId"]);
+    createdCrawls.push(id);
+    expect(await untilStatus(id, (s) => s !== "queued" && s !== "running")).toBe("finished");
+    const judged = await call(baseB, "POST", `/crawls/${id}/rules`);
+    expect(judged.status, judged.text).toBe(200);
+
+    // A skipped finding rule and a skipped metric: no sitemap read, so the
+    // needsSitemaps rules are skipped beside the needsSpider ones.
+    const issues = await a("GET", `/crawls/${id}/issues?ruleId=links.orphan`);
+    expect(issues.status, issues.text).toBe(200);
+    expect(issues.body["items"]).toEqual([]);
+    const notMeasured = issues.body["notMeasured"] as string[];
+    for (const ruleId of ["links.orphan", "inlinks.distribution", "sitemap.invalid"]) {
+      expect(notMeasured, ruleId).toContain(ruleId);
+    }
+    expect(notMeasured).not.toContain("links.broken-internal");
+    expect([...notMeasured].sort()).toEqual(notMeasured);
+    expect(issues.body["disabledRules"]).toEqual([]);
+    const viaIssues = JSON.parse((await tool("issues_list", { crawlId: id, ruleId: "links.orphan" })).text) as Record<string, unknown>;
+    expect(viaIssues["items"]).toEqual([]);
+    expect(viaIssues["notMeasured"]).toEqual(notMeasured);
+
+    const metrics = await a("GET", `/crawls/${id}/metrics?metricId=inlinks.distribution`);
+    expect(metrics.status, metrics.text).toBe(200);
+    expect(metrics.body["items"]).toEqual([]);
+    expect(metrics.body["notMeasured"]).toEqual(notMeasured);
+    const viaMetrics = JSON.parse((await tool("metrics_get", { crawlId: id, metricId: "inlinks.distribution" })).text) as Record<string, unknown>;
+    expect(viaMetrics["items"]).toEqual([]);
+    expect(viaMetrics["notMeasured"]).toEqual(notMeasured);
+
+    // The overview lists no skipped rule as a zero row, and names them.
+    const overview = await a("GET", `/crawls/${id}/overview/issues?includeZero=true`);
+    expect(overview.status, overview.text).toBe(200);
+    expect(overview.body["notMeasured"]).toEqual(notMeasured);
+    const rowIds = (overview.body["rows"] as { ruleId: string }[]).map((r) => r.ruleId);
+    for (const ruleId of notMeasured) expect(rowIds, ruleId).not.toContain(ruleId);
+    expect(rowIds).toContain("crawl.list-mode");
+
+    // A rule-scoped table of a skipped rule is refused, as a disabled one is.
+    const urls = await a("GET", `/crawls/${id}/issues/links.orphan/urls`);
+    expect(urls.status, urls.text).toBe(409);
+    expect(String(urls.body["error"])).toContain("not measured");
+    expect(String(urls.body["error"])).toContain("crawl.list-mode");
+    // One metric's table says why it is empty: nobody measured it.
+    const table = await a("GET", `/crawls/${id}/metrics/inlinks.distribution`);
+    expect(table.status, table.text).toBe(200);
+    expect(String(table.body["note"])).toContain("not measured");
+
+    // The issues export names them too.
+    const exported = await a("GET", `/crawls/${id}/export?dataset=issues`);
+    expect(exported.status, exported.text).toBe(200);
+    expect(exported.body["notMeasured"]).toEqual(notMeasured);
+
+    // A spider crawl measures everything: an empty list, never absent.
+    const spider = await a("GET", `/crawls/${blocker}/issues`);
+    expect(spider.body["notMeasured"]).toEqual([]);
+  }, 60_000);
+});

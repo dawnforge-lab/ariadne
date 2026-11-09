@@ -1051,7 +1051,11 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "crawl's judgement sets that value. A rule the judgement disables still " +
         "ran and its findings are stored, but its group is left out here — the " +
         "answer's disabledRules names every such rule, so 'filtered out' and 'did " +
-        "not fire' stay distinguishable. judgementStale {stale, reasons} says " +
+        "not fire' stay distinguishable. " +
+        "On a LIST crawl, notMeasured names the rules its rules run did not run " +
+        "(the crawl.list-mode marker's own list; [] on a spider crawl): an empty " +
+        "answer for one of them is NOT MEASURED, never clean. " +
+        "judgementStale {stale, reasons} says " +
         "whether the crawl's judgement has changed since its last rules run " +
         "(reasons: overrides | thresholds | findingCap); re-run crawl_rules to " +
         "clear it.\n\n" +
@@ -1075,7 +1079,7 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "findings belong to no cohort and are excluded by this filter.\n" +
         "ruleId, checkId and category intersect; a combination that can select no " +
         "rule is refused rather than answered with an empty page.\n\n" +
-        `Paginated: {items, nextCursor, disabledRules, judgementStale}; limit ` +
+        `Paginated: {items, nextCursor, disabledRules, notMeasured, judgementStale}; limit ` +
         `defaults to ${PAGE_SIZE_DEFAULT}, maximum ${PAGE_SIZE_MAX}.`,
       inputSchema: z.strictObject({
         crawlId: crawlIdField(),
@@ -1119,7 +1123,8 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
       title: "Issues Overview: one row per rule",
       description:
         "THE ISSUES OVERVIEW of a judged crawl, with its judgement applied: " +
-        "{crawlId, rulesetVersion, pagesJudged, rows, disabledRules, judgementStale}. " +
+        "{crawlId, rulesetVersion, pagesJudged, rows, disabledRules, notMeasured, " +
+        "judgementStale}. " +
         "One row per rule that found something — {ruleId, title, type, priority, " +
         "severity, category, checkIds, urls, percentOfJudged, marker?} — ordered by " +
         "type (issue, warning, opportunity), then priority (high, medium, low), then " +
@@ -1134,7 +1139,9 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "sitemap.uncrawled, which lists sitemap URLs the crawl never fetched); both " +
         "are null when the crawl has no site.health row (and percentOfJudged when " +
         "pagesJudged is 0). Rules the crawl's judgement disables are left out and " +
-        "named in disabledRules; metric rules never appear. Not paginated: one row per " +
+        "named in disabledRules; rules a list crawl did not run are never a row, not " +
+        "even a zero, and are named in notMeasured; metric rules never appear. Not " +
+        "paginated: one row per " +
         "rule, at most the ruleset's rule count.\n\n" +
         "A crawl no rules run has judged is refused (409): an empty overview would " +
         "read as a clean site. The same rows are a spreadsheet through export_crawl " +
@@ -1252,7 +1259,8 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "A rule the crawl's judgement disables is refused (409) rather than " +
         "answered with an empty page: its findings are stored, and an empty page " +
         "would read as 'this rule found nothing'. issues_list's disabledRules " +
-        "names them.\n\n" +
+        "names them. So is a rule a list crawl did not run (issues_list's " +
+        "notMeasured): its empty page would read as clean where nobody looked.\n\n" +
         `Paginated: {items, nextCursor}; limit defaults to ${PAGE_SIZE_DEFAULT}, ` +
         `maximum ${PAGE_SIZE_MAX}. A large rule can have thousands of rows — ` +
         "follow the cursors, or use export_crawl if you want all of them at once.",
@@ -1336,7 +1344,10 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "measuring'. The check is one field: crawl_status's rulesRunAt is the " +
         "timestamp of the last COMPLETED rules pass, and null means none is on " +
         "record (never judged, being judged now, or a run that died part-way). " +
-        "Read it before you quote a number that is not there.\n\n" +
+        "Read it before you quote a number that is not there. " +
+        "On a LIST crawl, notMeasured names the metrics (and rules) its rules run " +
+        "did not run — an empty answer for one is NOT MEASURED; [] on a spider " +
+        "crawl.\n\n" +
         "Filters, each refused by name if it names nothing this crawl measured:\n" +
         `  metricId   — a single metric, e.g. redirect.volume\n` +
         `  scope      — the cohort kind: ${METRIC_SCOPES_HINT}\n` +
@@ -1346,7 +1357,7 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "metric is a measurement the last rules run stored — site.health counted " +
         "the rules that run left enabled — so a stale judgement means these numbers " +
         "predate the crawl's current settings.\n\n" +
-        `Paginated: {items, nextCursor, judgementStale}; limit defaults to ` +
+        `Paginated: {items, nextCursor, notMeasured, judgementStale}; limit defaults to ` +
         `${PAGE_SIZE_DEFAULT}, maximum ${PAGE_SIZE_MAX}.`,
       inputSchema: z.strictObject({
         crawlId: crawlIdField(),
@@ -1863,7 +1874,8 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "bytes}, plus disabledRules " +
         "on the issues dataset: the rules the crawl's judgement disables, whose " +
         "findings the file leaves out (the issues and issue_urls CSV views leave " +
-        "them out too, and issue_urls of a disabled rule is refused).\n" +
+        "them out too, and issue_urls of a disabled rule is refused), and beside it " +
+        "notMeasured, the rules a list crawl did not run.\n" +
         `  format=csv writes a spreadsheet of one VIEW: ${CSV_VIEWS.join(", ")} ` +
         "(default issues). issue_urls is one rule's findings and needs a ruleId; " +
         "metric_table is one metric's table and needs a metricId; issues_overview is " +
@@ -1872,7 +1884,7 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "seven, like the two overviews, refuse both. Answers {format, view, path, rows, " +
         "bytes}, plus disabledRules on the four views that read findings (issues, " +
         "issue_urls, issues_overview, crawl_overview): the rules the crawl's judgement " +
-        "disables, whose findings the file leaves out.\n" +
+        "disables, whose findings the file leaves out, with notMeasured beside it.\n" +
         "  metric_table is the spreadsheet of the metric_table tool's table: the " +
         "header is the column LABELS, one row per table row, and the metric's " +
         "summary scalars lead every row as extra columns — a CSV has no place " +

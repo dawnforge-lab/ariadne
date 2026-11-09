@@ -1714,7 +1714,7 @@ of fetch class `excluded`, read with `pages_query` (`fetchClass: "excluded"`). L
 measurement; null is a crawl written before migration 0036, where nobody counted.
 `crawl_status` carries no credential, value or name.
 
-### 4.3 `issues_list` → `{items: IssueGroup[], nextCursor, disabledRules, judgementStale}`
+### 4.3 `issues_list` → `{items: IssueGroup[], nextCursor, disabledRules, notMeasured, judgementStale}`
 
 The gate crawl's first group, as it came back (2026-11-08, ruleset 0.23.0):
 
@@ -1752,6 +1752,20 @@ fire". **`judgementStale`** is `crawl_status`'s flag (§4.2), carried on the
 listing so a dashboard drawing it needs no second call. Pinned:
 `test/api/judgement-surfaces.test.ts:139` "issues_list drops the disabled rule,
 names it, and carries the overrides".
+
+**`notMeasured` (27c final wave)** sits beside `disabledRules` on every listing
+that carries it — `issues_list`, `issues_overview`, the `issues` export and the
+CSV views that read findings — and on `metrics_get`: the rule ids the stored
+rules run left out because this is a **list crawl** (the `crawl.list-mode`
+marker's own `notMeasured`, decided by the same registry flags, the crawl's
+mode and its stored `sitemapsRead`), sorted. A listing filtered to one of them
+is empty because **nobody measured it, not because the site is clean** (hard
+rule 1). `[]` on a spider crawl and on a crawl no rules run has judged. Mirroring
+a disabled rule: `issues_overview` never makes one a zero row, `issue_urls` (and
+the `issue_urls` CSV view) of one is refused 409 naming `crawl.list-mode`, and
+`metric_table` of a skipped metric says in its `note` that it was not measured.
+Pinned: `test/api/scope-start.test.ts:579` "issues_list and metrics_get name a
+skipped rule in notMeasured, on HTTP and MCP, and never read it as clean".
 
 Pinned: `test/api/query.test.ts:1082` "groups by rule, orders by severity then
 rule id", `test/api/query.test.ts:1225` "says so when a rule's listing was capped"
@@ -1804,7 +1818,9 @@ its 46 rows, as they came back (2026-11-08):
 - **Rows included:** the rules that fired. `includeZero` adds every ENABLED page
   and query rule that ran and found nothing, at `urls: 0` (174 rows on the gate
   crawl, 128 of them zero). A rule the judgement disables is never a row, zero
-  or not, and is named in `disabledRules`. Metric rules never appear.
+  or not, and is named in `disabledRules`; a rule a list crawl did not measure is
+  never a row either, and is named in `notMeasured` (§4.3). Metric rules never
+  appear.
 - **Not paginated:** at most one row per finding rule (174). It is an aggregate
   rather than an export, which is how it meets obligation 1. It is one
   `GROUP BY rule_id` plus the stored `site.health` row, read with the judgement
@@ -2010,6 +2026,9 @@ and an empty page here would read as "this rule found nothing". The gate crawl
 answered `rule 'title.same-as-h1' is disabled on crawl
 'crawl_4dd32709-56c9-4a62-9af4-7a843f76ff6c'; re-enable it with crawl_config_set
 to list its findings`. `issue_inlinks` refuses a disabled rule the same way.
+**A rule a list crawl did not measure** (`notMeasured`, §4.3) is refused 409 by
+`issue_urls` and its CSV view on the same terms, naming `crawl.list-mode`: an
+empty page would read as "clean" where nobody looked (27c final wave).
 Pinned: `test/api/judgement-surfaces.test.ts:165` "issue_urls and issue_inlinks
 refuse a disabled rule with CONFLICT naming it",
 `test/api/judgement-surfaces.test.ts:220` "the issue_urls CSV of a disabled
@@ -2120,8 +2139,9 @@ client formats), percentages as numbers under a label ending `(%)`, booleans as
 `true`/`false`.
 
 **`note` is present exactly when `rows` is empty**, and says which empty it is:
-a judged crawl whose metric measured nothing, or a metric whose rows hold an
-empty list. The two answers that are NOT an empty table are refusals, both
+a judged crawl whose metric measured nothing, a metric a list crawl did not
+measure (it says so, naming `crawl.list-mode`, since the 27c final wave), or a
+metric whose rows hold an empty list. The two answers that are NOT an empty table are refusals, both
 404: a `metricId` this ruleset does not define (the metric is the RESOURCE here,
 where on `metrics_get` it is a filter and a 400), and **a crawl no rules pass
 has ever completed over** — metrics are written by `crawl_rules`, and "nobody
@@ -2171,11 +2191,13 @@ these numbers predate the crawl's current settings. The gate crawl's
 `site.health` table came back with `"judgementStale":{"stale":false,"reasons":[]}`
 after its re-judge. Pinned with `metrics_get`'s below.
 
-### 4.5 `metrics_get` → `{items: MetricRow[], nextCursor, judgementStale}`
+### 4.5 `metrics_get` → `{items: MetricRow[], nextCursor, notMeasured, judgementStale}`
 
 `{metricId, scope, scopeValue, value, title, explanation, checkIds, category}`
 per row, and since Phase 27a `judgementStale` beside `items` and `nextCursor`
-(`crawl_status`'s flag, §4.2). A metric is a measurement the last rules run
+(`crawl_status`'s flag, §4.2). Since the 27c final wave, `notMeasured` (§4.3):
+the metrics (and rules) a list crawl's rules run left out, so an empty page for
+one reads "not measured", never "nothing to measure". A metric is a measurement the last rules run
 stored, and `site.health` counted only the findings of the rules that run left
 enabled, so a stale judgement means these numbers predate the crawl's current
 settings: a rule disabled since is still in `site.health`'s counts, and a rule
@@ -3681,10 +3703,11 @@ Three consequences a consumer must plan for:
 `GET /crawls/:id/export?format=csv&view=<view>` streams `text/csv; charset=utf-8`,
 chunked, with no `Content-Length` and a `Content-Disposition` filename. The MCP
 tool writes the same bytes to a file under the server's export directory and
-answers `{format, view, ruleId?, metricId?, path, rows, bytes, disabledRules?}`.
+answers `{format, view, ruleId?, metricId?, path, rows, bytes, disabledRules?, notMeasured?}`.
 `rows` counts **data rows**; the header is always written and never counted.
 `disabledRules` is on the answer of the four views that read findings
-(`issues`, `issue_urls`, `issues_overview`, `crawl_overview`) and absent on the
+(`issues`, `issue_urls`, `issues_overview`, `crawl_overview`), with `notMeasured`
+(§4.3: what a list crawl did not measure) beside it, and both are absent on the
 rest.
 
 | view | columns | one row is | measured on `crawl_02ff6f7a` |

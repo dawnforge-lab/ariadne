@@ -2742,7 +2742,7 @@ describe("GET /crawls/:id/export", () => {
     // `disabledRules` on the issues dataset since Phase 27a: the rules the
     // crawl's judgement leaves out of the file (none here).
     expect(Object.keys(res.body).sort()).toEqual([
-      "bytes", "dataset", "disabledRules", "path", "rows",
+      "bytes", "dataset", "disabledRules", "notMeasured", "path", "rows",
     ]);
     expect(res.body["disabledRules"]).toEqual([]);
 
@@ -3356,15 +3356,15 @@ describe("GET /crawls/:id/export?format=csv", () => {
       path: join(exportDir, `${crawlF}-issues.jsonl.gz`),
       rows: 3,
       bytes: implicit.body["bytes"],
-      // Additive since Phase 27a: the issues dataset names the rules the
-      // crawl's judgement leaves out (none here).
-      disabledRules: [],
+      // Additive since 27a / 27c M16: the rules the judgement leaves out and
+      // the rules a list crawl did not measure (none here, a spider crawl).
+      disabledRules: [], notMeasured: [],
     });
     expect(explicit.body).toEqual(implicit.body);
     // No `format` key on the JSONL answer: the shape a caller already parses is
     // untouched by this task.
     expect(Object.keys(implicit.body).sort()).toEqual([
-      "bytes", "dataset", "disabledRules", "path", "rows",
+      "bytes", "dataset", "disabledRules", "notMeasured", "path", "rows",
     ]);
   });
 
