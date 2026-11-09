@@ -983,7 +983,10 @@ const KINDS = ["page", "query", "metric"] as const satisfies readonly AnyRule["k
 //     sitemap read; `runRules` does not run them on a list crawl (and
 //     `needsSitemaps` only when no sitemap was read), and the new marker
 //     `crawl.list-mode` (CHECK-83, one finding per list crawl) names what was
-//     not measured. A spider crawl's findings do not move. 189 rules:
+//     not measured. `listPartial` marks the rules that judge the response of
+//     a target a list crawl fetches only when listed or a redirect target; they
+//     run, and the marker names them under `partiallyMeasured`. A spider
+//     crawl's findings do not move. 189 rules:
 //     72 page / 103 query / 14 metric.
 export const RULESET_VERSION = "0.24.0";
 
@@ -1066,7 +1069,7 @@ export function defineRule<T extends AnyRule>(
   // it is refused here rather than reaching the registry as a silent marker.
   if (rule.marker !== undefined && (typeof rule.marker !== "string" || rule.marker.trim() === ""))
     fail("marker, when present, must be a non-empty reason string");
-  for (const flag of ["needsSpider", "needsSitemaps"] as const) {
+  for (const flag of ["needsSpider", "needsSitemaps", "listPartial"] as const) {
     if (rule[flag] !== undefined && rule[flag] !== true) fail(`${flag}, when present, must be true`);
     // Only `crawl.list-mode` is refused: it is the rule that has to RUN on a
     // list crawl to say the flagged ones did not. Another marker may be flagged
@@ -1074,6 +1077,9 @@ export function defineRule<T extends AnyRule>(
     if (rule[flag] === true && rule.id === "crawl.list-mode")
       fail(`${flag} is refused on crawl.list-mode — it must run on a list crawl`);
   }
+  // A rule that does not run on a list crawl cannot also run on it partially.
+  if (rule.listPartial === true && (rule.needsSpider === true || rule.needsSitemaps === true))
+    fail("listPartial is refused beside needsSpider / needsSitemaps: a rule either runs on a list crawl or does not");
   validateColumns(rule, fail);
   validateTable(rule, fail);
   return attachTriage(rule, triage, fail) as T;

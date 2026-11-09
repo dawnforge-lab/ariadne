@@ -644,6 +644,7 @@ export const paginationRules: QueryRule[] = [
   defineRule<QueryRule>({
     kind: "query",
     id: NON_INDEXABLE_TARGET.id,
+    listPartial: true,
     checkIds: ["CHECK-22", "CHECK-23"],
     category: CATEGORY,
     severity: NON_INDEXABLE_TARGET.severity,
@@ -666,6 +667,7 @@ export const paginationRules: QueryRule[] = [
   defineRule<QueryRule>({
     kind: "query",
     id: LOOP.id,
+    listPartial: true,
     checkIds: ["CHECK-22"],
     category: CATEGORY,
     severity: LOOP.severity,
@@ -685,6 +687,7 @@ export const paginationRules: QueryRule[] = [
   defineRule<QueryRule>({
     kind: "query",
     id: SEQUENCE_ERROR.id,
+    listPartial: true,
     checkIds: ["CHECK-22"],
     category: CATEGORY,
     severity: SEQUENCE_ERROR.severity,

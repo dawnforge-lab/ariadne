@@ -321,6 +321,7 @@ export const linkTargetRules: QueryRule[] = [
   defineRule<QueryRule>({
     kind: "query",
     id: BROKEN.id,
+    listPartial: true,
     checkIds: ["CHECK-11"],
     category: "links",
     severity: BROKEN.severity,
@@ -347,6 +348,7 @@ export const linkTargetRules: QueryRule[] = [
   defineRule<QueryRule>({
     kind: "query",
     id: TO_SERVER_ERROR.id,
+    listPartial: true,
     checkIds: ["CHECK-11"],
     category: "links",
     severity: TO_SERVER_ERROR.severity,
@@ -377,6 +379,7 @@ export const linkTargetRules: QueryRule[] = [
   defineRule<QueryRule>({
     kind: "query",
     id: NON_200.id,
+    listPartial: true,
     checkIds: ["CHECK-19"],
     category: "canonical",
     severity: NON_200.severity,
@@ -413,6 +416,7 @@ export const linkTargetRules: QueryRule[] = [
   defineRule<QueryRule>({
     kind: "query",
     id: NON_INDEXABLE.id,
+    listPartial: true,
     checkIds: ["CHECK-19"],
     category: "canonical",
     severity: NON_INDEXABLE.severity,

@@ -228,6 +228,7 @@ export const canonicalGraphRules: QueryRule[] = [
   defineRule<QueryRule>({
     kind: "query",
     id: CHAIN.id,
+    listPartial: true,
     checkIds: ["CHECK-17", "CHECK-19"],
     category: CATEGORY,
     severity: CHAIN.severity,

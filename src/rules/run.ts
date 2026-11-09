@@ -7,7 +7,12 @@ import { deriveSitemapHreflang } from "./derive/sitemap-hreflang.js";
 import { deriveUrlParams } from "./derive/url-params.js";
 import { effectiveThresholds, judgedWithOf, readStoredJudgement } from "./judgement.js";
 import { resolveRuleCaps, storedFindingCap } from "./query/crawl-evidence.js";
-import { listModeSkips, readListScope, skipsOnList } from "./query/list-mode.js";
+import {
+  listModePartials,
+  listModeSkips,
+  readListScope,
+  skipsOnList,
+} from "./query/list-mode.js";
 import { RULESET_VERSION, type Registry } from "./registry/registry.js";
 import {
   METRIC_SCOPES,
@@ -196,6 +201,7 @@ export async function runRules(
           listMode: {
             sitemapsRead: scope.sitemapsRead,
             notMeasured: listModeSkips(registry.all(), scope.sitemapsRead),
+            partiallyMeasured: listModePartials(registry.all()),
           },
         }
       : {}),

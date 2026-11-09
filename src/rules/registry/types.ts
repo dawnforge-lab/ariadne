@@ -189,6 +189,16 @@ interface RuleMeta {
    */
   needsSitemaps?: true;
   /**
+   * Phase 27c: the rule judges the RESPONSE of a URL that a list crawl fetches
+   * only when it is listed or a redirect target (a canonical, hreflang,
+   * pagination or link target). It still RUNS on a list crawl, because a target
+   * the list did fetch is a true finding; but it is silent about every other
+   * target, which reads as clean. `crawl.list-mode` names these rules under
+   * `partiallyMeasured`. Never together with `needsSpider` / `needsSitemaps`,
+   * and refused on `crawl.list-mode` itself.
+   */
+  listPartial?: true;
+  /**
    * THE RULE'S REPORT, column by column — what a reader sees after the four
    * standard columns every finding row carries (`address`, `statusCode`,
    * `indexability`, `indexabilityStatus`).
@@ -331,7 +341,11 @@ export interface JudgementContext {
    * this run did not execute (`needsSpider`, plus `needsSitemaps` when no
    * sitemap was read). `crawl.list-mode` reports it and is the only reader.
    */
-  listMode?: { sitemapsRead: boolean; notMeasured: readonly string[] };
+  listMode?: {
+    sitemapsRead: boolean;
+    notMeasured: readonly string[];
+    partiallyMeasured: readonly string[];
+  };
 }
 
 /** The context of a crawl with no overrides. */

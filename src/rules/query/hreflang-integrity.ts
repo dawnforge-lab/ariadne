@@ -634,6 +634,7 @@ export const hreflangIntegrityRules: QueryRule[] = [
   defineRule<QueryRule>({
     kind: "query",
     id: RETURN_CODE.id,
+    listPartial: true,
     checkIds: ["CHECK-24"],
     category: CATEGORY,
     severity: RETURN_CODE.severity,

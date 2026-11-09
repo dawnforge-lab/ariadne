@@ -1055,6 +1055,7 @@ export const hreflangRules: QueryRule[] = [
   defineRule<QueryRule>({
     kind: "query",
     id: RETURN_LINK.id,
+    listPartial: true,
     checkIds: ["CHECK-24"],
     category: CATEGORY,
     severity: RETURN_LINK.severity,
@@ -1106,6 +1107,7 @@ export const hreflangRules: QueryRule[] = [
   defineRule<QueryRule>({
     kind: "query",
     id: NON_INDEXABLE.id,
+    listPartial: true,
     checkIds: ["CHECK-26"],
     category: CATEGORY,
     severity: NON_INDEXABLE.severity,

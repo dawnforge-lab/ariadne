@@ -62,6 +62,11 @@ export function listModeSkips(rules: readonly AnyRule[], sitemapsRead: boolean):
   return rules.filter((r) => skipsOnList(r, sitemapsRead)).map((r) => r.id).sort();
 }
 
+/** The ids that run on a list crawl but judge only the targets the list fetched, sorted. */
+export function listModePartials(rules: readonly AnyRule[]): string[] {
+  return rules.filter((r) => r.listPartial === true).map((r) => r.id).sort();
+}
+
 /** Whether a list crawl leaves this rule out. */
 export function skipsOnList(rule: AnyRule, sitemapsRead: boolean): boolean {
   return rule.needsSpider === true || (rule.needsSitemaps === true && !sitemapsRead);
@@ -80,12 +85,13 @@ export const listModeRules: QueryRule[] = [
     severity: LIST_MODE.severity,
     columns: [
       { key: "notMeasured", label: "Not Measured" },
+      { key: "partiallyMeasured", label: "Partially Measured" },
       { key: "sitemapsRead", label: "Sitemaps Read" },
     ],
     ...copyFor(LIST_MODE.id),
     rulesetVersion: RULESET_VERSION,
     marker:
-      "This is a list crawl: it fetched only the URLs it was given and followed no link, so every check that needs the whole site, and without a sitemap read every sitemap check, was not run; crawl the site to measure them.",
+      "This is a list crawl: it fetched only the URLs it was given and followed no link, so every check that needs the whole site, and without a sitemap read every sitemap check, was not run, and the target checks were judged only against URLs it fetched; crawl the site to measure them.",
     run: async (_db, _crawlId, _caps, ctx): Promise<Finding[]> => {
       const list = ctx?.listMode;
       if (list === undefined) return [];
@@ -93,7 +99,11 @@ export const listModeRules: QueryRule[] = [
         queryFinding(LIST_MODE, {
           pageId: null,
           pageUrl: null,
-          evidence: { notMeasured: [...list.notMeasured], sitemapsRead: list.sitemapsRead },
+          evidence: {
+            notMeasured: [...list.notMeasured],
+            partiallyMeasured: [...list.partiallyMeasured],
+            sitemapsRead: list.sitemapsRead,
+          },
           dedupeKey: "site",
         }),
       ];

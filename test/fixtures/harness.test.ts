@@ -3846,8 +3846,8 @@ describe("the fixture site end to end", () => {
     // rules and headers marker made twenty-one, and its
     // `sitemap.over-50k-urls` twenty-two; Phase 26b's `extraction.not-recorded`
     // made twenty-three, and Phase 26c's `sitemap.oversized` and
-    // `social.image-insecure` make twenty-five and Phase 27c's `crawl.list-mode` twenty-six — asserted below, so the number
-    // cannot go stale again). A
+    // `social.image-insecure` make twenty-five, and Phase 27c's `crawl.list-mode`
+    // twenty-six — asserted below, so the number cannot go stale again). A
     // new rule arrives here with no fixture and fails immediately, which is the
     // point — the alternative is a rule nobody has ever seen speak.
     expect(SKIP_HARNESS_CLAIMS).toHaveLength(26);
