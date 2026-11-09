@@ -45,6 +45,7 @@ import {
 import { captureResponseHeaders, type StoredResponseHeaders } from "./response-headers.js";
 import { parseLinkHeader, relTokens, type LinkHeaderEntry } from "./link-header.js";
 import { MAX_HREFLANG_PAIRS, type HreflangPair } from "./parse/page-analyzer.js";
+import { credentialHeadersOf, type CredentialTarget } from "./credentials.js";
 
 /**
  * The body cap, spent on **decompressed** bytes (see readCappedDecoded). It
@@ -283,6 +284,12 @@ export interface FetchOpts {
    * Supplying it also opts out of the shared connection pool.
    */
   lookup?: DnsLookupFn;
+  /**
+   * The crawl's credentials (Phase 27c), sent only when THIS url is in the
+   * site family (`credentialHeadersFor`). A redirect is never followed here —
+   * each hop is its own `fetchPage` call — so each hop decides for itself.
+   */
+  credentials?: CredentialTarget;
 }
 
 /**
@@ -581,7 +588,13 @@ export async function fetchPage(url: string, opts: FetchOpts): Promise<FetchResu
     const response = await request(url, {
       dispatcher,
       method: "GET",
-      headers: pageRequestHeaders(opts.userAgent),
+      // The credential headers first and the engine's after: the refused
+      // names (`credentialError`) already keep them apart, and the engine's
+      // identity wins regardless (rule 9).
+      headers: {
+        ...credentialHeadersOf(url, opts.credentials),
+        ...pageRequestHeaders(opts.userAgent),
+      },
       // Manual redirects: a 3xx is its own row and the crawl loop enqueues the
       // target (which re-enters url-policy on the way in), so chains and loops
       // are visible in the recorded rows instead of collapsed by the client.

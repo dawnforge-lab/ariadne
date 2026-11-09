@@ -35,12 +35,22 @@ const REDACTED_REQUEST_HEADERS = new Set(["authorization", "cookie", "proxy-auth
  * The request headers a crawl sent, as `crawls.request_headers` records them:
  * credential-bearing names (matched case-insensitively) keep their key and lose
  * their value, so the row says a credential was sent without holding it.
+ *
+ * `extraNames` are the crawl's own custom credential header names (Phase 27c,
+ * `CredentialShape.requestHeaderNames`): redacted the same way, also
+ * case-insensitively. A custom header's value is a secret whatever it is
+ * called.
  */
-export function redactRequestHeaders(h: Record<string, string>): Record<string, string> {
+export function redactRequestHeaders(
+  h: Record<string, string>,
+  extraNames: Iterable<string> = [],
+): Record<string, string> {
+  const redacted = new Set(REDACTED_REQUEST_HEADERS);
+  for (const name of extraNames) redacted.add(name.toLowerCase());
   return Object.fromEntries(
     Object.entries(h).map(([name, value]) => [
       name,
-      REDACTED_REQUEST_HEADERS.has(name.toLowerCase()) ? "[redacted]" : value,
+      redacted.has(name.toLowerCase()) ? "[redacted]" : value,
     ]),
   );
 }

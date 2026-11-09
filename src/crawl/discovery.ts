@@ -95,6 +95,7 @@ import {
   sharedAgent,
   type HeaderBag,
 } from "./http.js";
+import { credentialHeadersOf, type CredentialTarget } from "./credentials.js";
 
 const gunzip = promisify(gunzipCallback);
 
@@ -474,6 +475,13 @@ export interface DiscoveryOpts {
    * server. Never wire this to config, an API field or an env var.
    */
   allowPrivate?: boolean;
+  /**
+   * The crawl's credentials (Phase 27c). Every document request — robots.txt,
+   * each sitemap, and every redirect hop of either — decides on its OWN URL
+   * (`credentialHeadersFor`): a hop that leaves the site family carries none
+   * of them, and a third-party robots.txt (the resource pass's) never does.
+   */
+  credentials?: CredentialTarget;
 }
 
 /**
@@ -685,7 +693,9 @@ async function requestDoc<T>(
       const response = await request(url, {
         dispatcher: sharedAgent(allowPrivate),
         method: "GET",
+        // THIS hop's URL decides, not the chain's start (Phase 27c).
         headers: {
+          ...credentialHeadersOf(url, opts.credentials),
           "user-agent": opts.userAgent,
           accept: "text/plain,application/xml,text/xml,application/gzip;q=0.9,*/*;q=0.8",
         },

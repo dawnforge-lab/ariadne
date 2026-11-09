@@ -105,6 +105,7 @@ import { request } from "undici";
 import type { Db } from "../../db/client.js";
 import { resources } from "../../db/schema.js";
 import { fetchRobots, type RobotsInfo, type RobotsOutcome } from "../discovery.js";
+import { credentialHeadersOf, type CredentialTarget } from "../credentials.js";
 import { classifyStatus, parseRetryAfter, type FetchClass } from "../fetch-page.js";
 import {
   ACCEPT_ENCODING,
@@ -318,6 +319,12 @@ export interface ResourcePassOpts {
   allowPrivate?: boolean;
   /** Backoff between a third-party robots.txt's retries. Lowered by tests. */
   robotsRetryBackoffMs?: number;
+  /**
+   * The crawl's credentials (Phase 27c). Each request decides on its own URL
+   * (`credentialHeadersFor`): a same-family resource carries them, a resource
+   * on a CDN or any other host — and that host's robots.txt — never does.
+   */
+  credentials?: CredentialTarget;
   signal?: AbortSignal;
 }
 
@@ -506,6 +513,9 @@ export async function fetchCrawlResources(
                   allowPrivate,
                   timeoutMs,
                   retryBackoffMs: opts.robotsRetryBackoffMs,
+                  // Decided per hop by discovery: another host's robots.txt
+                  // gets nothing, unless a redirect brings it back home.
+                  credentials: opts.credentials,
                 },
                 "disallow",
               );
@@ -673,6 +683,7 @@ export async function fetchCrawlResources(
         timeoutMs,
         count: method === "GET",
         maxCountedBytes,
+        credentials: opts.credentials,
       });
       spent += 1;
       requests += 1;
@@ -1062,6 +1073,8 @@ interface RequestOpts {
   count: boolean;
   /** The counter's ceiling. See MAX_COUNTED_BYTES. */
   maxCountedBytes: number;
+  /** Sent only when `url` is in the site family (`credentialHeadersFor`). */
+  credentials: CredentialTarget | undefined;
 }
 
 /**
@@ -1090,6 +1103,7 @@ async function requestResource(
       dispatcher: sharedAgent(opts.allowPrivate),
       method,
       headers: {
+        ...credentialHeadersOf(url, opts.credentials),
         "user-agent": opts.userAgent,
         accept: "*/*",
         "accept-encoding": ACCEPT_ENCODING,

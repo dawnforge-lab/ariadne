@@ -134,6 +134,15 @@ import {
   type CrawlScope,
 } from "./url-scope.js";
 import { engineVersion, redactRequestHeaders } from "./versions.js";
+import {
+  credentialError,
+  credentialHeadersFor,
+  credentialShapeError,
+  requireCredentials,
+  type CrawlCredentials,
+  type CredentialShape,
+  type CredentialTarget,
+} from "./credentials.js";
 import { storableCap, storableDeep } from "./storable-text.js";
 
 /**
@@ -368,6 +377,31 @@ export interface CrawlConfig extends RenderSelectionConfig {
    * re-filter the scope lists get (Deviation 11).
    */
   maxUrlLength?: number;
+  /**
+   * THE CRAWL'S CREDENTIALS (Phase 27c): custom request headers, HTTP Basic
+   * auth and cookies (`src/crawl/credentials.ts`). Sent ONLY to requests whose
+   * own URL is in the site family (`credentialHeadersFor`, decided per
+   * request and per redirect hop) — the host probe, robots.txt, sitemaps,
+   * pages, the recheck, the known-404 probe and same-family resources — and
+   * never to any other host.
+   *
+   * NEVER STORED, on `allowPrivate`'s precedent: `storableConfig` strips it,
+   * and `parseStoredConfig`'s closed field set never reads it back. A secret
+   * value must not reach a column, a log line, an error or a response. A
+   * resume re-supplies it through `ResumeOpts.config`, and a resume that does
+   * not is refused (`credentialShape`).
+   */
+  credentials?: CrawlCredentials;
+  /**
+   * What `credentials` looked like — which fields, and the header and cookie
+   * names (`shapeOf`) — and STORED, so the row says this crawl needs them. A
+   * run whose shape is set and whose `credentials` are absent or of another
+   * shape is refused with `CredentialsMissingError` before its first request
+   * (hard rule 7): a crawl never continues unauthenticated against a site
+   * that needed auth. Required whenever `credentials` is given
+   * (`validateCrawlConfig`), so the record cannot be left out.
+   */
+  credentialShape?: CredentialShape;
 }
 
 /**
@@ -711,6 +745,9 @@ export async function runCrawl(
   signal?: AbortSignal,
 ): Promise<CrawlSummary> {
   validateCrawlConfig(config);
+  // Before the row exists and before any request: a crawl that needs
+  // credentials it was not given is refused, never run unauthenticated.
+  requireCredentials(null, config.siteUrl, config.credentialShape, config.credentials);
 
   const crawlId = `crawl_${randomUUID()}`;
   await db.insert(crawls).values({
@@ -795,6 +832,16 @@ export async function resumeCrawl(
 
   const config = opts.config ?? parseStoredConfig(row.config, crawlId);
   validateCrawlConfig(config);
+  // THE ROW DECIDES WHETHER CREDENTIALS ARE NEEDED, unless the override states
+  // a shape of its own: an `opts.config` that simply leaves `credentialShape`
+  // out must not be the way a crawl that needed auth resumes without it. Before
+  // the claim, so a refused resume has changed nothing.
+  requireCredentials(
+    crawlId,
+    config.siteUrl,
+    config.credentialShape ?? storedCredentialShape(row.config, crawlId),
+    config.credentials,
+  );
 
   // THE CLAIM, a compare-and-swap rather than a blind write. With
   // `expectStatus` it is conditioned on that status (the API queue's `queued`),
@@ -886,11 +933,21 @@ export async function resumeCrawl(
  * errors a second after seeing them and report the answer as if a minute had
  * passed. Persisting a shortened gap is persisting a WEAKER CLAIM about the
  * evidence, which is worse than persisting a stale number.
+ *
+ * `credentials` (Phase 27c) joins the strip for a stronger reason than either:
+ * its values are SECRETS — header values, a password, cookie values — and a
+ * secret value must never reach a column. What the row keeps is
+ * `credentialShape` (names only), so a resume knows to ask for them again.
  */
 export function storableConfig(
   config: CrawlConfig,
-): Omit<CrawlConfig, "allowPrivate" | "recheckMinGapMs"> {
-  const { allowPrivate: _allowPrivate, recheckMinGapMs: _recheckMinGapMs, ...rest } = config;
+): Omit<CrawlConfig, "allowPrivate" | "recheckMinGapMs" | "credentials"> {
+  const {
+    allowPrivate: _allowPrivate,
+    recheckMinGapMs: _recheckMinGapMs,
+    credentials: _credentials,
+    ...rest
+  } = config;
   return rest;
 }
 
@@ -953,6 +1010,10 @@ export function parseStoredConfig(value: unknown, crawlId: string): CrawlConfig 
     include: raw["include"],
     maxRedirectHops: raw["maxRedirectHops"],
     maxUrlLength: raw["maxUrlLength"],
+    // The shape only (Phase 27c). `credentials` is never read back: the row
+    // must not hold one, and one that somehow does is not the thing that
+    // turns them on.
+    credentialShape: storedCredentialShape(raw, crawlId) ?? undefined,
   };
   for (const [field, expected] of [
     ["siteUrl", "string"],
@@ -1041,6 +1102,24 @@ export function parseStoredConfig(value: unknown, crawlId: string): CrawlConfig 
     }
   }
   return config as CrawlConfig;
+}
+
+/**
+ * `config_jsonb.credentialShape`, validated, or null when the row has none. A
+ * present-but-malformed shape stops the read (the `parseStoredConfig` ruling):
+ * read as "none", it would let a crawl that needed auth run without it.
+ * Exported beside `parseStoredConfig` for `resumeCrawl`, which consults the row
+ * even when an override config is supplied.
+ */
+export function storedCredentialShape(value: unknown, crawlId: string): CredentialShape | null {
+  if (typeof value !== "object" || value === null) {
+    throw new Error(`crawl ${crawlId}: stored config is not readable`);
+  }
+  const shape = (value as Record<string, unknown>)["credentialShape"];
+  if (shape === undefined) return null;
+  const error = credentialShapeError(shape, `crawl ${crawlId}: stored config.credentialShape`);
+  if (error !== null) throw new Error(error);
+  return shape as CredentialShape;
 }
 
 /** `CrawlConfig.maxRedirectHops`' range (Phase 27c). */
@@ -1182,6 +1261,24 @@ export function validateCrawlConfig(config: CrawlConfig): void {
       }
     }
   }
+  // The credentials (Phase 27c). The messages name fields and header or
+  // cookie NAMES, never a value. Supplied credentials need the shape that
+  // records them, or the row would not say the crawl needs them and a resume
+  // would run unauthenticated.
+  if (config.credentials !== undefined) {
+    const error = credentialError(config.credentials, "CrawlConfig.credentials");
+    if (error !== null) throw new TypeError(error);
+  }
+  if (config.credentialShape !== undefined) {
+    const error = credentialShapeError(config.credentialShape, "CrawlConfig.credentialShape");
+    if (error !== null) throw new TypeError(error);
+  }
+  if (config.credentials !== undefined && config.credentialShape === undefined) {
+    throw new TypeError(
+      "CrawlConfig.credentials was given without CrawlConfig.credentialShape: the stored " +
+        "row would not say this crawl needs credentials, and a resume would run without them",
+    );
+  }
   // The test-only recheck gap, checked here for `findingCap`'s reason: the pass
   // that spends it runs after the last page, so a nonsense value would be found
   // by a `RangeError` an hour into a crawl. It is range-checked and not
@@ -1238,7 +1335,21 @@ async function execute(
     await db
       .update(crawls)
       .set({
-        requestHeaders: redactRequestHeaders(pageRequestHeaders(config.userAgent)),
+        // The credential headers a page on the seed's own origin is sent ride
+        // along REDACTED: the row says they were sent, never what they held.
+        requestHeaders: redactRequestHeaders(
+          {
+            ...credentialHeadersFor(config.siteUrl, config.siteUrl, config.credentials),
+            ...pageRequestHeaders(config.userAgent),
+          },
+          // The shape's names, and the credentials' own as well: the two agree
+          // by the time a run gets here (`requireCredentials`), and a value
+          // must not reach the row even if they ever did not.
+          [
+            ...(config.credentialShape?.requestHeaderNames ?? []),
+            ...Object.keys(config.credentials?.requestHeaders ?? {}),
+          ],
+        ),
         engineVersion: engineVersion(),
       })
       .where(eq(crawls.id, crawlId));
@@ -1403,6 +1514,12 @@ async function runToCompletion(
   const scoped = scope.exclude.length > 0 || scope.include.length > 0;
   const maxUrlLength = config.maxUrlLength ?? CRAWL_DEFAULTS.maxUrlLength;
   const maxRedirectHops = config.maxRedirectHops ?? CRAWL_DEFAULTS.maxRedirectHops;
+  // Phase 27c: the credentials every request builder below is handed. Each
+  // decides per request, from that request's own URL, whether to send them.
+  const credentials: CredentialTarget | undefined =
+    config.credentials === undefined
+      ? undefined
+      : { siteUrl: config.siteUrl, values: config.credentials };
 
   // THE PLATFORM PROFILE (Phase 24a §3.1; src/crawl/platform.ts). The first
   // classifiable response — an `ok` HTML page from the crawl's origin — is
@@ -1444,6 +1561,7 @@ async function runToCompletion(
     const hostProbe = await probeHostVariants(config.siteUrl, {
       userAgent: config.userAgent,
       allowPrivate,
+      credentials,
       legacyHosts: config.legacyHosts,
       perHostDelayMs: pacingOf(config, activeProfile).perHostDelayMs,
       timeoutMs: FETCH_TIMEOUT_MS,
@@ -1474,6 +1592,7 @@ async function runToCompletion(
   const discovery = await discover(config.siteUrl, {
     userAgent: config.userAgent,
     allowPrivate,
+    credentials,
     // The sitemap walk's own spacing: the crawl's, floored by a profile already
     // known (probe or resume). Robots' Crawl-delay is folded in by discover.
     perHostDelayMs: pacingOf(config, activeProfile).perHostDelayMs,
@@ -2130,6 +2249,7 @@ async function runToCompletion(
           userAgent: config.userAgent,
           allowPrivate,
           maxUrlLength,
+          credentials,
           timeoutMs: FETCH_TIMEOUT_MS,
           // A pause or cancel reaches the request on the wire (Phase 27b).
           signal,
@@ -2392,6 +2512,7 @@ async function runToCompletion(
   try {
     await probeKnownMissing(db, crawlId, config, discovery, gate, {
       allowPrivate,
+      credentials,
       pagesCrawled,
       aborted,
     });
@@ -2452,6 +2573,7 @@ async function runToCompletion(
         robots: discovery.robots,
         timeoutMs: FETCH_TIMEOUT_MS,
         allowPrivate,
+        credentials,
         // TEST ONLY, and spread rather than passed so ABSENT stays absent: the
         // pass's own default is `MIN_RECHECK_GAP_MS`, and a `minGapMs:
         // undefined` must reach it as "nobody said" rather than as a value. See
@@ -2561,6 +2683,7 @@ async function runToCompletion(
         maxResourceHosts: config.maxResourceHosts,
         timeoutMs: FETCH_TIMEOUT_MS,
         allowPrivate,
+        credentials,
         signal,
       });
 
@@ -2796,7 +2919,12 @@ async function probeKnownMissing(
   config: CrawlConfig,
   discovery: DiscoveryResult,
   gate: HostGate,
-  opts: { allowPrivate: boolean; pagesCrawled: number; aborted: boolean },
+  opts: {
+    allowPrivate: boolean;
+    credentials: CredentialTarget | undefined;
+    pagesCrawled: number;
+    aborted: boolean;
+  },
 ): Promise<void> {
   if (opts.aborted) {
     // The crawl was told to stop (paused or cancelled). Issuing another
@@ -2826,6 +2954,7 @@ async function probeKnownMissing(
   const result = await fetchPage(probeUrl, {
     userAgent: config.userAgent,
     allowPrivate: opts.allowPrivate,
+    credentials: opts.credentials,
     maxUrlLength: config.maxUrlLength ?? CRAWL_DEFAULTS.maxUrlLength,
     timeoutMs: FETCH_TIMEOUT_MS,
   });
