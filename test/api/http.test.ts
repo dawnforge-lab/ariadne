@@ -1360,7 +1360,7 @@ describe("POST /crawls/:id/resume", () => {
   // no-op: without it the method queues a crawl whose row says something else
   // entirely and answers `{status: "queued"}` about it (hard rule 7).
   it("409s when the crawl's state changes under the call, rather than queueing anyway", async () => {
-    const id = await seedResumable("paused");
+    const id = await seedResumable("finished");
     await db.insert(frontier).values({
       crawlId: id,
       url: `${resumeSite}/a`,

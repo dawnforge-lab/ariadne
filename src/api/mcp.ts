@@ -567,14 +567,18 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "REFUSED, and each refusal says which: no such crawl; the crawl is " +
         "cancelled (final); a render pass or a rules run is working on it on this " +
         "server (wait for it to answer); this server is " +
-        "already holding it; the crawl still holds an unexpired lease (a worker is " +
-        "on it — wait, a dead worker's leases expire on their own); a terminal " +
-        "crawl with nothing owed, naming what was counted (pending frontier rows, " +
+        "already holding it; a pause or cancel is pending on it and the worker " +
+        "that should act on it is gone (retire it with crawl_mark_failed, then " +
+        "resume); the crawl still holds an unexpired lease (a worker is " +
+        "on it — wait, a dead worker's leases expire on their own); a finished or " +
+        "failed crawl with nothing owed, naming what was counted (pending frontier rows, " +
         "expired leases, unasked resource rows); the site's host is no longer on " +
         "this server's crawl allowlist, which is policy and not a fault; or the " +
         "crawl's state changed while the call was checking it, in which case " +
         "nothing was queued and crawl_status says what it is now. Pages waiting on " +
-        "the render pass are NOT resumable work — that is crawl_render.",
+        "the render pass are NOT resumable work — that is crawl_render. A paused " +
+        "crawl is never refused as having nothing owed: a pause always skips at " +
+        "least the known-404 probe, which the resume then takes.",
       inputSchema: z.strictObject({ crawlId: crawlIdField() }),
     },
     async ({ crawlId }) => run("crawl_resume", () => service.resumeCrawl(crawlId)),

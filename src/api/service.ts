@@ -3281,8 +3281,9 @@ export class ApiService {
    *  3. **A live worker holds leases** — 409, naming the count. An unexpired
    *     `leased_until` is the frontier's own live-worker detector, and it is the
    *     test `markCrawlFailed` and the render driver already make.
-   *  4. **Nothing left to resume** — 409 on a settled crawl with no owed work,
-   *     naming every place that was looked: pending frontier rows, rows whose
+   *  4. **Nothing left to resume** — 409 on a `finished` or `failed` crawl
+   *     with no owed work (never on a `paused` one: see below), naming every
+   *     place that was looked: pending frontier rows, rows whose
    *     lease has expired, and resource rows with a null `fetch_class`. A
    *     "resume" that quietly ran discovery, found nothing to do and closed the
    *     row again would cost the site a robots.txt, a sitemap walk and up to
@@ -3299,6 +3300,15 @@ export class ApiService {
    *  8. **A render pass or a rules run holds it** — 409 naming which
    *     (`refuseWhileBusy`): a resume would change the crawl under a pass that
    *     has already read it.
+   *  9. **A pause or cancel is pending on it** — 409 naming the request. A
+   *     request lives only on a `running` row, and one this server does not
+   *     hold is an orphan whose worker died before answering it. Queueing it
+   *     would carry the request into a `queued` row (the column contract says
+   *     it may not be there) and have the next run obey a question nobody is
+   *     asking any more. `crawl_mark_failed` retires the orphan and clears the
+   *     request; a failed crawl is resumable. The claim is also conditioned on
+   *     `control_request is null`, so a request set after the read is not
+   *     carried in either.
    *
    * A PAUSED CRAWL IS RESUMABLE, and that is the whole point of a pause (27b).
    * `paused` means the loop stopped on purpose — an agent's `crawl_pause`
@@ -3309,9 +3319,12 @@ export class ApiService {
    * having found nothing. So the rows a pause leaves are precisely the
    * questions nobody has answered yet, and resuming asks only those — at the
    * spacing the crawl earned, which the frontier and the throttle record keep.
-   * A crawl paused while it was still queued never ran at all, so it owes the
-   * whole crawl and is not refused as having nothing left (it has no discovery
-   * record: that is the test). `failed` is resumable on the same terms — a
+   * A PAUSED CRAWL IS NEVER "NOTHING TO RESUME". Every pause skips the known-404
+   * probe, and one that lands in the epilogue can skip the resource and 5xx
+   * recheck passes too — work `owedWork` does not count, because it is not a
+   * row. A crawl paused while still queued never ran at all and owes the whole
+   * crawl. So refusal 4 applies only to `finished` and `failed` rows, and a
+   * paused crawl is always accepted. `failed` is resumable on the same terms — a
    * crash decided nothing either — and a caller who wants the crawl dead rather
    * than continued has `crawl_cancel` (or `crawl_mark_failed` for an orphan).
    * `cancelled` is NOT: see refusal 7.
@@ -3374,6 +3387,19 @@ export class ApiService {
         `crawl ${crawlId} is already held by this server ('${row.status}'): it is ` +
           `running now or waiting to run, and a resume would be a second worker on ` +
           `the same crawl`,
+      );
+    }
+
+    // Refusal 9: a request pending on a crawl nobody here holds. Read through
+    // the validator, so a value this engine never writes is a 500, not a pass.
+    const pendingRequest = readControlRequest(row.controlRequest, crawlId);
+    if (pendingRequest !== null) {
+      throw new ServiceError(
+        "CONFLICT",
+        `crawl ${crawlId} ('${row.status}') has a '${pendingRequest}' request pending, and ` +
+          `the worker that should act on it is gone: a resume would carry the request into ` +
+          `the next run instead of answering it. Retire the crawl with crawl_mark_failed ` +
+          `(which clears the request; a failed crawl is resumable), then resume it`,
       );
     }
 
@@ -3448,11 +3474,9 @@ export class ApiService {
     // nobody is holding is a crawl a dead process left behind: its frontier may
     // be empty simply because it never got as far as seeding one, and resuming
     // it does what a fresh start does — discover, seed, loop. A `paused` crawl
-    // with no discovery record is the same case: it was paused before its run
-    // seeded anything (most often while it was still queued), so it owes the
-    // whole crawl.
-    const neverSeeded = row.status === "paused" && row.discovery === null;
-    if (row.status !== "queued" && row.status !== "running" && !neverSeeded) {
+    // always owes work this count cannot see (the docblock's "a paused crawl is
+    // never nothing to resume"), so it is not counted at all.
+    if (row.status !== "queued" && row.status !== "running" && row.status !== "paused") {
       const work = await this.owedWork(crawlId, config);
       if (work.total === 0) {
         throw new ServiceError("CONFLICT", nothingToResume(crawlId, row.status, work));
@@ -3503,8 +3527,15 @@ export class ApiService {
       })
       // Conditioned on the status this call READ, for `markCrawlFailed`'s
       // reason: a crawl that started under another process between the guards
-      // and here is left exactly as it is.
-      .where(and(eq(crawls.id, crawlId), eq(crawls.status, row.status)));
+      // and here is left exactly as it is. And on no request pending (refusal
+      // 9), so one set after the read is not carried into a queued row.
+      .where(
+        and(
+          eq(crawls.id, crawlId),
+          eq(crawls.status, row.status),
+          isNull(crawls.controlRequest),
+        ),
+      );
 
     // AND THE COMPARE-AND-SWAP IS READ, which is the whole point of writing one.
     //

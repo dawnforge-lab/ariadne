@@ -669,3 +669,56 @@ describe("MCP: crawl_pause and crawl_cancel", () => {
     expect(text("crawl_resume")).toContain("final");
   });
 });
+
+/**
+ * Controller Rulings 5 and 6 (pre-review): a resume never carries a pending
+ * request into a queued row, and a paused crawl is always resumable.
+ */
+describe("crawl_resume: pending requests and paused epilogues (Rulings 5, 6)", () => {
+  it("refuses a running orphan with a pending request, naming it, until crawl_mark_failed clears it", async () => {
+    const id = await seedRow("running", { controlRequest: "cancel" });
+    await db.insert(frontier).values({ crawlId: id, url: `${site}/`, state: "pending", depth: 0, discoveredVia: "seed" });
+
+    const refused = await resume(id);
+    expect(refused.status).toBe(409);
+    expect(String(refused.body["error"])).toContain("'cancel'");
+    expect(String(refused.body["error"])).toContain("crawl_mark_failed");
+    expect(await stored(id)).toMatchObject({ status: "running", controlRequest: "cancel" });
+
+    expect((await call("POST", `/crawls/${id}/fail`)).status).toBe(200);
+    expect(await stored(id)).toMatchObject({ status: "failed", controlRequest: null });
+
+    const res = await resume(id);
+    expect(res.status).toBe(202);
+    expect(res.body).toMatchObject({ crawlId: id, status: "queued" });
+    await until("the resumed run closes", id, (b) => b["status"] !== "queued" && b["status"] !== "running");
+  }, 60_000);
+
+  // A pause in the epilogue: every page fetched, no resource row owed — and
+  // still the known-404 probe was skipped. That is owed work no row counts.
+  it("resumes a crawl paused in its epilogue with nothing pending, and the run takes the 404 probe", async () => {
+    const id = await seedRow("paused", {
+      pauseReason: "request",
+      discovery: mkDiscovery(),
+      pagesCrawled: 1,
+      finishedAt: new Date(),
+      notfoundProbe: { skipped: "crawl stopped (paused or cancelled) before the known-404 probe" },
+    });
+    const url = `${site}/`;
+    await db.insert(frontier).values({ crawlId: id, url, state: "done", depth: 0, discoveredVia: "seed" });
+    await db.insert(pages).values(
+      mkPage({ id: `page_${randomUUID()}`, crawlId: id, url, urlNormalised: url, depth: 0, clickDepth: 0, discoveredVia: "seed" }),
+    );
+
+    const res = await resume(id);
+    expect(res.status).toBe(202);
+    const final = await until("finished", id, (b) => b["status"] === "finished");
+    expect(final["pauseReason"]).toBeNull();
+
+    const [row] = await db.select({ probe: crawls.notfoundProbe }).from(crawls).where(eq(crawls.id, id));
+    const probe = row?.probe as Record<string, unknown> | null | undefined;
+    expect(probe).toBeTruthy();
+    expect(probe).not.toHaveProperty("skipped");
+    expect(probe?.["statusCode"]).toBe(404);
+  }, 60_000);
+});
