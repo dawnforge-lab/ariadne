@@ -455,7 +455,7 @@ describe("refileOutOfScope", () => {
     matchingRule: () => null,
   };
   const limits = (budget: number, over: Partial<RefileLimits> = {}): RefileLimits => ({
-    budget,
+    blockedBudget: budget,
     maxPages: 100,
     maxUrlLength: 2500,
     robots: allowAll,
@@ -791,5 +791,98 @@ describe("scope config validation and storage", () => {
     expect(() => parseStoredConfig({ ...stored, maxUrlLength: null }, "crawl_shape")).toThrow(
       /crawl crawl_shape: stored config.maxUrlLength is not a number/,
     );
+  });
+});
+
+describe("refileOutOfScope, the final wave (27c)", () => {
+  const allowAll: RefileLimits["robots"] = {
+    outcome: "read",
+    isAllowed: () => true,
+    matchingRule: () => null,
+  };
+  const limits = (blockedBudget: number, over: Partial<RefileLimits> = {}): RefileLimits => ({
+    blockedBudget,
+    maxPages: 100,
+    maxUrlLength: 2500,
+    robots: allowAll,
+    ...over,
+  });
+
+  /** `/drop/1..3` as excluded rows (by a first re-filter), `/keep`, `/x/1`, `/x/2` pending. */
+  async function crawlWithExcludedRows(): Promise<string> {
+    const id = `crawl_refile_fw_${Math.random().toString(36).slice(2)}`;
+    await db.insert(crawls).values({
+      id,
+      siteUrl: "https://refile.example/",
+      config: {},
+      rulesetVersion: RULESET_VERSION,
+      status: "paused",
+    });
+    createdCrawls.push(id);
+    await enqueueUrls(db, id, [
+      { url: "https://refile.example/keep", depth: 1, discoveredVia: "link" },
+      { url: "https://refile.example/drop/1", depth: 1, discoveredVia: "link" },
+      { url: "https://refile.example/drop/2", depth: 1, discoveredVia: "link" },
+      { url: "https://refile.example/drop/3", depth: 1, discoveredVia: "link" },
+    ]);
+    await refileOutOfScope(db, id, { exclude: ["*/drop/*"], include: [] }, limits(10));
+    await enqueueUrls(db, id, [
+      { url: "https://refile.example/x/1", depth: 2, discoveredVia: "link" },
+      { url: "https://refile.example/x/2", depth: 2, discoveredVia: "link" },
+    ]);
+    return id;
+  }
+
+  it("measures the forward budget after the backward pass, so budget the backward pass frees is spent (M4)", async () => {
+    // Budget 3, three excluded rows on record: nothing left — until the
+    // narrow-then-widen edit re-admits the three /drop/ rows, which frees it.
+    const id = await crawlWithExcludedRows();
+    const result = await refileOutOfScope(db, id, { exclude: ["*/x/*"], include: [] }, limits(3));
+    expect(result).toEqual({ refiled: 2, dropped: 0, readmitted: 3, reblocked: 0, unroomed: 0 });
+    const rows = await db.select({ url: pages.url, fetchClass: pages.fetchClass }).from(pages).where(eq(pages.crawlId, id));
+    expect(rows.map((r) => [r.url, r.fetchClass]).sort()).toEqual([
+      ["https://refile.example/x/1", "excluded"],
+      ["https://refile.example/x/2", "excluded"],
+    ]);
+  });
+
+  it("counts the rows already on record against the budget when nothing is re-admitted (M4)", async () => {
+    const id = await crawlWithExcludedRows();
+    const result = await refileOutOfScope(
+      db,
+      id,
+      { exclude: ["*/drop/*", "*/x/*"], include: [] },
+      limits(4),
+    );
+    expect(result).toEqual({ refiled: 1, dropped: 1, readmitted: 0, reblocked: 0, unroomed: 0 });
+  });
+
+  it("gives the backward pass the room the forward pass frees in the frontier (M4)", async () => {
+    // Frontier: /keep, /x/1, /x/2. maxPages 4 — the forward pass removes /x/1
+    // and /x/2, so three /drop/ rows fit beside /keep.
+    const id = await crawlWithExcludedRows();
+    const result = await refileOutOfScope(
+      db,
+      id,
+      { exclude: ["*/x/*"], include: [] },
+      limits(10, { maxPages: 4 }),
+    );
+    expect(result).toEqual({ refiled: 2, dropped: 0, readmitted: 3, reblocked: 0, unroomed: 0 });
+  });
+
+  it("makes a robots line holding U+0000 storable when it re-classes a row (M2)", async () => {
+    const id = await crawlWithExcludedRows();
+    const robots: RefileLimits["robots"] = {
+      outcome: "read",
+      isAllowed: (url) => !url.endsWith("/drop/1"),
+      matchingRule: (url) => (url.endsWith("/drop/1") ? "Disallow: /drop/\u00001" : null),
+    };
+    const result = await refileOutOfScope(db, id, { exclude: [], include: [] }, limits(10, { robots }));
+    expect(result.reblocked).toBe(1);
+    const [row] = await db
+      .select({ fetchClass: pages.fetchClass, fetchReason: pages.fetchReason })
+      .from(pages)
+      .where(and(eq(pages.crawlId, id), eq(pages.url, "https://refile.example/drop/1")));
+    expect(row).toEqual({ fetchClass: "disallowed", fetchReason: "robots.txt: Disallow: /drop/␀1" });
   });
 });

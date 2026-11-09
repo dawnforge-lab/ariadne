@@ -303,4 +303,26 @@ describe("excluded rows and fenced-off URLs", () => {
       await expect(storedScope(db, "crawl_missing")).rejects.toThrow("crawl_missing");
     });
   });
+
+  describe("a URL with no scheme separator under a scope (27c final wave M1)", () => {
+    it("a mailto: hreflang alternate under an include list is still reported, not dropped by a NULL", async () => {
+      const crawlId = await newMetricCrawl(db, SITE, created, {
+        config: { userAgent: "AriadneBot-test", maxPages: 500, include: ["*/keep/*"] },
+        discovery: mkDiscovery() as unknown as Record<string, unknown>,
+      });
+      const home = await addPage(crawlId, "/keep/home");
+      await db.insert(hreflang).values({
+        crawlId,
+        pageId: home,
+        hreflangCode: "fr",
+        targetUrl: "mailto:fr@scope.example",
+        targetPageId: null,
+        source: "html",
+      });
+      const alt = await qrule("hreflang.alternates-not-crawled").run(db, crawlId);
+      const text = JSON.stringify(alt);
+      expect(text).toContain('"host":"mailto:"');
+      expect(text).toContain('"total":1');
+    });
+  });
 });

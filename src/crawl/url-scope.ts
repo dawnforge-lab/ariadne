@@ -123,8 +123,12 @@ export function scopeRefusesSql(urlExpr: SQL, scope: CrawlScope): SQL {
  * It mirrors `isSameOrigin` by enumerating the admissible origins in
  * TypeScript (each candidate is checked with `isSameOrigin` itself) and
  * matching the URL's `scheme://authority` prefix against them, so the two
- * cannot drift. NULL for a NULL urlExpr. Userinfo in the authority is not
- * understood (such a URL reads as off-origin, the safe direction here).
+ * cannot drift. Never NULL: a URL with no `scheme://` (a `mailto:` hreflang
+ * alternate) or a NULL urlExpr is false, because it is off-origin — and a NULL
+ * here would make `not fencedOffSql(…)` NULL too, filtering the row out of a
+ * "not crawled" rule instead of reporting it (27c final wave M1). Userinfo in
+ * the authority is not understood (such a URL reads as off-origin, the safe
+ * direction here).
  */
 export function sameOriginSql(urlExpr: SQL, siteUrl: string): SQL {
   const site = new URL(siteUrl);
@@ -139,7 +143,7 @@ export function sameOriginSql(urlExpr: SQL, siteUrl: string): SQL {
       }
     }
   }
-  return sql`lower(substring(${urlExpr} from '^[a-zA-Z][a-zA-Z0-9+.-]*://[^/?#]*')) = any(${sql.param(origins)}::text[])`;
+  return sql`coalesce(lower(substring(${urlExpr} from '^[a-zA-Z][a-zA-Z0-9+.-]*://[^/?#]*')) = any(${sql.param(origins)}::text[]), false)`;
 }
 
 /**
