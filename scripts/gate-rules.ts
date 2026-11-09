@@ -242,6 +242,10 @@ async function requestPauseAtFraction(
         flippedTo = current;
         break;
       }
+      // The run has ended (returned or thrown) and the row still says
+      // `running`: stop polling. The caller surfaces the run's own error, or
+      // reports that the status never flipped; this loop must not spin on.
+      if (ended.value) break;
       await new Promise((r) => setTimeout(r, 100));
     }
     return { requestedAt, flippedAt, flippedTo, done: n };
@@ -690,9 +694,21 @@ async function main(): Promise<number> {
         let first: CrawlSummary;
         try {
           first = await runCrawl(db, config);
-        } finally {
+        } catch (runError) {
+          // The run threw: stop the watcher (its loops check `ended`), wait for
+          // it to let go of the database, and surface the RUN's error — a
+          // watcher failure beside it is reported, never in its place.
           ended.value = true;
+          const settled = await watcher;
+          if ("error" in settled) {
+            throw new AggregateError(
+              [runError, settled.error],
+              "gate: the paused crawl run threw, and its pause watcher failed too",
+            );
+          }
+          throw runError;
         }
+        ended.value = true;
         const watched = await watcher;
         if ("error" in watched) throw watched.error;
         const requested = watched.value;
@@ -702,7 +718,10 @@ async function main(): Promise<number> {
         }
         const summaryMs = Date.now() - requested.requestedAt;
         if (requested.flippedAt === null) {
-          throw new Error("gate: the status was never sampled after the pause request");
+          throw new Error(
+            `gate: the run returned '${first.status}' but crawls.status still read 'running' ` +
+              `when the sampler stopped; the status flip was never observed`,
+          );
         }
         const flipMs = requested.flippedAt - requested.requestedAt;
         if (first.status !== "paused" || first.pauseReason !== "request") {
