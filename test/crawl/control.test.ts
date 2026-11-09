@@ -204,13 +204,13 @@ async function stallFrontierRow(id: string) {
 }
 
 /**
- * THE EPILOGUE SITE (Review Focus 1). Five pages, thirty image references
- * between them, every image answering after 300 ms — a resource pass slow
+ * THE EPILOGUE SITE (Review Focus 1). Five pages, sixty image references
+ * between them, every image answering after 400 ms — a resource pass slow
  * enough that a pause lands in the middle of it.
  */
 let imageServer: Server;
 let imageBase: string;
-const IMAGE_COUNT = 30;
+const IMAGE_COUNT = 60;
 
 function imageSite(): Server {
   return createServer((req, res) => {
@@ -226,7 +226,7 @@ function imageSite(): Server {
         const body = Buffer.alloc(64, 1);
         res.writeHead(200, { "content-type": "image/png", "content-length": String(body.length) });
         res.end(req.method === "HEAD" ? undefined : body);
-      }, 300);
+      }, 400);
       return;
     }
     const page = path === "/" ? 1 : Number(/^\/q(\d+)$/.exec(path)?.[1] ?? NaN);
@@ -237,7 +237,7 @@ function imageSite(): Server {
     }
     const links = page === 1 ? ["/q2", "/q3", "/q4", "/q5"] : [];
     const images: string[] = [];
-    for (let n = (page - 1) * 6 + 1; n <= page * 6; n += 1) images.push(`/img/${n}.png`);
+    for (let n = (page - 1) * 12 + 1; n <= page * 12; n += 1) images.push(`/img/${n}.png`);
     res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
     res.end(
       `<!doctype html><html><head><title>Q ${page}</title></head><body>` +
@@ -548,6 +548,50 @@ describe("the claim", () => {
     expect((error as ClaimLostError).status).toBe("paused");
     expect((error as ClaimLostError).crawlId).toBe(id);
     expect(await crawlRow(id)).toEqual(before);
+  });
+
+  it("a resume that expects 'queued' and finds 'cancelled' throws ClaimLostError, not the final-cancel Error (Ruling 3)", async () => {
+    const id = `crawl_claim_c_${Date.now()}`;
+    await db.insert(crawls).values({
+      id,
+      siteUrl: `${stallBase}/`,
+      config: storableConfig(stallConfig()),
+      rulesetVersion: "test",
+      status: "cancelled",
+      cancelledAt: new Date(),
+      finishedAt: new Date(),
+    });
+    createdCrawls.push(id);
+    const before = await crawlRow(id);
+
+    const error = await resumeCrawl(db, id, { config: stallConfig(), expectStatus: "queued" }).then(
+      () => null,
+      (e: unknown) => e,
+    );
+    expect(error).toBeInstanceOf(ClaimLostError);
+    expect((error as ClaimLostError).status).toBe("cancelled");
+    expect(await crawlRow(id)).toEqual(before);
+
+    // Without expectStatus a cancelled crawl is still the plain final-cancel Error.
+    const plain = await resumeCrawl(db, id, { config: stallConfig() }).then(
+      () => null,
+      (e: unknown) => e,
+    );
+    expect(plain).not.toBeInstanceOf(ClaimLostError);
+    expect(String((plain as Error).message)).toMatch(/is cancelled.*final/);
+  });
+
+  it("a resume that expects 'queued' of a crawl that does not exist is a plain Error, not a lost claim", async () => {
+    const error = await resumeCrawl(db, `crawl_missing_${Date.now()}`, {
+      config: stallConfig(),
+      expectStatus: "queued",
+    }).then(
+      () => null,
+      (e: unknown) => e,
+    );
+    expect(error).toBeInstanceOf(Error);
+    expect(error).not.toBeInstanceOf(ClaimLostError);
+    expect(String((error as Error).message)).toMatch(/no crawl/);
   });
 });
 

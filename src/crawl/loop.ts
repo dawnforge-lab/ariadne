@@ -592,9 +592,18 @@ export interface ResumeOpts {
   signal?: AbortSignal;
   /**
    * The status the claim must find. The API queue sets `queued`, so a crawl
-   * somebody else moved while it waited (paused, cancelled, deleted) is not
-   * run: the claim is `where status = 'queued'`, and zero rows throws
-   * `ClaimLostError`. Absent, any status but `cancelled` is claimed.
+   * somebody else moved while it waited is not run.
+   *
+   * With it: an EXISTING row whose status is anything else — `paused`,
+   * `cancelled`, `running`, `finished`, `failed` — throws `ClaimLostError`
+   * carrying that status, whether the read before the claim saw it or the
+   * claim itself (`where status = 'queued'`, zero rows) lost the race. Nothing
+   * is written. A row that does not exist at all is a plain `Error` (`no
+   * crawl …`), never a `ClaimLostError`: delete refuses a queued crawl, so a
+   * row vanishing under the runner is an anomaly and stays loud.
+   *
+   * Without it: any status but `cancelled` is claimed, and `cancelled` throws a
+   * plain `Error` (a cancel is final).
    */
   expectStatus?: "queued";
   /**
@@ -659,6 +668,11 @@ export async function runCrawl(
  * shutdown's), or a `maxPages` stop that the operator wants to extend. A
  * `cancelled` crawl is refused: a cancel is final.
  *
+ * The claim clears `pause_reason` but NOT `control_request`. A crawl whose
+ * process died with a pause or cancel pending still holds it on its `running`
+ * row, and a (`reclaimLeases`) resume of it honours that request at its first
+ * poll. That is intended: the agent asked, and nobody has answered yet.
+ *
  * The frontier *is* the resume state: pending rows are still pending and done
  * rows are never re-fetched, so this re-seeds and re-walks the sitemap without
  * re-crawling anything. Discovery does run again, because robots rules and the
@@ -708,7 +722,13 @@ export async function resumeCrawl(
     throw new Error(`resumeCrawl: no crawl ${crawlId}`);
   }
 
-  if (row.status === "cancelled") {
+  if (opts.expectStatus !== undefined) {
+    // Any other status, `cancelled` included, is a claim already lost: the
+    // caller (the API queue) skips on the type, not on the sentence.
+    if (row.status !== opts.expectStatus) {
+      throw new ClaimLostError(crawlId, row.status, opts.expectStatus);
+    }
+  } else if (row.status === "cancelled") {
     throw new Error(`resumeCrawl: crawl ${crawlId} is cancelled, and a cancel is final`);
   }
 
@@ -716,10 +736,15 @@ export async function resumeCrawl(
   validateCrawlConfig(config);
 
   // THE CLAIM, a compare-and-swap rather than a blind write. With
-  // `expectStatus` it is conditioned on that status (the API queue's `queued`):
-  // a crawl paused, cancelled or deleted while it waited is not run. Without
-  // it, any status but `cancelled`: the check above, repeated in the WHERE so
-  // a cancel that lands between the read and here is still refused.
+  // `expectStatus` it is conditioned on that status (the API queue's `queued`),
+  // so a crawl moved between the read above and here is not run. Without it,
+  // any status but `cancelled`: the check above, repeated in the WHERE so a
+  // cancel that lands between the read and here is still refused.
+  //
+  // It does NOT clear `control_request`. A row holds one only while `running`,
+  // so the only claim that can meet one is a resume of a crawl whose process
+  // died with a request pending (`reclaimLeases`); that resume honours the
+  // request at its first poll, which is intended — the agent asked for it.
   const claimed = await db
     .update(crawls)
     .set({
@@ -745,6 +770,7 @@ export async function resumeCrawl(
       .select({ status: crawls.status })
       .from(crawls)
       .where(eq(crawls.id, crawlId));
+    // Gone between the read and the claim: an anomaly, not a lost claim.
     if (now === undefined) throw new Error(`resumeCrawl: no crawl ${crawlId}`);
     if (opts.expectStatus === undefined) {
       // The one status the unconditioned claim refuses.
@@ -2769,9 +2795,11 @@ async function robotsBlockedRowCount(db: Db, crawlId: string): Promise<number> {
  * Read off the column in the same statement rather than from the watcher's
  * last poll, so a cancel that lands while the loop winds down still wins
  * (cancel > pause request > pause shutdown). The one case it does not cover is
- * a watcher that RECORDED a cancel over a column that no longer says so —
- * impossible today, since only a close clears the column — and that is a throw
- * (the UPDATE is conditioned on it, so nothing is written), never a guess.
+ * a watcher that RECORDED a request over a column that no longer says so (a
+ * cancel over anything but 'cancel', a pause over neither 'pause' nor
+ * 'cancel') — impossible today, since only a close clears the column — and
+ * that is a throw (the UPDATE is conditioned on it, so nothing is written),
+ * never a guess.
  *
  * Every outcome clears `control_request`, and sets `pause_reason` and
  * `cancelled_at` to agree with the status (the 27b column contract:
@@ -2899,6 +2927,19 @@ async function closeCrawl(
     return { status: outcome, pauseReason: null };
   }
 
+  // The request the watcher RECORDED must still stand in the column, or the
+  // CASE would read a cleared column as a shutdown: a recorded cancel needs
+  // 'cancel'; a recorded pause needs 'pause' or the cancel that may have
+  // overtaken it. A shutdown records nothing and conditions nothing.
+  const recorded =
+    stop?.kind === "cancel" ? "cancel" : stop?.kind === "pause" && stop.reason === "request" ? "pause" : null;
+  const requestStillStanding =
+    recorded === "cancel"
+      ? eq(crawls.controlRequest, "cancel")
+      : recorded === "pause"
+        ? sql`${crawls.controlRequest} in ('pause', 'cancel')`
+        : sql`true`;
+
   // THE STOPPED CLOSE: one statement, the column decides (see the docblock).
   // Every CASE reads the row as it was before this UPDATE, so `control_request
   // = null` in the same SET does not change what the others see.
@@ -2914,19 +2955,15 @@ async function closeCrawl(
       controlRequest: null,
       failureReason: null,
     })
-    .where(
-      stop?.kind === "cancel"
-        ? and(eq(crawls.id, crawlId), eq(crawls.controlRequest, "cancel"))
-        : eq(crawls.id, crawlId),
-    )
+    .where(and(eq(crawls.id, crawlId), requestStillStanding))
     .returning({ status: crawls.status, pauseReason: crawls.pauseReason });
   const row = rows[0];
   if (row === undefined) {
     throw new Error(
-      stop?.kind === "cancel"
-        ? `closeCrawl: crawl ${crawlId} was asked to cancel, but its control_request no ` +
-            `longer says 'cancel' — something cleared it under the run; not guessing a status`
-        : `closeCrawl: crawl ${crawlId}: the crawls row is gone; cannot close it`,
+      recorded === null
+        ? `closeCrawl: crawl ${crawlId}: the crawls row is gone; cannot close it`
+        : `closeCrawl: crawl ${crawlId} was asked to ${recorded}, but its control_request ` +
+            `no longer says so — something cleared it under the run; not guessing a status`,
     );
   }
   const pauseReason = readPauseReason(row.pauseReason, crawlId);
