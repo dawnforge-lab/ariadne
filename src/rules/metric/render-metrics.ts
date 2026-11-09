@@ -349,8 +349,9 @@ async function renderCoverage(db: Db, crawlId: string, self: MetricIdentity): Pr
            count(*) filter (where p.render_error is not null)::int as render_failures
     from pages p
     where p.crawl_id = ${crawlId}
-      -- Crawled means requested: a robots-blocked row (Phase 23 T3) is not,
-      -- and the render budget's denominator excludes it the same way.
+      -- Crawled means requested: a robots-blocked row (Phase 23 T3) or a
+      -- scope-excluded row (27c) is not, and the render budget's denominator
+      -- (select.ts) and the overview's render section exclude them the same way.
       and not ${NEVER_REQUESTED("p")}`);
 
   const row = res.rows[0];

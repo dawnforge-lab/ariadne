@@ -1091,7 +1091,7 @@ describe("the fixture site end to end", () => {
         matchedBy: { line: 3, text: "Disallow: /private/" },
       },
     ]);
-    expect(siteFindings.get("sitemap.uncrawled")).toEqual([
+    expect([...(siteFindings.get("sitemap.uncrawled") ?? [])].sort((a, b) => ((a as { url: string }).url < (b as { url: string }).url ? -1 : 1))).toEqual([
       // `attempted: false` is the shape that matters: there is no `pages` row at
       // all, because the crawl refused to enqueue a URL robots.txt disallows.
       // A URL that was fetched and failed would carry a fetch class instead.

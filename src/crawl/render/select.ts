@@ -86,7 +86,7 @@
  */
 import { sql, type SQL } from "drizzle-orm";
 import type { Db } from "../../db/client.js";
-import { ROBOTS_BLOCKED } from "../../rules/helpers.js";
+import { NEVER_REQUESTED } from "../../rules/helpers.js";
 
 /**
  * The three numbers the render pass is calibrated with. Phase-5 first
@@ -613,11 +613,12 @@ function candidateCte(crawlId: string, cfg: ResolvedRenderConfig): SQL {
         -- Over EVERY crawled URL, not over the cohort: the bound being enforced
         -- is "no more than pct% of this crawl leaves through a browser".
         select least(
-          -- Robots-blocked rows (Phase 23 T3) were never requested, so they are
-          -- not "crawled URLs": a site that disallows a faceted space must not
+          -- Robots-blocked rows (Phase 23 T3) and scope-excluded rows (27c)
+          -- were never requested, so they are not "crawled URLs": a site that
+          -- disallows a faceted space, or a crawl that fences one off, must not
           -- buy itself a bigger browser budget with rows nobody fetched.
           ceil((select count(*) from pages bp
-                where bp.crawl_id = ${crawlId} and not ${ROBOTS_BLOCKED("bp")})::numeric
+                where bp.crawl_id = ${crawlId} and not ${NEVER_REQUESTED("bp")})::numeric
                * ${renderBudgetPct} / 100)::int,
           ${renderMaxPages}::int) as n
       ),

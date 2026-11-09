@@ -25,7 +25,7 @@ Ruleset 0.24.0, 189 rules (72 page / 103 query / 14 metric), one new rule
 
 | # | clause | result | where |
 |---|---|---|---|
-| 1 | full suite and the harness green, 0 skipped; `tsc` clean | **pass**: 152 files / 4,060 tests, 0 failed, 0 skipped; `tsc` clean (after the final wave, on `1b9d696` plus its docs commit; 4,043 on `422fa2a`) | §1 |
+| 1 | full suite and the harness green, 0 skipped; `tsc` clean | **pass**: 152 files / 4,062 tests, 0 failed, 0 skipped; `tsc` clean (after the PR #27 `/code-review` fix; 4,060 after the final wave, 4,043 on `422fa2a`) | §1 |
 | 2 | the fixture gains a Basic-auth area, a cookie-gated page, a header-gated page and a redirect chain over 10 hops, each with positive and negative tests, including credentials not crossing to another host and not following a redirect off the site family | **pass** | §2 |
 | 3 | the secret scan passes, and a restart test shows `CREDENTIALS_REQUIRED` rather than 401 rows | **pass** | §3 |
 | 4 | a list crawl of the fixture: every listed URL classified, the spider-only rules marked by `crawl.list-mode`, no rule firing because of the missing graph | **pass** | §4 |
@@ -36,10 +36,10 @@ Ruleset 0.24.0, 189 rules (72 page / 103 query / 14 metric), one new rule
 
 | | |
 |---|---|
-| `npm test` (`DATABASE_URL` set) | **152 files / 4,060 tests, 0 failed, 0 skipped** (392.0 s), after the final wave (on `1b9d696` with the final docs commit's changes in the tree). Before it: 4,043 (402.6 s) on `422fa2a`. The known `renderer.test.ts` flake did not appear in either run |
-| `npx tsc --noEmit` | clean, after the final wave and on `422fa2a` |
+| `npm test` (`DATABASE_URL` set) | **152 files / 4,062 tests, 0 failed, 0 skipped** (396.3 s), after the PR #27 `/code-review` fix (Ruling 31). Before it: 4,060 (392.0 s) after the final wave, 4,043 (402.6 s) on `422fa2a`. The known `renderer.test.ts` flake did not appear. One run before the fix's last commit failed only `harness.test.ts` "the site-scoped findings are…": it read `issues` without an order and compared `sitemap.uncrawled`'s two rows positionally; it passed on re-run, and the assertion now sorts by URL |
+| `npx tsc --noEmit` | clean, after the `/code-review` fix, after the final wave and on `422fa2a` |
 | baseline at the branch point (`c8315e5`) | 142 files / 3,874 tests |
-| phase delta | +10 files, +186 tests (+169 before the final wave) |
+| phase delta | +10 files, +188 tests (+186 after the final wave, +169 before it) |
 | MCP tools / HTTP routes | 27 / 27, unchanged; command tools 9 |
 | skills and surface guard | `npx vitest run test/skills`: 25 of 25, including the citations of `docs/talos-surface.md` |
 
@@ -414,6 +414,18 @@ Final wave (the whole-branch review's I1 and M1 to M16, controller rulings):
     Ruling 17's accepted race, which fails loudly and never runs unauthenticated. Cost if
     wrong: M6 could fail a credentialed render of a page whose requests repeat a header —
     loudly, as a render failure, never as a silent gap.
+
+PR #27 `/code-review` (one confirmed issue, fixed before merge):
+
+31. **The render budget and the overview's render section count only requested rows**:
+    `select.ts`'s `budget` CTE and `overview.ts`'s `renderSection` now filter
+    `not NEVER_REQUESTED` (robots-blocked or scope-`excluded`), the denominator
+    `render.coverage` already used. Before, every `excluded` row bought browser budget
+    and diluted the overview's `Pages rendered` percent, which then disagreed with
+    `render.coverage`. The 50k gate did not show it: its budget hit the 500 cap.
+    Pinned by `test/crawl/render-select.test.ts` "leaves scope-excluded rows out of the
+    percentage" and `test/api/crawl-overview.test.ts` "leaves scope-excluded rows out of
+    the render percent". Cost if wrong: none — a crawl without excluded rows is unchanged.
 
 ## Deviations
 

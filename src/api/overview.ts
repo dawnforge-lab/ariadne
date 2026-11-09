@@ -27,7 +27,7 @@ import { sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import type { RuleCategory, Severity, AnyRule, IssueType, Priority } from "../rules/registry/types.js";
 import { RULESET_VERSION, type Registry } from "../rules/registry/registry.js";
-import { INDEXABILITY_STATUS_SQL, ROBOTS_BLOCKED } from "../rules/helpers.js";
+import { INDEXABILITY_STATUS_SQL, NEVER_REQUESTED } from "../rules/helpers.js";
 import { RENDER_PASS_EVIDENCE } from "../rules/metric/render-metrics.js";
 import {
   copyRenderer,
@@ -662,7 +662,8 @@ function storedRenderCoverage(
 
 /**
  * `Pages rendered`, counted live over the REQUESTED pages (every row but the
- * robots-blocked ones, `render.coverage`'s own denominator), then
+ * never-requested ones — robots-blocked and scope-`excluded` —
+ * `render.coverage`'s own denominator), then
  * `Render coverage (<state>)` from the stored `render.coverage` row: value
  * `pagesRendered`, percent `pagesRendered / pagesCrawled`, the metric's
  * `renderPassEvidence` (ran | none | failed) in the label. On an unjudged crawl
@@ -676,8 +677,8 @@ async function renderSection(
   judged: boolean,
 ): Promise<OverviewSection> {
   const result = await db.execute<{ requested: number; rendered: number }>(sql`
-    select count(*) filter (where not ${ROBOTS_BLOCKED("p")})::int as requested,
-           count(*) filter (where p.rendered and not ${ROBOTS_BLOCKED("p")})::int as rendered
+    select count(*) filter (where not ${NEVER_REQUESTED("p")})::int as requested,
+           count(*) filter (where p.rendered and not ${NEVER_REQUESTED("p")})::int as rendered
       from pages p
      where p.crawl_id = ${crawlId}`);
   const r = result.rows[0];
