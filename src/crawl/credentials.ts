@@ -361,7 +361,79 @@ export function credentialShapeError(value: unknown, path: string): string | nul
   return null;
 }
 
-function describeShape(shape: CredentialShape): string {
+/**
+ * What a reader is shown in place of a credential value (27c T9): the
+ * `crawl_config_get` view writes it for every value, and `crawl_config_set`
+ * reads a field sent back exactly as that view showed it as "no change".
+ * The same marker the `request_headers` evidence redaction writes.
+ */
+export const REDACTED = "[redacted]";
+
+/**
+ * The three credential fields as a reader sees them: the names the shape
+ * stores, every value `REDACTED`. A field the shape does not name is absent.
+ * Header names are the shape's (lower-cased); cookie names keep their case.
+ */
+export function redactedCredentials(shape: CredentialShape | null): {
+  requestHeaders?: Record<string, string>;
+  httpAuth?: string;
+  cookies?: Array<{ name: string; value: string }>;
+} {
+  if (shape === null) return {};
+  return {
+    ...(shape.requestHeaderNames.length === 0
+      ? {}
+      : {
+          // Own properties, so a header named `__proto__` stays a header.
+          requestHeaders: Object.fromEntries(
+            shape.requestHeaderNames.map((name) => [name, REDACTED] as const),
+          ),
+        }),
+    ...(shape.httpAuth ? { httpAuth: REDACTED } : {}),
+    ...(shape.cookieNames.length === 0
+      ? {}
+      : { cookies: shape.cookieNames.map((name) => ({ name, value: REDACTED })) }),
+  };
+}
+
+/**
+ * Why a credential field's value carries the `REDACTED` marker where a value
+ * belongs, or null. A marker is what a reader was SHOWN, not a value: sent as
+ * one, it would be a header, password or cookie literally reading
+ * "[redacted]". Names the field (and the header or cookie NAME) only.
+ */
+export function redactionMarkerError(field: keyof CrawlCredentials, value: unknown): string | null {
+  const marked = `carries the redaction marker '${REDACTED}' where a value belongs`;
+  switch (field) {
+    case "httpAuth":
+      if (value === REDACTED) return `httpAuth ${marked}`;
+      if (isPlainObject(value)) {
+        for (const key of ["username", "password"] as const) {
+          if (value[key] === REDACTED) return `httpAuth.${key} ${marked}`;
+        }
+      }
+      return null;
+    case "requestHeaders":
+      if (isPlainObject(value)) {
+        for (const [name, v] of Object.entries(value)) {
+          if (v === REDACTED) return `requestHeaders header ${quoted(name)} ${marked}`;
+        }
+      }
+      return null;
+    case "cookies":
+      if (Array.isArray(value)) {
+        for (const cookie of value) {
+          if (isPlainObject(cookie) && cookie["value"] === REDACTED) {
+            return `cookies cookie ${quoted(String(cookie["name"]))} ${marked}`;
+          }
+        }
+      }
+      return null;
+  }
+}
+
+/** The fields and names a shape asks for, for a message: never a value. */
+export function describeShape(shape: CredentialShape): string {
   const parts: string[] = [];
   if (shape.requestHeaderNames.length > 0) {
     parts.push(`requestHeaders (${shape.requestHeaderNames.join(", ")})`);

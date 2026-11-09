@@ -19,7 +19,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
-import { and, eq, inArray, sql } from "drizzle-orm";
+import { and, desc, eq, inArray, sql } from "drizzle-orm";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 
@@ -1058,5 +1058,79 @@ describe("crawl_config_set on a queued crawl the runner has already dequeued (27
     }
     await until("it runs", id, (b) => b["status"] === "running");
     await stopRunning(id);
+  }, 60_000);
+});
+
+describe("crawl_config_set: the scope lists while paused (27c T9)", () => {
+  const setConfig = (id: string, body: unknown): Promise<Res> =>
+    call("PATCH", `/crawls/${id}/config`, { body });
+
+  it("an exclude set on a paused crawl stamps scopeChangedAt, and the resumed run re-files what it now refuses", async () => {
+    const { id } = await start(60);
+    await until(
+      "running with pages",
+      id,
+      (b) => b["status"] === "running" && (b["frontier"] as { done: number }).done >= 2,
+    );
+    expect((await pause(id)).status).toBe(202);
+    await until("paused", id, (b) => b["status"] === "paused");
+    // A URL the pause left pending, the last the loop would have reached.
+    const [last] = await db
+      .select({ url: frontier.url })
+      .from(frontier)
+      .where(and(eq(frontier.crawlId, id), eq(frontier.state, "pending")))
+      .orderBy(desc(frontier.depth), desc(frontier.discoveredAt))
+      .limit(1);
+    if (last === undefined) throw new Error("the pause left nothing pending");
+    const target = last.url;
+
+    const got = await call("GET", `/crawls/${id}/config`);
+    expect((got.body["crawl"] as Record<string, unknown>)["scopeChangedAt"]).toBeNull();
+    expect((got.body["mutability"] as Record<string, unknown>)["scopeChangedAt"]).toBe("never");
+
+    const before = Date.now();
+    const set = await setConfig(id, { crawl: { exclude: [`${target}*`] } });
+    expect(set.status, JSON.stringify(set.body)).toBe(200);
+    const stamped = (set.body["crawl"] as Record<string, unknown>)["scopeChangedAt"];
+    expect(typeof stamped).toBe("string");
+    expect(Date.parse(String(stamped))).toBeGreaterThanOrEqual(before - 1000);
+    const [row] = await db.select({ at: crawls.scopeChangedAt }).from(crawls).where(eq(crawls.id, id));
+    expect(row?.at?.toISOString()).toBe(stamped);
+    // The same list again is no change, and the stamp stays.
+    const again = await setConfig(id, { crawl: { exclude: [`${target}*`] } });
+    expect((again.body["crawl"] as Record<string, unknown>)["scopeChangedAt"]).toBe(stamped);
+
+    expect((await resume(id)).status).toBe(202);
+    expect((await until("finished", id, (b) => b["status"] === "finished", 60_000))["status"]).toBe("finished");
+    const [refiled] = await db
+      .select({ fetchClass: pages.fetchClass, statusCode: pages.statusCode })
+      .from(pages)
+      .where(and(eq(pages.crawlId, id), eq(pages.url, target)));
+    expect(refiled?.fetchClass).toBe("excluded");
+    expect(refiled?.statusCode).toBeNull();
+    const fetchedUnder = await db
+      .select({ n: sql<number>`count(*)::int` })
+      .from(pages)
+      .where(and(eq(pages.crawlId, id), sql`${pages.url} like ${`${target}%`}`, sql`${pages.fetchClass} <> 'excluded'`));
+    expect(fetchedUnder[0]?.n).toBe(0);
+  }, 120_000);
+
+  it("an exclude on a running crawl is 409, and mode and urls are never", async () => {
+    const { id } = await start();
+    await until("running", id, (b) => b["status"] === "running");
+    const running = await setConfig(id, { crawl: { exclude: [`${site}/p/9*`] } });
+    expect(running.status).toBe(409);
+    expect(String(running.body["error"])).toContain("whenPaused");
+    await stopRunning(id);
+
+    const paused = await seedRow("paused", { pauseReason: "request" });
+    const mode = await setConfig(paused, { crawl: { mode: "list" } });
+    expect(mode.status).toBe(409);
+    expect(String(mode.body["error"])).toContain("(mutability: never)");
+    const urls = await setConfig(paused, { crawl: { urls: [`${site}/p/1`] } });
+    expect(urls.status).toBe(409);
+    expect(String(urls.body["error"])).toContain("(mutability: never)");
+    const [row] = await db.select({ config: crawls.config }).from(crawls).where(eq(crawls.id, paused));
+    expect(row?.config).not.toHaveProperty("mode");
   }, 60_000);
 });

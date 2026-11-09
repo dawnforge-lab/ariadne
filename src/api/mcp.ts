@@ -70,6 +70,7 @@ import { DISCOVERED_VIA } from "../crawl/frontier.js";
 import { RENDER_PASS_EVIDENCE } from "../rules/metric/render-metrics.js";
 import { METRIC_SCOPES } from "../rules/registry/types.js";
 import type { ServiceConfig } from "./config.js";
+import { credentialInputSchemas } from "./config-schema.js";
 import { CSV_VIEWS, EXPORT_FORMATS } from "./csv.js";
 import {
   ApiService,
@@ -435,7 +436,8 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "paused is a stop that crawl_resume continues, with pauseReason 'request' " +
         "(crawl_pause) or 'shutdown' (the server stopped mid-run). cancelled is " +
         "final — crawl_resume refuses it; cancelledAt says when, and neverFetched " +
-        "counts the URLs it never asked for. controlRequested is a pause or cancel " +
+        "counts the URLs it never asked for (null on a crawl cancelled before it ran: " +
+        "nothing was seen, which is not zero). controlRequested is a pause or cancel " +
         "asked of a running crawl and not yet acted on (null otherwise). Two fields answer the " +
         "question 'is anybody actually working on this': queuePosition is a " +
         "number only while THIS server holds the crawl (null otherwise), and " +
@@ -589,10 +591,18 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "epilogue work had not started — the known-404 probe if the stop came " +
         "during the page crawl; otherwise the rest of the 5xx recheck and the " +
         "resource pass — and a paused crawl may owe that work with no row " +
-        "counting it, so the resume runs to find out.",
-      inputSchema: z.strictObject({ crawlId: crawlIdField() }),
+        "counting it, so the resume runs to find out.\n\n" +
+        "CREDENTIALS. A crawl started with requestHeaders, httpAuth or cookies keeps " +
+        "them only in the server's memory. After a server restart they are gone, and " +
+        "this tool refuses with code CREDENTIALS_REQUIRED (409), naming the fields and " +
+        "header/cookie names it needs, until you send them again here — exactly those " +
+        "kinds and names (crawl_config_get shows them, values [redacted]); another " +
+        "shape is a VALIDATION refusal. A crawl that needed them never runs without " +
+        "them. Values sent are never stored, logged or answered.",
+      inputSchema: z.strictObject({ crawlId: crawlIdField(), ...credentialInputSchemas() }),
     },
-    async ({ crawlId }) => run("crawl_resume", () => service.resumeCrawl(crawlId)),
+    async ({ crawlId, ...credentials }) =>
+      run("crawl_resume", () => service.resumeCrawl(crawlId, defined(credentials))),
   );
 
   server.registerTool(
@@ -742,9 +752,15 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "spelling of the site (www. or bare) that could not be approved when the " +
         "pass started, with the reason: the pass still ran, and pages on that " +
         "spelling come back as 'policy refusal' render errors. '<host> has no A or " +
-        "AAAA record' for www. is normal on a site with no www record.",
+        "AAAA record' for www. is normal on a site with no www record.\n\n" +
+        "CREDENTIALS. A crawl started with requestHeaders, httpAuth or cookies renders " +
+        "with them, sent only to the site's own hosts. After a server restart (or a " +
+        "cancel) the server no longer holds them: this tool refuses with code " +
+        "CREDENTIALS_REQUIRED (409) until you send them here, of exactly the shape " +
+        "crawl_config_get shows.",
       inputSchema: z.strictObject({
         crawlId: crawlIdField(),
+        ...credentialInputSchemas(),
         urls: z
           .array(z.string())
           .describe(
@@ -754,10 +770,8 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
           .optional(),
       }),
     },
-    async ({ crawlId, urls }) =>
-      run("crawl_render", () =>
-        service.renderCrawl(crawlId, urls === undefined ? {} : { urls }),
-      ),
+    async ({ crawlId, ...input }) =>
+      run("crawl_render", () => service.renderCrawl(crawlId, defined(input))),
   );
 
   server.registerTool(
@@ -818,7 +832,13 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "judgementStale}.\n\n" +
         "crawl is every setting the crawl was stored with, at its effective value " +
         "(findingCap is in judgement, not here); it is what config_validate " +
-        "answered as effective for the body that started it. mutability says, per " +
+        "answered as effective for the body that started it, except that " +
+        "credentials are shown, never their values: requestHeaders {name: " +
+        "'[redacted]'}, httpAuth '[redacted]' and cookies [{name, value: " +
+        "'[redacted]'}] appear when the crawl was given them. listUrlCount and " +
+        "listDuplicates (a list crawl) and scopeChangedAt (when exclude or include " +
+        "last changed through crawl_config_set, ISO, or null) are facts, never " +
+        "set. mutability says, per " +
         "crawl key, whether it can change after the crawl starts: never, " +
         "whenPaused (only while the crawl is queued or paused) or always; the " +
         "operator's own budgets (maxResources, maxResourceHosts, maxBlockedUrls, " +
@@ -852,12 +872,21 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "crawl_start validates it, and null is refused — a crawl field has no " +
         "unset. Only the fields crawl_config_get marks whenPaused can be changed " +
         "(maxPages, maxDepth, perHostDelayMs, maxConcurrency, renderBudgetPct, " +
-        "renderMaxPages, renderSamplePerType), and only while the crawl is queued " +
+        "renderMaxPages, renderSamplePerType, exclude, include, maxRedirectHops, " +
+        "requestHeaders, httpAuth, cookies), and only while the crawl is queued " +
         "or paused: pause a running crawl with crawl_pause, set, then " +
         "crawl_resume. A never field (siteUrl, userAgent, the host lists, " +
-        "fetchResources) is refused 409 when its value changes; sent with the " +
-        "value already stored it is no change, so you may send back the whole " +
-        "crawl object crawl_config_get gave you with one field edited. A queued " +
+        "fetchResources, mode, urls, maxUrlLength) is refused 409 when its value " +
+        "changes. ANY field sent with the value crawl_config_get shows is no " +
+        "change, on any status — a credential sent back as '[redacted]' included — " +
+        "so you may send back the whole crawl object crawl_config_get gave you " +
+        "with one field edited. A changed exclude or include stamps scopeChangedAt, " +
+        "and the resumed run files the pending URLs the new lists refuse as " +
+        "excluded rows; pages already fetched stay. Credentials sent here replace " +
+        "the ones this server holds (each field whole; an empty requestHeaders or " +
+        "cookies drops that kind) and are never stored, logged or answered; after a " +
+        "server restart a change must send every credential the crawl needs, or it " +
+        "is refused CREDENTIALS_REQUIRED (409). A queued " +
         "crawl this server is already starting is refused 409 (pause it first). " +
         "maxPages cannot go below the pages " +
         "already crawled; perHostDelayMs keeps its floor, and a resumed crawl " +

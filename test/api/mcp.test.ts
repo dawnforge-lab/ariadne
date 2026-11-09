@@ -1343,8 +1343,8 @@ describe("crawl_render", () => {
       const tools = await client.listTools();
       const render = tools.tools.find((t) => t.name === "crawl_render");
       expect(Object.keys(render?.inputSchema.properties ?? {}).sort()).toEqual([
-        "crawlId",
-        "urls",
+        "cookies", "crawlId", "httpAuth", // the crawl's credentials (27c T9)
+        "requestHeaders", "urls",
       ]);
     });
 

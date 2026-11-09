@@ -455,11 +455,11 @@ describe("the secret never leaves", () => {
     expectNoSecret(serverLog.join("\n"), "the server log");
   });
 
-  it("refuses a credential in a crawl_config_set patch rather than storing it", async () => {
+  it("takes a credential in a crawl_config_set patch into memory, never into the row (27c T9)", async () => {
     const { id } = await acceptQueued({ siteUrl: `${site}/` });
     const res = await a("PATCH", `/crawls/${id}/config`, { crawl: { requestHeaders: { "x-tenant": HEADER_VALUE } } });
-    expect(res.status).toBe(400);
-    expectNoSecret(res.text, "the patch refusal");
+    expect(res.status, res.text).toBe(200);
+    expectNoSecret(res.text, "the patch answer");
     const [row] = await db.select({ config: crawls.config }).from(crawls).where(eq(crawls.id, id));
     expectNoSecret(JSON.stringify(row?.config), "config_jsonb after the patch");
     await cancel(id);

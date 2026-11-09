@@ -138,7 +138,9 @@ import {
   credentialError,
   credentialHeadersFor,
   credentialShapeError,
+  describeShape,
   requireCredentials,
+  sameShape,
   type CrawlCredentials,
   type CredentialShape,
   type CredentialTarget,
@@ -856,16 +858,25 @@ export async function resumeCrawl(
 
   const config = opts.config ?? parseStoredConfig(row.config, crawlId);
   validateCrawlConfig(config);
-  // THE ROW DECIDES WHETHER CREDENTIALS ARE NEEDED, unless the override states
-  // a shape of its own: an `opts.config` that simply leaves `credentialShape`
-  // out must not be the way a crawl that needed auth resumes without it. Before
-  // the claim, so a refused resume has changed nothing.
-  requireCredentials(
-    crawlId,
-    config.siteUrl,
-    config.credentialShape ?? storedCredentialShape(row.config, crawlId),
-    config.credentials,
-  );
+  // THE ROW DECIDES WHETHER CREDENTIALS ARE NEEDED. An `opts.config` that
+  // leaves `credentialShape` out must not be the way a crawl that needed auth
+  // resumes without it, and one that states a SMALLER (or any other) shape must
+  // not be the way it resumes with less (27c T9): when the row stores a shape,
+  // an override's own shape must be that shape. Only a row with none takes the
+  // override's. Before the claim, so a refused resume has changed nothing.
+  const rowShape = storedCredentialShape(row.config, crawlId);
+  if (
+    rowShape !== null &&
+    config.credentialShape !== undefined &&
+    !sameShape(rowShape, config.credentialShape)
+  ) {
+    throw new Error(
+      `resumeCrawl: crawl ${crawlId}'s override config states a credentialShape other than ` +
+        `the one its row stores (${describeShape(rowShape)}): the row decides which ` +
+        `credentials a resume needs`,
+    );
+  }
+  requireCredentials(crawlId, config.siteUrl, rowShape ?? config.credentialShape, config.credentials);
 
   // THE CLAIM, a compare-and-swap rather than a blind write. With
   // `expectStatus` it is conditioned on that status (the API queue's `queued`),

@@ -642,6 +642,27 @@ function onTheWire<S extends z.ZodType>(field: { schema: S } & CrawlField): S {
 }
 
 /**
+ * The three credential fields as `crawl_resume` and `crawl_render` take them
+ * (27c T9): `crawl_start`'s own schemas (`credentialSchema`, so the refusals
+ * are the same names-only sentences) and published shapes, marked
+ * `x-ariadne-secret`. No mutability marker: on these tools they re-supply the
+ * crawl's credentials for one call, they do not change a setting.
+ */
+export function credentialInputSchemas() {
+  const secret = <S extends z.ZodType>(field: { schema: S } & CrawlField): S =>
+    field.schema.meta({
+      ...(field.jsonSchema ?? {}),
+      description: field.description,
+      "x-ariadne-secret": true,
+    });
+  return {
+    requestHeaders: secret(CRAWL_FIELDS.requestHeaders).optional(),
+    httpAuth: secret(CRAWL_FIELDS.httpAuth).optional(),
+    cookies: secret(CRAWL_FIELDS.cookies).optional(),
+  };
+}
+
+/**
  * A `JudgementError`'s dotted path as zod segments. The first segment is a
  * block key; everything after it is ONE segment, because a rule id has dots in
  * it (`rules.title.too-long` is `["rules", "title.too-long"]`).

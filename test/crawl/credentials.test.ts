@@ -529,3 +529,33 @@ describe("the header names undici refuses to send", () => {
     }
   });
 });
+
+// 27c T9 (Task 5 review): an override config stating a SMALLER shape than the
+// row's must not be the way a crawl that needed more resumes with less.
+describe("resumeCrawl: the row's stored shape decides", () => {
+  it("refuses an override whose credentialShape differs from the row's, naming the crawl, before any request", async () => {
+    const crawlId = `crawl_credentials_shape_${Date.now()}`;
+    const stored = storableConfig(cfg({ credentialShape: shapeOf(CREDS)! }));
+    await db.insert(crawls).values({
+      id: crawlId,
+      siteUrl: stored.siteUrl,
+      config: stored,
+      rulesetVersion: "test",
+      status: "paused",
+      pauseReason: "request",
+    });
+    createdCrawls.push(crawlId);
+    recorded = [];
+    const smaller: CrawlCredentials = { httpAuth: { username: USERNAME, password: PASSWORD } };
+    const error = await resumeCrawl(db, crawlId, {
+      config: { ...cfg(), credentials: smaller, credentialShape: shapeOf(smaller)! },
+    }).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toContain(crawlId);
+    expect((error as Error).message).toContain("credentialShape");
+    for (const secret of SECRETS) expect((error as Error).message).not.toContain(secret);
+    expect(recorded).toEqual([]);
+    const [after] = await db.select().from(crawls).where(eq(crawls.id, crawlId));
+    expect(after!.status).toBe("paused");
+  });
+});

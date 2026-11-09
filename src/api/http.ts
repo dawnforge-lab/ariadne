@@ -28,7 +28,11 @@
  *                                      queued again. Answers `crawl_start`'s
  *                                      `{crawlId, status, queuePosition}` -> 202.
  *                                      A paused crawl resumes; a cancelled one
- *                                      is final and 409s
+ *                                      is final and 409s. Optional body: the
+ *                                      crawl's `requestHeaders` / `httpAuth` /
+ *                                      `cookies`, which a crawl that needed
+ *                                      them must be sent again after a restart
+ *                                      (409 `CREDENTIALS_REQUIRED` until then)
  *   POST /crawls/:id/pause             pause a crawl. Queued: paused now -> 200.
  *                                      Running: requested of its loop -> 202.
  *                                      `{crawlId, status, controlRequested,
@@ -43,7 +47,9 @@
  *   POST /crawls/:id/render            run the render pass. No body: the engine
  *                                      selects. `{"urls": [...]}`: those pages
  *                                      instead, replacing the automatic
- *                                      selection for that pass
+ *                                      selection for that pass. The crawl's
+ *                                      credentials ride the same body, as on
+ *                                      resume
  *   POST /crawls/:id/rules             run the rules
  *   GET  /crawls/:id/config            `{crawl, mutability, judgement, ...}`:
  *                                      the crawl's stored settings with each
@@ -170,6 +176,7 @@ import {
   ApiService,
   ServiceError,
   parseRenderCrawlInput,
+  parseResumeCrawlInput,
   type CsvStream,
   type ServiceErrorCode,
 } from "./service.js";
@@ -403,11 +410,13 @@ function buildRoutes(): Route[] {
       pattern: ["crawls", id, "resume"],
       query: [],
       // 202, not 200, and for `POST /crawls`'s reason: the crawl is ACCEPTED
-      // here and runs later. A 200 would say the work is done.
-      handler: async (service, ctx) => {
-        noBody(ctx);
-        return { status: 202, body: await service.resumeCrawl(param(ctx, "id")) };
-      },
+      // here and runs later. A 200 would say the work is done. The body is
+      // optional: the crawl's credentials, re-supplied after a restart (27c);
+      // `parseResumeCrawlInput` refuses any other field rather than ignoring it.
+      handler: async (service, ctx) => ({
+        status: 202,
+        body: await service.resumeCrawl(param(ctx, "id"), parseResumeCrawlInput(ctx.body)),
+      }),
     },
     {
       method: "POST",

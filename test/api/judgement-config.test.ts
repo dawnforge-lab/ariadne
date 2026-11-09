@@ -813,10 +813,10 @@ describe("the crawl part of crawl_config_get / crawl_config_set (27b T7)", () =>
     const { findingCap, ...storedLess } = await storedConfig(id);
     expect(findingCap).toBe(50);
     // The equality chain (Ruling 1): validate's effective, the stored row and
-    // the read all say the same thing.
-    expect(got.body["crawl"]).toEqual(storedLess);
+    // the read all say the same thing, the read adding scopeChangedAt (27c T9).
+    expect(got.body["crawl"]).toEqual({ ...storedLess, scopeChangedAt: null });
     const { findingCap: _cap, ...effectiveLess } = effective;
-    expect(got.body["crawl"]).toEqual(effectiveLess);
+    expect(got.body["crawl"]).toEqual({ ...effectiveLess, scopeChangedAt: null });
     expect(got.body["crawl"]).not.toHaveProperty("findingCap");
     expect((got.body["judgement"] as Record<string, unknown>)["findingCap"]).toBe(50);
 
@@ -1006,5 +1006,77 @@ describe("judgement refusal wording: the start body and crawl_config_set say the
     const fromStart = detailAfter(String(started.body["error"]), "rules.title.too-long");
     const fromSet = detailAfter(String(set.body["error"]), "rules.title.too-long");
     expect(fromSet).toBe(fromStart);
+  });
+});
+
+describe("the whole crawl object from crawl_config_get, redacted, sent back (27c T9)", () => {
+  const SHAPE = { requestHeaderNames: ["x-tenant"], httpAuth: true, cookieNames: ["sid"] };
+  const seed = async (status: string): Promise<string> => {
+    const id = `crawl_config_echo_${randomUUID()}`;
+    await db.insert(crawls).values({
+      id,
+      siteUrl: `${SITE}/`,
+      config: {
+        siteUrl: `${SITE}/`,
+        maxPages: 100,
+        maxDepth: 5,
+        userAgent: "AriadneBot-test",
+        perHostDelayMs: 1000,
+        maxConcurrency: 4,
+        probeHosts: false,
+        mode: "spider",
+        exclude: [],
+        include: [],
+        maxRedirectHops: 10,
+        maxUrlLength: 2500,
+        credentialShape: SHAPE,
+      },
+      discovery: mkDiscovery(),
+      rulesetVersion: "test",
+      status,
+      ...(status === "paused" ? { pauseReason: "request" } : {}),
+      pagesCrawled: 5,
+    });
+    createdCrawls.push(id);
+    return id;
+  };
+
+  it("shows the credentials redacted and scopeChangedAt; sent back on a paused crawl with maxPages changed, only maxPages changes", async () => {
+    const id = await seed("paused");
+    const before = await storedRow(id);
+    const got = await call("GET", `/crawls/${id}/config`);
+    expect(got.status).toBe(200);
+    const crawl = got.body["crawl"] as Record<string, unknown>;
+    expect(crawl["httpAuth"]).toBe("[redacted]");
+    expect(crawl["requestHeaders"]).toEqual({ "x-tenant": "[redacted]" });
+    expect(crawl["cookies"]).toEqual([{ name: "sid", value: "[redacted]" }]);
+    expect(crawl["scopeChangedAt"]).toBeNull();
+    expect(crawl).not.toHaveProperty("credentialShape");
+    const mutability = got.body["mutability"] as Record<string, string>;
+    expect(mutability["httpAuth"]).toBe("whenPaused");
+    expect(mutability["scopeChangedAt"]).toBe("never");
+
+    const res = await patch(id, { crawl: { ...crawl, maxPages: 900 } });
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(res.body["crawl"]).toEqual({ ...crawl, maxPages: 900 });
+    const after = await storedRow(id);
+    expect(after.config).toEqual({ ...(before.config as Record<string, unknown>), maxPages: 900 });
+    const [row] = await db.select({ at: crawls.scopeChangedAt }).from(crawls).where(eq(crawls.id, id));
+    expect(row?.at).toBeNull();
+  });
+
+  it("the same object on a running crawl, maxPages unchanged, is 200 and changes nothing", async () => {
+    const id = await seed("running");
+    const before = await storedRow(id);
+    const got = await call("GET", `/crawls/${id}/config`);
+    const res = await patch(id, { crawl: got.body["crawl"] });
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(await storedRow(id)).toEqual(before);
+    // A whenPaused key that does change is still refused while it runs.
+    const changed = await patch(id, { crawl: { ...(got.body["crawl"] as Record<string, unknown>), maxPages: 900 } });
+    expect(changed.status).toBe(409);
+    const scope = await patch(id, { crawl: { scopeChangedAt: "2026-01-01T00:00:00.000Z" } });
+    expect(scope.status).toBe(409);
+    expect(String(scope.body["error"])).toContain("scopeChangedAt");
   });
 });
