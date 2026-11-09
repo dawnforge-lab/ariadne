@@ -2358,7 +2358,9 @@ describe("a client that leaves mid-export", () => {
 
 describe("GET /crawls/:id — the lifecycle fields (27b)", () => {
   it("reports cancelledAt and neverFetched for a cancelled crawl, nulls for control and pause", async () => {
-    const id = await seedCrawl({ status: "running" });
+    // A crawl that ran: it has discovery evidence. One cancelled before it ran
+    // has none, and its neverFetched is null (Ruling 11, lifecycle.test.ts).
+    const id = await seedCrawl({ status: "running", discovery: DISCOVERY });
     await seedLease(id, { state: "pending", expiresInMs: 0, url: "http://seeded.example/a" });
     await seedLease(id, { state: "pending", expiresInMs: 0, url: "http://seeded.example/b" });
     await db.execute(sql`update crawls set status = 'cancelled', cancelled_at = now() where id = ${id}`);

@@ -399,7 +399,12 @@ export interface CrawlDetail extends CrawlListItem {
   pauseReason: PauseReason | null;
   /** When the crawl was cancelled (ISO); null unless `status` is `cancelled`. */
   cancelledAt: string | null;
-  /** The frontier URLs a cancelled crawl never fetched (`frontier.pending`); null unless `status` is `cancelled`. */
+  /**
+   * The frontier URLs a cancelled crawl never fetched (`frontier.pending`).
+   * Null unless `status` is `cancelled` — and null on a cancelled crawl that
+   * never ran (no discovery evidence: it was cancelled while queued). Nothing
+   * was seen, so the count is unknown, not zero (Ruling 11).
+   */
   neverFetched: number | null;
   pagesTotal: number | null;
   /**
@@ -2594,7 +2599,8 @@ export class ApiService {
       controlRequested: readControlRequest(row.controlRequest, crawlId),
       pauseReason: readPauseReason(row.pauseReason, crawlId),
       cancelledAt: row.cancelledAt === null ? null : row.cancelledAt.toISOString(),
-      neverFetched: row.status === "cancelled" ? counts.pending : null,
+      // Unknown, not 0, on a crawl cancelled before it ran (Ruling 11).
+      neverFetched: row.status === "cancelled" && row.discovery !== null ? counts.pending : null,
       // Straight off the column, null included. The null is not defaulted to a
       // sentence here on either side of the contract: on a `finished` crawl it
       // is the correct answer, and on a `failed` one it means the row predates
@@ -3288,14 +3294,15 @@ export class ApiService {
    * (`pauseReason: "request"`) or this server shutting down (`"shutdown"`) —
    * and its stop path decides nothing on the way out: the URLs it never leased
    * stay pending, the resource rows it never reached stay null with no reason,
-   * and the 404 probe and the resource pass are skipped rather than recorded as
+   * and the epilogue work it had not started is skipped rather than recorded as
    * having found nothing. So the rows a pause leaves are precisely the
    * questions nobody has answered yet, and resuming asks only those — at the
    * spacing the crawl earned, which the frontier and the throttle record keep.
-   * A PAUSED CRAWL IS NEVER "NOTHING TO RESUME". Every pause skips the known-404
-   * probe, and one that lands in the epilogue can skip the resource and 5xx
-   * recheck passes too — work `owedWork` does not count, because it is not a
-   * row. A crawl paused while still queued never ran at all and owes the whole
+   * A PAUSED CRAWL IS NEVER "NOTHING TO RESUME". A stop skips whatever epilogue
+   * work had not started (the order is probe → recheck → resources): the
+   * known-404 probe if the stop came during the page crawl; otherwise the rest
+   * of the 5xx recheck and the resource pass — work `owedWork` does not count,
+   * because it is not a row. A crawl paused while still queued never ran at all and owes the whole
    * crawl. So refusal 4 applies only to `finished` and `failed` rows, and a
    * paused crawl is always accepted. `failed` is resumable on the same terms — a
    * crash decided nothing either — and a caller who wants the crawl dead rather
@@ -3634,25 +3641,13 @@ export class ApiService {
    * order `parseStartBody` puts a bad body ahead of a busy queue.
    */
   async renderCrawl(crawlId: string, input: RenderCrawlInput = {}): Promise<RenderSummaryOut> {
-    const row = await this.crawlRow(crawlId);
-
-    let config: CrawlConfig;
-    try {
-      config = parseStoredConfig(row.config, crawlId);
-    } catch (error) {
-      throw new ServiceError("CONFLICT", messageOf(error));
-    }
-    const robotsCrawlDelaySec = this.robotsCrawlDelay(row.discovery, crawlId);
-    const renderUrls =
-      input.urls === undefined
-        ? undefined
-        : await this.checkRenderUrls(crawlId, input.urls, config);
-
-    // Check and claim in ONE synchronous step, as `runRulesForCrawl` claims
-    // `judging`: while the pass runs, `refuseWhileBusy` refuses the commands
-    // that would change the crawl under it (resume, cancel). The driver's own
-    // render-lease check would also refuse a second pass, but only once the
-    // first has leased a row; this hold covers the whole call.
+    // Check and claim in ONE synchronous step, before the first `await`, as
+    // `runRulesForCrawl` claims `judging` (see there for the window a claim
+    // taken after the reads left open): while the call runs, `refuseWhileBusy`
+    // refuses the commands that would change the crawl under it (resume,
+    // cancel, a crawl config change). The driver's own render-lease check
+    // would also refuse a second pass, but only once the first has leased a
+    // row; this hold covers the whole call, reads included.
     if (this.rendering.has(crawlId)) {
       throw new ServiceError(
         "CONFLICT",
@@ -3663,26 +3658,43 @@ export class ApiService {
     this.rendering.add(crawlId);
     let summary: RenderPassSummary;
     try {
-      summary = await runRenderPass(this.db, crawlId, {
-        ...config,
-        robotsCrawlDelaySec,
-        ...(renderUrls === undefined ? {} : { renderUrls }),
-        // NOT left to the pass's own cwd-relative default. The render pass
-        // writes a file per rendered page, and a server that never said where
-        // put them wherever it happened to be started — which is how this
-        // repository's own suite left twelve crawl directories in the working
-        // tree. The directory is a SERVER property (`ServiceConfig.renderDir`),
-        // absolutised at construction, and no request may name it.
-        renderHtmlDir: this.renderDir,
-        allowPrivate: this.config.crawlDefaults?.allowPrivate === true,
-        ...(this.config.resolveAddress === undefined
-          ? {}
-          : { resolveAddress: this.config.resolveAddress }),
-      });
-    } catch (error) {
-      throw mapRenderPassError(error, crawlId, this.log);
+      const row = await this.crawlRow(crawlId);
+
+      let config: CrawlConfig;
+      try {
+        config = parseStoredConfig(row.config, crawlId);
+      } catch (error) {
+        throw new ServiceError("CONFLICT", messageOf(error));
+      }
+      const robotsCrawlDelaySec = this.robotsCrawlDelay(row.discovery, crawlId);
+      const renderUrls =
+        input.urls === undefined
+          ? undefined
+          : await this.checkRenderUrls(crawlId, input.urls, config);
+
+      try {
+        summary = await runRenderPass(this.db, crawlId, {
+          ...config,
+          robotsCrawlDelaySec,
+          ...(renderUrls === undefined ? {} : { renderUrls }),
+          // NOT left to the pass's own cwd-relative default. The render pass
+          // writes a file per rendered page, and a server that never said where
+          // put them wherever it happened to be started — which is how this
+          // repository's own suite left twelve crawl directories in the working
+          // tree. The directory is a SERVER property (`ServiceConfig.renderDir`),
+          // absolutised at construction, and no request may name it.
+          renderHtmlDir: this.renderDir,
+          allowPrivate: this.config.crawlDefaults?.allowPrivate === true,
+          ...(this.config.resolveAddress === undefined
+            ? {}
+            : { resolveAddress: this.config.resolveAddress }),
+        });
+      } catch (error) {
+        throw mapRenderPassError(error, crawlId, this.log);
+      }
     } finally {
-      // Released on the failure path too, for `judging`'s reason.
+      // Released on every path — a refused read, a refused list, a failed
+      // pass — for `judging`'s reason.
       this.rendering.delete(crawlId);
     }
 
@@ -3775,26 +3787,14 @@ export class ApiService {
    * a silent block is a request that appears to hang.
    */
   async runRulesForCrawl(crawlId: string): Promise<RunSummary> {
-    const row = await this.crawlRow(crawlId);
-    if (row.status === "queued" || row.status === "running") {
-      throw new ServiceError(
-        "CONFLICT",
-        `crawl ${crawlId} is '${row.status}': the rules may only run over a crawl that ` +
-          `has stopped, or they would judge a site that is still being fetched`,
-      );
-    }
-    // The stored judgement block, validated before the crawl is claimed or a
-    // row is touched: an override of a rule this ruleset lacks (a later
-    // ruleset removed it) is the CONFLICT the read surfaces answer, naming the
-    // crawl and the rule and pointing at crawl_config_set — not the bare
-    // `JudgementError` `runRules` would throw, which a transport answers 500.
-    // Synchronous, like the claim below, so nothing can move between the two.
-    // `crawl_config_set` validates against this registry, so a block that
-    // passes here cannot gain an unknown rule before `runRules` reads it.
-    readJudgementBlock(row.judgement, crawlId, this.registry);
-    // Check and claim in ONE synchronous step — no `await` between them — so
-    // two callers that both got past the status read cannot both see an
-    // unheld crawl.
+    // Check and claim in ONE synchronous step, BEFORE the first `await`. Two
+    // callers cannot both see an unheld crawl, and — the reason the claim
+    // comes before the status read rather than after it — no command that
+    // `refuseWhileBusy` guards (resume, cancel, a crawl config change) can
+    // land between the read below and the run: one issued while the read is
+    // in flight already meets the hold. A claim taken after the read left that
+    // window open, and a resume landing in it moved the crawl to `queued`
+    // under a run that had read it `paused`.
     if (this.judging.has(crawlId)) {
       throw new ServiceError(
         "CONFLICT",
@@ -3805,6 +3805,38 @@ export class ApiService {
     }
     this.judging.add(crawlId);
     try {
+      const row = await this.crawlRow(crawlId);
+      if (row.status === "queued" || row.status === "running") {
+        throw new ServiceError(
+          "CONFLICT",
+          `crawl ${crawlId} is '${row.status}': the rules may only run over a crawl that ` +
+            `has stopped, or they would judge a site that is still being fetched`,
+        );
+      }
+      // Ruling 11: a crawl with no discovery evidence never ran — it was
+      // paused or cancelled while still queued — so there is nothing to judge.
+      // Refused here, as the render driver refuses a crawl that "never
+      // completed discovery", rather than letting the first rule that reads
+      // the robots evidence throw and the transport answer 500.
+      if (row.discovery === null) {
+        throw new ServiceError(
+          "CONFLICT",
+          `crawl ${crawlId} is '${row.status}' and has no discovery evidence: it never ran ` +
+            (row.status === "paused" || row.status === "cancelled"
+              ? `(it was ${row.status} before discovery)`
+              : `(it ended before discovery completed)`) +
+            `, so there is nothing to judge`,
+        );
+      }
+      // The stored judgement block, validated before a row is touched: an
+      // override of a rule this ruleset lacks (a later ruleset removed it) is
+      // the CONFLICT the read surfaces answer, naming the crawl and the rule
+      // and pointing at crawl_config_set — not the bare `JudgementError`
+      // `runRules` would throw, which a transport answers 500.
+      // `crawl_config_set` validates against this registry and is refused
+      // while the crawl is held (above), so a block that passes here cannot
+      // gain an unknown rule before `runRules` reads it.
+      readJudgementBlock(row.judgement, crawlId, this.registry);
       return await runRules(this.db, crawlId, this.registry);
     } catch (error) {
       // The one refusal `runRules` owns: an id nothing knows. It is raced with

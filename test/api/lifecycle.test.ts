@@ -869,3 +869,71 @@ describe("crawl_config_set: the crawl part against a live server (27b T7)", () =
     }, 120_000);
   });
 });
+
+describe("crawl_rules on a crawl that never ran (Ruling 11)", () => {
+  it("refuses a crawl paused while queued and one cancelled while queued (409, never ran); neverFetched is null, not 0", async () => {
+    const { running, waiting } = await runningAndWaiting();
+    const other = await start();
+    expect((await pause(waiting)).status).toBe(200);
+    expect((await cancel(other.id)).status).toBe(200);
+    await stopRunning(running);
+
+    for (const id of [waiting, other.id]) {
+      const status = id === waiting ? "paused" : "cancelled";
+      const res = await call("POST", `/crawls/${id}/rules`);
+      expect(res.status, status).toBe(409);
+      expect(String(res.body["error"])).toContain(id);
+      expect(String(res.body["error"])).toContain("never ran");
+      expect(String(res.body["error"])).toContain(status);
+      const mcpRes = await tool("crawl_rules", { crawlId: id });
+      expect(mcpRes.isError).toBe(true);
+      expect(String(mcpRes.body["error"])).toContain("never ran");
+    }
+
+    const neverRan = await detail(other.id);
+    expect(neverRan["status"]).toBe("cancelled");
+    expect(neverRan["neverFetched"]).toBeNull();
+
+    // A crawl cancelled AFTER it ran keeps a count: it saw URLs it never fetched.
+    const ran = await detail(running);
+    expect(ran["status"]).toBe("cancelled");
+    expect(typeof ran["neverFetched"]).toBe("number");
+  }, 90_000);
+});
+
+describe("the rules guard claims before it reads (in-process TOCTOU)", () => {
+  it("a crawl_resume issued while crawl_rules is between its read and its run is refused 409", async () => {
+    const id = await seedPausedJudgeable();
+    const svc = api.service as unknown as { crawlRow: (crawlId: string) => Promise<unknown> };
+    const realRow = svc.crawlRow.bind(svc);
+    let releaseRead!: () => void;
+    const readHeld = new Promise<void>((r) => {
+      releaseRead = r;
+    });
+    let enteredRead!: () => void;
+    const reading = new Promise<void>((r) => {
+      enteredRead = r;
+    });
+    let held = false;
+    const spy = vi.spyOn(svc, "crawlRow").mockImplementation(async (crawlId: string) => {
+      if (crawlId === id && !held) {
+        held = true;
+        enteredRead();
+        await readHeld;
+      }
+      return await realRow(crawlId);
+    });
+    const run = call("POST", `/crawls/${id}/rules`);
+    try {
+      await reading;
+      const resumed = await resume(id);
+      expect(resumed.status).toBe(409);
+      expect(String(resumed.body["error"])).toContain("rules are running");
+      expect((await stored(id)).status).toBe("paused");
+    } finally {
+      releaseRead();
+      spy.mockRestore();
+    }
+    expect((await run).status).toBe(200);
+  }, 60_000);
+});

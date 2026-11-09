@@ -582,8 +582,11 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "crawl's state changed while the call was checking it, in which case " +
         "nothing was queued and crawl_status says what it is now. Pages waiting on " +
         "the render pass are NOT resumable work — that is crawl_render. A paused " +
-        "crawl is never refused as having nothing owed: a pause always skips at " +
-        "least the known-404 probe, which the resume then takes.",
+        "crawl is never refused as having nothing owed: a stop skips whatever " +
+        "epilogue work had not started — the known-404 probe if the stop came " +
+        "during the page crawl; otherwise the rest of the 5xx recheck and the " +
+        "resource pass — and a paused crawl may owe that work with no row " +
+        "counting it, so the resume runs to find out.",
       inputSchema: z.strictObject({ crawlId: crawlIdField() }),
     },
     async ({ crawlId }) => run("crawl_resume", () => service.resumeCrawl(crawlId)),
@@ -612,7 +615,8 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "spacing the crawl earned and its throttle record. A paused crawl stays " +
         "paused across a server restart, and nothing starts it but crawl_resume. " +
         "You can render it and run the rules on it while it is paused — looking at " +
-        "partial results is a reason to pause.\n\n" +
+        "partial results is a reason to pause — once it has run: a crawl paused " +
+        "while still queued has nothing to judge, and crawl_rules refuses it.\n\n" +
         "Asking again while a pause is pending answers the same and changes " +
         "nothing. REFUSED: a crawl with a cancel pending (the cancel wins); a crawl " +
         "already paused; a finished, failed or cancelled crawl, naming its status.",
@@ -627,11 +631,16 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
       title: "Cancel a crawl",
       description:
         "Stop a crawl FOR GOOD. A cancel is final: crawl_resume refuses a cancelled " +
-        "crawl. What it crawled stays judgeable — crawl_rules runs on it as on a " +
-        "finished crawl — and crawl_status reports cancelledAt and neverFetched, " +
-        "the URLs it never asked for. Its 404 probe, resource pass and 5xx recheck " +
-        "do not run, and their checks read as not measured, never as a pass. To " +
-        "stop a crawl you may want to continue, use crawl_pause instead.\n\n" +
+        "crawl. What a crawl cancelled after it ran had crawled stays judgeable — " +
+        "crawl_rules runs on it as on a finished crawl. A crawl cancelled while " +
+        "still queued never ran: there is nothing to judge, and crawl_rules " +
+        "refuses it (409). crawl_status reports cancelledAt and neverFetched, the " +
+        "URLs it never asked for (null on a crawl cancelled before it ran: " +
+        "nothing was seen). A cancel skips whatever epilogue work had not " +
+        "started — the 404 probe if it came during the page crawl; otherwise the " +
+        "rest of the 5xx recheck and the resource pass — and the skipped checks " +
+        "read as not measured, never as a pass. To stop a crawl you may want to " +
+        "continue, use crawl_pause instead.\n\n" +
         "Answers {crawlId, status, controlRequested, immediate}. A QUEUED or " +
         "PAUSED crawl is cancelled at once: immediate true, status 'cancelled'. A " +
         "RUNNING crawl is asked to cancel: immediate false, status 'running', " +
@@ -765,6 +774,8 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "Refused while the crawl is 'queued' or 'running': findings about a site " +
         "that is still being fetched change under the reader (an 'orphan' page is " +
         "only orphaned because the page linking to it has not been fetched yet). " +
+        "Refused too for a crawl that never ran — paused or cancelled while still " +
+        "queued, so it has no discovery evidence and nothing to judge. " +
         "Running it a second time re-judges the crawl with the current ruleset.",
       inputSchema: z.strictObject({ crawlId: crawlIdField() }),
     },
