@@ -30,7 +30,10 @@ import {
   MAX_CREDENTIAL_VALUE_BYTES,
   MAX_REQUEST_HEADERS,
   credentialError,
+  credentialFieldError,
   credentialHeadersFor,
+  credentialShapeError,
+  redactionMarkerError,
   sameShape,
   shapeOf,
   type CrawlCredentials,
@@ -191,7 +194,8 @@ describe("credentialError", () => {
 
   it("refuses a malformed set and accepts a well-formed one", () => {
     expect(credentialError("nope", "crawl")).toContain("crawl");
-    expect(credentialError({ extra: 1 }, "crawl")).toContain("extra");
+    // An unknown key is named by position, never quoted (27c final wave M13).
+    expect(credentialError({ extra: 1 }, "crawl")).toContain("unknown field (key 1");
     expect(credentialError({ httpAuth: { username: "u" } }, "crawl")).toContain("password");
     expect(credentialError({ cookies: [{ name: "a" }] }, "crawl")).toContain("cookies");
     expect(credentialError(CREDS, "crawl")).toBeNull();
@@ -557,5 +561,65 @@ describe("resumeCrawl: the row's stored shape decides", () => {
     expect(recorded).toEqual([]);
     const [after] = await db.select().from(crawls).where(eq(crawls.id, crawlId));
     expect(after!.status).toBe("paused");
+  });
+});
+
+describe("credential validation, the final wave (27c)", () => {
+  it("refuses a sec- header name, whatever its case, beside proxy- (M5)", () => {
+    for (const name of ["sec-ch-ua", "Sec-Fetch-Mode", "sec-anything"]) {
+      const error = credentialError({ requestHeaders: { [name]: "v-s3cret" } }, "crawl");
+      expect(error, name).toContain(name);
+      expect(error, name).toContain("refused");
+      expect(error, name).not.toContain("v-s3cret");
+    }
+    // A name that merely contains "sec" is a header like any other.
+    expect(credentialError({ requestHeaders: { "x-sec-token": "v" } }, "crawl")).toBeNull();
+  });
+
+  it("never quotes a mis-shaped name or an unknown key: it names the position (M13)", () => {
+    const probes: Array<[keyof CrawlCredentials, unknown, string]> = [
+      ["cookies", [{ name: "session=S3CRET", value: "" }], "cookies[0].name"],
+      ["cookies", [{ name: "ok", value: "v" }, { name: "a", value: "b", "x=S3CRET": "" }], "cookies[1]"],
+      ["requestHeaders", { "x-ok": "v", "Authorization: Bearer S3CRET": "" }, "requestHeaders entry 2"],
+      ["httpAuth", { username: "u", password: "p", "S3CRET": "" }, "httpAuth"],
+    ];
+    for (const [field, value, says] of probes) {
+      const error = credentialFieldError(field, value);
+      expect(error, says).not.toBeNull();
+      expect(error, says).toContain(says);
+      expect(error, says).not.toContain("S3CRET");
+    }
+    expect(credentialFieldError("httpAuth", { username: "u", password: "p", "S3CRET": "" })).toContain(
+      "key 3",
+    );
+    const top = credentialError({ requestHeaders: {}, "S3CRET": 1 }, "crawl");
+    expect(top).toContain("key 2");
+    expect(top).not.toContain("S3CRET");
+    // A redaction marker under a mis-shaped name is named by position too.
+    const marked = redactionMarkerError("requestHeaders", { "Authorization: Bearer S3CRET": "[redacted]" });
+    expect(marked).toContain("requestHeaders entry 1");
+    expect(marked).not.toContain("S3CRET");
+    const cookie = redactionMarkerError("cookies", [{ name: "session=S3CRET", value: "[redacted]" }]);
+    expect(cookie).toContain("cookies[0]");
+    expect(cookie).not.toContain("S3CRET");
+  });
+
+  it("checks a stored shape's keys and names as the value validators do (M7)", () => {
+    const ok = { requestHeaderNames: ["x-tenant"], httpAuth: true, cookieNames: ["sid"] };
+    expect(credentialShapeError(ok, "shape")).toBeNull();
+    const cases: Array<[Record<string, unknown>, string]> = [
+      [{ ...ok, extra: 1 }, "unknown field"],
+      [{ ...ok, requestHeaderNames: ["x tenant"] }, "shape.requestHeaderNames[0]"],
+      [{ ...ok, requestHeaderNames: ["user-agent"] }, "refused"],
+      [{ ...ok, requestHeaderNames: ["sec-ch-ua"] }, "refused"],
+      [{ ...ok, requestHeaderNames: ["x-a", "X-A"] }, "twice"],
+      [{ ...ok, cookieNames: ["sid", "sid"] }, "twice"],
+      [{ ...ok, cookieNames: ["a=b"] }, "shape.cookieNames[0]"],
+    ];
+    for (const [shape, says] of cases) {
+      const error = credentialShapeError(shape, "shape");
+      expect(error, JSON.stringify(shape)).toContain(says);
+    }
+    expect(credentialShapeError({ ...ok, cookieNames: ["a=S3CRET"] }, "shape")).not.toContain("S3CRET");
   });
 });

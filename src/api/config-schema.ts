@@ -517,7 +517,8 @@ export const CRAWL_FIELDS = {
       `HTTP token; a value is at most ${MAX_CREDENTIAL_VALUE_BYTES} bytes with no CR or ` +
       "LF. Refused names: host, user-agent, accept, accept-encoding, content-length, " +
       "connection, transfer-encoding, te, upgrade, expect, keep-alive, cookie (use " +
-      "cookies), authorization (use httpAuth) and any proxy-* name. " +
+      "cookies), authorization (use httpAuth), and any name starting proxy- or sec- " +
+      "(the browser owns sec-*). " +
       SECRET_NOTE,
   },
   httpAuth: {

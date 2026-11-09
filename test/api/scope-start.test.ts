@@ -534,3 +534,43 @@ describe("a scope pattern that can never match (27c final wave I1)", () => {
     }
   });
 });
+
+describe("a secret smuggled into a credential NAME (27c final wave M13)", () => {
+  it("is never echoed: each refusal names the position, on HTTP and MCP, start, validate, set and resume", async () => {
+    const probes: Array<{ fields: Record<string, unknown>; says: string }> = [
+      { fields: { cookies: [{ name: "session=S3CRET", value: "" }] }, says: "cookies[0].name" },
+      { fields: { requestHeaders: { "Authorization: Bearer S3CRET": "" } }, says: "requestHeaders entry 1" },
+      { fields: { httpAuth: { username: "u", password: "p", "x-S3CRET": "" } }, says: "httpAuth has an unknown field (key 3" },
+    ];
+    const { id } = await acceptQueued({ siteUrl: `${site}/` });
+    for (const { fields, says } of probes) {
+      const name = JSON.stringify(fields);
+      const body = { siteUrl: `${site}/`, ...fields };
+      const started = await a("POST", "/crawls", body);
+      expect(started.status, name).toBe(400);
+      expect(String(started.body["error"]), name).toContain(says);
+      const answers: Array<[string, string]> = [
+        ["POST /crawls", started.text],
+        ["POST /config/validate", (await a("POST", "/config/validate", body)).text],
+        ["PATCH config", (await a("PATCH", `/crawls/${id}/config`, { crawl: fields })).text],
+        ["POST resume", (await a("POST", `/crawls/${id}/resume`, fields)).text],
+      ];
+      const viaStart = await tool("crawl_start", body);
+      expect(viaStart.isError, name).toBe(true);
+      expect(viaStart.text, name).toContain(says);
+      answers.push(["MCP crawl_start", viaStart.text]);
+      answers.push(["MCP config_validate", (await tool("config_validate", { config: body })).text]);
+      const viaSet = await tool("crawl_config_set", { crawlId: id, crawl: fields });
+      expect(viaSet.isError, name).toBe(true);
+      answers.push(["MCP crawl_config_set", viaSet.text]);
+      const viaResume = await tool("crawl_resume", { crawlId: id, ...fields });
+      expect(viaResume.isError, name).toBe(true);
+      answers.push(["MCP crawl_resume", viaResume.text]);
+      for (const [where, text] of answers) {
+        expect(text, `${where} ${name}`).not.toContain("S3CRET");
+      }
+    }
+    expectNoSecret(serverLog.join("\n"), "the server log");
+    await cancel(id);
+  });
+});

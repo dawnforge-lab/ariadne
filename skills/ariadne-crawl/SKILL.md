@@ -200,20 +200,23 @@ matched against the whole URL, `*` for any run of characters and nothing else
 special: `*/cart*` and `*?sort=*` are path and parameter rules,
 `https://example.com/blog/*` a host-and-path rule. The match starts at the URL's first
 character, so **a path rule needs its leading `*`**: `/cart*` can never match and is
-refused. Exclude wins; a non-empty `include`
-admits only what matches it. A refused URL is never fetched: it is a page row of fetch
-class `excluded` whose `fetchReason` names the pattern, and past the shared budget it
-is counted in `crawl_status.excludedDropped`. A seed or listed URL the scope refuses,
-and a pattern that can never match (no leading `*` and no `http://`/`https://`, a host
-that is not the site's, or `http://` on an https site), are refused at start and by
-`crawl_config_set` (an empty crawl is not an answer). Fence off only what the brief says to: every excluded URL is
-a part of the site the audit does not see, and the findings file must say so.
+refused. Exclude wins; a non-empty `include` admits only what matches it. A refused
+URL is never fetched: it is a page row of fetch class `excluded` whose `fetchReason`
+names the pattern, and past the shared budget it is counted in
+`crawl_status.excludedDropped`. A seed or listed URL the scope refuses, and a pattern
+that can never match (no leading `*` and no `http://`/`https://`, a host that is not
+the site's, or `http://` on an https site), are refused at start and by
+`crawl_config_set` (an empty crawl is not an answer). Fence off only what the brief
+says to: every excluded URL is a part of the site the audit does not see, and the
+findings file must say so.
 
 **Credentials — staging sites and gated pages.** `requestHeaders` (up to 20; not
 `host`, `user-agent`, `accept`, `accept-encoding`, `content-length`, `connection`,
 `transfer-encoding`, `te`, `upgrade`, `expect`, `keep-alive`, `cookie`,
-`authorization` or any `proxy-*` name), `httpAuth` (`{username, password}`, Basic) and
-`cookies` (up to 50 `{name, value}`). They go only to the site's own hosts, never to a
+`authorization`, or any name starting `proxy-` or `sec-`), `httpAuth`
+(`{username, password}`, Basic) and `cookies` (up to 50 `{name, value}`). A
+refusal never quotes a name that is not an HTTP token (it names its position): a
+value pasted into a name is not echoed back. They go only to the site's own hosts, never to a
 CDN, another host or a redirect that leaves the site, and an https site never sends
 them over http. They cannot change the user agent, the delay floor or robots.txt.
 **The engine never stores them**: they live in the server's memory, `crawl_config_get`

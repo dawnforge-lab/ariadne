@@ -94,7 +94,12 @@ existing one. The gate evidence is `docs/gates/phase-27c.md`.
   sends them on its own `http` URLs. Refused header names: `host`, `user-agent`,
   `accept`, `accept-encoding`, `content-length`, `connection`, `transfer-encoding`,
   `te`, `upgrade`, `expect`, `keep-alive`, `cookie` (use `cookies`), `authorization`
-  (use `httpAuth`) and any `proxy-*` name — 13 names and a prefix. `Set-Cookie` from
+  (use `httpAuth`), and any name starting `proxy-` or `sec-` (the Fetch standard's
+  forbidden prefixes; `sec-*` names such as `sec-ch-ua` are the browser's own) — 13
+  names and two prefixes. A refusal names a header or cookie name that is an HTTP
+  token; one that is not, and an unknown key, it names by position only
+  (`requestHeaders entry 2`, `cookies[0].name`, `httpAuth has an unknown field (key
+  3 …)`), so a value pasted into a name is never echoed. `Set-Cookie` from
   the site is ignored. **They are held only in this server's memory**: never in
   `config_jsonb`, a log line, an error or a response, and dropped on `crawl_cancel`
   and `crawl_delete`. What is stored is which kinds were given and the header and
@@ -1135,15 +1140,22 @@ each does are in the Phase 27c summary at the top of this document; this is what
   URL outside `siteUrl`'s site family (400), one the URL policy refuses (403), one
   `exclude`/`include` refuses (400: listing and excluding a URL is a contradiction to
   fix); an explicit `maxPages` below the distinct list (400);
-- a pattern whose scheme and host name a host outside the site family, an upper-case
-  scheme or host, an empty pattern, more than 100 patterns or one over 512 characters
-  (400); a spider seed the scope refuses (400: an empty crawl is not an answer);
-- a refused header name, a header or cookie name that is not an HTTP token, a header
+- a pattern that can never match: one with no leading `*` whose literal start is not
+  `http://` or `https://` (a path rule needs its `*`), one whose scheme and host name
+  an origin admission never admits for the site (another host, or `http://` on an
+  `https` site), an upper-case scheme or host; an empty pattern, more than 100
+  patterns or one over 512 characters (400); a spider seed the scope refuses (400: an
+  empty crawl is not an answer);
+- a refused header name (the 13 names, or a `proxy-` or `sec-` prefix), a header or
+  cookie name that is not an HTTP token, a header
   value with CR, LF or another control character but tab, or a character above
   U+00FF, a value over 1,024 bytes, a header name given twice (case-insensitive) or a
   cookie name given twice, a cookie value with `;`, `,` or whitespace, a username
   holding `:`, more than 20 headers or 50 cookies (400). **No refusal quotes a value**: the
-  message names the field and the header or cookie name only.
+  message names the field and the header or cookie name only — and a name that is not
+  a token, or an unknown key, only by its position, never quoted (pinned:
+  `test/api/scope-start.test.ts:539` "is never echoed: each refusal names the position,
+  on HTTP and MCP, start, validate, set and resume").
 
 A list crawl's answer adds `listUrlCount` (distinct URLs) and `listDuplicates` (how
 many were collapsed as another's spelling); a spider crawl's has neither. Pinned:
@@ -1158,7 +1170,7 @@ a valid set and shows no value in crawl_status, effective, crawl_config_get, the
 or the log". The crawl side: `test/crawl/list-mode.test.ts:177` "fetches every listed
 URL at depth 0 and follows redirects but no link", `test/crawl/scope-admission.test.ts:243`
 "writes an excluded row for a URL an exclude pattern matches, never requests it, and
-stamps excluded_dropped 0", `test/crawl/credentials.test.ts:417` "sends none of them to
+stamps excluded_dropped 0", `test/crawl/credentials.test.ts:421` "sends none of them to
 another host: a resource, its robots.txt, a legacy host's probe, a redirect hop", and
 the secret scan, `test/fixtures/scope-and-requests.test.ts:337` "after a crawl with all
 three credential kinds and a render pass, no secret is in any stored column or the

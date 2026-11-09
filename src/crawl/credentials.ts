@@ -14,7 +14,9 @@
  *  - **A value is never stored, logged or quoted.** What a crawl row carries is
  *    the `CredentialShape` — which fields were supplied and the header and
  *    cookie NAMES — never a value. `credentialError`'s messages name the field
- *    and the header or cookie NAME, never a value; `CredentialsMissingError`
+ *    and the header or cookie NAME, never a value — and a name that is not an
+ *    HTTP token, or an unknown key, by its POSITION only, never quoted, since
+ *    a mis-shaped name is where a misplaced value lands; `CredentialsMissingError`
  *    names the crawl and the field names. `CrawlConfig.credentials` is stripped
  *    by `storableConfig` and never read back by `parseStoredConfig`.
  *  - **A crawl that needed them is never run without them** (hard rule 7). A
@@ -40,8 +42,11 @@ export const MAX_COOKIES = 50;
  * `authorization` have their own fields. `expect` and `keep-alive` are refused
  * because undici refuses to send either (it throws at send time), so a crawl
  * carrying one would fail on its first request — refused at validation
- * instead (27c T8). Any name starting `proxy-` is refused too
- * (`isRefusedHeaderName`).
+ * instead (27c T8). Any name starting `proxy-` or `sec-` is refused too
+ * (`isRefusedHeaderName`): the Fetch standard's forbidden prefixes. `sec-*`
+ * names are the browser's own (`sec-ch-ua*`, its identity hints, and
+ * `sec-fetch-*`), which a credential header would otherwise replace in the
+ * render pass (27c final wave M5).
  */
 export const REFUSED_HEADER_NAMES: ReadonlySet<string> = new Set([
   "host",
@@ -153,9 +158,15 @@ export function credentialHeadersOf(
 /** RFC 9110 §5.6.2 `token`: one or more tchars. */
 const TOKEN = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
 
+/** The name prefixes a client may not use, compared lower-case (the Fetch standard's forbidden prefixes). */
+export const REFUSED_HEADER_PREFIXES: readonly string[] = ["proxy-", "sec-"];
+
 function isRefusedHeaderName(name: string): boolean {
   const lower = name.toLowerCase();
-  return REFUSED_HEADER_NAMES.has(lower) || lower.startsWith("proxy-");
+  return (
+    REFUSED_HEADER_NAMES.has(lower) ||
+    REFUSED_HEADER_PREFIXES.some((prefix) => lower.startsWith(prefix))
+  );
 }
 
 function bytes(value: string): number {
@@ -168,9 +179,75 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
   return proto === Object.prototype || proto === null;
 }
 
-/** A name, quoted for a message. Names are not secrets; values are, and never get here. */
+/**
+ * A name, quoted for a message. A well-formed name (an HTTP token) is not a
+ * secret; values are, and never get here. A name that is NOT a token is never
+ * quoted (27c final wave M13): the commonest misuse puts the value in the name
+ * (`"session=S3CRET"`, `"Authorization: Bearer S3CRET"`), so a refusal names
+ * its position instead.
+ */
 function quoted(name: string): string {
   return JSON.stringify(name);
+}
+
+const UNQUOTED = "it is not quoted, since a mis-shaped name may hold a value";
+
+/**
+ * Why an object's keys are not all `accepted`, or null. The first unknown key
+ * is named by its position (from 1, in the order sent), never quoted: a key
+ * can be a value pasted in the wrong place (27c final wave M13).
+ */
+function unknownKeyError(path: string, value: Record<string, unknown>, accepted: readonly string[]): string | null {
+  const keys = Object.keys(value);
+  const at = keys.findIndex((key) => !accepted.includes(key));
+  if (at === -1) return null;
+  return (
+    `${path} has an unknown field (key ${at + 1} in the order sent; accepted: ` +
+    `${accepted.join(", ")}); ${UNQUOTED}`
+  );
+}
+
+/**
+ * Why a header NAME is not one a client may set, or null; a good name is added
+ * to `seen` (lower-cased: header names are case-insensitive). `position` names
+ * it without quoting it (`requestHeaders entry 3`), for a name that is not a
+ * token. Shared by the value validator and `credentialShapeError`.
+ */
+function headerNameError(name: string, path: string, position: string, seen: Set<string>): string | null {
+  if (!TOKEN.test(name)) {
+    return `${position} has a name that is not an HTTP token (RFC 9110); ${UNQUOTED}`;
+  }
+  const lower = name.toLowerCase();
+  if (isRefusedHeaderName(name)) {
+    const why =
+      lower === "cookie"
+        ? "send cookies through the cookies field"
+        : lower === "authorization"
+          ? "send Basic credentials through the httpAuth field"
+          : lower.startsWith("proxy-")
+            ? "proxy headers are never sent"
+            : lower.startsWith("sec-")
+              ? "sec-* headers are the browser's own (a forbidden prefix in the Fetch standard)"
+              : lower === "expect" || lower === "keep-alive"
+                ? "the HTTP client refuses to send it"
+                : "the engine owns it";
+    return `${path} header name ${quoted(name)} is refused: ${why}`;
+  }
+  if (seen.has(lower)) {
+    return `${path} names the header ${quoted(name)} twice (header names are case-insensitive)`;
+  }
+  seen.add(lower);
+  return null;
+}
+
+/** `headerNameError` for a cookie NAME (RFC 6265 cookie-name is a token; case-sensitive). */
+function cookieNameError(name: string, path: string, position: string, seen: Set<string>): string | null {
+  if (!TOKEN.test(name)) {
+    return `${position} is not an HTTP token (RFC 6265); ${UNQUOTED}`;
+  }
+  if (seen.has(name)) return `${path} names the cookie ${quoted(name)} twice`;
+  seen.add(name);
+  return null;
 }
 
 /**
@@ -188,11 +265,8 @@ function quoted(name: string): string {
  */
 export function credentialError(c: unknown, path: string): string | null {
   if (!isPlainObject(c)) return `${path} must be an object`;
-  for (const key of Object.keys(c)) {
-    if (key !== "requestHeaders" && key !== "httpAuth" && key !== "cookies") {
-      return `${path} has an unknown field ${quoted(key)}`;
-    }
-  }
+  const unknown = unknownKeyError(path, c, ["requestHeaders", "httpAuth", "cookies"]);
+  if (unknown !== null) return unknown;
   return (
     headersError(c["requestHeaders"], `${path}.requestHeaders`) ??
     httpAuthError(c["httpAuth"], `${path}.httpAuth`) ??
@@ -230,29 +304,9 @@ function headersError(value: unknown, path: string): string | null {
     return `${path} holds ${names.length} headers; the limit is ${MAX_REQUEST_HEADERS}`;
   }
   const seen = new Set<string>();
-  for (const name of names) {
-    if (!TOKEN.test(name)) {
-      return `${path} header name ${quoted(name)} is not an HTTP token (RFC 9110)`;
-    }
-    if (isRefusedHeaderName(name)) {
-      const lower = name.toLowerCase();
-      const why =
-        lower === "cookie"
-          ? "send cookies through the cookies field"
-          : lower === "authorization"
-            ? "send Basic credentials through the httpAuth field"
-            : lower.startsWith("proxy-")
-              ? "proxy headers are never sent"
-              : lower === "expect" || lower === "keep-alive"
-                ? "the HTTP client refuses to send it"
-                : "the engine owns it";
-      return `${path} header name ${quoted(name)} is refused: ${why}`;
-    }
-    const lower = name.toLowerCase();
-    if (seen.has(lower)) {
-      return `${path} names the header ${quoted(name)} twice (header names are case-insensitive)`;
-    }
-    seen.add(lower);
+  for (const [i, name] of names.entries()) {
+    const nameError = headerNameError(name, path, `${path} entry ${i + 1}`, seen);
+    if (nameError !== null) return nameError;
     const headerValue = value[name];
     if (typeof headerValue !== "string") {
       return `${path} header ${quoted(name)} value must be a string`;
@@ -277,11 +331,8 @@ function headersError(value: unknown, path: string): string | null {
 function httpAuthError(value: unknown, path: string): string | null {
   if (value === undefined) return null;
   if (!isPlainObject(value)) return `${path} must be an object with username and password`;
-  for (const key of Object.keys(value)) {
-    if (key !== "username" && key !== "password") {
-      return `${path} has an unknown field ${quoted(key)}`;
-    }
-  }
+  const unknown = unknownKeyError(path, value, ["username", "password"]);
+  if (unknown !== null) return unknown;
   for (const field of ["username", "password"] as const) {
     const v = value[field];
     if (typeof v !== "string") return `${path}.${field} must be a string`;
@@ -307,18 +358,12 @@ function cookiesError(value: unknown, path: string): string | null {
   const seen = new Set<string>();
   for (const [i, cookie] of value.entries()) {
     if (!isPlainObject(cookie)) return `${path}[${i}] must be an object {name, value}`;
-    for (const key of Object.keys(cookie)) {
-      if (key !== "name" && key !== "value") {
-        return `${path}[${i}] has an unknown field ${quoted(key)}`;
-      }
-    }
+    const unknown = unknownKeyError(`${path}[${i}]`, cookie, ["name", "value"]);
+    if (unknown !== null) return unknown;
     const name = cookie["name"];
     if (typeof name !== "string") return `${path}[${i}].name must be a string`;
-    if (!TOKEN.test(name)) {
-      return `${path} cookie name ${quoted(name)} is not an HTTP token (RFC 6265)`;
-    }
-    if (seen.has(name)) return `${path} names the cookie ${quoted(name)} twice`;
-    seen.add(name);
+    const nameError = cookieNameError(name, path, `${path}[${i}].name`, seen);
+    if (nameError !== null) return nameError;
     const cookieValue = cookie["value"];
     if (typeof cookieValue !== "string") {
       return `${path} cookie ${quoted(name)} value must be a string`;
@@ -339,10 +384,16 @@ function cookiesError(value: unknown, path: string): string | null {
 /**
  * Why a stored or supplied `credentialShape` is not one, or null. A shape is
  * data we wrote, but it has been through a jsonb column, so it is validated
- * rather than trusted (the `parseStoredConfig` precedent).
+ * rather than trusted (the `parseStoredConfig` precedent): no unknown key,
+ * and the names obey the rules the value validators apply — a header name is
+ * a token, not refused and not repeated (case-insensitively), a cookie name a
+ * token and not repeated (27c final wave M7). The same name checks, so the
+ * same messages, never quoting a name that is not a token.
  */
 export function credentialShapeError(value: unknown, path: string): string | null {
   if (!isPlainObject(value)) return `${path} is not an object`;
+  const unknown = unknownKeyError(path, value, ["requestHeaderNames", "httpAuth", "cookieNames"]);
+  if (unknown !== null) return unknown;
   const { requestHeaderNames, httpAuth, cookieNames } = value;
   const strings = (list: unknown) =>
     Array.isArray(list) && list.every((entry) => typeof entry === "string");
@@ -357,6 +408,18 @@ export function credentialShapeError(value: unknown, path: string): string | nul
     !httpAuth
   ) {
     return `${path} names no credentials; omit it instead`;
+  }
+  const headerPath = `${path}.requestHeaderNames`;
+  const headersSeen = new Set<string>();
+  for (const [i, name] of (requestHeaderNames as string[]).entries()) {
+    const error = headerNameError(name, headerPath, `${headerPath}[${i}]`, headersSeen);
+    if (error !== null) return error;
+  }
+  const cookiePath = `${path}.cookieNames`;
+  const cookiesSeen = new Set<string>();
+  for (const [i, name] of (cookieNames as string[]).entries()) {
+    const error = cookieNameError(name, cookiePath, `${cookiePath}[${i}]`, cookiesSeen);
+    if (error !== null) return error;
   }
   return null;
 }
@@ -415,16 +478,22 @@ export function redactionMarkerError(field: keyof CrawlCredentials, value: unkno
       return null;
     case "requestHeaders":
       if (isPlainObject(value)) {
-        for (const [name, v] of Object.entries(value)) {
-          if (v === REDACTED) return `requestHeaders header ${quoted(name)} ${marked}`;
+        for (const [i, [name, v]] of Object.entries(value).entries()) {
+          if (v !== REDACTED) continue;
+          // A name that is not a token is named by position, never quoted (M13).
+          const which = TOKEN.test(name) ? `header ${quoted(name)}` : `entry ${i + 1}`;
+          return `requestHeaders ${which} ${marked}`;
         }
       }
       return null;
     case "cookies":
       if (Array.isArray(value)) {
-        for (const cookie of value) {
+        for (const [i, cookie] of value.entries()) {
           if (isPlainObject(cookie) && cookie["value"] === REDACTED) {
-            return `cookies cookie ${quoted(String(cookie["name"]))} ${marked}`;
+            const name = cookie["name"];
+            const which =
+              typeof name === "string" && TOKEN.test(name) ? ` (cookie ${quoted(name)})` : "";
+            return `cookies[${i}]${which} ${marked}`;
           }
         }
       }
