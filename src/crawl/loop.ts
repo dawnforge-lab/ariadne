@@ -50,7 +50,7 @@
  * done and the row was still in a buffer (build plan §7).
  */
 import { randomUUID } from "node:crypto";
-import { eq, sql } from "drizzle-orm";
+import { and, eq, ne, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import { crawls, sitemapHreflang, sitemapMemberships, sitemapUrls } from "../db/schema.js";
 // Ruleset provenance for the `crawls` row: the registry owns the number, the
@@ -66,7 +66,20 @@ import {
   type RobotsInfo,
   type SitemapSink,
 } from "./discovery.js";
-import { fetchPage, MAX_BODY, pageRequestHeaders, type FetchClass, type FetchResult } from "./fetch-page.js";
+import {
+  ControlWatcher,
+  readPauseReason,
+  type PauseReason,
+  type StopReason,
+} from "./control.js";
+import {
+  fetchPage,
+  FetchAbortedError,
+  MAX_BODY,
+  pageRequestHeaders,
+  type FetchClass,
+  type FetchResult,
+} from "./fetch-page.js";
 import { probeHostVariants } from "./host-probe.js";
 import {
   isClassifiableResponse,
@@ -405,12 +418,20 @@ export interface CrawlSummary {
   /**
    * How the run ended, mirroring `crawls.status`:
    *  - `finished`  — the frontier drained, or `maxPages` was reached.
-   *  - `cancelled` — the abort signal fired; the frontier still has work.
-   *  - `failed`    — the crawl could not legitimately proceed. Today that is
-   *    an unreachable robots.txt (complete disallow, RFC 9309 §2.3.1.4). A
-   *    caller must branch on this: 0 pages with `failed` is not an empty site.
+   *  - `paused`    — the run stopped with its frontier intact and is resumable:
+   *    an agent's pause (`pauseReason: "request"`) or this process shutting
+   *    down (the abort signal, `pauseReason: "shutdown"`). A shutdown is a
+   *    pause (Phase 27b).
+   *  - `cancelled` — an agent's cancel. Final: `resumeCrawl` refuses it. What
+   *    was crawled stays judgeable.
+   *  - `failed`    — the crawl could not legitimately proceed: an unreachable
+   *    robots.txt (complete disallow, RFC 9309 §2.3.1.4), or an error, the
+   *    control poll's included. A caller must branch on this: 0 pages with
+   *    `failed` is not an empty site.
    */
-  status: "finished" | "cancelled" | "failed";
+  status: "finished" | "paused" | "cancelled" | "failed";
+  /** Why a `paused` run paused; null for every other status. */
+  pauseReason: PauseReason | null;
   /** Pages persisted across the crawl's whole life, resumes included. */
   pagesCrawled: number;
   frontier: FrontierCounts;
@@ -427,16 +448,18 @@ export interface CrawlSummary {
   pageTemplates: PageTemplateInference | null;
   /**
    * What the resource fetch pass did, or null when it did not run — a crawl
-   * that failed before it had pages, or one that was cancelled (an abort means
-   * stop asking servers for things, and the pass is all asking). Null is not
+   * that failed before it had pages, or one that was stopped (paused or
+   * cancelled: a stop means stop asking servers for things, and the pass is
+   * all asking). Null is not
    * "no resources": that is a summary whose `seen` is 0, and the two must not
    * be read as the same thing.
    */
   resources: ResourcePassSummary | null;
   /**
    * What the re-verification pass (5xx and no-response rows) did, or null when it did not run — a
-   * crawl that failed before it had pages, or one that was already cancelled
-   * when the pass's turn came (an abort means stop asking servers for things,
+   * crawl that failed before it had pages, or one that was already stopped
+   * (paused or cancelled) when the pass's turn came (a stop means stop asking
+   * servers for things,
    * and the pass is all asking). The `resources: null` precedent, with the same
    * warning: null is not "no server errors". That is a summary whose
    * `rechecked` is 0, and the two must not be read as the same thing — one says
@@ -561,7 +584,19 @@ export interface ResumeOpts {
    * scripts) must re-state it here. See storableConfig.
    */
   config?: CrawlConfig;
+  /**
+   * The process's shutdown signal. Firing it PAUSES the crawl (reason
+   * `shutdown`); an agent's pause or cancel arrives through
+   * `crawls.control_request` instead (`ControlWatcher`).
+   */
   signal?: AbortSignal;
+  /**
+   * The status the claim must find. The API queue sets `queued`, so a crawl
+   * somebody else moved while it waited (paused, cancelled, deleted) is not
+   * run: the claim is `where status = 'queued'`, and zero rows throws
+   * `ClaimLostError`. Absent, any status but `cancelled` is claimed.
+   */
+  expectStatus?: "queued";
   /**
    * Return *every* live lease in the crawl to pending before starting, instead
    * of waiting for the dead worker's leases to expire (see leaseSecondsFor).
@@ -574,11 +609,31 @@ export interface ResumeOpts {
 }
 
 /**
+ * A resume's claim found the row in another status than the one it expected
+ * (`ResumeOpts.expectStatus`): something else moved the crawl between the
+ * caller's read and the claim. Nothing was changed.
+ */
+export class ClaimLostError extends Error {
+  readonly crawlId: string;
+  readonly status: string;
+  constructor(crawlId: string, status: string, expected: string) {
+    super(
+      `resumeCrawl: crawl ${crawlId} is '${status}', not '${expected}': something else ` +
+        `moved it before this run could claim it, and nothing was changed`,
+    );
+    this.name = "ClaimLostError";
+    this.crawlId = crawlId;
+    this.status = status;
+  }
+}
+
+/**
  * Start a new crawl of `config.siteUrl`.
  *
  * Creates the `crawls` row, reads robots.txt and the sitemap tree, seeds the
- * frontier, and runs the loop until the frontier drains, `maxPages` is reached
- * or `signal` aborts.
+ * frontier, and runs the loop until the frontier drains, `maxPages` is reached,
+ * an agent's pause or cancel arrives through `crawls.control_request`, or
+ * `signal` (the process shutting down) aborts, which pauses the crawl.
  */
 export async function runCrawl(
   db: Db,
@@ -600,8 +655,9 @@ export async function runCrawl(
 }
 
 /**
- * Continue an existing crawl — after a crash, an abort, or a `maxPages` stop
- * that the operator wants to extend.
+ * Continue an existing crawl — after a crash, a pause (an agent's, or a
+ * shutdown's), or a `maxPages` stop that the operator wants to extend. A
+ * `cancelled` crawl is refused: a cancel is final.
  *
  * The frontier *is* the resume state: pending rows are still pending and done
  * rows are never re-fetched, so this re-seeds and re-walks the sitemap without
@@ -652,14 +708,19 @@ export async function resumeCrawl(
     throw new Error(`resumeCrawl: no crawl ${crawlId}`);
   }
 
+  if (row.status === "cancelled") {
+    throw new Error(`resumeCrawl: crawl ${crawlId} is cancelled, and a cancel is final`);
+  }
+
   const config = opts.config ?? parseStoredConfig(row.config, crawlId);
   validateCrawlConfig(config);
 
-  if (opts.reclaimLeases === true) {
-    await releaseLeases(db, crawlId, null);
-  }
-
-  await db
+  // THE CLAIM, a compare-and-swap rather than a blind write. With
+  // `expectStatus` it is conditioned on that status (the API queue's `queued`):
+  // a crawl paused, cancelled or deleted while it waited is not run. Without
+  // it, any status but `cancelled`: the check above, repeated in the WHERE so
+  // a cancel that lands between the read and here is still refused.
+  const claimed = await db
     .update(crawls)
     .set({
       status: "running",
@@ -669,8 +730,33 @@ export async function resumeCrawl(
       // (migration 0017), and a `running` row still carrying why it once failed
       // breaks it and tells a reader a live crawl has already died.
       failureReason: null,
+      // And the pause's reason goes with the pause: non-null exactly when
+      // `status = 'paused'` (27b column contract).
+      pauseReason: null,
     })
-    .where(eq(crawls.id, crawlId));
+    .where(
+      opts.expectStatus === undefined
+        ? and(eq(crawls.id, crawlId), ne(crawls.status, "cancelled"))
+        : and(eq(crawls.id, crawlId), eq(crawls.status, opts.expectStatus)),
+    )
+    .returning({ id: crawls.id });
+  if (claimed.length === 0) {
+    const [now] = await db
+      .select({ status: crawls.status })
+      .from(crawls)
+      .where(eq(crawls.id, crawlId));
+    if (now === undefined) throw new Error(`resumeCrawl: no crawl ${crawlId}`);
+    if (opts.expectStatus === undefined) {
+      // The one status the unconditioned claim refuses.
+      throw new Error(`resumeCrawl: crawl ${crawlId} is cancelled, and a cancel is final`);
+    }
+    throw new ClaimLostError(crawlId, now.status, opts.expectStatus);
+  }
+
+  // After the claim, so a lost claim has touched nothing.
+  if (opts.reclaimLeases === true) {
+    await releaseLeases(db, crawlId, null);
+  }
 
   return execute(db, crawlId, config, opts.signal);
 }
@@ -986,6 +1072,13 @@ async function execute(
   config: CrawlConfig,
   signal: AbortSignal | undefined,
 ): Promise<CrawlSummary> {
+  // THE ONE SIGNAL THE RUN STOPS ON (Phase 27b). It fires on an agent's pause
+  // or cancel (polled off `crawls.control_request`), on the process's own
+  // shutdown signal (a pause, reason `shutdown`), and on a poll that failed.
+  // Stopped in the `finally`, whatever happened: an interval left armed would
+  // keep the process alive and keep reading a row nobody is running.
+  const watcher = new ControlWatcher(db, crawlId, { shutdown: signal });
+  watcher.start();
   try {
     // What this run sent and which build sent it (Phase 25 §3). Latest wins on
     // a resume: the column describes the process that finished the crawl.
@@ -996,8 +1089,20 @@ async function execute(
         engineVersion: engineVersion(),
       })
       .where(eq(crawls.id, crawlId));
-    return await runToCompletion(db, crawlId, config, signal);
-  } catch (error) {
+    return await runToCompletion(db, crawlId, config, watcher);
+  } catch (caught) {
+    // A control poll that failed on the way down is surfaced beside whatever
+    // ended the run, never lost to it (rule 7). The run's own paths already
+    // raise it when it is the cause; this covers an error that got there first.
+    await watcher.stop();
+    const controlFailure = watcher.failure();
+    const error =
+      controlFailure === null || controlFailure === caught || containsError(caught, controlFailure)
+        ? caught
+        : new AggregateError(
+            [caught, controlFailure],
+            `crawl ${crawlId} failed, and its control poll failed too`,
+          );
     try {
       // The frontier's own crawled count, not a counter held in this process:
       // it is the honest number, and it survives whatever went wrong.
@@ -1016,7 +1121,30 @@ async function execute(
       );
     }
     throw error;
+  } finally {
+    await watcher.stop();
   }
+}
+
+/** Whether `error` is `target` or an AggregateError that holds it, at any depth. */
+function containsError(error: unknown, target: unknown): boolean {
+  if (error === target) return true;
+  if (error instanceof AggregateError) {
+    return error.errors.some((inner: unknown) => containsError(inner, target));
+  }
+  return false;
+}
+
+/**
+ * Stop the control watcher and raise a poll failure it recorded, before a row
+ * is closed. Stopped FIRST so nothing it records after the check is lost: the
+ * close itself re-reads `control_request` in its own UPDATE, so a request
+ * landing after this still decides a stopped close (cancel over pause).
+ */
+async function settleControl(watcher: ControlWatcher): Promise<void> {
+  await watcher.stop();
+  const failure = watcher.failure();
+  if (failure !== null) throw failure;
 }
 
 /**
@@ -1110,9 +1238,12 @@ async function runToCompletion(
   db: Db,
   crawlId: string,
   config: CrawlConfig,
-  signal: AbortSignal | undefined,
+  watcher: ControlWatcher,
 ): Promise<CrawlSummary> {
   const allowPrivate = config.allowPrivate === true;
+  // Everything below stops on the watcher's signal, never on the caller's
+  // directly: the caller's is one of the watcher's inputs (a shutdown).
+  const signal = watcher.signal;
 
   // THE PLATFORM PROFILE (Phase 24a §3.1; src/crawl/platform.ts). The first
   // classifiable response — an `ok` HTML page from the crawl's origin — is
@@ -1221,11 +1352,12 @@ async function runToCompletion(
     // so there is nothing to take a first line of: `note` names the outcome,
     // the attempts and the status the host answered with, and it is what the
     // Phase 17 gate could only read in a log.
-    await closeCrawl(db, crawlId, "failed", crawled, null, note);
+    await settleControl(watcher);
+    const closed = await closeCrawl(db, crawlId, "failed", crawled, null, note);
     return summarise(
       db,
       crawlId,
-      "failed",
+      closed,
       crawled,
       emptyWriterStats(),
       discovery,
@@ -1728,7 +1860,16 @@ async function runToCompletion(
           userAgent: config.userAgent,
           allowPrivate,
           timeoutMs: FETCH_TIMEOUT_MS,
+          // A pause or cancel reaches the request on the wire (Phase 27b).
+          signal,
         });
+      } catch (error) {
+        // THE CRAWL STOPPED, NOT THE SITE. An aborted fetch learned nothing
+        // about the URL, so nothing is written: no page row, no failed
+        // frontier row. Its row stays leased and the shutdown below returns it
+        // to pending with the attempt refunded, so the resume asks it afresh.
+        if (error instanceof FetchAbortedError) return { outcome: null, persisted: false };
+        throw error;
       } finally {
         // Off the wire the moment the response is in: parsing and persisting
         // are ours, not the site's.
@@ -1935,10 +2076,17 @@ async function runToCompletion(
     failures.push(error);
   }
   try {
-    await releaseLeases(db, crawlId, workerId);
+    // With the attempt refunded: every row still leased here was never
+    // fetched to an answer (an abort in admit, in the send wait, or on the
+    // wire), so it must not come back one attempt closer to `failed`.
+    await releaseLeases(db, crawlId, workerId, { refundAttempt: true });
   } catch (error) {
     failures.push(error);
   }
+  // A control poll that failed is what stopped the loop, and it ends the run
+  // `failed` with that error, never `paused` (rule 7).
+  const controlFailure = watcher.failure();
+  if (controlFailure !== null) failures.push(controlFailure);
 
   raiseFailures(crawlId, failures, "while running and shutting down");
 
@@ -2135,10 +2283,11 @@ async function runToCompletion(
       });
 
   // The pass stops asking the moment the signal fires, so a crawl that was
-  // cancelled inside it must say `cancelled` — with the note, and with the
-  // frontier's own account of what is left.
+  // stopped inside it must close stopped (paused or cancelled), with the note
+  // and with the frontier's own account of what is left — never `finished`
+  // over a resource census it does not have.
   if (resourcePass?.aborted === true || signal?.aborted === true) aborted = true;
-  const status = aborted ? "cancelled" : "finished";
+  const outcome = aborted ? "stopped" : "finished";
 
   // The final earned-spacing write, after the resource pass (which shares this
   // gate and may have escalated a third-party host). The crawl-wide number is
@@ -2191,24 +2340,50 @@ async function runToCompletion(
   // a reader who sees `finished` sees the marker too.
   const pageTemplates = await inferPageTemplates(db, crawlId);
 
-  await closeCrawl(db, crawlId, status, pagesCrawled, {
-    delta: writer.stats().resourceRefsCappedPages,
-    resumed,
-  });
+  // The watcher is stopped before the close, and a failed poll is raised
+  // rather than closed over. A stopped close reads WHY off the row itself
+  // (`closeCrawl`), so a request that lands after this still decides it.
+  await settleControl(watcher);
+  const closed = await closeCrawl(
+    db,
+    crawlId,
+    outcome,
+    pagesCrawled,
+    { delta: writer.stats().resourceRefsCappedPages, resumed },
+    null,
+    outcome === "stopped" ? watcher.stopReason() : null,
+  );
   return summarise(
     db,
     crawlId,
-    status,
+    closed,
     pagesCrawled,
     writer.stats(),
     discovery,
     pageTemplates,
     resourcePass,
     recheckPass,
-    aborted
-      ? "aborted by the caller; the frontier still holds pending URLs"
-      : seedNote,
+    outcome === "stopped" ? stoppedNote(closed) : seedNote,
   );
+}
+
+/**
+ * The summary's sentence for a stopped run, from the frontier as the close
+ * left it. A function of the counts because `summarise` reads them once.
+ */
+function stoppedNote(closed: ClosedAs): (frontier: FrontierCounts) => string {
+  return (frontier) => {
+    if (closed.status === "cancelled") {
+      return `cancelled; ${frontier.pending} URL(s) were never fetched`;
+    }
+    if (closed.status === "paused" && closed.pauseReason !== null) {
+      return `paused (${closed.pauseReason}); the frontier still holds ${frontier.pending} pending URL(s)`;
+    }
+    throw new Error(
+      `stoppedNote: a stopped close came back '${closed.status}' with pause reason ` +
+        `${String(closed.pauseReason)}`,
+    );
+  };
 }
 
 /**
@@ -2342,10 +2517,11 @@ async function probeKnownMissing(
   opts: { allowPrivate: boolean; pagesCrawled: number; aborted: boolean },
 ): Promise<void> {
   if (opts.aborted) {
-    // The caller asked us to stop. Issuing another request would be the one
-    // thing an abort is meant to prevent; a resume will take the sample.
+    // The crawl was told to stop (paused or cancelled). Issuing another
+    // request would be the one thing a stop is meant to prevent; a resume will
+    // take the sample.
     await writeNotFoundProbe(db, crawlId, {
-      skipped: "crawl cancelled before the known-404 probe",
+      skipped: "crawl stopped (paused or cancelled) before the known-404 probe",
     });
     return;
   }
@@ -2574,6 +2750,29 @@ async function robotsBlockedRowCount(db: Db, crawlId: string): Promise<number> {
  * Close the row: the terminal status, the finish time, the page count — and,
  * when this process ran pages, the cap-exceeded count beside them.
  *
+ * ## The three outcomes (Phase 27b)
+ *
+ * `finished` and `failed` are the status they name. `stopped` is a run that
+ * stopped short on its control signal, and the row ITSELF says which status
+ * that is, in one `UPDATE … RETURNING`:
+ *
+ *  - `control_request = 'cancel'` → `cancelled`, `cancelled_at = now()`;
+ *  - `control_request = 'pause'`  → `paused`, `pause_reason = 'request'`;
+ *  - no request (the process's shutdown signal) → `paused`, `'shutdown'`.
+ *
+ * Read off the column in the same statement rather than from the watcher's
+ * last poll, so a cancel that lands while the loop winds down still wins
+ * (cancel > pause request > pause shutdown). The one case it does not cover is
+ * a watcher that RECORDED a cancel over a column that no longer says so —
+ * impossible today, since only a close clears the column — and that is a throw
+ * (the UPDATE is conditioned on it, so nothing is written), never a guess.
+ *
+ * Every outcome clears `control_request`, and sets `pause_reason` and
+ * `cancelled_at` to agree with the status (the 27b column contract:
+ * `pause_reason` non-null exactly when `paused`, `cancelled_at` only when
+ * `cancelled`, `control_request` only while `running`). A request that arrives
+ * after the run has done its work is answered by `finished` (Deviation 12).
+ *
  * ## `refsCapped`, and why it is optional
  *
  * `crawls.resource_refs_capped_pages` counts the pages whose analyzer dropped a
@@ -2639,60 +2838,129 @@ async function robotsBlockedRowCount(db: Db, crawlId: string): Promise<number> {
 async function closeCrawl(
   db: Db,
   crawlId: string,
-  status: CrawlSummary["status"],
+  outcome: "finished" | "stopped" | "failed",
   pagesCrawled: number,
   refsCapped: { delta: number; resumed: boolean } | null = null,
   failureReason: string | null = null,
-): Promise<void> {
-  if (status === "failed" && failureReason === null) {
+  stop: StopReason | null = null,
+): Promise<ClosedAs> {
+  if (outcome === "failed" && failureReason === null) {
     throw new Error(
       `closeCrawl: crawl ${crawlId} is being closed 'failed' with no reason — ` +
         `crawls.failure_reason is what a reader is left with (migration 0017)`,
     );
   }
-  if (status !== "failed" && failureReason !== null) {
+  if (outcome !== "failed" && failureReason !== null) {
     throw new Error(
-      `closeCrawl: crawl ${crawlId} is being closed '${status}' with a failure ` +
+      `closeCrawl: crawl ${crawlId} is being closed '${outcome}' with a failure ` +
         `reason ('${failureReason}') — that column belongs to 'failed' rows only`,
     );
   }
-  await db
+  // A stopped close without a reason to stop, or a reason handed to another
+  // close, is a defect in the caller: the loop only stops on its watcher.
+  if ((outcome === "stopped") !== (stop !== null)) {
+    throw new Error(
+      `closeCrawl: crawl ${crawlId} is being closed '${outcome}' with stop reason ` +
+        `${JSON.stringify(stop)} — a stop reason belongs to a stopped close, and only there`,
+    );
+  }
+  const common = {
+    finishedAt: new Date(),
+    pagesCrawled,
+    ...(refsCapped === null
+      ? {}
+      : {
+          resourceRefsCappedPages: refsCapped.resumed
+            ? sql`${crawls.resourceRefsCappedPages} + ${refsCapped.delta}`
+            : refsCapped.delta,
+        }),
+  };
+
+  if (outcome !== "stopped") {
+    await db
+      .update(crawls)
+      .set({
+        ...common,
+        status: outcome,
+        // A reason can quote the site (a robots.txt note, a fetch reason), so it
+        // passes the storability boundary (ruling R11). Null stays null.
+        failureReason: failureReason === null ? null : storableCap(failureReason),
+        controlRequest: null,
+        pauseReason: null,
+        cancelledAt: null,
+      })
+      .where(eq(crawls.id, crawlId));
+    return { status: outcome, pauseReason: null };
+  }
+
+  // THE STOPPED CLOSE: one statement, the column decides (see the docblock).
+  // Every CASE reads the row as it was before this UPDATE, so `control_request
+  // = null` in the same SET does not change what the others see.
+  const rows = await db
     .update(crawls)
     .set({
-      status,
-      finishedAt: new Date(),
-      pagesCrawled,
-      // A reason can quote the site (a robots.txt note, a fetch reason), so it
-      // passes the storability boundary (ruling R11). Null stays null.
-      failureReason: failureReason === null ? null : storableCap(failureReason),
-      ...(refsCapped === null
-        ? {}
-        : {
-            resourceRefsCappedPages: refsCapped.resumed
-              ? sql`${crawls.resourceRefsCappedPages} + ${refsCapped.delta}`
-              : refsCapped.delta,
-          }),
+      ...common,
+      status: sql`case when ${crawls.controlRequest} = 'cancel' then 'cancelled' else 'paused' end`,
+      pauseReason: sql`case when ${crawls.controlRequest} = 'cancel' then null
+                            when ${crawls.controlRequest} = 'pause' then 'request'
+                            else 'shutdown' end`,
+      cancelledAt: sql`case when ${crawls.controlRequest} = 'cancel' then now() else null end`,
+      controlRequest: null,
+      failureReason: null,
     })
-    .where(eq(crawls.id, crawlId));
+    .where(
+      stop?.kind === "cancel"
+        ? and(eq(crawls.id, crawlId), eq(crawls.controlRequest, "cancel"))
+        : eq(crawls.id, crawlId),
+    )
+    .returning({ status: crawls.status, pauseReason: crawls.pauseReason });
+  const row = rows[0];
+  if (row === undefined) {
+    throw new Error(
+      stop?.kind === "cancel"
+        ? `closeCrawl: crawl ${crawlId} was asked to cancel, but its control_request no ` +
+            `longer says 'cancel' — something cleared it under the run; not guessing a status`
+        : `closeCrawl: crawl ${crawlId}: the crawls row is gone; cannot close it`,
+    );
+  }
+  const pauseReason = readPauseReason(row.pauseReason, crawlId);
+  if (row.status === "cancelled" && pauseReason === null) {
+    return { status: "cancelled", pauseReason: null };
+  }
+  if (row.status === "paused" && pauseReason !== null) {
+    return { status: "paused", pauseReason };
+  }
+  throw new Error(
+    `closeCrawl: crawl ${crawlId}'s stopped close came back '${row.status}' with pause ` +
+      `reason ${String(pauseReason)}`,
+  );
+}
+
+/** What a close wrote: the status and, for a pause, its reason. */
+interface ClosedAs {
+  status: CrawlSummary["status"];
+  pauseReason: PauseReason | null;
 }
 
 async function summarise(
   db: Db,
   crawlId: string,
-  status: CrawlSummary["status"],
+  closed: ClosedAs,
   pagesCrawled: number,
   writerStats: PageWriterStats,
   discovery: DiscoveryResult,
   pageTemplates: PageTemplateInference | null,
   resources: ResourcePassSummary | null,
   recheck: RecheckPassSummary | null,
-  note: string | null,
+  note: string | null | ((frontier: FrontierCounts) => string),
 ): Promise<CrawlSummary> {
+  const frontier = await frontierCounts(db, crawlId);
   return {
     crawlId,
-    status,
+    status: closed.status,
+    pauseReason: closed.pauseReason,
     pagesCrawled,
-    frontier: await frontierCounts(db, crawlId),
+    frontier,
     writer: writerStats,
     robots: { outcome: discovery.robots.outcome, note: discovery.robots.note },
     discovery: {
@@ -2702,6 +2970,6 @@ async function summarise(
     pageTemplates,
     resources,
     recheck,
-    note,
+    note: typeof note === "function" ? note(frontier) : note,
   };
 }

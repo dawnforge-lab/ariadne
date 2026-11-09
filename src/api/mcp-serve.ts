@@ -63,12 +63,13 @@ let shuttingDown = false;
  * Close once, whatever asked: a signal, or the client hanging up.
  *
  * The crawl in flight is aborted rather than killed — the loop's graceful path
- * leaves the run `cancelled` with its frontier intact, so a restart resumes it.
+ * leaves the run `paused` (reason `shutdown`) with its frontier intact, so a
+ * restart resumes it.
  */
 function shutdown(why: string): void {
   if (shuttingDown) return;
   shuttingDown = true;
-  console.error(`ariadne mcp: ${why} — closing (a running crawl is cancelled, not killed)`);
+  console.error(`ariadne mcp: ${why} — closing (a running crawl is paused (shutdown), not killed)`);
   mcp
     .close()
     .then(() => closeDb(db))

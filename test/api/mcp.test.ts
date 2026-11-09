@@ -1678,7 +1678,7 @@ describe("crawl_resume", () => {
     // What the kill left: the graceful abort path, which decides NOTHING about
     // the rows it did not reach. That is the property the resume rests on.
     const killed = await ok("crawl_status", { crawlId });
-    expect(killed["status"]).toBe("cancelled");
+    expect([killed["status"], killed["pauseReason"]]).toEqual(["paused", "shutdown"]);
     expect(resources(killed).skipped).toBeGreaterThan(0);
 
     // The spacing the crawl "earned" — written straight to the column because

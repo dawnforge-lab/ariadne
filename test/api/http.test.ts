@@ -1269,7 +1269,7 @@ describe("POST /crawls/:id/resume", () => {
     await spare.close();
 
     const killed = await call("GET", `/crawls/${killedId}`);
-    expect(killed.body["status"]).toBe("cancelled");
+    expect([killed.body["status"], killed.body["pauseReason"]]).toEqual(["paused", "shutdown"]);
     // The nulls an abort leaves are not a failure state: they are the questions
     // nobody has answered yet, and they are the resume's work list.
     expect(resourcesOf(killed.body).skipped).toBeGreaterThan(0);

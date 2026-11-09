@@ -60,9 +60,9 @@ for (const signal of ["SIGINT", "SIGTERM"] as const) {
   process.on(signal, () => {
     if (shuttingDown) return;
     shuttingDown = true;
-    console.error(`ariadne api: ${signal} — closing (a running crawl is cancelled, not killed)`);
+    console.error(`ariadne api: ${signal} — closing (a running crawl is paused (shutdown), not killed)`);
     // The queue's close aborts the crawl in flight and waits for it to write
-    // its `cancelled` row, so a restart resumes rather than re-crawls.
+    // its `paused` (shutdown) row, so a restart resumes rather than re-crawls.
     api
       .close()
       .then(() => closeDb(db))

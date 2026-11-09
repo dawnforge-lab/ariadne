@@ -1314,13 +1314,13 @@ describe("the crawl runs the pass itself", () => {
     // The pages were all fetched and the abort arrived during the resource
     // pass. A crawl that closed `finished` on a flag computed before the pass
     // would be claiming a resource census it does not have.
-    expect(summary.status).toBe("cancelled");
+    expect([summary.status, summary.pauseReason]).toEqual(["paused", "shutdown"]);
     expect(summary.resources?.aborted).toBe(true);
-    expect(summary.note).toContain("aborted by the caller");
+    expect(summary.note).toContain("paused (shutdown)");
     expect(hitsFor(assets, "/abort-2.png")).toEqual([]);
 
     const row = (await db.select().from(crawls).where(eq(crawls.id, summary.crawlId)))[0];
-    expect(row?.status).toBe("cancelled");
+    expect([row?.status, row?.pauseReason]).toEqual(["paused", "shutdown"]);
     // The row it never reached is the resume's work list: null, no reason.
     const untouched = await rowFor(summary.crawlId, `${assets.base}/abort-2.png`);
     expect(untouched.fetchClass).toBeNull();
@@ -1383,7 +1383,7 @@ describe("the crawl runs the pass itself", () => {
       controller.signal,
     );
 
-    expect(summary.status).toBe("cancelled");
+    expect([summary.status, summary.pauseReason]).toEqual(["paused", "shutdown"]);
     // Null is "the pass did not run", which is not "there were no resources" —
     // an abort means stop asking servers for things, and this pass is all
     // asking. The nulls it left are the resume's work list.

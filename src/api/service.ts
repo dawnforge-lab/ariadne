@@ -5254,8 +5254,8 @@ export class ApiService {
   /**
    * Stop the queue: abort the crawl in flight and wait for it to close its row.
    *
-   * The abort is the crawl loop's own graceful path — the run ends `cancelled`
-   * with its frontier intact, resumable. Crawls still waiting are left as
+   * The abort is the crawl loop's own graceful path — the run ends `paused`
+   * (reason `shutdown`) with its frontier intact, resumable. Crawls still waiting are left as
    * `queued` rows and logged: this process will not run them and says so, which
    * is the restart contract in the module header.
    */
