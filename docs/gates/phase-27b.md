@@ -4,11 +4,18 @@ Date: 2026-11-09. Spec: `docs/superpowers/specs/2026-11-08-phase-27-agent-contro
 (the "27b — Lifecycle and the config schema" section and "Gate 27b"). Plan:
 `docs/superpowers/plans/2026-11-08-phase-27b-lifecycle-and-config-schema.md`. Branch
 `worktree-phase-27b`, built on `168826b` (PR #25's merge). Figures below were measured on
-the code of `fbc5841` (Task 7's last commit) plus `30fc6a9` (the gate script's
-`--pause-at-fraction` flag) and this task's documentation commit, which changes no
-behaviour (its one test edit adds a `console.log` of the equivalence counts).
+the code of `fbc5841` (Task 7's last commit) plus the gate script's
+`--pause-at-fraction` flag (`30fc6a9`, extended in `ff1d194` to sample the status flip,
+and tidied in `80025f8`, which also rewords the `crawl_pause` description). The 50k
+numbers in §7 are from the run on `ff1d194`; the later script commit only removes a
+sampler line that could not measure what it claimed (§7). The full suite ran on the
+commit named in §1.
 
-**Verdict: all gate clauses pass.** Ruleset 0.23.0, 188 rules (72 page / 102 query / 14
+**Verdict: clauses 1 to 6 and the memory limit of clause 7 pass. One spec sentence was
+NOT demonstrated at 50k scale and is a finding for the owner to rule on (§7):** the
+spec says the status change happens within one poll interval plus the abort settle time.
+On the fixture crawls it does (806 to 932 ms). On the 50k gate crawl the status flipped
+`paused` **5.3 s** after the request, against a 1 s poll. Ruleset 0.23.0, 188 rules (72 page / 102 query / 14
 metric), no rule, ruleset or `EXTRACTION_VERSION` change; migrations 0034 (columns) and
 0035 (the `cancelled` to `paused` relabel). The 50k crawl, paused at 40% and resumed,
 peaked at **285.2 MB** (limit 512 MB; within 5% of 26c's 293.7 MB means at most 308.4 MB).
@@ -23,13 +30,13 @@ peaked at **285.2 MB** (limit 512 MB; within 5% of 26c's 293.7 MB means at most 
 | 4 | a delete leaves zero rows in every `crawl_id` table and no files | **pass**: 14 tables, 0 rows each; no render or export file | §4 |
 | 5 | a paused crawl survives a restart still paused | **pass** | §5 |
 | 6 | both transports accept and refuse the same fields; `config_validate` and `crawl_start` agree on every refusal | **pass** | §6 |
-| 7 | the 50k gate with one pause and one resume: at most 512 MB, within 5% of 293.7 MB | **pass**: 285.2 MB, 50,000 pages `finished` | §7 |
+| 7 | the 50k gate with one pause and one resume: at most 512 MB, within 5% of 293.7 MB | **pass on memory**: 276.4 MB (second run; first run 285.2 MB), 50,000 pages `finished`. **Finding**: the pause's status flip took 5.3 s in run 2 (run 1 measured 5.55 s to the summary), not about 1 s | §7 |
 
 ## 1. Clause 1: suite and types
 
 | | |
 |---|---|
-| `npm test` (`DATABASE_URL` set) | **142 files / 3,858 tests, 0 failed, 0 skipped** (337.8 s, 2026-11-09 03:45 UTC). The known `renderer.test.ts` flake did not appear |
+| `npm test` (`DATABASE_URL` set) | **142 files / 3,858 tests, 0 failed, 0 skipped** (317.4 s), run on commit **`6251dc3`** (the last code commit; the docs commit after it changes no code). The known `renderer.test.ts` flake did not appear. An earlier run on `80025f8` failed one test (the `crawl_pause` description lost its "poll crawl_status" wording), fixed in `6251dc3` |
 | `npx tsc --noEmit` | clean |
 | baseline at the branch point (`168826b`) | 136 files / 3,770 tests |
 | phase delta | +6 files, +88 tests |
@@ -104,30 +111,52 @@ DATABASE_URL=postgresql://ariadne:ariadne@localhost:5440/ariadne_gate27b \
   node --max-old-space-size=512 --import tsx scripts/gate-rules.ts --pause-at-fraction 0.4
 ```
 
-Commit `30fc6a9` plus the 27b surface code of `fbc5841`; Node v22.23.2.
+Node v22.23.2. The gate was run twice. Run 1 (`30fc6a9`) measured the interval from the
+request to the run's summary. Review found that interval was the wrong one for the spec's
+bound, so `ff1d194` made the script sample `crawls.status` every 100 ms after the request,
+and run 2 is the same command on it (fresh database, dropped afterwards).
 
-| | |
-|---|---|
-| pause requested | at 20,034 URLs done (`setControlRequest`, fraction 0.4), 20,072 pages written |
-| **pause latency** (request recorded to the run's `paused` summary) | **5,550 ms** (see the note below) |
-| resume | `resumeCrawl(db, id, { config })`, ending `finished` |
-| crawl | `finished`, **50,000 pages**, frontier done 50,000, failed 0; 989.4 s (both runs), 50.5 pages/s |
-| render pass | 7 selected, 7 rendered, 0 failures, 9.5 s |
-| rules pass | 50,000 pages scanned, 155,449 findings, 38 metric rows, wall 366.5 s |
-| **peak RSS, every phase** | **285.2 MB** (at +420 s); crawl 285.2, render 279.0, rules 279.0 |
-| against the limits | 512 MB: pass. 308.4 MB (5% over 26c's 293.7 MB): pass, and 8.5 MB under 26c |
-| browser RSS (not gated, an upper bound) | 1,127.4 MB over 14 processes |
-| wall time | about 1,370 s for the three phases (989.4 + 9.5 + 366.5 s, plus setup) |
+| | run 1 (`30fc6a9`) | run 2 (`ff1d194`) |
+|---|---|---|
+| pause requested | at 20,034 done, 20,072 pages written | at 20,066 done, 20,088 pages written |
+| request to **status read `paused`** (the spec's interval) | not sampled | **5,294 ms** (100 ms sampling) |
+| request to the run's summary | 5,550 ms | 5,294 ms |
+| status flip to summary | not sampled | 0 ms |
+| resume | `resumeCrawl(db, id, { config })`, `finished` | same |
+| crawl | `finished`, **50,000 pages**, failed 0; 989.4 s (both runs), 50.5 pages/s | same; 983.9 s, 50.8 pages/s |
+| render pass | 7 rendered, 0 failures, 9.5 s | 7 rendered, 0 failures, 9.6 s |
+| rules pass | 155,449 findings, 38 metric rows, 366.5 s | same findings and rows, 365.1 s |
+| **peak RSS, every phase** | **285.2 MB** (at +420 s) | **276.4 MB** (at +415 s); crawl 276.4, render 273.7, rules 273.9 |
+| wall time, three phases | about 1,370 s | about 1,360 s (983.9 + 9.6 + 365.1 s, plus setup) |
+| browser RSS (not gated, an upper bound) | 1,127.4 MB | 1,127.6 MB over 14 processes |
 
-**The pause latency is not the 1 s of the small fixture, and the doc says so.** The gate
-measured 5.55 s from the recorded request to the run's summary, against 806 to 932 ms on
-the fixture crawls. The poll interval is the same 1,000 ms; the rest is the wind-down of a
-16-worker crawl that is 20,000 pages deep: in-flight fetches abort, the writer drains the
-pages it already holds, and the close summarises 20,072 pages (frontier counts, template
-inference input). The spec's bound (one poll interval plus the abort settle) is met by the
-page crawl on the fixture, and the settle at 50k scale is 4.5 s on this machine. It is
-recorded, not gated. `--pause-at-fraction` samples RSS across both runs of the crawl phase,
-as the unflagged gate does.
+Both runs are at most 512 MB and at most 308.4 MB (5% over 26c's 293.7 MB); run 2 is 17.3 MB
+under 26c. `--pause-at-fraction` samples RSS across both runs of the crawl phase, as the
+unflagged gate does.
+
+**Which interval is the spec's.** The spec's bound is on the status change, "within one poll
+interval plus the abort settle time". That is request to status flip: **5,294 ms** at 50k.
+The run's summary arrives in the same millisecond as the flip (flip to summary 0 ms), so
+`summarise` adds nothing, and run 1's 5,550 ms to the summary differs from run 2 by run-to-run spread.
+
+**The finding.** 5.3 s is materially above the poll interval (1 s) plus a few seconds of
+settle, and this gate cannot say where the other 4.3 s go. What is known from the code:
+`loop.ts` runs the whole-crawl `inferPageTemplates` BEFORE `closeCrawl`, and `closeCrawl`
+is what flips the status and writes the inference result in one UPDATE. So the 5.3 s holds
+the poll wait, the abort and the draining of in-flight fetches and the writer's backlog,
+AND the template inference over 20,088 pages, in an order the sampler cannot see. A first
+attempt to split them by sampling `template_inference_jsonb` read it non-null in the same
+sample as the status flip, which is what a column written in the closing UPDATE does, so
+that sampler was dropped (`80025f8`) and no split is claimed. To decompose it, time
+`inferPageTemplates` over a stored 20k-page crawl, or instrument the loop's close path;
+neither was done here. The fixture crawls (28 pages) cannot show it: inference over 28
+pages is negligible. Whether a pause that takes 5 s at 20k pages and possibly more at 50k
+meets the spec's bound is for the owner to rule on; either the bound is restated as
+"one poll plus abort settle plus close work that grows with the crawl", or the close path
+is made cheaper for a pause (for example, skipping template inference when the stop is a
+pause, since a resume runs it at the real end). The stop-latency text in the `crawl_pause`
+description and in `docs/talos-surface.md` §4.1c now states this instead of promising a
+second.
 
 ## Rulings
 
@@ -213,11 +242,13 @@ From the spec text (owner to see in review):
 
 Added by the gate run:
 
-17. **The measured pause latency at 50k pages is 5.55 s, not about 1 s** (§7): the poll is
-    1 s, the rest is the wind-down of a deep 16-worker crawl. The documentation of
-    `crawl_pause` still says "about a second" for the page crawl on a small site; the
-    talos-surface §4.1c states the three exceptions it knows (discovery, epilogue passes) and
-    this gate records the scale one.
+17. **The spec's stop bound was not demonstrated at 50k pages** (§7). Request to status flip
+    measured **5,294 ms** at 50k (20,066 URLs done), against 806 to 932 ms on the fixture
+    crawls and a 1 s poll. The flip happens in `closeCrawl`, after the loop's whole-crawl
+    template inference, so the interval includes that inference, whose share is not
+    measured. `crawl_pause`'s description and `docs/talos-surface.md` §4.1c state the
+    measured figure and no longer promise "about a second". Owner to rule (§7, last
+    paragraph of "The finding").
 
 ## Carried to Phase 28
 
