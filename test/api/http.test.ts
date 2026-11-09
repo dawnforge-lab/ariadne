@@ -2427,3 +2427,33 @@ describe("a client that leaves mid-export", () => {
     }
   }, 120_000);
 });
+
+describe("GET /crawls/:id — the lifecycle fields (27b)", () => {
+  it("reports cancelledAt and neverFetched for a cancelled crawl, nulls for control and pause", async () => {
+    const id = await seedCrawl({ status: "running" });
+    await seedLease(id, { state: "pending", expiresInMs: 0, url: "http://seeded.example/a" });
+    await seedLease(id, { state: "pending", expiresInMs: 0, url: "http://seeded.example/b" });
+    await db.execute(sql`update crawls set status = 'cancelled', cancelled_at = now() where id = ${id}`);
+
+    const res = await call("GET", `/crawls/${id}`);
+    expect(res.status).toBe(200);
+    const frontierBody = res.body["frontier"] as { pending: number };
+    expect(frontierBody.pending).toBe(2);
+    expect(res.body["neverFetched"]).toBe(frontierBody.pending);
+    expect(typeof res.body["cancelledAt"]).toBe("string");
+    expect(new Date(String(res.body["cancelledAt"])).toISOString()).toBe(res.body["cancelledAt"]);
+    expect(res.body["controlRequested"]).toBeNull();
+    expect(res.body["pauseReason"]).toBeNull();
+  });
+
+  it("reports nulls on a running crawl and refuses a stored value the engine never writes", async () => {
+    const id = await seedCrawl({ status: "running" });
+    const ok = await call("GET", `/crawls/${id}`);
+    expect(ok.body).toMatchObject({
+      controlRequested: null, pauseReason: null, cancelledAt: null, neverFetched: null,
+    });
+    await db.execute(sql`update crawls set control_request = 'stop' where id = ${id}`);
+    const bad = await call("GET", `/crawls/${id}`);
+    expect(bad.status).toBe(500);
+  });
+});

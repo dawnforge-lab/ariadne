@@ -239,6 +239,20 @@
       "when": 1794170895156,
       "tag": "0033_rules_judged_with_effective",
       "breakpoints": true
+    },
+    {
+      "idx": 34,
+      "version": "7",
+      "when": 1794182646011,
+      "tag": "0034_panoramic_absorbing_man",
+      "breakpoints": true
+    },
+    {
+      "idx": 35,
+      "version": "7",
+      "when": 1794182657305,
+      "tag": "0035_cancelled_to_paused",
+      "breakpoints": true
     }
   ]
 }

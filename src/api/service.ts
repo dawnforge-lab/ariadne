@@ -69,6 +69,7 @@ import {
 } from "../crawl/loop.js";
 import { DISCOVERED_VIA, frontierCounts, type FrontierCounts } from "../crawl/frontier.js";
 import { FETCH_CLASSES, type FetchClass } from "../crawl/fetch-page.js";
+import { readControlRequest, readPauseReason, type ControlRequest, type PauseReason } from "../crawl/control.js";
 // The resource vocabulary this surface reads, imported rather than spelled out:
 // the one `fetch_reason` literal a surface may read (a constant this repository
 // defines, never a sentence somebody could reword) and the two `fetch_class`
@@ -524,6 +525,14 @@ export interface CrawlListItem {
 /** One crawl, in full. */
 export interface CrawlDetail extends CrawlListItem {
   rulesetVersion: string;
+  /** A pause or cancel asked of this running crawl that its loop has not yet acted on; else null. */
+  controlRequested: ControlRequest | null;
+  /** Why the crawl is `paused` (`request` or `shutdown`); null in every other status. */
+  pauseReason: PauseReason | null;
+  /** When the crawl was cancelled (ISO); null unless `status` is `cancelled`. */
+  cancelledAt: string | null;
+  /** The frontier URLs a cancelled crawl never fetched (`frontier.pending`); null unless `status` is `cancelled`. */
+  neverFetched: number | null;
   pagesTotal: number | null;
   /**
    * WHY THIS CRAWL IS `failed` — one sentence, or null.
@@ -2615,6 +2624,12 @@ export class ApiService {
       pagesTotal: row.pagesTotal,
       renderPassCount: row.renderPassCount,
       rulesetVersion: row.rulesetVersion,
+      // Validated: a value this engine never writes is a defect of ours — a 500
+      // naming the crawl, not a null.
+      controlRequested: readControlRequest(row.controlRequest, crawlId),
+      pauseReason: readPauseReason(row.pauseReason, crawlId),
+      cancelledAt: row.cancelledAt === null ? null : row.cancelledAt.toISOString(),
+      neverFetched: row.status === "cancelled" ? counts.pending : null,
       // Straight off the column, null included. The null is not defaulted to a
       // sentence here on either side of the contract: on a `finished` crawl it
       // is the correct answer, and on a `failed` one it means the row predates

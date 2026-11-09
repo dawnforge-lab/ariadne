@@ -233,7 +233,8 @@ target is not something this skill can crawl.
 
 ```
 {crawlId, siteUrl, status, startedAt, finishedAt, pagesCrawled, pagesTotal,
- renderPassCount, rulesetVersion, failureReason, legacyHosts, sitemapUrls, findingCap,
+ renderPassCount, rulesetVersion, controlRequested, pauseReason, cancelledAt,
+ neverFetched, failureReason, legacyHosts, sitemapUrls, findingCap,
  frontier: {pending, leased, done, failed, renderPending},
  queuePosition, liveLeases, blockedPages, hostSpacingMs, throttle,
  platform, platformProfile,
@@ -248,6 +249,11 @@ target is not something this skill can crawl.
 ```
 
 What the fields mean when you are waiting:
+- **`controlRequested`, `pauseReason`, `cancelledAt`, `neverFetched`** (lifecycle,
+  read-only until pause/cancel land): `controlRequested` is a pause or cancel
+  asked of a running crawl, `pauseReason` is `request` or `shutdown` on a
+  `paused` crawl, `cancelledAt` and `neverFetched` (the frontier's `pending`)
+  are set only on a `cancelled` crawl; each is null otherwise.
 
 - **`status`** — `queued`, `running`, `finished`, `cancelled`, `failed`. The last
   three are terminal.
