@@ -36,6 +36,10 @@
  *   POST /crawls/:id/cancel            cancel a crawl, for good. Queued or
  *                                      paused: cancelled now -> 200. Running:
  *                                      requested -> 202. Same answer shape
+ *   DELETE /crawls/:id?confirm=<id>    delete a crawl for good: every row and its
+ *                                      files. `confirm` must repeat the id.
+ *                                      `{crawlId, rows, files}` -> 200; 409
+ *                                      while queued, running or busy
  *   POST /crawls/:id/render            run the render pass. No body: the engine
  *                                      selects. `{"urls": [...]}`: those pages
  *                                      instead, replacing the automatic
@@ -369,6 +373,18 @@ function buildRoutes(): Route[] {
         noBody(ctx);
         const out = await service.cancelCrawl(param(ctx, "id"));
         return { status: out.immediate ? 200 : 202, body: out };
+      },
+    },
+    {
+      method: "DELETE",
+      pattern: ["crawls", id],
+      query: ["confirm"],
+      handler: async (service, ctx) => {
+        noBody(ctx);
+        return {
+          status: 200,
+          body: await service.deleteCrawl(param(ctx, "id"), ctx.query.get("confirm") ?? undefined),
+        };
       },
     },
     {

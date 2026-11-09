@@ -69,6 +69,7 @@ import { and, asc, desc, eq, getTableColumns, gt, inArray, isNotNull, isNull, sq
 
 import type { Db } from "../db/client.js";
 import { crawls, frontier, issues, pages } from "../db/schema.js";
+import { deleteCrawlFiles, deleteCrawlRows } from "./crawl-delete.js";
 import {
   ClaimLostError,
   CRAWL_DEFAULTS,
@@ -544,6 +545,16 @@ export interface CrawlControlOut {
   status: string;
   controlRequested: ControlRequest | null;
   immediate: boolean;
+}
+
+/**
+ * What `crawl_delete` removed: rows per table (`crawls: 1` included) and the
+ * regular files taken off disk.
+ */
+export interface CrawlDeleted {
+  crawlId: string;
+  rows: Record<string, number>;
+  files: { renders: number; exports: number };
 }
 
 /** One crawl, as a listing row. */
@@ -3207,6 +3218,59 @@ export class ApiService {
       default:
         throw settledRefusal(crawlId, row.status, "cancelled");
     }
+  }
+
+  /**
+   * Delete a crawl for good — `crawl_delete` and `DELETE /crawls/:id?confirm=`
+   * (27b). Every row the crawl owns goes in one transaction, then its files
+   * (render artifacts, exports); `crawl_compare` and every other reader answer
+   * 404 for it afterwards. There is no soft delete.
+   *
+   * `confirm` must repeat the crawl id: the call is irreversible, and an id
+   * picked from the wrong row of a list is the mistake it guards against.
+   *
+   * Refusals, in order: confirm (400), no such crawl (404), `queued` or
+   * `running` (409), a pending control request (409), a render pass or rules
+   * run on this server (409), live leases (409). The transaction locks the
+   * crawl row and checks the status and the request again, so a crawl that was
+   * resumed between the check and the delete is refused, not deleted.
+   *
+   * The files go after the commit; a file that cannot be removed throws with
+   * every path left on disk (`deleteCrawlFiles`), the rows already being gone.
+   */
+  async deleteCrawl(crawlId: string, confirm: string | undefined): Promise<CrawlDeleted> {
+    if (confirm !== crawlId) {
+      throw new ServiceError("VALIDATION", "confirm must repeat the crawl id");
+    }
+    const row = await this.crawlRow(crawlId);
+    refuseDeleteWhile(crawlId, row.status, readControlRequest(row.controlRequest, crawlId));
+    this.refuseWhileBusy(crawlId, "crawl_delete");
+    const live = await this.liveLeaseCount(crawlId);
+    if (live > 0) {
+      throw new ServiceError(
+        "CONFLICT",
+        `crawl ${crawlId} holds ${live} unexpired lease(s): a worker is still on it. ` +
+          `A dead worker's leases expire on their own — try again after they do`,
+      );
+    }
+
+    const rows = await this.db.transaction(async (tx) => {
+      const locked = await tx
+        .select({ status: crawls.status, controlRequest: crawls.controlRequest })
+        .from(crawls)
+        .where(eq(crawls.id, crawlId))
+        .limit(1)
+        .for("update");
+      const current = locked[0];
+      if (current === undefined) {
+        throw new ServiceError("NOT_FOUND", `no such crawl '${clip(crawlId)}'`);
+      }
+      refuseDeleteWhile(crawlId, current.status, readControlRequest(current.controlRequest, crawlId));
+      return await deleteCrawlRows(tx, crawlId);
+    });
+
+    const files = await deleteCrawlFiles(crawlId, slug(crawlId), this.renderDir, this.exportDir);
+    return { crawlId, rows, files };
   }
 
   /** Take a crawl out of this process's wait queue, if it is there. Synchronous. */
@@ -7534,9 +7598,25 @@ function parseDataset(value: string | undefined): ExportDataset {
  * resulting path stays inside the export directory as well; neither check is
  * load-bearing alone.
  */
-function slug(value: string): string {
+export function slug(value: string): string {
   const cleaned = value.replace(/[^A-Za-z0-9_.-]/g, "_").replace(/^\.+/, "_");
   return cleaned.length > 80 ? cleaned.slice(0, 80) : cleaned;
+}
+
+/** The lifecycle refusals of `deleteCrawl`: a live crawl, or one with a request pending. */
+function refuseDeleteWhile(crawlId: string, status: string, pending: ControlRequest | null): void {
+  if (status === "queued" || status === "running") {
+    throw new ServiceError(
+      "CONFLICT",
+      `crawl ${crawlId} is ${status}: pause or cancel it, wait until it has stopped, then delete it`,
+    );
+  }
+  if (pending !== null) {
+    throw new ServiceError(
+      "CONFLICT",
+      `crawl ${crawlId} has a ${pending} request pending: wait for it to be acted on, then delete it`,
+    );
+  }
 }
 
 /** Evidence as stored, or a refusal — never a `{}` standing in for a row. */

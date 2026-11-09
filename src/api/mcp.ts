@@ -1,7 +1,7 @@
 /**
- * The MCP transport: twenty-four tools over the same service layer the HTTP
- * routes use. Eight of them change something (`crawl_start`, `crawl_resume`,
- * `crawl_pause`, `crawl_cancel`, `crawl_render`, `crawl_rules`,
+ * The MCP transport: twenty-five tools over the same service layer the HTTP
+ * routes use. Nine of them change something (`crawl_start`, `crawl_resume`,
+ * `crawl_pause`, `crawl_cancel`, `crawl_delete`, `crawl_render`, `crawl_rules`,
  * `crawl_mark_failed`, `crawl_config_set`); every other one only reads.
  *
  * This is a SECOND TRANSPORT, not a second API. Every tool below is a schema, a
@@ -106,6 +106,7 @@ export const TOOL_NAMES = [
   "crawl_resume",
   "crawl_pause",
   "crawl_cancel",
+  "crawl_delete",
   "crawl_render",
   "crawl_rules",
   "crawl_config_get",
@@ -637,6 +638,30 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
       inputSchema: z.strictObject({ crawlId: crawlIdField() }),
     },
     async ({ crawlId }) => run("crawl_cancel", () => service.cancelCrawl(crawlId)),
+  );
+
+  server.registerTool(
+    named("crawl_delete"),
+    {
+      title: "Delete a crawl",
+      description:
+        "Delete a crawl FOR GOOD: every row it owns (pages, links, issues, metrics, " +
+        "frontier and the rest) and its files on this server (render artifacts and " +
+        "exports). There is no undo and no soft delete: afterwards crawl_status, " +
+        "crawl_list and crawl_compare know nothing of it. Answers {crawlId, rows, " +
+        "files}: rows per table (crawls: 1 included) and {renders, exports}, the " +
+        "files removed.\n\n" +
+        "confirm must repeat crawlId exactly — it guards against deleting the wrong " +
+        "crawl from a list. REFUSED: a missing or different confirm (400); a " +
+        "queued or running crawl (409 — pause or cancel it, wait until it stops); a " +
+        "crawl with a pause or cancel pending; a crawl a render pass or rules run is " +
+        "working on in this server; a crawl a worker still holds leases on.",
+      inputSchema: z.strictObject({
+        crawlId: crawlIdField(),
+        confirm: z.string().describe("The crawl id again, exactly as in crawlId."),
+      }),
+    },
+    async ({ crawlId, confirm }) => run("crawl_delete", () => service.deleteCrawl(crawlId, confirm)),
   );
 
   server.registerTool(

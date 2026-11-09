@@ -902,6 +902,7 @@ webhooks**: polling `crawl_status` is the contract until Talos asks otherwise.
 | `crawl_resume` | `POST /crawls/:id/resume` | — (a paused crawl resumes; a cancelled one is final and refused) |
 | `crawl_pause` | `POST /crawls/:id/pause` | — (queued: paused now, 200; running: requested of the loop, 202) |
 | `crawl_cancel` | `POST /crawls/:id/cancel` | — (final; queued or paused: cancelled now, 200; running: requested, 202) |
+| `crawl_delete` | `DELETE /crawls/:id?confirm=<crawlId>` | `confirm` (required; must repeat `crawlId`). Hard delete of every row and the render and export files; 409 while queued or running |
 | `crawl_mark_failed` | `POST /crawls/:id/fail` | — |
 | `crawl_render` | `POST /crawls/:id/render` | `urls[]` (optional; replaces the automatic selection) |
 | `crawl_rules` | `POST /crawls/:id/rules` | — |
