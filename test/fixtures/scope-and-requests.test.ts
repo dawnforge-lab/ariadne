@@ -244,13 +244,13 @@ describe("credentials do not cross to another host", () => {
     const own = seen.filter((r) => r.host === new URL(app.base).host);
     expect(own.length).toBeGreaterThan(0);
     expect(own.some((r) => r.authorization !== null)).toBe(true);
-    // Anything that reached the other name carried none of them.
+    // Nothing reached the other name at all: the crawl does not follow a
+    // redirect off the site family. That a request which DOES reach another
+    // host carries none of them is proved on the wire by test/crawl/
+    // credentials.test.ts "sends none of them to another host: a resource,
+    // its robots.txt, a legacy host's probe, a redirect hop" (27c final wave M10).
     const legacyHost = new URL(app.legacyBase).host;
-    for (const r of seen.filter((r) => r.host === legacyHost)) {
-      expect(r.authorization, `authorization to ${r.host}${r.path}`).toBeNull();
-      expect(r.cookie, `cookie to ${r.host}${r.path}`).toBeNull();
-      expect(r.headerKey, `x-fixture-key to ${r.host}${r.path}`).toBeNull();
-    }
+    expect(seen.filter((r) => r.host === legacyHost)).toEqual([]);
   });
 });
 

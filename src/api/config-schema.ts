@@ -452,7 +452,9 @@ export const CRAWL_FIELDS = {
       "URLs in urls, at depth 0: redirects are followed to their target (within " +
       "maxRedirectHops) so every listed URL ends in a classified row, links are " +
       "recorded but not followed, and no sitemap is read unless sitemapUrls is given. " +
-      "robots.txt is always read and obeyed. Rules that need the whole site (the link " +
+      "robots.txt is always read and obeyed. The host probe (probeHosts: false turns it " +
+      "off), the known-404 probe, and the recheck, resource and render passes as " +
+      "configured run too. Rules that need the whole site (the link " +
       "graph, click depth, sitemap coverage, orphans) do not run on a list crawl; the " +
       "crawl.list-mode finding names them.",
     default: "spider",

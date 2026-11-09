@@ -187,7 +187,11 @@ Three things a crawl can be told since Phase 27c. Each is checked at start, and
 https) fetches exactly those URLs at depth 0, follows each one's redirects to a
 classified row (within `maxRedirectHops`), records links without following them,
 obeys robots.txt, and reads no sitemap unless you pass `sitemapUrls` (never `[]`:
-omit the key to read none). `maxPages` defaults to twice the distinct list. The answer
+omit the key to read none). Beside the list it also requests the host probe (the site
+root on up to four spellings; `probeHosts: false` turns it off) and the known-404 probe
+(one random path), and the 5xx recheck, the resource pass and the render pass run as
+configured: re-checking five URLs on a fragile site, turn off what it should not see.
+`maxPages` defaults to twice the distinct list. The answer
 adds `listUrlCount` and `listDuplicates`; two spellings of one URL are crawled once
 and counted. Use it to re-check the URLs a previous audit flagged, a migration's
 redirect map, or a client's priority pages. **It is not an audit of the site**: the

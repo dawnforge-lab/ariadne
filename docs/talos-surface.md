@@ -35,6 +35,10 @@ existing one. The gate evidence is `docs/gates/phase-27c.md`.
   and obeys it, and reads no sitemap unless `sitemapUrls` is given (given, it walks
   the sitemaps robots.txt declares as well as the named ones, and queues none of
   their entries; `sitemapUrls: []` on a list crawl is refused as a contradiction).
+  "Exactly the listed URLs" is the page crawl: the crawl also runs the host probe
+  (the site root on up to four spellings, Ruling 2 of the 27c gate; `probeHosts:
+  false` turns it off) and the known-404 probe (one random path), and the 5xx
+  recheck, the resource pass and the render pass run as configured.
   Each listed URL is normalised, passes the URL policy at the crawl's
   `maxUrlLength`, must be in `siteUrl`'s site
   family (`isSameOrigin`: its host or the `www`/apex twin, `http` or `https`) and must

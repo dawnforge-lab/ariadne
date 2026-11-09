@@ -25,7 +25,7 @@ Ruleset 0.24.0, 189 rules (72 page / 103 query / 14 metric), one new rule
 
 | # | clause | result | where |
 |---|---|---|---|
-| 1 | full suite and the harness green, 0 skipped; `tsc` clean | **pass**: 152 files / 4,043 tests, 0 failed, 0 skipped; `tsc` clean (on `422fa2a`) | §1 |
+| 1 | full suite and the harness green, 0 skipped; `tsc` clean | **pass**: 152 files / 4,060 tests, 0 failed, 0 skipped; `tsc` clean (after the final wave, on `1b9d696` plus its docs commit; 4,043 on `422fa2a`) | §1 |
 | 2 | the fixture gains a Basic-auth area, a cookie-gated page, a header-gated page and a redirect chain over 10 hops, each with positive and negative tests, including credentials not crossing to another host and not following a redirect off the site family | **pass** | §2 |
 | 3 | the secret scan passes, and a restart test shows `CREDENTIALS_REQUIRED` rather than 401 rows | **pass** | §3 |
 | 4 | a list crawl of the fixture: every listed URL classified, the spider-only rules marked by `crawl.list-mode`, no rule firing because of the missing graph | **pass** | §4 |
@@ -36,10 +36,10 @@ Ruleset 0.24.0, 189 rules (72 page / 103 query / 14 metric), one new rule
 
 | | |
 |---|---|
-| `npm test` (`DATABASE_URL` set) | **152 files / 4,043 tests, 0 failed, 0 skipped** (402.6 s), on `422fa2a` (the working tree differed only by this document). The known `renderer.test.ts` flake did not appear |
-| `npx tsc --noEmit` | clean, on `422fa2a` |
+| `npm test` (`DATABASE_URL` set) | **152 files / 4,060 tests, 0 failed, 0 skipped** (392.0 s), after the final wave (on `1b9d696` with the final docs commit's changes in the tree). Before it: 4,043 (402.6 s) on `422fa2a`. The known `renderer.test.ts` flake did not appear in either run |
+| `npx tsc --noEmit` | clean, after the final wave and on `422fa2a` |
 | baseline at the branch point (`c8315e5`) | 142 files / 3,874 tests |
-| phase delta | +10 files, +169 tests |
+| phase delta | +10 files, +186 tests (+169 before the final wave) |
 | MCP tools / HTTP routes | 27 / 27, unchanged; command tools 9 |
 | skills and surface guard | `npx vitest run test/skills`: 25 of 25, including the citations of `docs/talos-surface.md` |
 
@@ -59,7 +59,7 @@ to `/chain/end` (13 redirects before the 200).
 |---|---|
 | positive: a list crawl of the three gated URLs with all three credentials gives three `ok` 200 rows | `test/fixtures/scope-and-requests.test.ts` "a list crawl of the three gated URLs with credentials gives three ok rows" |
 | negative: with no credentials, and with each one left out in turn, exactly the gate whose credential is missing is a `blocked` row with the site's 401 or 403, and the other two are `ok` | "without a gate's credential that URL is a blocked 401/403 row and the other two are ok" |
-| no crossing on a redirect: `/auth/to-legacy` is a `redirect` row, nothing on the other name has a page row, the source was requested with credentials, and any request that reached the other host carried no `authorization`, cookie or custom header | "/auth/to-legacy redirects to localhost: the target is not fetched with authorization, cookie or the custom header" |
+| no crossing on a redirect: `/auth/to-legacy` is a `redirect` row, nothing on the other name has a page row, the source was requested with credentials, and no request reached the other host at all | "/auth/to-legacy redirects to localhost: the target is not fetched with authorization, cookie or the custom header" |
 | no crossing on the wire, every request kind: all three are sent on the page fetch, robots.txt, the sitemap, the 5xx recheck, the 404 probe and a same-host resource, and none to another host's resource, its robots.txt, a legacy host's probe or a redirect hop | `test/crawl/credentials.test.ts` "sends all three on the page fetch, robots.txt, the sitemap, the recheck, the 404 probe and a same-host resource" and "sends none of them to another host: a resource, its robots.txt, a legacy host's probe, a redirect hop" |
 | the downgrade rule: an https site never sends them over http; an http-only site does on its own http URLs | `test/crawl/credentials.test.ts` "sends nothing over a scheme the site does not use, and nothing when no credentials were given" (unit level, the https half); the http half is every positive fixture crawl above, since the fixture is a plain-http site whose gated pages answer 200 only with the credentials |
 | the redirect cap, positive: under the default cap of 10 the chain stops at `/chain/10`, every hop to it a `redirect` row, `/chain/11` not fetched, and `/chain/10`'s reason says `maxRedirectHops is 10` | "a list crawl of /chain/0 stops at /chain/10 and says maxRedirectHops is 10" |
@@ -71,11 +71,13 @@ politeness back-off before its row is final. That is the existing behaviour, and
 negative test asserts it rather than the brief's expectation. The cost is test time
 (about 30 s per refused URL, so the four negative crawls run side by side).
 
-**One weak branch, stated.** The crawler never follows a redirect off the site family, so
-in the `/auth/to-legacy` test no request reaches the other name at all, and the assertion
-"anything that reached the other host carried none of them" runs over an empty set. The
-proof that nothing crosses is the row assertions beside it and the unit-level
-`credentials.test.ts` case, which drives requests at another host and inspects them.
+**The weak branch, closed (final wave M10).** The crawler never follows a redirect off
+the site family, so in the `/auth/to-legacy` test no request reaches the other name at
+all. The test used to loop "anything that reached the other host carried none of them"
+over that empty set; it now asserts the set IS empty (a request to the other name would
+fail it), and its comment points to the wire proof that a request which does reach
+another host carries none of them: `test/crawl/credentials.test.ts` "sends none of them
+to another host: a resource, its robots.txt, a legacy host's probe, a redirect hop".
 
 ## 3. Clause 3: the secret scan and the restart
 
@@ -215,7 +217,8 @@ in the SDD workspace).
 
 - **The request:** `{siteUrl: "https://lavishalice.com/", mode: "list", urls: <50>,
   fetchResources: false}`, every other field an API default, so production pacing, and the
-  Shopify profile applied itself. Accepted 16:38:27 UTC, finished 16:39:27; render 3
+  Shopify profile applied itself. Accepted 16:38:27 UTC, finished 16:39:22.9 (the row's
+  `finishedAt`, `live-list/result.json`; 16:39:27 was the poll that saw it); render 3
   pages, 0 failures (30.3 s); rules done 16:40:02. **Peak RSS of the process 232.4 MB.**
 - **The 50 URLs**, chosen from the stored spider crawl `crawl_4dd32709-…` across types and
   classes: 1 home, 19 products, 10 collections, 6 pages, 2 blog posts, 5 product and 2
@@ -374,6 +377,44 @@ Every ruling made during the build (the SDD ledger), with what it costs if wrong
     stay O(shapes), 2.1 MB and 4.1 MB here; doing the collapse in SQL would remove them,
     and was not done.)
 
+Final wave (the whole-branch review's I1 and M1 to M16, controller rulings):
+
+26. **A scope pattern's origin is checked in the ONE direction admission asks** (I1):
+    `isSameOrigin(<pattern origin>, siteUrl)`, so `http://example.com/*` on an https site
+    is refused (no http URL is ever admitted there), and a pattern with a non-empty
+    literal start that is neither a prefix of `http://`/`https://` nor starts with one
+    (`/cart*`, `example.com/*`) is refused, saying a path rule needs a leading `*`. Both
+    reach `crawl_start`, `config_validate` and `crawl_config_set`. Also refused, by the
+    same reasoning: a pattern whose literal scheme the site never admits even when a `*`
+    cuts its host short (`http://*` on an https site). Cost if wrong: an agent that wrote
+    one of these must re-spell it; before, its fence fenced off nothing, silently.
+27. **Credential header names starting `sec-` are refused** (M5), beside `proxy-`: the
+    Fetch standard's forbidden prefixes. `sec-ch-ua*` are the browser's identity hints and
+    `sec-fetch-*` its request context, which a credential header would otherwise replace
+    in the render pass. The renderer's merge is unchanged. Cost if wrong: a site gated on
+    a `sec-`-named header cannot be crawled with credentials; none is known, and the name
+    is one browsers set themselves.
+28. **Listings carry `notMeasured` beside `disabledRules`** (M16), mirroring 27a: every
+    listing that carries `disabledRules` (`issues_list`, `issues_overview`, the `issues`
+    export, the CSV views that read findings) and `metrics_get` name the rule ids the
+    stored rules run skipped for list mode, derived from the same `readListScope` +
+    `listModeSkips` the runner decides with (`listModeNotMeasured`); `[]` on a spider
+    crawl and on a crawl no rules run has judged. Cost if wrong: an additive field; a
+    consumer that pinned the answers' exact key sets sees one more key.
+29. **A not-measured rule is refused where a disabled one is, and never a zero row**
+    (M16, implementer's call within the mirror): `issue_urls` and its CSV view refuse it
+    409 naming `crawl.list-mode`; `issues_overview` with `includeZero` leaves it out;
+    `metric_table`'s `note` says the metric was not measured instead of "there was
+    nothing to measure". `issue_inlinks` is untouched (it reads links, and none of its
+    three rules is skipped on a list crawl). Cost if wrong: a caller that read an empty
+    `issue_urls` page for a skipped rule gets a 409 it must handle.
+30. **M6 and M9 are parked, not fixed** (controller): M6, repeated browser headers passed
+    back verbatim to `Fetch.continueRequest`, is plausible and unverified (no test drives
+    a repeated request header through CDP); M9, the queued-crawl credential race, is
+    Ruling 17's accepted race, which fails loudly and never runs unauthenticated. Cost if
+    wrong: M6 could fail a credentialed render of a page whose requests repeat a header —
+    loudly, as a render failure, never as a silent gap.
+
 ## Deviations
 
 From the spec text (owner to see in review):
@@ -428,8 +469,8 @@ Added during the build and by the gate run:
 
 13. **The 1 MiB body cap covers five routes, not two** (Ruling 16): the spec raises it
     for `POST /crawls` and `POST /config/validate` only.
-14. **13 refused header names plus `proxy-*`, not 11** (Ruling 11): `expect` and
-    `keep-alive`.
+14. **13 refused header names plus `proxy-*` and `sec-*`, not 11** (Rulings 11 and 27):
+    `expect` and `keep-alive`, and the `sec-` prefix (final wave M5).
 15. **The 50k scope gate's pattern is `*/products/p1*`** (Ruling 23, §5).
 16. **The live lavishalice list crawl (clause 6) ran after the owner's OK**, given
     separately from the build (it crawls a client site), with `fetchResources: false`
@@ -440,23 +481,32 @@ Added during the build and by the gate run:
 
 ## Open at this gate
 
-Flagged "fix in final wave" in the ledger and not closed by Task 12 (the controller's
-final review owns them):
-- T4 C: the robots re-class `UPDATE` on resume writes `robotsBlockedReason(line)` without
-  `storableCap`, so a NUL in the matching `Disallow` line would fail every resume.
-- T4 B: `CrawlConfig.maxUrlLength`'s docblock claims redirect targets become `excluded`
-  rows; `fetchPage` refuses them first and records `redirect target refused: too_long` on
-  the redirect row (rule 7 holds; the docblock is wrong).
-- T4 A: the forward re-file measures the budget before the backward pass frees room, so a
-  narrow-then-widen edit can overstate `excluded_dropped`.
-- T5 2, 4, 5: the renderer's merged headers let a credential header override a browser
-  header of the same name; repeated browser headers passed back unchanged may fail a
-  credentialed render; `credentialShapeError` checks types only. (T5 1, the override
-  shape smaller than the row's, was closed in `dcd4a0a`.)
-- T6: rows read from `list_urls` are not checked against `listUrlCount`, so an empty or
-  short table ends "every listed URL was refused" instead of a loud defect.
-- T9 concern 2 (Ruling 17): the queued-crawl credential race.
-- T10: the vacuous no-crossing loop in `scope-and-requests.test.ts` (§2).
+Parked by the controller's final-wave ruling (Ruling 30), not fixed:
+- M6 (T5 3): repeated browser headers passed back unchanged may fail a credentialed
+  render; plausible, unverified.
+- M9 (T9 concern 2, Ruling 17): the queued-crawl credential race; fails loudly.
+
+Closed by the final wave (the whole-branch review's items; `final-fix-report.md` in the
+SDD workspace has each one's commit and test):
+- I1: scope patterns that can never match are refused (Ruling 26).
+- M1 (T3): `sameOriginSql` is `coalesce(…, false)`, so a `mailto:` hreflang alternate
+  under an `include` list is still reported.
+- M2 (T4 C): the resume re-class writes `storableCap(robotsBlockedReason(line))`.
+- M3 (T4 B): `CrawlConfig.maxUrlLength`'s docblock says what happens to a redirect target.
+- M4 (T4 A): the re-filter runs backward first and measures the forward budget after it.
+- M5 (T5 2): `sec-` header names are refused (Ruling 27).
+- M7 (T5 4): `credentialShapeError` refuses unknown keys and checks names as the value
+  validators do.
+- M8 (T6): `runCrawl` refuses `mode: "list"`; the loop checks the `list_urls` rows it
+  read against `listUrlCount`.
+- M10 (T10): the vacuous loop is an assertion that nothing reached the other host (§2).
+- M11, M12: the §6 finish time, the audit skill's run-on line.
+- M13: a credential name that is not a token, or an unknown key, is named by position,
+  never quoted.
+- M14: `crawl_config_set` refuses `maxPages` below a list crawl's distinct list.
+- M15: the tool description and the crawl skill say a list crawl also runs the host
+  probe and the 404 probe, and the recheck, resource and render passes as configured.
+- M16: listings carry `notMeasured` (Rulings 28, 29).
 
 ## Carried to Phase 28
 

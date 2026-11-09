@@ -271,7 +271,11 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "host or the www/apex twin, http or https) fetches exactly those URLs at depth 0, " +
         "follows their redirects (within maxRedirectHops) so each ends in a classified " +
         "row, records links without following them, obeys robots.txt and reads no " +
-        "sitemap unless sitemapUrls is given. maxPages defaults to twice the distinct " +
+        "sitemap unless sitemapUrls is given. Beside the list it also requests the " +
+        "host probe (the site root on up to four spellings; probeHosts: false turns " +
+        "it off) and the known-404 probe (one random path), and the 5xx recheck, the " +
+        "resource pass and the render pass run as configured — on a fragile site, " +
+        "turn off what it should not see. maxPages defaults to twice the distinct " +
         "list. The answer adds listUrlCount and listDuplicates (two spellings of one URL " +
         "are collapsed and counted). Rules that need the whole site do not run on a list " +
         "crawl: the crawl.list-mode finding names them (notMeasured) and the target " +
