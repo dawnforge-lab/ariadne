@@ -213,8 +213,8 @@ export interface PageTemplateInference {
 }
 
 /**
- * How many `old -> new` pairs go into one UPDATE. The mapping is at most one
- * entry per distinct page type, so this bounds the SQL text, not the memory.
+ * How many `old -> new` pairs go into one UPDATE. It bounds the SQL text and
+ * the `sql` fragments alive at once: they are built per batch (gate 27c).
  */
 const RETYPE_BATCH = 500;
 
@@ -292,15 +292,20 @@ export async function inferPageTemplates(
     return result;
   }
 
-  const pairs = [...mapping].map(([from, to]) => sql`(${from}::text, ${to}::text)`);
+  // The fragments are built ONE BATCH AT A TIME, inside the loop. A drizzle
+  // `sql` fragment costs ~600 bytes against the ~50 of the two strings it wraps,
+  // so building every pair first held 23.5 MB at once on the 50k gate's 40,000
+  // singleton shapes and set the crawl's RSS peak (gate 27c). `entries` holds
+  // only references to the mapping's strings.
+  const entries = [...mapping];
   // ALL THE BATCHES OR NONE OF THEM, which is what the three sibling
   // derivations do (`deriveUrlParams`, `deriveFieldPresence`,
   // `deriveClickDepth`) and for the same reason. A hard kill between two
   // batches would leave half the population collapsed and half of it not, under
   // a `crawls` row still saying `running` — and a reader cannot tell that from a
   // crawl whose types legitimately had nothing to collapse (hard rule 7). The
-  // batching bounds the SQL text rather than the memory, so nothing is gained by
-  // committing between batches; the transaction costs one line.
+  // batching bounds the SQL text and the fragments alive at once, and committing
+  // between batches would change neither; the transaction costs one line.
   //
   // The second line of defence, not the first: because the pass is idempotent
   // over the population, a resume re-runs it and a half-collapsed crawl would
@@ -308,8 +313,10 @@ export async function inferPageTemplates(
   // transaction is what makes the row never wrong in the first place.
   let pagesRetyped = 0;
   await db.transaction(async (tx) => {
-    for (let i = 0; i < pairs.length; i += RETYPE_BATCH) {
-      const batch = pairs.slice(i, i + RETYPE_BATCH);
+    for (let i = 0; i < entries.length; i += RETYPE_BATCH) {
+      const batch = entries
+        .slice(i, i + RETYPE_BATCH)
+        .map(([from, to]) => sql`(${from}::text, ${to}::text)`);
       const written = await tx.execute(sql`
         update pages p
         set page_type = v.new_type

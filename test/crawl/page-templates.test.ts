@@ -375,4 +375,15 @@ describe("inferPageTemplates", () => {
   it("throws on a crawl id nothing knows (no silent zero)", async () => {
     await expect(inferPageTemplates(db, "crawl_nope")).rejects.toThrow(/no such crawl/);
   });
+
+  it("retypes every pair across several update batches: 1,201 singleton shapes, three batches", async () => {
+    // RETYPE_BATCH is 500: 1,201 pairs are batches of 500, 500 and 1. The pairs
+    // are built batch by batch (gate 27c: building all of them first cost
+    // 23.5 MB at 40,000 shapes), so every slice boundary is exercised here.
+    const paths = Array.from({ length: 1201 }, (_, i) => `/products/p${i}`);
+    const crawlId = await crawlOf(paths);
+    const result = await inferPageTemplates(db, crawlId);
+    expect(result).toEqual({ typesBefore: 1201, typesAfter: 1, pagesRetyped: 1201 });
+    expect(await typeCensus(crawlId)).toEqual(new Map([["/products/:slug", 1201]]));
+  });
 });
