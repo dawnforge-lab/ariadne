@@ -1322,12 +1322,12 @@ describe("POST /crawls/:id/resume", () => {
   // THE JUDGED MARKER CANNOT SURVIVE A RESUME. `rulesRunAt` is the surface's
   // load-bearing sentence (talos-surface.md §5): a timestamp means a complete
   // rules pass is on record, so an empty findings answer means "looked, found
-  // nothing". Judge a cancelled crawl, resume it, and that timestamp would stand
+  // nothing". Judge a failed crawl, resume it, and that timestamp would stand
   // over a crawl that has since grown pages — `findingsCount` describing a
   // strictly smaller crawl than `pagesScanned` counts, and `crawl_compare`
   // inheriting the staleness because it believes both sides were judged.
   it("unjudges a crawl it queues, so no timestamp outlives the pages it described", async () => {
-    const id = await seedResumable("cancelled");
+    const id = await seedResumable("failed");
     await db.insert(frontier).values({
       crawlId: id,
       url: `${resumeSite}/a`,
@@ -1360,7 +1360,7 @@ describe("POST /crawls/:id/resume", () => {
   // no-op: without it the method queues a crawl whose row says something else
   // entirely and answers `{status: "queued"}` about it (hard rule 7).
   it("409s when the crawl's state changes under the call, rather than queueing anyway", async () => {
-    const id = await seedResumable("cancelled");
+    const id = await seedResumable("paused");
     await db.insert(frontier).values({
       crawlId: id,
       url: `${resumeSite}/a`,

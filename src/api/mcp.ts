@@ -1,8 +1,8 @@
 /**
- * The MCP transport: twenty tools over the same service layer the HTTP routes
- * use. Six of them change something (`crawl_start`, `crawl_resume`,
- * `crawl_render`, `crawl_rules`, `crawl_mark_failed`, `crawl_config_set`);
- * every other one only reads.
+ * The MCP transport: twenty-four tools over the same service layer the HTTP
+ * routes use. Eight of them change something (`crawl_start`, `crawl_resume`,
+ * `crawl_pause`, `crawl_cancel`, `crawl_render`, `crawl_rules`,
+ * `crawl_mark_failed`, `crawl_config_set`); every other one only reads.
  *
  * This is a SECOND TRANSPORT, not a second API. Every tool below is a schema, a
  * description written for an agent, and one call into `ApiService` — there is no
@@ -104,6 +104,8 @@ export const TOOL_NAMES = [
   "crawl_list",
   "crawl_mark_failed",
   "crawl_resume",
+  "crawl_pause",
+  "crawl_cancel",
   "crawl_render",
   "crawl_rules",
   "crawl_config_get",
@@ -159,9 +161,10 @@ The order of operations is fixed by what the evidence means:
   1. crawl_start   accepts a crawl and returns a crawl id immediately. It is
                    queued, not finished; one crawl runs at a time per server.
   2. crawl_status  polls it. Poll until status is no longer 'queued'/'running'.
-                   A crawl that stopped with work still owed — a server shut
-                   down mid-run, a cancel somebody regrets — is continued with
-                   crawl_resume, which is the same crawl and not a new one.
+                   crawl_pause stops a crawl resumably and crawl_cancel stops
+                   it for good. A 'paused' crawl — yours, or a server that shut
+                   down mid-run — is continued with crawl_resume, which is the
+                   same crawl and not a new one. 'cancelled' is final.
   3. crawl_render  (optional) re-fetches some pages in a real browser, so
                    client-side-rendered content is measured rather than guessed.
                    Either the engine picks them or you name them with 'urls'.
@@ -419,17 +422,23 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "in pending, because nothing about them was decided. A crawl older than " +
         "the pass answers zeroes with a null passAt, which is the second reading, " +
         "not the first.\n\n" +
-        "This is the polling tool. status is one of queued, running, finished, " +
-        "cancelled, failed — the last three are terminal. Two fields answer the " +
+        "This is the polling tool. status is one of queued, running, paused, " +
+        "finished, cancelled, failed. finished, cancelled and failed are terminal; " +
+        "paused is a stop that crawl_resume continues, with pauseReason 'request' " +
+        "(crawl_pause) or 'shutdown' (the server stopped mid-run). cancelled is " +
+        "final — crawl_resume refuses it; cancelledAt says when, and neverFetched " +
+        "counts the URLs it never asked for. controlRequested is a pause or cancel " +
+        "asked of a running crawl and not yet acted on (null otherwise). Two fields answer the " +
         "question 'is anybody actually working on this': queuePosition is a " +
         "number only while THIS server holds the crawl (null otherwise), and " +
         "liveLeases counts unexpired worker leases. A 'queued' crawl with " +
         "queuePosition null was accepted by a server process that is now gone — " +
         "nobody will run it; hand it to crawl_resume, which continues the same " +
         "crawl, or retire it with crawl_mark_failed. The same pair answers a " +
-        "'running' row with liveLeases 0 long after its server died, and a " +
-        "terminal crawl that stopped with work owed: crawl_resume finishes it, " +
-        "crawl_mark_failed closes it.\n\n" +
+        "'running' row with liveLeases 0 long after its server died. A paused or " +
+        "failed crawl that stopped with work owed is finished by crawl_resume, or " +
+        "ended for good by crawl_cancel (paused) — never by crawl_mark_failed, " +
+        "which closes only an orphaned queued or running row.\n\n" +
         "blockedPages counts pages a WAF or rate limiter answered instead of the " +
         "site (401/403/429/challenge). hostSpacingMs is how far the engine has " +
         "already backed off in response: the widest per-host gap it is enforcing, " +
@@ -519,9 +528,10 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
     {
       title: "Resume an interrupted crawl",
       description:
-        "Continue a crawl that stopped with work still owed — a server that was " +
-        "shut down mid-crawl, a worker that died, or a crawl somebody cancelled " +
-        "and now wants finished. It is THE SAME CRAWL: same crawlId, same row, " +
+        "Continue a crawl that stopped with work still owed — a crawl that is " +
+        "paused (crawl_pause, or a server that was shut down mid-crawl), a worker " +
+        "that died, or a crawl that failed. A cancelled crawl is NOT resumable: a " +
+        "cancel is final, and this tool refuses it. It is THE SAME CRAWL: same crawlId, same row, " +
         "same frontier, and pages already on record are never fetched again. " +
         "Answers {crawlId, status, queuePosition} exactly as crawl_start does, " +
         "with status 'queued' — the work is accepted here and runs later.\n\n" +
@@ -554,7 +564,9 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "the resumed crawl finishes; until you do, crawl_status reads " +
         "rulesRunAt null and any findings still in the table are a pass nobody " +
         "completed.\n\n" +
-        "REFUSED, and each refusal says which: no such crawl; this server is " +
+        "REFUSED, and each refusal says which: no such crawl; the crawl is " +
+        "cancelled (final); a render pass or a rules run is working on it on this " +
+        "server (wait for it to answer); this server is " +
         "already holding it; the crawl still holds an unexpired lease (a worker is " +
         "on it — wait, a dead worker's leases expire on their own); a terminal " +
         "crawl with nothing owed, naming what was counted (pending frontier rows, " +
@@ -566,6 +578,61 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
       inputSchema: z.strictObject({ crawlId: crawlIdField() }),
     },
     async ({ crawlId }) => run("crawl_resume", () => service.resumeCrawl(crawlId)),
+  );
+
+  server.registerTool(
+    named("crawl_pause"),
+    {
+      title: "Pause a crawl",
+      description:
+        "Stop a crawl so that it can be continued later with crawl_resume. Answers " +
+        "{crawlId, status, controlRequested, immediate}.\n\n" +
+        "A QUEUED crawl is paused at once: immediate true, status 'paused', and it " +
+        "is taken out of this server's queue, so it will not start until you " +
+        "resume it. A RUNNING crawl is asked to pause: immediate false, status " +
+        "'running', controlRequested 'pause'. That is a REQUEST, not an outcome — " +
+        "the crawl stops within about a second (in-flight fetches are aborted and " +
+        "go back to the frontier, never recorded as failures), but a crawl that " +
+        "finishes before then closes 'finished' instead. Then poll crawl_status " +
+        "until status is 'paused' (pauseReason 'request').\n\n" +
+        "A pause keeps everything a resume needs: the frontier, the per-host " +
+        "spacing the crawl earned and its throttle record. A paused crawl stays " +
+        "paused across a server restart, and nothing starts it but crawl_resume. " +
+        "You can render it and run the rules on it while it is paused — looking at " +
+        "partial results is a reason to pause.\n\n" +
+        "Asking again while a pause is pending answers the same and changes " +
+        "nothing. REFUSED: a crawl with a cancel pending (the cancel wins); a crawl " +
+        "already paused; a finished, failed or cancelled crawl, naming its status.",
+      inputSchema: z.strictObject({ crawlId: crawlIdField() }),
+    },
+    async ({ crawlId }) => run("crawl_pause", () => service.pauseCrawl(crawlId)),
+  );
+
+  server.registerTool(
+    named("crawl_cancel"),
+    {
+      title: "Cancel a crawl",
+      description:
+        "Stop a crawl FOR GOOD. A cancel is final: crawl_resume refuses a cancelled " +
+        "crawl. What it crawled stays judgeable — crawl_rules runs on it as on a " +
+        "finished crawl — and crawl_status reports cancelledAt and neverFetched, " +
+        "the URLs it never asked for. Its 404 probe, resource pass and 5xx recheck " +
+        "do not run, and their checks read as not measured, never as a pass. To " +
+        "stop a crawl you may want to continue, use crawl_pause instead.\n\n" +
+        "Answers {crawlId, status, controlRequested, immediate}. A QUEUED or " +
+        "PAUSED crawl is cancelled at once: immediate true, status 'cancelled'. A " +
+        "RUNNING crawl is asked to cancel: immediate false, status 'running', " +
+        "controlRequested 'cancel' — a REQUEST, which outranks a pending pause; a " +
+        "crawl that finishes before its next poll closes 'finished' instead. Then " +
+        "poll crawl_status until status is 'cancelled'.\n\n" +
+        "Asking again while a cancel is pending answers the same and changes " +
+        "nothing. REFUSED: a finished, failed or cancelled crawl, naming its " +
+        "status; and a crawl a render pass or a rules run is working on in this " +
+        "server — neither can be interrupted, so wait for crawl_render or " +
+        "crawl_rules to answer and ask again.",
+      inputSchema: z.strictObject({ crawlId: crawlIdField() }),
+    },
+    async ({ crawlId }) => run("crawl_cancel", () => service.cancelCrawl(crawlId)),
   );
 
   server.registerTool(

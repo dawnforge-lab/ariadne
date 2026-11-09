@@ -26,7 +26,16 @@
  *   POST /crawls/:id/resume            continue a crawl that stopped with work
  *                                      still owed — the same crawl, the same id,
  *                                      queued again. Answers `crawl_start`'s
- *                                      `{crawlId, status, queuePosition}` -> 202
+ *                                      `{crawlId, status, queuePosition}` -> 202.
+ *                                      A paused crawl resumes; a cancelled one
+ *                                      is final and 409s
+ *   POST /crawls/:id/pause             pause a crawl. Queued: paused now -> 200.
+ *                                      Running: requested of its loop -> 202.
+ *                                      `{crawlId, status, controlRequested,
+ *                                      immediate}`
+ *   POST /crawls/:id/cancel            cancel a crawl, for good. Queued or
+ *                                      paused: cancelled now -> 200. Running:
+ *                                      requested -> 202. Same answer shape
  *   POST /crawls/:id/render            run the render pass. No body: the engine
  *                                      selects. `{"urls": [...]}`: those pages
  *                                      instead, replacing the automatic
@@ -337,6 +346,29 @@ function buildRoutes(): Route[] {
       handler: async (service, ctx) => {
         noBody(ctx);
         return { status: 202, body: await service.resumeCrawl(param(ctx, "id")) };
+      },
+    },
+    {
+      method: "POST",
+      pattern: ["crawls", id, "pause"],
+      query: [],
+      // 200 when the row has already moved (`immediate`), 202 when the request
+      // is recorded for a running crawl's loop to act on: the same line
+      // between "done" and "accepted" the routes above draw.
+      handler: async (service, ctx) => {
+        noBody(ctx);
+        const out = await service.pauseCrawl(param(ctx, "id"));
+        return { status: out.immediate ? 200 : 202, body: out };
+      },
+    },
+    {
+      method: "POST",
+      pattern: ["crawls", id, "cancel"],
+      query: [],
+      handler: async (service, ctx) => {
+        noBody(ctx);
+        const out = await service.cancelCrawl(param(ctx, "id"));
+        return { status: out.immediate ? 200 : 202, body: out };
       },
     },
     {

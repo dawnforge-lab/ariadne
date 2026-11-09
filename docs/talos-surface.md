@@ -899,7 +899,9 @@ webhooks**: polling `crawl_status` is the contract until Talos asks otherwise.
 | `crawl_start` | `POST /crawls` | `siteUrl` (required), `maxPages`, `maxDepth`, `userAgent`, `perHostDelayMs`, `maxConcurrency`, `probeHosts`, `legacyHosts[]`, `sitemapUrls[]`, `renderBudgetPct`, `renderMaxPages`, `renderSamplePerType`, `findingCap`, `fetchResources`, `judgement` (the block `crawl_config_set` changes later, §4.9) |
 | `crawl_status` | `GET /crawls/:id` | — |
 | `crawl_list` | `GET /crawls` | `siteUrl`, `limit`, `cursor` |
-| `crawl_resume` | `POST /crawls/:id/resume` | — |
+| `crawl_resume` | `POST /crawls/:id/resume` | — (a paused crawl resumes; a cancelled one is final and refused) |
+| `crawl_pause` | `POST /crawls/:id/pause` | — (queued: paused now, 200; running: requested of the loop, 202) |
+| `crawl_cancel` | `POST /crawls/:id/cancel` | — (final; queued or paused: cancelled now, 200; running: requested, 202) |
 | `crawl_mark_failed` | `POST /crawls/:id/fail` | — |
 | `crawl_render` | `POST /crawls/:id/render` | `urls[]` (optional; replaces the automatic selection) |
 | `crawl_rules` | `POST /crawls/:id/rules` | — |
@@ -920,7 +922,7 @@ webhooks**: polling `crawl_status` is the contract until Talos asks otherwise.
 | `export_crawl` | `GET /crawls/:id/export` | `format` (`jsonl.gz` \| `csv`), `dataset` (jsonl.gz only), `view` + `ruleId` \| `metricId` (csv only) |
 
 Pinned: the tool list and every schema — `test/api/mcp.test.ts:670`
-("advertises exactly the twenty-two tools of the agent surface"),
+("advertises exactly the twenty-four tools of the agent surface"),
 `test/api/mcp.test.ts:697` ("closes every input schema and describes every
 field"), `test/api/mcp.test.ts:729` ("names every member of the closed
 vocabulary each field enumerates"), `test/api/mcp.test.ts:758` ("advertises

@@ -45,6 +45,17 @@
  * A crawl left `running` by a killed process is the other half of the same
  * story, and it already had an answer: `markCrawlFailed`, whose lease test is
  * the same one the render driver uses to tell a live crawl from a dead one.
+ *
+ * **A paused crawl is not queued work (27b).** `crawl_pause` on a queued crawl
+ * takes it out of this process's queue and moves the row to `paused` in one
+ * step; on a running crawl it asks the loop, through `crawls.control_request`,
+ * to stop. A graceful shutdown (`close()`) is a pause too: the crawl in flight
+ * closes `paused` with reason `shutdown`, its frontier intact. Either way the
+ * row stays `paused` across a restart and is never adopted — not at boot, and
+ * not by a runner that later finds it in its own queue (`runQueued` skips any
+ * row that has left `queued`). `crawl_resume` continues it, and only that.
+ * `crawl_cancel` ends a crawl for good: `cancelled` is final, and resume
+ * refuses it.
  */
 import { randomUUID } from "node:crypto";
 import { once } from "node:events";
@@ -54,11 +65,12 @@ import { join as joinPath, resolve as resolvePath, sep as pathSep } from "node:p
 import { PassThrough, type Duplex } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { createGzip } from "node:zlib";
-import { and, asc, desc, eq, getTableColumns, gt, inArray, isNotNull, sql, type SQL } from "drizzle-orm";
+import { and, asc, desc, eq, getTableColumns, gt, inArray, isNotNull, isNull, sql, type SQL } from "drizzle-orm";
 
 import type { Db } from "../db/client.js";
 import { crawls, frontier, issues, pages } from "../db/schema.js";
 import {
+  ClaimLostError,
   CRAWL_DEFAULTS,
   failureReasonOf,
   parseStoredConfig,
@@ -69,7 +81,13 @@ import {
 } from "../crawl/loop.js";
 import { DISCOVERED_VIA, frontierCounts, type FrontierCounts } from "../crawl/frontier.js";
 import { FETCH_CLASSES, type FetchClass } from "../crawl/fetch-page.js";
-import { readControlRequest, readPauseReason, type ControlRequest, type PauseReason } from "../crawl/control.js";
+import {
+  readControlRequest,
+  readPauseReason,
+  setControlRequest,
+  type ControlRequest,
+  type PauseReason,
+} from "../crawl/control.js";
 // The resource vocabulary this surface reads, imported rather than spelled out:
 // the one `fetch_reason` literal a surface may read (a constant this repository
 // defines, never a sentence somebody could reword) and the two `fetch_class`
@@ -509,6 +527,23 @@ export interface CrawlAccepted {
   status: string;
   /** Crawls this process must finish first. 0 = it is starting now. */
   queuePosition: number;
+}
+
+/**
+ * What `crawl_pause` / `crawl_cancel` (`POST /crawls/:id/pause|cancel`) answer.
+ *
+ * `immediate` says which of two things happened. True: the row has already
+ * moved (a queued or paused crawl), and `status` is where it now stands. False:
+ * the crawl is `running`, the request is recorded in `crawls.control_request`
+ * (`controlRequested`), and the loop acts on it at its next poll — a REQUEST,
+ * which a clean finish that lands first can overtake. `crawl_status` says what
+ * actually happened.
+ */
+export interface CrawlControlOut {
+  crawlId: string;
+  status: string;
+  controlRequested: ControlRequest | null;
+  immediate: boolean;
 }
 
 /** One crawl, as a listing row. */
@@ -2217,10 +2252,13 @@ export interface PageQuery {
   cursor?: string;
 }
 
+/**
+ * A crawl this process means to run. It carries no config: the runner reads
+ * the row's stored config when it dequeues the crawl (`runQueued`), so a
+ * change made while the crawl waited is the one it runs with.
+ */
 interface QueueEntry {
   crawlId: string;
-  /** The effective config, `allowPrivate` included — never the stored one. */
-  config: CrawlConfig;
   /**
    * Whether this entry CONTINUES a crawl that has already run, rather than
    * starting one that has not.
@@ -2295,6 +2333,13 @@ export class ApiService {
    * than in the database.
    */
   private readonly judging = new Set<string>();
+
+  /**
+   * Crawls this process is currently rendering — one render pass at a time,
+   * per crawl, claimed and released exactly as `judging` is (see
+   * `renderCrawl`). In-process for `judging`'s reasons.
+   */
+  private readonly rendering = new Set<string>();
 
   /** Crawls accepted by this process and not yet started, in FIFO order. */
   private readonly waiting: QueueEntry[] = [];
@@ -2433,7 +2478,7 @@ export class ApiService {
       status: "queued",
     });
 
-    const entry: QueueEntry = { crawlId, config: crawlConfig, resuming: false };
+    const entry: QueueEntry = { crawlId, resuming: false };
     this.waiting.push(entry);
     this.pump();
     return { crawlId, status: "queued", queuePosition: this.queuePosition(crawlId) ?? 0 };
@@ -3014,12 +3059,160 @@ export class ApiService {
         status: "failed",
         finishedAt: new Date(),
         failureReason: MARKED_FAILED_REASON,
+        // A request pending on a `running` orphan dies with it: the column is
+        // non-null only while the row says `running` (27b column contract),
+        // and nobody is left to answer it.
+        controlRequest: null,
       })
       // Conditioned on the status this call READ, so a crawl that started (or
       // was closed by its own worker) between the guard and here is left alone
       // rather than overwritten. `getCrawl` below reports what actually stands.
       .where(and(eq(crawls.id, crawlId), eq(crawls.status, row.status)));
     return this.getCrawl(crawlId);
+  }
+
+  /**
+   * Pause a crawl — `crawl_pause` and `POST /crawls/:id/pause` (27b).
+   *
+   * The control table, applied with a compare-and-swap on the status this call
+   * read (and, on a running crawl, on the request it read):
+   *
+   *  - **queued** → `paused` (reason `request`) now, `immediate: true`, and out
+   *    of this process's queue. The removal and the CAS's dispatch are one
+   *    synchronous step after the read, as in `pump`, so the runner cannot
+   *    dequeue the crawl between them. A queued row this process does not hold
+   *    is decided by the CAS alone, and a runner elsewhere that later reaches it
+   *    skips it (`runQueued`, `ClaimLostError`).
+   *  - **running**, nothing pending → `control_request = 'pause'`,
+   *    `immediate: false`: the loop stops at its next poll. With a pause
+   *    already pending, the same answer and no write. With a cancel pending,
+   *    409: a cancel outranks a pause, and a pause would not undo it.
+   *  - **paused** → 409, already paused.
+   *  - **finished / failed / cancelled** → 409 naming the status.
+   *
+   * It never meets a render pass or a rules run: both refuse `queued` and
+   * `running` crawls, and those are the only ones a pause moves.
+   *
+   * A REQUEST IS NOT AN OUTCOME. A 202 says the request is on the row; a run
+   * that drains its frontier before its next poll closes `finished` and clears
+   * it. `crawl_status` is where the outcome is read.
+   */
+  async pauseCrawl(crawlId: string): Promise<CrawlControlOut> {
+    const row = await this.crawlRow(crawlId);
+    const pending = readControlRequest(row.controlRequest, crawlId);
+    switch (row.status) {
+      case "queued": {
+        // From here to the UPDATE's dispatch there is no `await`.
+        this.dropFromQueue(crawlId);
+        const moved = await this.db
+          .update(crawls)
+          .set({
+            status: "paused",
+            pauseReason: "request",
+            // As the loop's own stopped close writes it: when the crawl stopped.
+            finishedAt: new Date(),
+            controlRequest: null,
+          })
+          .where(and(eq(crawls.id, crawlId), eq(crawls.status, "queued")));
+        requireMoved(moved, crawlId, row.status, "pause");
+        return { crawlId, status: "paused", controlRequested: null, immediate: true };
+      }
+      case "running": {
+        if (pending === "cancel") {
+          throw new ServiceError(
+            "CONFLICT",
+            `crawl ${crawlId} is 'running' and a cancel is already pending: a cancel ` +
+              `outranks a pause, and the crawl will close 'cancelled'`,
+          );
+        }
+        if (pending === null) {
+          const set = await this.db
+            .update(crawls)
+            .set({ controlRequest: "pause" })
+            .where(
+              and(
+                eq(crawls.id, crawlId),
+                eq(crawls.status, "running"),
+                isNull(crawls.controlRequest),
+              ),
+            );
+          requireMoved(set, crawlId, row.status, "pause");
+        }
+        return { crawlId, status: "running", controlRequested: "pause", immediate: false };
+      }
+      case "paused":
+        throw new ServiceError(
+          "CONFLICT",
+          `crawl ${crawlId} is already paused (reason: ` +
+            `${String(readPauseReason(row.pauseReason, crawlId))}): crawl_resume continues it`,
+        );
+      default:
+        throw settledRefusal(crawlId, row.status, "paused");
+    }
+  }
+
+  /**
+   * Cancel a crawl — `crawl_cancel` and `POST /crawls/:id/cancel` (27b). A
+   * cancel is FINAL: `crawl_resume` refuses a cancelled crawl, and what it
+   * crawled stays judgeable.
+   *
+   * The control table, with `pauseCrawl`'s compare-and-swap and its one
+   * synchronous step for a queued crawl this process holds:
+   *
+   *  - **queued** → `cancelled` now (`cancelled_at`), out of the queue.
+   *  - **running** → `control_request = 'cancel'`, `immediate: false`, whether
+   *    nothing or a pause was pending (a cancel outranks a pause). With a cancel
+   *    already pending, the same answer and no write.
+   *  - **paused** → `cancelled` now, `cancelled_at` set, `pause_reason` null.
+   *  - **finished / failed / cancelled** → 409 naming the status.
+   *
+   * Refused (409) while this process renders or judges the crawl
+   * (`refuseWhileBusy`): neither can be interrupted, and a cancel would change
+   * the crawl under a pass that has already read it.
+   */
+  async cancelCrawl(crawlId: string): Promise<CrawlControlOut> {
+    const row = await this.crawlRow(crawlId);
+    const pending = readControlRequest(row.controlRequest, crawlId);
+    if (row.status !== "queued" && row.status !== "running" && row.status !== "paused") {
+      throw settledRefusal(crawlId, row.status, "cancelled");
+    }
+    this.refuseWhileBusy(crawlId, "crawl_cancel");
+    switch (row.status) {
+      case "queued":
+      case "paused": {
+        // From here to the UPDATE's dispatch there is no `await`.
+        if (row.status === "queued") this.dropFromQueue(crawlId);
+        const now = new Date();
+        const moved = await this.db
+          .update(crawls)
+          .set({
+            status: "cancelled",
+            cancelledAt: now,
+            pauseReason: null,
+            controlRequest: null,
+            // A queued crawl stops now; a paused one already has the time its
+            // run stopped, and that stays.
+            ...(row.status === "queued" ? { finishedAt: now } : {}),
+          })
+          .where(and(eq(crawls.id, crawlId), eq(crawls.status, row.status)));
+        requireMoved(moved, crawlId, row.status, "cancel");
+        return { crawlId, status: "cancelled", controlRequested: null, immediate: true };
+      }
+      case "running": {
+        if (pending !== "cancel" && !(await setControlRequest(this.db, crawlId, "cancel"))) {
+          throw changedState(crawlId, row.status, "cancel");
+        }
+        return { crawlId, status: "running", controlRequested: "cancel", immediate: false };
+      }
+      default:
+        throw settledRefusal(crawlId, row.status, "cancelled");
+    }
+  }
+
+  /** Take a crawl out of this process's wait queue, if it is there. Synchronous. */
+  private dropFromQueue(crawlId: string): void {
+    const index = this.waiting.findIndex((e) => e.crawlId === crawlId);
+    if (index >= 0) this.waiting.splice(index, 1);
   }
 
   /**
@@ -3031,7 +3224,8 @@ export class ApiService {
    * Phase 1, and the API's own queue runner already calls it for every crawl it
    * starts. What was missing was reachability. When the Phase 11 gate crawl's
    * harness stopped the server 40 minutes into the resource pass, the row closed
-   * `cancelled` with 786 resource rows still unasked, and finishing them took a
+   * `cancelled` (what a shutdown wrote before 27b; it writes `paused` now) with
+   * 786 resource rows still unasked, and finishing them took a
    * script with a database handle — for an operator driving this engine over the
    * network there was no move at all (docs/gates/phase-11.md §5). This is that
    * move.
@@ -3099,19 +3293,28 @@ export class ApiService {
    *     zero means something else took the crawl between the guards and the
    *     write, and nothing is queued.
    *
-   * A CANCELLED CRAWL WITH WORK LEFT IS RESUMABLE, and that is a ruling rather
-   * than an oversight. `cancelled` means an abort signal fired — an operator
-   * stopped the server, or stopped the crawl — and the loop's abort path is
-   * careful to decide nothing on the way out: the URLs it never leased stay
-   * pending, the resource rows it never reached stay null with no reason, and
-   * the 404 probe and the resource pass are skipped rather than recorded as
-   * having found nothing. So the rows an abort leaves are precisely the
-   * questions nobody has answered yet, and resuming asks only those. An operator
-   * who changes their mind is the ordinary case (it is what the Phase 11 gate
-   * did), and refusing it would mean re-crawling a site from scratch to recover
-   * from a decision that cost the site nothing. `failed` is here on the same
-   * terms — a crash decided nothing either — and a caller who wants the crawl
-   * dead rather than continued still has `crawl_mark_failed`.
+   *  7. **The crawl is `cancelled`** — 409, first of all the checks after the
+   *     read. A cancel is final (27b): it is what an agent asks for when it
+   *     wants the crawl to stop for good, and a resume would undo it.
+   *  8. **A render pass or a rules run holds it** — 409 naming which
+   *     (`refuseWhileBusy`): a resume would change the crawl under a pass that
+   *     has already read it.
+   *
+   * A PAUSED CRAWL IS RESUMABLE, and that is the whole point of a pause (27b).
+   * `paused` means the loop stopped on purpose — an agent's `crawl_pause`
+   * (`pauseReason: "request"`) or this server shutting down (`"shutdown"`) —
+   * and its stop path decides nothing on the way out: the URLs it never leased
+   * stay pending, the resource rows it never reached stay null with no reason,
+   * and the 404 probe and the resource pass are skipped rather than recorded as
+   * having found nothing. So the rows a pause leaves are precisely the
+   * questions nobody has answered yet, and resuming asks only those — at the
+   * spacing the crawl earned, which the frontier and the throttle record keep.
+   * A crawl paused while it was still queued never ran at all, so it owes the
+   * whole crawl and is not refused as having nothing left (it has no discovery
+   * record: that is the test). `failed` is resumable on the same terms — a
+   * crash decided nothing either — and a caller who wants the crawl dead rather
+   * than continued has `crawl_cancel` (or `crawl_mark_failed` for an orphan).
+   * `cancelled` is NOT: see refusal 7.
    *
    * ## The honest race, stated rather than papered over
    *
@@ -3147,6 +3350,17 @@ export class ApiService {
     }
 
     const row = await this.crawlRow(crawlId);
+
+    // Before the policy checks: a cancelled crawl is refused whatever its host,
+    // and the answer should say the true reason.
+    if (row.status === "cancelled") {
+      throw new ServiceError(
+        "CONFLICT",
+        `crawl ${crawlId} is 'cancelled', and a cancel is final: it cannot be resumed. ` +
+          `What it crawled stays judgeable; start a new crawl to continue the site`,
+      );
+    }
+    this.refuseWhileBusy(crawlId, "crawl_resume");
 
     // FIRST, BECAUSE IT IS FREE AND BECAUSE THE NEXT CHECKS ARE NOT. This one is
     // an array lookup in this process; `isUrlAllowed` below resolves the host,
@@ -3233,14 +3447,22 @@ export class ApiService {
     // Only a SETTLED crawl can be out of work. A `queued` or `running` row that
     // nobody is holding is a crawl a dead process left behind: its frontier may
     // be empty simply because it never got as far as seeding one, and resuming
-    // it does what a fresh start does — discover, seed, loop.
-    if (row.status !== "queued" && row.status !== "running") {
+    // it does what a fresh start does — discover, seed, loop. A `paused` crawl
+    // with no discovery record is the same case: it was paused before its run
+    // seeded anything (most often while it was still queued), so it owes the
+    // whole crawl.
+    const neverSeeded = row.status === "paused" && row.discovery === null;
+    if (row.status !== "queued" && row.status !== "running" && !neverSeeded) {
       const work = await this.owedWork(crawlId, config);
       if (work.total === 0) {
         throw new ServiceError("CONFLICT", nothingToResume(crawlId, row.status, work));
       }
     }
 
+    // Again, synchronously before the claim: the check at the top was several
+    // `await`s ago, and a render pass or a rules run may have claimed the crawl
+    // since. Once the row says `queued`, both refuse it.
+    this.refuseWhileBusy(crawlId, "crawl_resume");
     const claimed = await this.db
       .update(crawls)
       .set({
@@ -3249,12 +3471,15 @@ export class ApiService {
         // and a row saying both would be unreadable. The crawl loop clears it
         // too when it starts, but a row can sit in this queue for a while first.
         finishedAt: null,
+        // And the pause's reason goes with the pause: non-null exactly when
+        // `status = 'paused'` (27b column contract).
+        pauseReason: null,
         // AND SO DOES `rules_run_at`, for a sharper reason than tidiness.
         //
         // It is the surface's single load-bearing sentence (talos-surface.md
         // §5): a timestamp means a complete rules pass is on record, so an empty
         // findings answer means "looked, found nothing", and null means nobody
-        // has looked. Judge a cancelled crawl and then resume it, and the
+        // has looked. Judge a paused crawl and then resume it, and the
         // timestamp would survive over a crawl that has since grown pages —
         // `findingsCount` would describe a strictly smaller crawl than
         // `pagesScanned` counts, and every reader is told to trust the pair.
@@ -3311,7 +3536,7 @@ export class ApiService {
       );
     }
 
-    const entry: QueueEntry = { crawlId, config, resuming: true };
+    const entry: QueueEntry = { crawlId, resuming: true };
     this.waiting.push(entry);
     this.pump();
     return { crawlId, status: "queued", queuePosition: this.queuePosition(crawlId) ?? 0 };
@@ -3419,6 +3644,19 @@ export class ApiService {
         ? undefined
         : await this.checkRenderUrls(crawlId, input.urls, config);
 
+    // Check and claim in ONE synchronous step, as `runRulesForCrawl` claims
+    // `judging`: while the pass runs, `refuseWhileBusy` refuses the commands
+    // that would change the crawl under it (resume, cancel). The driver's own
+    // render-lease check would also refuse a second pass, but only once the
+    // first has leased a row; this hold covers the whole call.
+    if (this.rendering.has(crawlId)) {
+      throw new ServiceError(
+        "CONFLICT",
+        `crawl ${crawlId}: a render pass is running for it on this server, and two ` +
+          `passes may not share a crawl. Wait for crawl_render to answer, then ask again`,
+      );
+    }
+    this.rendering.add(crawlId);
     let summary: RenderPassSummary;
     try {
       summary = await runRenderPass(this.db, crawlId, {
@@ -3439,6 +3677,9 @@ export class ApiService {
       });
     } catch (error) {
       throw mapRenderPassError(error, crawlId, this.log);
+    } finally {
+      // Released on the failure path too, for `judging`'s reason.
+      this.rendering.delete(crawlId);
     }
 
     return {
@@ -3711,6 +3952,26 @@ export class ApiService {
         .where(eq(crawls.id, crawlId));
     });
     return await this.getCrawlConfig(crawlId);
+  }
+
+  /**
+   * The refusal `crawl_resume` and `crawl_cancel` give while this process
+   * renders or judges the crawl (27b). Neither pass can be interrupted in this
+   * phase, and each has already read the crawl it is working on, so a command
+   * that would change the crawl under it is refused (409), naming the
+   * operation and every pass that holds it. In-process, as the holds are (see
+   * `runRulesForCrawl` for why).
+   */
+  private refuseWhileBusy(crawlId: string, operation: string): void {
+    const holds: string[] = [];
+    if (this.judging.has(crawlId)) holds.push("rules are running");
+    if (this.rendering.has(crawlId)) holds.push("a render pass is running");
+    if (holds.length === 0) return;
+    throw new ServiceError(
+      "CONFLICT",
+      `${operation} is refused for crawl ${crawlId}: ${holds.join(" and ")} on this ` +
+        `server, and neither can be interrupted. Wait for it to answer, then ask again`,
+    );
   }
 
   /** The refusal `setCrawlJudgement` gives while this process is judging the crawl. */
@@ -5326,9 +5587,23 @@ export class ApiService {
    * `resumeCrawl` rather than `runCrawl` because the row already exists — it
    * was created when the crawl was accepted. A queued crawl's frontier is
    * empty, so a resume of it does exactly what a fresh run does: discover,
-   * seed, loop. The config passed in is the effective one, `allowPrivate`
-   * included; the row's stored copy never had it (`storableConfig`), and
-   * `ResumeOpts.config` is the documented place to re-assert it.
+   * seed, loop.
+   *
+   * THE CONFIG IS READ HERE, AT DEQUEUE, from the row — not carried from
+   * acceptance — so a change made while the crawl waited is the one it runs
+   * with. The two test-only fields the row never holds (`storableConfig`) are
+   * re-asserted from this process (`processTrustConfig`), and
+   * `ResumeOpts.config` is the documented place to do it.
+   *
+   * THE CRAWL MAY HAVE LEFT THE QUEUE STATE WHILE IT WAITED: paused or
+   * cancelled by an agent (this process takes a crawl it holds out of its
+   * queue when it does that, but another process cannot), retired by
+   * `crawl_mark_failed` elsewhere. The read here skips such a row, and the
+   * loop's claim (`expectStatus: "queued"`) skips one that moves between this
+   * read and the claim; both are the same `ClaimLostError`. Either is logged
+   * and the row is left exactly as the other writer left it — it is not a
+   * failure of this crawl, and closing it `failed` would overwrite a decision
+   * somebody made.
    *
    * That identity is why `crawl_resume` needed no new runner: an entry put here
    * by `ApiService.resumeCrawl` differs only in that its frontier is NOT empty,
@@ -5341,14 +5616,25 @@ export class ApiService {
    * cannot tell those apart from outside.
    */
   private async runQueued(entry: QueueEntry, signal: AbortSignal): Promise<void> {
-    this.log(
-      `api: crawl ${entry.crawlId} ${entry.resuming ? "resuming" : "starting"} ` +
-        `(${entry.config.siteUrl})`,
-    );
     try {
+      const [row] = await this.db
+        .select({ status: crawls.status, config: crawls.config })
+        .from(crawls)
+        .where(eq(crawls.id, entry.crawlId));
+      if (row === undefined) throw new Error(`queue runner: no crawl ${entry.crawlId}`);
+      if (row.status !== "queued") throw new ClaimLostError(entry.crawlId, row.status, "queued");
+      const config: CrawlConfig = {
+        ...parseStoredConfig(row.config, entry.crawlId),
+        ...this.processTrustConfig(),
+      };
+      this.log(
+        `api: crawl ${entry.crawlId} ${entry.resuming ? "resuming" : "starting"} ` +
+          `(${config.siteUrl})`,
+      );
       const summary = await resumeCrawl(this.db, entry.crawlId, {
-        config: entry.config,
+        config,
         signal,
+        expectStatus: "queued",
       });
       // The template inference beside the page count, because the pair is the
       // whole of "what shape is this site" and the alternative is a second
@@ -5366,6 +5652,15 @@ export class ApiService {
           `${summary.pagesCrawled} page(s), ${templates}`,
       );
     } catch (error) {
+      if (error instanceof ClaimLostError) {
+        // Not a failure, and nothing to write: see the docblock. Matched on the
+        // type, never on the sentence.
+        this.log(
+          `api: crawl ${entry.crawlId} left the queue state ('${error.status}') before it ` +
+            `ran; not started`,
+        );
+        return;
+      }
       // The crawl's own failure path has already closed the row as `failed`
       // (see `execute` in the crawl loop) for anything thrown inside the run.
       // A throw BEFORE that — a row deleted underneath us, a config the loop
@@ -5392,6 +5687,22 @@ export class ApiService {
         })
         .where(and(eq(crawls.id, entry.crawlId), eq(crawls.status, "queued")));
     }
+  }
+
+  /**
+   * The two TEST-ONLY crawl-config fields `storableConfig` strips from every
+   * row (`allowPrivate`, `recheckMinGapMs`), re-asserted from this process's
+   * `crawlDefaults` — the process-trust seam, never a row or a request. The
+   * queue runner adds them to the stored config it reads at dequeue.
+   */
+  private processTrustConfig(): Pick<CrawlConfig, "allowPrivate" | "recheckMinGapMs"> {
+    const defaults = this.config.crawlDefaults;
+    return {
+      allowPrivate: defaults?.allowPrivate === true,
+      ...(defaults?.recheckMinGapMs === undefined
+        ? {}
+        : { recheckMinGapMs: defaults.recheckMinGapMs }),
+    };
   }
 
   /** 0 = running now or next; null = this process is not holding this crawl. */
@@ -7298,6 +7609,52 @@ function stripUndefined<T extends object>(value: T): Partial<T> {
 
 function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+/**
+ * The refusal a crawl_pause / crawl_cancel answers on a settled crawl, naming
+ * its status. A status this engine never writes is not a refusal but a defect
+ * of ours, and throws as one.
+ */
+function settledRefusal(crawlId: string, status: string, target: "paused" | "cancelled"): Error {
+  if (status === "finished" || status === "failed" || status === "cancelled") {
+    return new ServiceError(
+      "CONFLICT",
+      `crawl ${crawlId} is '${status}': only a queued, running or ` +
+        `${target === "paused" ? "" : "paused "}crawl can be ${target}`,
+    );
+  }
+  return new Error(`crawl ${crawlId} has status ${JSON.stringify(status)}, which this engine never writes`);
+}
+
+/** A control command's compare-and-swap found the row moved under it. */
+function changedState(crawlId: string, status: string, verb: "pause" | "cancel"): ServiceError {
+  return new ServiceError(
+    "CONFLICT",
+    `crawl ${crawlId} changed state while this ${verb} was being applied — it was ` +
+      `'${status}' when the call began and something else has moved it since. ` +
+      `Nothing was changed; read crawl_status and try again`,
+  );
+}
+
+/**
+ * Read a control command's compare-and-swap. Zero rows is `changedState`; a
+ * missing row count means nobody knows whether the write landed, which is a
+ * defect rather than a refusal (`resumeCrawl`'s reading of its own CAS).
+ */
+function requireMoved(
+  result: { rowCount: number | null },
+  crawlId: string,
+  status: string,
+  verb: "pause" | "cancel",
+): void {
+  if (result.rowCount === null) {
+    throw new Error(
+      `${verb}Crawl: the update of crawl ${crawlId} reported no row count, so whether ` +
+        `the ${verb} was applied is unknown`,
+    );
+  }
+  if (result.rowCount === 0) throw changedState(crawlId, status, verb);
 }
 
 /**
