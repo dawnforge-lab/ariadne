@@ -26,19 +26,39 @@
  *   POST /crawls/:id/resume            continue a crawl that stopped with work
  *                                      still owed — the same crawl, the same id,
  *                                      queued again. Answers `crawl_start`'s
- *                                      `{crawlId, status, queuePosition}` -> 202
+ *                                      `{crawlId, status, queuePosition}` -> 202.
+ *                                      A paused crawl resumes; a cancelled one
+ *                                      is final and 409s
+ *   POST /crawls/:id/pause             pause a crawl. Queued: paused now -> 200.
+ *                                      Running: requested of its loop -> 202.
+ *                                      `{crawlId, status, controlRequested,
+ *                                      immediate}`
+ *   POST /crawls/:id/cancel            cancel a crawl, for good. Queued or
+ *                                      paused: cancelled now -> 200. Running:
+ *                                      requested -> 202. Same answer shape
+ *   DELETE /crawls/:id?confirm=<id>    delete a crawl for good: every row and its
+ *                                      files. `confirm` must repeat the id.
+ *                                      `{crawlId, rows, files}` -> 200; 409
+ *                                      while queued, running or busy
  *   POST /crawls/:id/render            run the render pass. No body: the engine
  *                                      selects. `{"urls": [...]}`: those pages
  *                                      instead, replacing the automatic
  *                                      selection for that pass
  *   POST /crawls/:id/rules             run the rules
- *   GET  /crawls/:id/config            the crawl's judgement block, every
- *                                      overridable threshold, the last run's
- *                                      stamp and `judgementStale`
- *   PATCH /crawls/:id/config           `{judgement: {...}}`, an RFC 7396
- *                                      merge-patch of the block (null removes a
- *                                      key, except `findingCap`, where null is
- *                                      uncapped). 409 while the rules run
+ *   GET  /crawls/:id/config            `{crawl, mutability, judgement, ...}`:
+ *                                      the crawl's stored settings with each
+ *                                      key's mutability, its judgement block,
+ *                                      every overridable threshold, the last
+ *                                      run's stamp and `judgementStale`
+ *   PATCH /crawls/:id/config           `{crawl?: {...}, judgement?: {...}}`:
+ *                                      `crawl` is new values for whenPaused
+ *                                      settings (queued or paused crawls only;
+ *                                      409 for a changed never field),
+ *                                      `judgement` an RFC 7396 merge-patch of
+ *                                      the block (null removes a key, except
+ *                                      `findingCap`, where null is uncapped).
+ *                                      One transaction; 409 while the rules
+ *                                      (or, for `crawl`, a render pass) run
  *   GET  /crawls/:id/issues            findings grouped by rule (the triage view).
  *                                      A group's `count` is the rows the rule
  *                                      wrote; `truncated` + `total`|`atLeast`
@@ -77,6 +97,17 @@
  *                                      the metric's own declaration
  *   GET  /crawls/:id/pages             the crawled pages, slim and filtered
  *   GET  /crawls/:id/robots            the site's robots.txt as this crawl read it
+ *   GET  /config/schema                the crawl-start body as JSON Schema draft
+ *                                      2020-12 — each field's description,
+ *                                      default and `x-ariadne-mutable`, the
+ *                                      overridable thresholds with their bounds
+ *                                      — and the `rulesetVersion` it names
+ *                                      rules from
+ *   POST /config/validate              a dry run of `POST /crawls`: always 200
+ *                                      with `{valid, errors: [{path, code,
+ *                                      message}], effective}`. The same checks,
+ *                                      allowlist and URL policy included, and no
+ *                                      DNS lookup; only a non-JSON body is 400
  *   GET  /rules                        the rule catalog: every rule with its
  *                                      client-facing copy. `?crawlId=` joins
  *                                      one crawl's fired state onto it —
@@ -139,7 +170,6 @@ import {
   ApiService,
   ServiceError,
   parseRenderCrawlInput,
-  parseStartCrawlInput,
   type CsvStream,
   type ServiceErrorCode,
 } from "./service.js";
@@ -222,7 +252,7 @@ interface Route {
    * Every query parameter this route accepts — a CLOSED list, checked before
    * the handler runs.
    *
-   * `parseStartCrawlInput`'s discipline, applied to the other half of the
+   * The crawl-start schema's discipline, applied to the other half of the
    * request. A filter the server does not know is not a harmless extra: a
    * caller who writes `?serverity=critical` gets an unfiltered listing and
    * reads it as "these are the critical findings", which is a wrong answer
@@ -292,9 +322,32 @@ function buildRoutes(): Route[] {
       method: "POST",
       pattern: ["crawls"],
       query: [],
+      // The body as it arrived: `startCrawl` parses it with the one schema
+      // both transports share (src/api/config-schema.ts).
       handler: async (service, ctx) => ({
         status: 202,
-        body: await service.startCrawl(parseStartCrawlInput(ctx.body)),
+        body: await service.startCrawl(ctx.body),
+      }),
+    },
+    {
+      method: "GET",
+      pattern: ["config", "schema"],
+      query: [],
+      handler: async (service, ctx) => {
+        noBody(ctx);
+        return { status: 200, body: service.configSchema() };
+      },
+    },
+    {
+      method: "POST",
+      pattern: ["config", "validate"],
+      query: [],
+      // ALWAYS 200: an invalid body is the answer this route exists to give,
+      // `{valid: false, errors}`, not a refusal of the request. Only a body
+      // that is not JSON at all is a 400, and that is `handle`'s, before here.
+      handler: async (service, ctx) => ({
+        status: 200,
+        body: await service.validateConfig(ctx.body),
       }),
     },
     {
@@ -341,6 +394,41 @@ function buildRoutes(): Route[] {
     },
     {
       method: "POST",
+      pattern: ["crawls", id, "pause"],
+      query: [],
+      // 200 when the row has already moved (`immediate`), 202 when the request
+      // is recorded for a running crawl's loop to act on: the same line
+      // between "done" and "accepted" the routes above draw.
+      handler: async (service, ctx) => {
+        noBody(ctx);
+        const out = await service.pauseCrawl(param(ctx, "id"));
+        return { status: out.immediate ? 200 : 202, body: out };
+      },
+    },
+    {
+      method: "POST",
+      pattern: ["crawls", id, "cancel"],
+      query: [],
+      handler: async (service, ctx) => {
+        noBody(ctx);
+        const out = await service.cancelCrawl(param(ctx, "id"));
+        return { status: out.immediate ? 200 : 202, body: out };
+      },
+    },
+    {
+      method: "DELETE",
+      pattern: ["crawls", id],
+      query: ["confirm"],
+      handler: async (service, ctx) => {
+        noBody(ctx);
+        return {
+          status: 200,
+          body: await service.deleteCrawl(param(ctx, "id"), ctx.query.get("confirm") ?? undefined),
+        };
+      },
+    },
+    {
+      method: "POST",
       pattern: ["crawls", id, "render"],
       query: [],
       // The one POST here that takes an OPTIONAL body: no body is the automatic
@@ -376,11 +464,11 @@ function buildRoutes(): Route[] {
       pattern: ["crawls", id, "config"],
       query: [],
       // The body is the patch, validated whole by the service: a missing body,
-      // a key other than `judgement`, or a block the ruleset cannot apply is a
+      // a key other than `crawl` and `judgement`, or a block the ruleset cannot apply is a
       // 400 naming what was wrong, and nothing is written.
       handler: async (service, ctx) => ({
         status: 200,
-        body: await service.setCrawlJudgement(param(ctx, "id"), ctx.body),
+        body: await service.setCrawlConfig(param(ctx, "id"), ctx.body),
       }),
     },
     // THE QUERY SURFACE. Every one of these is a GET whose whole body is
@@ -735,7 +823,7 @@ function param(ctx: RequestCtx, name: string): string {
 /**
  * A query string this route understands, or a 400 naming the parameter.
  *
- * The same argument as `noBody` and as `parseStartCrawlInput`'s unknown-field
+ * The same argument as `noBody` and as the crawl-start schema's unknown-field
  * refusal, made about the third place a request can carry an instruction. An
  * ignored `?serverity=critical` is worse than an ignored body: the caller gets
  * a 200 full of rows and believes they are the critical ones.

@@ -97,7 +97,7 @@
  * request — not once per batch, which at a 30s spacing would be minutes of
  * asking after the caller said stop — and the rows it leaves get NO reason,
  * because nothing decided anything about them. The summary says `aborted: true`
- * so the crawl loop can close its row `cancelled` rather than reporting a
+ * so the crawl loop can close its row stopped (`paused` or `cancelled`) rather than reporting a
  * finished crawl with a silently incomplete resource census (hard rule 7).
  */
 import { and, asc, eq, gt, isNull, sql } from "drizzle-orm";
@@ -350,7 +350,7 @@ export interface ResourcePassSummary {
    * cap flags in the way it has to be: a cap is a budget the operator set and
    * the rows it stopped at SAY SO (`fetch_reason: 'resource-cap'`), while an
    * abort decided nothing about anything — its rows carry no reason, and the
-   * crawl that ran this pass must close `cancelled` rather than `finished`
+   * crawl that ran this pass must close stopped (`paused` or `cancelled`), not `finished`
    * (hard rule 7; the loop reads this).
    */
   aborted: boolean;
@@ -380,8 +380,13 @@ interface HostRecord {
   /**
    * The host's rules, as a promise so that concurrent workers arriving at a new
    * host share ONE robots.txt request rather than racing to make several.
+   *
+   * Null only when the caller's signal aborted while the robots.txt request
+   * waited for its gate slot (Phase 27b): nothing was asked, the pass is
+   * stopping, and every worker that reads the null stops too, leaving its row
+   * unasked. It is never read as "no rules".
    */
-  robots: Promise<RobotsInfo>;
+  robots: Promise<RobotsInfo | null>;
   /** Consecutive transport failures. Any answer resets it. */
   consecutiveErrors: number;
   /** Why this host's queue was parked, or null while it is alive. */
@@ -475,6 +480,8 @@ export async function fetchCrawlResources(
     // pre-computed class keeps one decision in one place: `admit` answers "may
     // we ask, and on what evidence", `processOne` turns that into a row.
     | { kind: "denied"; reason: string; outcome: RobotsOutcome }
+    // The signal fired while this host's robots.txt waited for its slot.
+    | { kind: "aborted" }
     | { kind: "ok" }
   > => {
     let record = hosts.get(host);
@@ -491,7 +498,7 @@ export async function fetchCrawlResources(
         robots: isSameOrigin(url, opts.siteUrl)
           ? Promise.resolve(opts.originRobots)
           : (async () => {
-              await gate.acquire(host);
+              if (!(await gate.acquire(host, opts.signal))) return null;
               const info = await fetchRobots(
                 new URL(url).origin,
                 {
@@ -521,6 +528,7 @@ export async function fetchCrawlResources(
     if (record.parked !== null) return { kind: "parked", reason: record.parked };
 
     const robots = await record.robots;
+    if (robots === null) return { kind: "aborted" };
     if (!robots.isAllowed(url)) {
       return {
         kind: "denied",
@@ -617,6 +625,9 @@ export async function fetchCrawlResources(
       const host = new URL(url).host;
 
       const admission = await admit(host, url);
+      // Stopped while the host's robots.txt waited for its slot: the row is
+      // left as the per-request check above leaves it, null and unasked.
+      if (admission.kind === "aborted") return;
       if (admission.kind === "capped") {
         // Unfetched, not failed: the null still means "seen, not yet asked".
         return done(unfetchable(null, RESOURCE_CAP_REASON));
@@ -643,7 +654,10 @@ export async function fetchCrawlResources(
         );
       }
 
-      await gate.acquire(host);
+      // The signal wakes the slot wait (Phase 27b): a stop under a long spacing
+      // is honoured now, not when the slot comes due. The row is left exactly
+      // as the per-request check above leaves it: null, no reason.
+      if (!(await gate.acquire(host, opts.signal))) return;
       // Re-checked after the wait: a sibling worker may have parked this host
       // while we sat in its queue, and asking anyway would be three more
       // requests at a server that has already stopped answering.
@@ -829,7 +843,8 @@ export async function fetchCrawlResources(
   // Read once, at the end, and returned: the signal may have fired inside a
   // worker (which stops asking immediately) rather than at a batch boundary,
   // and the caller has to be able to tell "the pass finished" from "the pass was
-  // stopped" — the crawl loop closes its row `cancelled` on this (hard rule 7).
+  // stopped" — the crawl loop closes its row stopped (`paused` or `cancelled`)
+  // on this (hard rule 7).
   const aborted = opts.signal?.aborted === true;
 
   if (cappedByResources && !aborted) {

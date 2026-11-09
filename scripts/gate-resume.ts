@@ -182,7 +182,7 @@ async function main(): Promise<number> {
     const pagesAfterRun1 = await countRows(db, "pages", crawlId);
 
     console.log("");
-    console.log(`run 1 status    ${summary1.status}${summary1.note === null ? "" : ` (${summary1.note})`}`);
+    console.log(`run 1 status    ${summary1.status}${summary1.pauseReason === null ? "" : ` [${summary1.pauseReason}]`}${summary1.note === null ? "" : ` (${summary1.note})`}`);
     console.log(`run 1 pages     ${summary1.pagesCrawled.toLocaleString()} (abort requested at ${doneAtAbort.toLocaleString()} done)`);
     console.log(`run 1 rows      ${pagesAfterRun1.toLocaleString()} in pages`);
     console.log(
@@ -224,8 +224,8 @@ async function main(): Promise<number> {
     console.log("");
 
     const failures: string[] = [];
-    if (summary1.status !== "cancelled") {
-      failures.push(`run 1 ended '${summary1.status}', expected 'cancelled'`);
+    if (summary1.status !== "paused" || summary1.pauseReason !== "shutdown") {
+      failures.push(`run 1 ended '${summary1.status}' (${String(summary1.pauseReason)}), expected 'paused' (shutdown)`);
     }
     if (afterAbort.pending + afterAbort.leased === 0) {
       failures.push("run 1 drained the frontier; there was nothing left to resume");

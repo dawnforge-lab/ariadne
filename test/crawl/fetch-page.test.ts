@@ -1,7 +1,8 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createServer, type Server } from "node:http";
+import { randomBytes } from "node:crypto";
 import { gzipSync } from "node:zlib";
-import { fetchPage, MAX_BODY, parseRetryAfter } from "../../src/crawl/fetch-page.js";
+import { FetchAbortedError, fetchPage, MAX_BODY, parseRetryAfter } from "../../src/crawl/fetch-page.js";
 import { analyzePage } from "../../src/crawl/parse/page-analyzer.js";
 import { closeFetchAgents, type DnsLookupFn } from "../../src/crawl/http.js";
 import { RESPONSE_HEADER_VALUE_CAP } from "../../src/crawl/response-headers.js";
@@ -825,5 +826,91 @@ describe("fetchPage", () => {
       expect(r.fetchClass).toBe("ok");
       expect(r.body).toContain("<title>ok</title>");
     });
+  });
+});
+
+describe("fetchPage signal (27b)", () => {
+  let stall: Server;
+  let stallBase: string;
+  let seen = 0;
+
+  beforeAll(async () => {
+    stall = createServer((req, res) => {
+      seen += 1;
+      if (req.url === "/partial-identity") {
+        // Headers and the first bytes, then silence: the body read is stalled.
+        res.writeHead(200, { "content-type": "text/html" });
+        res.write("<html><title>partial</title>");
+      } else if (req.url === "/partial-gzip") {
+        // A valid prefix of a gzip stream (incompressible payload), never ended.
+        const whole = gzipSync(randomBytes(64 * 1024));
+        res.writeHead(200, { "content-type": "text/html", "content-encoding": "gzip" });
+        res.write(whole.subarray(0, 4096));
+      }
+      // /stall: accept, never answer
+    });
+    await new Promise<void>((r) => stall.listen(0, "127.0.0.1", r));
+    const addr = stall.address();
+    if (addr === null || typeof addr === "string") throw new Error("no port");
+    stallBase = `http://127.0.0.1:${addr.port}`;
+  });
+  afterAll(async () => {
+    stall.closeAllConnections();
+    await new Promise<void>((r) => stall.close(() => r()));
+  });
+
+  it("rejects with FetchAbortedError when the signal aborts mid-request", async () => {
+    const url = `${stallBase}/stall`;
+    const controller = new AbortController();
+    setTimeout(() => controller.abort(), 100);
+    const started = Date.now();
+    const err = await fetchPage(url, { ...OPTS, timeoutMs: 20_000, signal: controller.signal }).then(
+      () => null,
+      (e: unknown) => e,
+    );
+    expect(err).toBeInstanceOf(FetchAbortedError);
+    expect((err as FetchAbortedError).url).toBe(url);
+    expect(Date.now() - started).toBeLessThan(1_000);
+  });
+
+  it.each(["/partial-identity", "/partial-gzip"])(
+    "rejects with FetchAbortedError when the signal aborts during the body read (%s)",
+    async (path) => {
+      const url = `${stallBase}${path}`;
+      const controller = new AbortController();
+      setTimeout(() => controller.abort(), 300); // well after headers + first bytes
+      const started = Date.now();
+      const err = await fetchPage(url, { ...OPTS, timeoutMs: 20_000, signal: controller.signal }).then(
+        () => null,
+        (e: unknown) => e,
+      );
+      expect(err).toBeInstanceOf(FetchAbortedError);
+      expect((err as FetchAbortedError).url).toBe(url);
+      expect(Date.now() - started).toBeLessThan(1_000);
+    },
+  );
+
+  it("rejects an already-aborted signal without touching the server", async () => {
+    const before = seen;
+    const controller = new AbortController();
+    controller.abort();
+    await expect(
+      fetchPage(`${stallBase}/stall`, { ...OPTS, signal: controller.signal }),
+    ).rejects.toBeInstanceOf(FetchAbortedError);
+    expect(seen).toBe(before);
+  });
+
+  it("still classifies the deadline as timeout when a signal is supplied but not aborted", async () => {
+    const result = await fetchPage(`${stallBase}/stall`, {
+      ...OPTS,
+      timeoutMs: 200,
+      signal: new AbortController().signal,
+    });
+    expect(result.fetchClass).toBe("timeout");
+  });
+
+  it("classifies the deadline as timeout with no signal at all", async () => {
+    const result = await fetchPage(`${stallBase}/stall`, { ...OPTS, timeoutMs: 200 });
+    expect(result.fetchClass).toBe("timeout");
   });
 });

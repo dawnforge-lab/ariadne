@@ -16,12 +16,16 @@ export const crawls = pgTable("crawls", {
   siteUrl: text("site_url").notNull(),
   config: jsonb("config_jsonb").notNull(),
   rulesetVersion: text("ruleset_version").notNull(),
-  // queued|running|finished|failed|cancelled. `running` and the three terminal
-  // values are written by the crawl loop (src/crawl/loop.ts, `CrawlSummary
+  // queued|running|paused|finished|failed|cancelled. `running`, `paused` and
+  // the terminal values are written by the crawl loop (src/crawl/loop.ts, `CrawlSummary
   // .status`); `queued` is written by the API's crawl queue, which creates the
   // row when a crawl is ACCEPTED and runs it when its turn comes
   // (src/api/service.ts) — so a queued row is durable work that no process has
-  // started, and it is never a summary outcome.
+  // started, and it is never a summary outcome. The API service also writes
+  // `paused` and `cancelled` directly (27b): `crawl_pause` on a queued crawl,
+  // and `crawl_cancel` on a queued or paused one, move the row at once
+  // (`pauseCrawl` / `cancelCrawl`); `failed` is also written by
+  // `crawl_mark_failed`.
   //
   // Free text, no enum constraint, so adding a value is a code change and not a
   // migration — which means every consumer must be audited by hand when one is
@@ -29,6 +33,15 @@ export const crawls = pgTable("crawls", {
   // guard (src/crawl/render/run-render.ts), which refuses `running` and
   // `queued`, and the API's crawl serialisation. No rule reads this column.
   status: text("status").notNull().default("running"),
+  // Phase 27b lifecycle columns, all nullable, contract kept in code (no DB
+  // check constraints):
+  //  - control_request: "pause" | "cancel", non-null only while status='running'
+  //    (a request the loop has not yet acted on);
+  //  - pause_reason: "request" | "shutdown", non-null exactly when status='paused';
+  //  - cancelled_at: set only when status='cancelled'.
+  controlRequest: text("control_request"),
+  pauseReason: text("pause_reason"),
+  cancelledAt: timestamp("cancelled_at", { withTimezone: true }),
   // WHY THIS CRAWL IS `failed` — one sentence, never a stack (migration 0017,
   // P18).
   //

@@ -698,10 +698,10 @@ describe("runCrawl", () => {
     const counts = await frontierCounts(db, summary.crawlId);
     expect(counts.leased).toBe(0); // graceful shutdown released leases
     expect(counts.pending).toBeGreaterThan(0); // and left work to resume
-    expect(summary.status).toBe("cancelled");
+    expect([summary.status, summary.pauseReason]).toEqual(["paused", "shutdown"]);
 
     const crawlRow = await db.select().from(crawls).where(eq(crawls.id, summary.crawlId));
-    expect(crawlRow[0]?.status).toBe("cancelled");
+    expect([crawlRow[0]?.status, crawlRow[0]?.pauseReason]).toEqual(["paused", "shutdown"]);
 
     // INSERTION 3c did not run, and says so by being null rather than by
     // returning a summary of nothing (the `resources: null` precedent). An
@@ -742,7 +742,7 @@ describe("runCrawl", () => {
 
     // Two by the crawl, one by the pass, and nothing after the signal fired.
     expect(boomHits).toBe(3);
-    expect(summary.status).toBe("cancelled");
+    expect([summary.status, summary.pauseReason]).toEqual(["paused", "shutdown"]);
     // The pass RAN, unlike the case above, and says what it settled before it
     // was stopped.
     expect(summary.recheck).toMatchObject({ rechecked: 1, capped: false, aborted: true });
@@ -751,7 +751,7 @@ describe("runCrawl", () => {
     expect(summary.resources).toBeNull();
 
     const [row] = await db.select().from(crawls).where(eq(crawls.id, summary.crawlId));
-    expect(row?.status).toBe("cancelled");
+    expect([row?.status, row?.pauseReason]).toEqual(["paused", "shutdown"]);
     // THE ASYMMETRY, which is the whole reason both columns exist: the COUNT is
     // stamped whatever happened, so an aborted pass says what it actually did;
     // the TIME is stamped only by a pass that COMPLETED, so no reader can take
@@ -990,11 +990,11 @@ describe("runCrawl", () => {
     poisonNextPage = false;
 
     expect(thrown).toBeInstanceOf(AggregateError);
-    const aggregate = thrown as AggregateError;
-    expect(aggregate.errors).toHaveLength(2);
-    const text = aggregate.errors.map((e) => String((e as Error).message ?? e)).join("\n");
+    const flat = (e: unknown): unknown[] => (e instanceof AggregateError ? e.errors.flatMap(flat) : [e]);
+    const text = flat(thrown).map((e) => String((e as Error).message ?? e)).join("\n");
     expect(text).toMatch(/frontier/); // the loop's error survived
     expect(text).toMatch(/pages/); // and so did the flush's
+    expect(text).toMatch(/the crawls row is gone/); // and the failed close says it closed nothing (27b M3)
   });
 });
 
@@ -1556,7 +1556,7 @@ describe("resumeCrawl", () => {
     const ac = new AbortController();
     setTimeout(() => ac.abort(), 50);
     const first = await crawl(config({ perHostDelayMs: 40 }), ac.signal);
-    expect(first.status).toBe("cancelled");
+    expect([first.status, first.pauseReason]).toEqual(["paused", "shutdown"]);
     expect(first.pagesCrawled).toBeLessThan(6);
 
     const resumed = await resumeCrawl(db, first.crawlId, {
@@ -1591,7 +1591,7 @@ describe("resumeCrawl", () => {
     const ac = new AbortController();
     setTimeout(() => ac.abort(), 50);
     const first = await crawl(config({ perHostDelayMs: 40 }), ac.signal);
-    expect(first.status).toBe("cancelled");
+    expect([first.status, first.pauseReason]).toEqual(["paused", "shutdown"]);
 
     // What the first run would have written had the site refused it: the column
     // is set directly because the fixture site never blocks, and the number is
@@ -1623,7 +1623,7 @@ describe("resumeCrawl", () => {
     const ac = new AbortController();
     setTimeout(() => ac.abort(), 50);
     const first = await crawl(config({ perHostDelayMs: 40 }), ac.signal);
-    expect(first.status).toBe("cancelled");
+    expect([first.status, first.pauseReason]).toEqual(["paused", "shutdown"]);
 
     const host = new URL(base).host;
     // What the first run would have written for this host had the site refused
@@ -1723,7 +1723,7 @@ describe("resumeCrawl", () => {
     const ac = new AbortController();
     setTimeout(() => ac.abort(), 50);
     const first = await crawl(config({ perHostDelayMs: 40 }), ac.signal);
-    expect(first.status).toBe("cancelled");
+    expect([first.status, first.pauseReason]).toEqual(["paused", "shutdown"]);
 
     // The crawl-wide number only — no map, as a row written before 0015 carries.
     await db
@@ -1752,14 +1752,14 @@ describe("resumeCrawl", () => {
   it("re-persists a non-widest host's escalation mid-crawl, not only at close", async () => {
     const originHost = new URL(throttle).host;
 
-    // A cancelled first run, only to mint a resumable crawl row + frontier.
+    // A paused (shutdown) first run, only to mint a resumable crawl row + frontier.
     const preAborted = new AbortController();
     preAborted.abort();
     const first = await crawl(
       config({ siteUrl: throttle, perHostDelayMs: 40, probeHosts: false }),
       preAborted.signal,
     );
-    expect(first.status).toBe("cancelled");
+    expect([first.status, first.pauseReason]).toEqual(["paused", "shutdown"]);
 
     // The prior run's finding: some OTHER host earned the crawl-wide widest
     // 10_000 ms (the fallback), while this origin earned only its 40 ms base —
@@ -1808,7 +1808,7 @@ describe("resumeCrawl", () => {
     const ac = new AbortController();
     setTimeout(() => ac.abort(), 50);
     const first = await crawl(config({ perHostDelayMs: 40 }), ac.signal);
-    expect(first.status).toBe("cancelled");
+    expect([first.status, first.pauseReason]).toEqual(["paused", "shutdown"]);
 
     // The worker that gets killed: it leases a URL, fetches it, buffers the
     // page row — and the process dies before the buffer is flushed. Dropping
@@ -2030,7 +2030,7 @@ describe("the test-only config fields are not persisted", () => {
     const ac = new AbortController();
     setTimeout(() => ac.abort(), 50);
     const first = await crawl(config({ perHostDelayMs: 40 }), ac.signal);
-    expect(first.status).toBe("cancelled");
+    expect([first.status, first.pauseReason]).toEqual(["paused", "shutdown"]);
 
     // The same resume, with the hatch re-stated at the call site — explicit,
     // in the open, and scoped to this call. That is the whole contract.
@@ -2330,7 +2330,7 @@ describe("platform profile", () => {
         config({ siteUrl: storefrontBase, maxConcurrency: 4, perHostDelayMs: 0 }),
         ac.signal,
       );
-      expect(first.status).toBe("cancelled");
+      expect([first.status, first.pauseReason]).toEqual(["paused", "shutdown"]);
       const recorded = (await rowOf(first.crawlId)).platformProfile;
       expect(recorded?.applied?.maxConcurrency).toBe(1);
 
@@ -2443,7 +2443,7 @@ describe("platform profile", () => {
         config({ siteUrl: storefrontBase, maxConcurrency: 4, perHostDelayMs: 250 }),
         ac.signal,
       );
-      expect(first.status).toBe("cancelled");
+      expect([first.status, first.pauseReason]).toEqual(["paused", "shutdown"]);
       expect((await rowOf(first.crawlId)).platform).toBe("shopify");
 
       reset(SHOPIFY_HEADERS);

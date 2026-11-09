@@ -91,20 +91,53 @@ export class JudgementError extends Error {
   }
 }
 
+/**
+ * The sentences a refused block's detail is written in. Exported because the
+ * published config schema (src/api/config-schema.ts) refuses the same shapes
+ * before this parser runs, and must refuse them in the same words — one
+ * wording, not two that drift.
+ */
+export const JUDGEMENT_DETAIL = {
+  disabledNotTrue: "only true is accepted; an enabled rule is one with no `disabled` key",
+  severity:
+    "severity cannot be overridden: it is the engine's fact about the rule; " +
+    "change its priority or disable it instead",
+  unknownKey: "unknown key",
+  notOverridableThreshold: `not an overridable threshold (overridable: ${THRESHOLD_NAMES.join(", ")})`,
+  unknownRule: (id: string): string => `no rule '${id}' in ruleset`,
+  metricRule: (id: string): string =>
+    `'${id}' is a metric rule; it produces no findings, so it cannot be ` +
+    "disabled, retyped or reprioritised",
+  /** A threshold that is not a number, not an integer, or outside its range. */
+  thresholdRange: (min: number, max: number): string => `must be an integer in [${min}, ${max}]`,
+  /** A rule override (or a section of the block) that is not an object. */
+  notObject: "must be a JSON object",
+} as const;
+
 const ruleOverrideSchema = z
-  .strictObject({
-    disabled: z
-      .literal(true, { error: "only true is accepted; an enabled rule is one with no `disabled` key" })
-      .optional(),
-    type: z.enum(["issue", "warning", "opportunity"]).optional(),
-    priority: z.enum(["high", "medium", "low"]).optional(),
-  })
+  .strictObject(
+    {
+      disabled: z.literal(true, { error: JUDGEMENT_DETAIL.disabledNotTrue }).optional(),
+      type: z.enum(["issue", "warning", "opportunity"]).optional(),
+      priority: z.enum(["high", "medium", "low"]).optional(),
+    },
+    {
+      // Only the not-an-object case: unrecognized keys are named by
+      // `firstIssue`, which knows their path.
+      error: (issue) => (issue.code === "invalid_type" ? JUDGEMENT_DETAIL.notObject : undefined),
+    },
+  )
   .refine((o) => Object.keys(o).length > 0, {
     message: "an empty override changes nothing; remove the rule's entry instead",
   });
 
 function thresholdValue(row: ThresholdRow) {
-  return z.number().int().min(row.min).max(row.max);
+  const range = (): string => JUDGEMENT_DETAIL.thresholdRange(row.min, row.max);
+  return z
+    .number({ error: range })
+    .int({ error: range })
+    .min(row.min, { error: range })
+    .max(row.max, { error: range });
 }
 
 const thresholdsSchema = z.strictObject(
@@ -151,13 +184,11 @@ function firstIssue(error: z.ZodError): { path: string; message: string } {
     segments.push(key);
     const parent = issue.path.map(String);
     if (key === "severity" && parent[0] === "rules" && parent.length === 2) {
-      detail =
-        "severity cannot be overridden: it is the engine's fact about the rule; " +
-        "change its priority or disable it instead";
+      detail = JUDGEMENT_DETAIL.severity;
     } else if (parent.length === 1 && parent[0] === "thresholds") {
-      detail = `not an overridable threshold (overridable: ${THRESHOLD_NAMES.join(", ")})`;
+      detail = JUDGEMENT_DETAIL.notOverridableThreshold;
     } else {
-      detail = "unknown key";
+      detail = JUDGEMENT_DETAIL.unknownKey;
     }
   }
   const path = segments.join(".");
@@ -185,15 +216,10 @@ export function parseJudgement(raw: unknown, registry: Registry): JudgementBlock
       const path = `rules.${id}`;
       const kind = kinds.get(id);
       if (kind === undefined) {
-        throw new JudgementError(path, `${path}: no rule '${id}' in ruleset`, "unknown-rule");
+        throw new JudgementError(path, `${path}: ${JUDGEMENT_DETAIL.unknownRule(id)}`, "unknown-rule");
       }
       if (kind === "metric") {
-        throw new JudgementError(
-          path,
-          `${path}: '${id}' is a metric rule; it produces no findings, so it cannot be ` +
-            "disabled, retyped or reprioritised",
-          "invalid",
-        );
+        throw new JudgementError(path, `${path}: ${JUDGEMENT_DETAIL.metricRule(id)}`, "invalid");
       }
     }
   }

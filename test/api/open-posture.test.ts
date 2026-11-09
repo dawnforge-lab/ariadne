@@ -114,7 +114,7 @@ async function startCrawl(base: string, body: Record<string, unknown>): Promise<
  * A cancelled `crawls` row written straight into the database, on a host no
  * allowlist names and no resolver answers for.
  */
-async function seedCancelledCrawl(siteUrl: string): Promise<string> {
+async function seedFailedCrawl(siteUrl: string): Promise<string> {
   const id = `crawl_seed_${createdCrawls.length}_${Date.now()}`;
   await db.insert(crawls).values({
     id,
@@ -128,7 +128,7 @@ async function seedCancelledCrawl(siteUrl: string): Promise<string> {
       maxConcurrency: 2,
     },
     rulesetVersion: "0.0.0-test",
-    status: "cancelled",
+    status: "failed",
   });
   createdCrawls.push(id);
   return id;
@@ -260,7 +260,7 @@ describe("the allowAnyPublicHost posture", () => {
   }, 40_000);
 
   it("the resume gate answers the policy question, not the allowlist question", async () => {
-    // A seeded cancelled crawl on a host nobody allowlisted: under the posture
+    // A seeded failed crawl on a host nobody allowlisted: under the posture
     // the allowlist gate passes and the URL POLICY is what answers. Without the
     // posture the same request dies at the allowlist. One row, two servers, two
     // different 403 texts — the posture changes WHICH gate refuses, not whether
@@ -271,7 +271,7 @@ describe("the allowAnyPublicHost posture", () => {
     // its addresses: a name that resolves to nothing (`seeded.example`) is
     // allowed at accept time and refused at fetch time, so it would sail past
     // this gate and be answered by the crawl's own state instead.
-    const id = await seedCancelledCrawl("http://127.0.0.1:9/");
+    const id = await seedFailedCrawl("http://127.0.0.1:9/");
     const open = await call(openNoPrivateBase, "POST", `/crawls/${id}/resume`);
     expect(open.status).toBe(403);
     expect(String(open.body["error"])).toContain("URL policy");

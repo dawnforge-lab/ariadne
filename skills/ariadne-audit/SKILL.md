@@ -137,8 +137,15 @@ one with `crawl_list` and confirm it is fit to audit.
 
 A crawl is fit to audit when:
 
-- `status` is `finished` (`cancelled` and `failed` crawls can still be audited, but
-  every count becomes a floor and the findings file must say so in `crawl.caveats`);
+- `status` is `finished` (`cancelled`, `paused` and `failed` crawls can still be
+  audited, but every count becomes a floor and the findings file must say so in
+  `crawl.caveats`). A `cancelled` crawl that ran is final, judgeable and partial:
+  an agent stopped it, and `neverFetched` (the URLs still pending in the frontier)
+  says how much of the site was never seen. State that number in the caveat. A
+  crawl paused or cancelled while still queued never ran and is NOT auditable:
+  `crawl_rules` refuses it (409, "never ran"), and its `neverFetched` is null
+  (null: the crawl was cancelled before it ran; nothing was seen). Start a new
+  crawl instead;
 - the frontier drained — `pending` and `leased` at 0. A crawl that stopped at its page
   cap makes CHECK-32 unanswerable (`links.orphan-skipped` fires and says why);
 - `renderPassCount` ≥ 1 if the site needs rendering. Without it, CHECK-01, CHECK-02,
@@ -1096,7 +1103,8 @@ broken there.
   yourself: a reader six weeks later has the crawl, not your session.
 - **`crawl.caveats`** is where the evidence's limits go: a page cap reached, a render
   pass that covered a fraction, URLs that failed to fetch, a crawl that ended
-  `cancelled`. Empty array when there are none — never absent.
+  `cancelled` (give `neverFetched`; a null there means the crawl never ran, and such a
+  crawl has no findings file). Empty array when there are none — never absent.
 - **`coverage`** counts the verdicts. It must sum to `checklist.checksTotal`.
 
 ### Before you hand it over

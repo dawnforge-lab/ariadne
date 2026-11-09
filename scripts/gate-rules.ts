@@ -70,9 +70,11 @@
  */
 import { readdirSync, readFileSync } from "node:fs";
 
-import { sql } from "drizzle-orm";
+import { desc, eq, sql } from "drizzle-orm";
 import { closeDb, createDb, type Db } from "../src/db/client.js";
-import { CRAWL_DEFAULTS, runCrawl } from "../src/crawl/loop.js";
+import { CRAWL_DEFAULTS, resumeCrawl, runCrawl, type CrawlSummary } from "../src/crawl/loop.js";
+import { setControlRequest } from "../src/crawl/control.js";
+import { crawls } from "../src/db/schema.js";
 import {
   RENDER_PASS_DEFAULTS,
   runRenderPass,
@@ -163,6 +165,99 @@ function pageTarget(): number {
 function reusedCrawlId(): string | null {
   const raw = process.env["GATE_CRAWL_ID"];
   return raw === undefined || raw === "" ? null : raw;
+}
+
+/**
+ * `--pause-at-fraction <0..1>` (Phase 27b): pause the crawl part-way through and
+ * resume it, inside the same process, so the peak RSS covers a pause and a
+ * resume as well as the crawl. Null when the flag is absent. A malformed value
+ * throws (no fallback to "no pause").
+ */
+function pauseAtFraction(): number | null {
+  const args = process.argv.slice(2);
+  const at = args.indexOf("--pause-at-fraction");
+  if (at < 0) return null;
+  const raw = args[at + 1];
+  const value = Number(raw);
+  if (raw === undefined || raw === "" || !Number.isFinite(value) || value <= 0 || value >= 1) {
+    throw new RangeError(`--pause-at-fraction needs a number strictly between 0 and 1, got ${raw}`);
+  }
+  return value;
+}
+
+/**
+ * Watches a crawl started by `runCrawl` (whose id the script cannot know until
+ * the row exists) and, once `done >= fraction x pages`, asks it to pause through
+ * the same `setControlRequest` the API's crawl_pause uses. Resolves with the
+ * moment the request was recorded, or null if `ended.value` was set first (the
+ * run ended without being paused: the caller reports that). Polls every 2 s;
+ * the dedicated gate database holds one crawl, and the newest row for this site
+ * URL is it.
+ */
+async function requestPauseAtFraction(
+  db: Db,
+  siteUrl: string,
+  fraction: number,
+  pages: number,
+  ended: { value: boolean },
+): Promise<PauseWatch | null> {
+  const threshold = Math.ceil(fraction * pages);
+  for (;;) {
+    await new Promise((r) => setTimeout(r, SAMPLE_MS));
+    if (ended.value) return null;
+    const rows = await db
+      .select({ id: crawls.id })
+      .from(crawls)
+      .where(eq(crawls.siteUrl, siteUrl))
+      .orderBy(desc(crawls.startedAt))
+      .limit(1);
+    const id = rows[0]?.id;
+    if (id === undefined) continue;
+    const done = await db.execute<{ n: number }>(
+      sql`select count(*)::int as n from frontier where crawl_id = ${id} and state = 'done'`,
+    );
+    const n = done.rows[0]?.n;
+    if (n === undefined) throw new Error(`gate: done-count over crawl '${id}' returned no row`);
+    if (n < threshold) continue;
+    const requested = await setControlRequest(db, id, "pause");
+    if (!requested) {
+      throw new Error(`gate: crawl ${id} was not running when the pause was requested at ${n} done`);
+    }
+    const requestedAt = Date.now();
+    // The spec's bound is on the STATUS CHANGE, so sample `crawls.status` every
+    // 100 ms from the request until it is no longer `running`. The run's own
+    // summary arrives later: the loop infers page templates and writes the close
+    // before it returns, so request-to-summary is a different, longer interval.
+    // The status flips in `closeCrawl`, which runs AFTER the loop's whole-crawl
+    // template inference; the inference result is written in that same closing
+    // UPDATE, so this sampler cannot split abort/drain from inference.
+    let flippedAt: number | null = null;
+    let flippedTo = "running";
+    for (;;) {
+      const status = await db.select({ status: crawls.status }).from(crawls).where(eq(crawls.id, id));
+      const current = status[0]?.status;
+      if (current === undefined) throw new Error(`gate: crawl ${id} vanished while pausing`);
+      if (current !== "running") {
+        flippedAt = Date.now();
+        flippedTo = current;
+        break;
+      }
+      // The run has ended (returned or thrown) and the row still says
+      // `running`: stop polling. The caller surfaces the run's own error, or
+      // reports that the status never flipped; this loop must not spin on.
+      if (ended.value) break;
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    return { requestedAt, flippedAt, flippedTo, done: n };
+  }
+}
+
+interface PauseWatch {
+  requestedAt: number;
+  /** When `crawls.status` was first read as something other than `running`. */
+  flippedAt: number | null;
+  flippedTo: string;
+  done: number;
 }
 
 interface PhaseRss {
@@ -584,7 +679,72 @@ async function main(): Promise<number> {
 
       sampler.startPhase();
       const crawlStartedAt = Date.now();
-      const summary = await runCrawl(db, config);
+      const pauseFraction = pauseAtFraction();
+      let summary: CrawlSummary;
+      if (pauseFraction === null) {
+        summary = await runCrawl(db, config);
+      } else {
+        const ended = { value: false };
+        // The watcher's failure is held, not left to reject unhandled while the
+        // run is still going: it is rethrown below as the script's own error.
+        const watcher = requestPauseAtFraction(db, config.siteUrl, pauseFraction, pages, ended).then(
+          (value) => ({ value }),
+          (error: unknown) => ({ error }),
+        );
+        let first: CrawlSummary;
+        try {
+          first = await runCrawl(db, config);
+        } catch (runError) {
+          // The run threw: stop the watcher (its loops check `ended`), wait for
+          // it to let go of the database, and surface the RUN's error — a
+          // watcher failure beside it is reported, never in its place.
+          ended.value = true;
+          const settled = await watcher;
+          if ("error" in settled) {
+            throw new AggregateError(
+              [runError, settled.error],
+              "gate: the paused crawl run threw, and its pause watcher failed too",
+            );
+          }
+          throw runError;
+        }
+        ended.value = true;
+        const watched = await watcher;
+        if ("error" in watched) throw watched.error;
+        const requested = watched.value;
+        if (requested === null) {
+          console.error(`FAIL: the crawl ended '${first.status}' before the pause was requested`);
+          return 1;
+        }
+        const summaryMs = Date.now() - requested.requestedAt;
+        if (requested.flippedAt === null) {
+          throw new Error(
+            `gate: the run returned '${first.status}' but crawls.status still read 'running' ` +
+              `when the sampler stopped; the status flip was never observed`,
+          );
+        }
+        const flipMs = requested.flippedAt - requested.requestedAt;
+        if (first.status !== "paused" || first.pauseReason !== "request") {
+          console.error(
+            `FAIL: the pause at ${requested.done} done ended the run '${first.status}' ` +
+              `(reason ${first.pauseReason}), expected paused/request`,
+          );
+          return 1;
+        }
+        console.log(
+          line(
+            "pause",
+            `requested at ${requested.done.toLocaleString()} done (fraction ${pauseFraction}), ` +
+              `${first.pagesCrawled.toLocaleString()} pages written`,
+          ),
+        );
+        console.log(line("pause→paused", `${flipMs} ms (crawls.status read '${requested.flippedTo}', 100 ms sampling)`));
+        console.log(line("pause→summary", `${summaryMs} ms (the run returned)`));
+        console.log(line("close wind-down", `${summaryMs - flipMs} ms (status flip to summary)`));
+        // Same config object, exactly as before: allowPrivate is never stored, so
+        // the resume re-states it (ResumeOpts.config).
+        summary = await resumeCrawl(db, first.crawlId, { config });
+      }
       const crawlMs = Date.now() - crawlStartedAt;
       const crawlRss = sampler.endPhase();
       crawlPeakBytes = crawlRss.peakBytes;

@@ -84,6 +84,8 @@ export interface JudgementView {
    * `findingCap` lives here and nowhere else (plan Deviation 1).
    */
   findingCap: number | null | undefined;
+  /** `config_jsonb` as stored, from the same read of the row (`crawl_config_get`'s `crawl`). */
+  config: unknown;
 }
 
 /** The columns of a `crawls` row a judgement view is built from. */
@@ -232,6 +234,7 @@ export function judgementViewOf(
     judgementStale,
     judgedWith,
     findingCap: cap,
+    config: row.config,
   };
 }
 

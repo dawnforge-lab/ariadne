@@ -983,3 +983,49 @@ describe("HostGate snapshot and restore", () => {
     expect(() => g.restore({ [H]: 100 })).toThrow(/already/);
   });
 });
+
+describe("HostGate.acquire with an abort signal (Phase 27b, Ruling 2)", () => {
+  it("wakes a waiting acquire well inside the spacing once aborted, and says it was aborted", async () => {
+    const gate = new HostGate({ perHostDelayMs: 5_000, robotsCrawlDelaySec: null });
+    const ac = new AbortController();
+    // The first claim is free (elapsed-time credit); the second waits 5 s.
+    expect(await gate.acquire("a.example", ac.signal)).toBe(true);
+    const waiting = gate.acquire("a.example", ac.signal);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const abortedAt = Date.now();
+    ac.abort();
+    expect(await waiting).toBe(false);
+    expect(Date.now() - abortedAt).toBeLessThan(500);
+    // The aborted waiter's slot is not handed back: the next free slot is
+    // still two spacings from the first claim, not one.
+    expect(gate.msUntilFree("a.example")).toBeGreaterThan(5_000);
+  });
+
+  it("claims nothing for a signal that is already aborted", async () => {
+    const gate = new HostGate({ perHostDelayMs: 5_000, robotsCrawlDelaySec: null });
+    const ac = new AbortController();
+    ac.abort();
+    expect(await gate.acquire("b.example", ac.signal)).toBe(false);
+    expect(gate.msUntilFree("b.example")).toBe(0);
+  });
+
+  it("without a signal it waits out the spacing exactly as before", async () => {
+    const gate = new HostGate({ perHostDelayMs: 150, robotsCrawlDelaySec: null });
+    await gate.acquire("c.example");
+    const started = Date.now();
+    // Typed `void` for the callers that pass no signal (the overload), so the
+    // host probe, the renderer and the 404 probe compile and behave as before.
+    const answer: void = await gate.acquire("c.example");
+    void answer;
+    expect(Date.now() - started).toBeGreaterThanOrEqual(140);
+  });
+
+  it("with a signal that never fires it answers true when the slot comes due", async () => {
+    const gate = new HostGate({ perHostDelayMs: 150, robotsCrawlDelaySec: null });
+    const ac = new AbortController();
+    await gate.acquire("d.example", ac.signal);
+    const started = Date.now();
+    expect(await gate.acquire("d.example", ac.signal)).toBe(true);
+    expect(Date.now() - started).toBeGreaterThanOrEqual(140);
+  });
+});

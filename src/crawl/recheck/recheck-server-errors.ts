@@ -151,7 +151,8 @@
  * recheck_fetch_class is null` (rows a cap or the breaker stamped included), so an interrupted pass re-run asks exactly the rows the first one never
  * reached and re-asks nothing it settled. An abort leaves BOTH nulls — nothing
  * was decided — and returns `aborted: true` so the crawl loop closes its row
- * `cancelled` rather than reporting a complete recheck it does not have.
+ * stopped (`paused` or `cancelled`) rather than reporting a complete recheck it
+ * does not have.
  *
  * ## Not contained
  *
@@ -240,7 +241,7 @@ const WORK_BATCH = 200;
 
 /**
  * The longest this pass sleeps without looking at the signal. A single 60s
- * `setTimeout` would mean a cancelled crawl sat there for a minute after the
+ * `setTimeout` would mean a stopped crawl sat there for a minute after the
  * caller said stop; "we stopped" has to mean the next quarter-second.
  */
 const SLEEP_SLICE_MS = 250;
@@ -333,7 +334,7 @@ export interface RecheckPassSummary {
    * `capped` in the way it has to be: a cap is a budget the operator set and the
    * rows it stopped at SAY SO, while an abort decided nothing about anything —
    * its rows keep both nulls, `crawls.recheck_pass_at` is not stamped, and the
-   * crawl that ran this pass must close `cancelled` rather than `finished`
+   * crawl that ran this pass must close stopped (`paused` or `cancelled`), not `finished`
    * (hard rule 7; the loop reads this).
    */
   aborted: boolean;
@@ -640,7 +641,10 @@ export async function recheckServerErrors(
         // `host` is non-null from here: the policy accepted the URL, which it
         // cannot do for a string `new URL` refused.
         const gateHost = host ?? new URL(item.url).host;
-        await gate.acquire(gateHost);
+        // The signal wakes the slot wait (Phase 27b): a stop under a long
+        // spacing is noticed now, not when the slot comes due. Aborted, the row
+        // is left exactly as it was, and the pass reports `aborted`.
+        if (!(await gate.acquire(gateHost, opts.signal))) return false;
         const result = await fetchPage(item.url, {
           userAgent: opts.userAgent,
           allowPrivate,

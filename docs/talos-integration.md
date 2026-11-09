@@ -97,6 +97,15 @@ crawler inside Talos. The intended shape:
    `type` and `priority` on each finding rule are the rule's defaults, and the
    agent's per-crawl overrides (`crawl_config_set`) are the judgement.
 
+7. **A stop is a pause, and only an agent's cancel is final.** Since Phase 27b a
+   server shutdown leaves its running crawls `paused` (reason `shutdown`) and a restart
+   starts none of them: Talos resumes a paused crawl with `crawl_resume`, same id, same
+   pages, same earned spacing. `cancelled` now means one thing, an agent's
+   `crawl_cancel`, and it is final. A pause or cancel never makes a crawl faster than
+   the spacing it earned (obligation 4), and `crawl_delete` is the one call that
+   destroys a crawl, guarded only by its confirm echo until Phase 28's tenant key
+   (`docs/talos-surface.md` §4.1c and §9).
+
 ## What Talos must eventually do (not Ariadne's job, recorded so it isn't lost)
 
 - Add agent tools wrapping Ariadne's API (mirroring the sf-skill vocabulary).

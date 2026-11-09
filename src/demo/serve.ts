@@ -49,7 +49,7 @@ for (const signal of ["SIGINT", "SIGTERM"] as const) {
   process.on(signal, () => {
     if (shuttingDown) return;
     shuttingDown = true;
-    console.error(`ariadne demo: ${signal} — closing (a running crawl is cancelled, not killed)`);
+    console.error(`ariadne demo: ${signal} — closing (a running crawl is paused (shutdown), not killed)`);
     demo
       .close()
       .then(() => closeDb(db))

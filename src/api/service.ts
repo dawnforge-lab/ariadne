@@ -45,6 +45,17 @@
  * A crawl left `running` by a killed process is the other half of the same
  * story, and it already had an answer: `markCrawlFailed`, whose lease test is
  * the same one the render driver uses to tell a live crawl from a dead one.
+ *
+ * **A paused crawl is not queued work (27b).** `crawl_pause` on a queued crawl
+ * takes it out of this process's queue and moves the row to `paused` in one
+ * step; on a running crawl it asks the loop, through `crawls.control_request`,
+ * to stop. A graceful shutdown (`close()`) is a pause too: the crawl in flight
+ * closes `paused` with reason `shutdown`, its frontier intact. Either way the
+ * row stays `paused` across a restart and is never adopted — not at boot, and
+ * not by a runner that later finds it in its own queue (`runQueued` skips any
+ * row that has left `queued`). `crawl_resume` continues it, and only that.
+ * `crawl_cancel` ends a crawl for good: `cancelled` is final, and resume
+ * refuses it.
  */
 import { randomUUID } from "node:crypto";
 import { once } from "node:events";
@@ -53,12 +64,15 @@ import { mkdir, rename, stat, unlink } from "node:fs/promises";
 import { join as joinPath, resolve as resolvePath, sep as pathSep } from "node:path";
 import { PassThrough, type Duplex } from "node:stream";
 import { pipeline } from "node:stream/promises";
+import { isDeepStrictEqual } from "node:util";
 import { createGzip } from "node:zlib";
-import { and, asc, desc, eq, getTableColumns, gt, inArray, isNotNull, sql, type SQL } from "drizzle-orm";
+import { and, asc, desc, eq, getTableColumns, gt, inArray, isNotNull, isNull, sql, type SQL } from "drizzle-orm";
 
 import type { Db } from "../db/client.js";
 import { crawls, frontier, issues, pages } from "../db/schema.js";
+import { deleteCrawlFiles, deleteCrawlRows } from "./crawl-delete.js";
 import {
+  ClaimLostError,
   CRAWL_DEFAULTS,
   failureReasonOf,
   parseStoredConfig,
@@ -69,6 +83,13 @@ import {
 } from "../crawl/loop.js";
 import { DISCOVERED_VIA, frontierCounts, type FrontierCounts } from "../crawl/frontier.js";
 import { FETCH_CLASSES, type FetchClass } from "../crawl/fetch-page.js";
+import {
+  readControlRequest,
+  readPauseReason,
+  setControlRequest,
+  type ControlRequest,
+  type PauseReason,
+} from "../crawl/control.js";
 // The resource vocabulary this surface reads, imported rather than spelled out:
 // the one `fetch_reason` literal a surface may read (a constant this repository
 // defines, never a sentence somebody could reword) and the two `fetch_class`
@@ -147,6 +168,21 @@ import { resolveRuleCaps, storedFindingCap } from "../rules/query/crawl-evidence
 import { runRules, type RunSummary } from "../rules/run.js";
 import { isHostAllowed, type ServiceConfig } from "./config.js";
 import {
+  API_CRAWL_DEFAULTS,
+  CRAWL_FIELDS,
+  MAX_SUPPLIED_SITEMAPS,
+  OPERATOR_ONLY_FIELDS,
+  parseStartBody,
+  publishedSchema,
+  serviceCodeOf,
+  startBodySchema,
+  tooManySitemaps,
+  unknownField,
+  type ConfigError,
+  type CrawlField,
+  type Mutability,
+} from "./config-schema.js";
+import {
   CSV_VIEWS,
   CSV_VIEW_DEFS,
   CRAWL_OVERVIEW_HEADER,
@@ -187,72 +223,9 @@ import {
 
 export { ServiceError, type ServiceErrorCode } from "./errors.js";
 
-/**
- * The crawl budget a request that does not name one gets.
- *
- * `CRAWL_DEFAULTS` deliberately has no `maxPages` — the crawl loop refuses to
- * invent a budget, because a budget is a politeness decision (rule 9). The API
- * has to have an answer anyway, and "unbounded" is the one answer that must not
- * be it: an agent that forgets the field would otherwise crawl a 400k-page site
- * to the end. 500 is a first look at a site, and a caller who wants more says
- * so in the request.
- */
-export const API_CRAWL_DEFAULTS = { maxPages: 500 } as const;
-
-/**
- * The politeness floor under `perHostDelayMs` for a crawl a CLIENT asked for.
- *
- * The MCP tool descriptions have said "perHostDelayMs has a floor" since the
- * agent surface was written, and until now there was none: an agent that sent
- * `perHostDelayMs: 0` got a crawl that hit one host as fast as the concurrency
- * window allowed. A claim the engine does not keep is worse than no claim, and
- * the yellow.com.mt incident (docs/talos-integration.md) is what being wrong
- * about this costs.
- *
- * 250ms — four requests a second to one host — is not a tuned number and is not
- * meant to be a comfortable one. It is the point below which a crawler is no
- * longer plausibly reading a site and is measurably load-testing it. The
- * genuinely polite delays are ten times this (`CRAWL_DEFAULTS` is 1000ms, the
- * crawl skill recommends 2000ms on anything Cloudflare-fronted); a caller who
- * hits this floor has already ignored all of that.
- *
- * REFUSED, NOT CLAMPED. Silently raising the value to 250 would answer a
- * request nobody made and leave the caller believing their number took effect
- * (hard rule 7). The refusal names the floor, so the fix is one edit.
- *
- * ## The boundary this does NOT cross, stated because it is load-bearing
- *
- * The floor binds `parseStartCrawlInput`, which is the request-field seam and
- * the ONLY seam both transports pass through (`POST /crawls` parses a body with
- * it, `crawl_start` parses its arguments with it). It deliberately does NOT
- * bind `effectiveConfig` or `validateCrawlConfig`, which is where a
- * `crawlDefaults.perHostDelayMs` supplied by the process that CONSTRUCTS the
- * server would be caught.
- *
- * That is the same process-trust seam `allowPrivate` rests on: the constructor
- * holds the database handle and the auth token, and it is how the test suite
- * crawls its own 127.0.0.1 fixture site at `perHostDelayMs: 0` without waiting
- * a second per page. A floor there would not make anything more polite — a
- * loopback fixture server has nobody to be rude to — and it would make the
- * suite unrunnable. The distinction is: a delay that arrived over the wire is
- * subject to the floor; a delay the operator compiled into the process is that
- * operator's decision.
- */
-export const MIN_PER_HOST_DELAY_MS = 250;
-
-/**
- * How many sitemap documents one crawl-start request may name.
- *
- * The walk itself is capped at 300 documents including everything a sitemap
- * INDEX points at (`MAX_SITEMAP_DOCS`, src/crawl/discovery.ts), so this is not
- * the limit that protects the origin — it is the limit on what a REQUEST may
- * carry into `config_jsonb`, which is a column every resume and every render
- * pass reads back. Fifty root documents is already a site whose sitemap has an
- * index, and supplying the index is both shorter and more faithful to what the
- * site publishes. Refused rather than trimmed: a list this engine silently cut
- * would leave the caller believing every document was walked (hard rule 7).
- */
-export const MAX_SUPPLIED_SITEMAPS = 50;
+// The request's defaults and bounds live with the schema that enforces them;
+// re-exported because the transports, the demo and the suite read them here.
+export { API_CRAWL_DEFAULTS, MAX_SUPPLIED_SITEMAPS, MIN_PER_HOST_DELAY_MS } from "./config-schema.js";
 
 /** `CrawlDetail.platform` and `.platformProfile`, off the two crawls columns. */
 function platformFields(
@@ -269,8 +242,9 @@ export const PAGE_SIZE_DEFAULT = 50;
 export const PAGE_SIZE_MAX = 200;
 
 /**
- * The crawl-start body, after validation. Every field except `siteUrl` is an
- * override of a default; the set is closed (see `parseStartCrawlInput`).
+ * The crawl-start body, after validation (`parseStartBody`,
+ * src/api/config-schema.ts). Every field except `siteUrl` is an override of a
+ * default; the set is closed.
  */
 export interface StartCrawlInput {
   siteUrl: string;
@@ -288,52 +262,29 @@ export interface StartCrawlInput {
   findingCap?: number | null;
   fetchResources?: boolean;
   /**
-   * The crawl's judgement block (Phase 27a), as the caller sent it: checked to
-   * be a JSON object here and parsed against the ruleset by `startCrawl`
-   * (`parseJudgement`), which is where the registry is. Its `findingCap` is
-   * stored in `config_jsonb.findingCap`; the rest in `judgement_jsonb`.
+   * The crawl's judgement block (Phase 27a), parsed against the ruleset by the
+   * schema (`parseJudgement` is its semantic check). Its `findingCap` is stored
+   * in `config_jsonb.findingCap`; the rest in `judgement_jsonb`.
    */
-  judgement?: unknown;
+  judgement?: JudgementBlock;
 }
 
-type FieldKind = "string" | "number" | "boolean" | "string[]" | "number|null" | "object";
+/** What a started crawl stores in `config_jsonb`: its effective config, less the test-only fields. */
+export type StoredConfig = ReturnType<typeof storableConfig>;
+
+/** `config_validate`'s answer, and what `startCrawl` acts on. */
+export interface StartBodyCheck {
+  valid: boolean;
+  errors: ConfigError[];
+  /** The config the crawl would be stored with, and its judgement; null when invalid. */
+  effective: (StoredConfig & { judgement: JudgementBlock | null }) | null;
+}
+
+type FieldKind = "string[]";
 
 /**
- * The wire's whole vocabulary for starting a crawl.
- *
- * A closed table rather than a cast: a body is validated field by field and an
- * unknown key is a 400 naming it. The alternative — spreading the body into a
- * config and letting the extra keys ride along — is how a field that was never
- * meant to cross the wire crosses it, which is precisely the failure
- * `allowPrivate` demonstrates below.
- *
- * EXPORTED because the MCP transport advertises a schema rather than parsing a
- * body: `crawl_start`'s tool schema names these fields with a description each,
- * and a test asserts the two sets are equal. A field added here and forgotten
- * there would be a field the HTTP surface accepts and the agent surface cannot
- * see — which is how a second, quietly smaller API appears.
- */
-export const START_CRAWL_FIELDS: Record<keyof StartCrawlInput, FieldKind> = {
-  siteUrl: "string",
-  maxPages: "number",
-  maxDepth: "number",
-  userAgent: "string",
-  perHostDelayMs: "number",
-  maxConcurrency: "number",
-  probeHosts: "boolean",
-  legacyHosts: "string[]",
-  sitemapUrls: "string[]",
-  renderBudgetPct: "number",
-  renderMaxPages: "number",
-  renderSamplePerType: "number",
-  findingCap: "number|null",
-  fetchResources: "boolean",
-  judgement: "object",
-};
-
-/**
- * The fields `POST /crawls/:id/render` accepts, on the same terms and for the
- * same reason as `START_CRAWL_FIELDS`: the MCP tool advertises a schema, the
+ * The fields `POST /crawls/:id/render` accepts, closed on the same terms as the
+ * crawl-start schema (src/api/config-schema.ts): the MCP tool advertises a schema, the
  * HTTP route parses a body, and a test asserts the two sets are the same one.
  */
 export const RENDER_CRAWL_FIELDS: Record<keyof RenderCrawlInput, FieldKind> = {
@@ -351,7 +302,7 @@ export const RENDER_CRAWL_FIELDS: Record<keyof RenderCrawlInput, FieldKind> = {
 const MISSING_URLS_NAMED = 5;
 
 /**
- * Validate a render body. Same discipline as `parseStartCrawlInput`: an unknown
+ * Validate a render body. Same discipline as `parseStartBody`: an unknown
  * field is a refusal naming it, never an ignored instruction. A caller who sent
  * `{"pages": [...]}` and got a 200 would believe the engine rendered what they
  * named, and it would have rendered its own automatic selection instead.
@@ -383,120 +334,12 @@ export function parseRenderCrawlInput(raw: unknown): RenderCrawlInput {
   return input as RenderCrawlInput;
 }
 
-/**
- * Validate a crawl-start body. Never casts, never ignores a field it does not
- * know, and never accepts either TEST-ONLY crawl-config field at any value
- * (`allowPrivate`, `recheckMinGapMs`).
- *
- * Shared by both transports on purpose: the MCP server's `crawl_start` gets the
- * same field allowlist and the same refusals as the HTTP route, because the
- * argument that a test-only escape hatch must not be reachable from outside the
- * process does not weaken when the caller is on stdio.
- */
-export function parseStartCrawlInput(raw: unknown): StartCrawlInput {
-  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
-    throw new ServiceError("VALIDATION", "request body must be a JSON object");
-  }
-  const body = raw as Record<string, unknown>;
-
-  // Named before the unknown-field loop so the refusal says WHY rather than
-  // "unknown field": a caller sending this has read about the flag somewhere
-  // and needs to be told it is not an API field at all, at any value.
-  if ("allowPrivate" in body) {
-    throw new ServiceError(
-      "VALIDATION",
-      "allowPrivate is not accepted over the API at any value: it is a test-only " +
-        "escape hatch that admits loopback and private targets, it is never persisted " +
-        "on a crawl row, and it can only be set by the process that constructs the " +
-        "server",
-    );
-  }
-
-  // The second test-only field, refused by name for the same reason and with
-  // the same weight (P17). The 60-second floor between a page's two
-  // observations is the CLAIM the evidence makes — "still broken a minute
-  // later" — not a tuning knob: a caller who could shrink it could make every
-  // transient 5xx clear and turn a `critical` into a `warning` on demand.
-  if ("recheckMinGapMs" in body) {
-    throw new ServiceError(
-      "VALIDATION",
-      "recheckMinGapMs is not accepted over the API at any value: it is a test-only " +
-        "crawl-config field that shortens the minimum gap between a page's two fetch " +
-        "observations, it is never persisted on a crawl row, and it can only be set by " +
-        "the process that constructs the server",
-    );
-  }
-
-  const input: Record<string, unknown> = {};
-  for (const [key, value] of Object.entries(body)) {
-    const kind = START_CRAWL_FIELDS[key as keyof StartCrawlInput];
-    if (kind === undefined) {
-      throw new ServiceError(
-        "VALIDATION",
-        `unknown field '${clip(key)}' (accepted: ${Object.keys(START_CRAWL_FIELDS).join(", ")})`,
-      );
-    }
-    if (value === undefined) continue;
-    assertKind(key, value, kind);
-    input[key] = value;
-  }
-
-  if (typeof input["siteUrl"] !== "string" || input["siteUrl"].trim() === "") {
-    throw new ServiceError("VALIDATION", "siteUrl is required and must be a non-empty string");
-  }
-
-  // The politeness floor the tool descriptions promise. Here rather than in
-  // `validateCrawlConfig` because this is the seam BOTH transports pass through
-  // and the construction-trust path does not — see `MIN_PER_HOST_DELAY_MS`.
-  const delay = input["perHostDelayMs"];
-  if (typeof delay === "number" && delay < MIN_PER_HOST_DELAY_MS) {
-    throw new ServiceError(
-      "VALIDATION",
-      `perHostDelayMs ${delay} is below this server's politeness floor of ` +
-        `${MIN_PER_HOST_DELAY_MS}ms: the per-host delay is not a throughput knob, and a ` +
-        `crawl faster than four requests a second to one host is load-testing it. ` +
-        `robots.txt's own crawl-delay still wins when it is longer`,
-    );
-  }
-  return input as unknown as StartCrawlInput;
-}
-
 function assertKind(key: string, value: unknown, kind: FieldKind): void {
-  const bad = (expected: string): never => {
-    throw new ServiceError("VALIDATION", `field '${key}' must be ${expected}`);
-  };
   switch (kind) {
-    case "string":
-      if (typeof value !== "string") bad("a string");
-      return;
-    case "number":
-      // A number that is not finite is not a number a config can use, and
-      // JSON.parse produces no NaN — so this only ever catches a caller who
-      // sent a string. Naming the type beats a RangeError three layers down.
-      if (typeof value !== "number" || !Number.isFinite(value)) bad("a finite number");
-      return;
-    case "boolean":
-      if (typeof value !== "boolean") bad("a boolean");
-      return;
     case "string[]":
       if (!Array.isArray(value) || value.some((v) => typeof v !== "string")) {
-        bad("an array of strings");
+        throw new ServiceError("VALIDATION", `field '${key}' must be an array of strings`);
       }
-      return;
-    case "number|null":
-      // NULL IS A VALUE HERE, not an omission, and it is the whole reason this
-      // kind exists: `findingCap: null` says "list everything", which is a
-      // different instruction from leaving the field out ("use the defaults").
-      // Every other field on the wire treats a null as a caller who meant to
-      // send nothing.
-      if (value !== null && (typeof value !== "number" || !Number.isFinite(value))) {
-        bad("a finite number, or null");
-      }
-      return;
-    case "object":
-      // A JSON object and nothing else: a null here is not "no judgement" (an
-      // absent field is), and an array is not a block with no keys.
-      if (!isPlainObject(value)) bad("a JSON object");
       return;
   }
 }
@@ -508,6 +351,33 @@ export interface CrawlAccepted {
   status: string;
   /** Crawls this process must finish first. 0 = it is starting now. */
   queuePosition: number;
+}
+
+/**
+ * What `crawl_pause` / `crawl_cancel` (`POST /crawls/:id/pause|cancel`) answer.
+ *
+ * `immediate` says which of two things happened. True: the row has already
+ * moved (a queued or paused crawl), and `status` is where it now stands. False:
+ * the crawl is `running`, the request is recorded in `crawls.control_request`
+ * (`controlRequested`), and the loop acts on it at its next poll — a REQUEST,
+ * which a clean finish that lands first can overtake. `crawl_status` says what
+ * actually happened.
+ */
+export interface CrawlControlOut {
+  crawlId: string;
+  status: string;
+  controlRequested: ControlRequest | null;
+  immediate: boolean;
+}
+
+/**
+ * What `crawl_delete` removed: rows per table (`crawls: 1` included) and the
+ * regular files taken off disk.
+ */
+export interface CrawlDeleted {
+  crawlId: string;
+  rows: Record<string, number>;
+  files: { renders: number; exports: number };
 }
 
 /** One crawl, as a listing row. */
@@ -524,6 +394,19 @@ export interface CrawlListItem {
 /** One crawl, in full. */
 export interface CrawlDetail extends CrawlListItem {
   rulesetVersion: string;
+  /** A pause or cancel asked of this running crawl that its loop has not yet acted on; else null. */
+  controlRequested: ControlRequest | null;
+  /** Why the crawl is `paused` (`request` or `shutdown`); null in every other status. */
+  pauseReason: PauseReason | null;
+  /** When the crawl was cancelled (ISO); null unless `status` is `cancelled`. */
+  cancelledAt: string | null;
+  /**
+   * The frontier URLs a cancelled crawl never fetched (`frontier.pending`).
+   * Null unless `status` is `cancelled` — and null on a cancelled crawl that
+   * never ran (no discovery evidence: it was cancelled while queued). Nothing
+   * was seen, so the count is unknown, not zero (Ruling 11).
+   */
+  neverFetched: number | null;
   pagesTotal: number | null;
   /**
    * WHY THIS CRAWL IS `failed` — one sentence, or null.
@@ -1100,6 +983,21 @@ export interface ThresholdSetting {
  */
 export interface CrawlConfigOut {
   crawlId: string;
+  /**
+   * The crawl's stored settings, less `findingCap` (which is the judgement's and
+   * appears there): every key of `config_jsonb` at its effective value, the
+   * operator-only ones included. At start it equals what `config_validate`
+   * answers as `effective` for the body that started the crawl, minus
+   * `findingCap` and `judgement`; it diverges after a `crawl_config_set`.
+   */
+  crawl: Record<string, unknown>;
+  /**
+   * Whether each `crawl` key can change after the crawl starts, and
+   * `judgement: "always"`. A key the wire does not know (the operator-only
+   * `maxResources`, `maxResourceHosts`, `maxBlockedUrls`, `platformProfiles`) is
+   * `never`.
+   */
+  mutability: Record<string, Mutability>;
   /**
    * The crawl's current block, `{}` when nothing is set. `findingCap` appears
    * when the crawl's config carries one — null is uncapped — and is absent when
@@ -2208,10 +2106,23 @@ export interface PageQuery {
   cursor?: string;
 }
 
+/**
+ * A crawl this process means to run. It carries no config: the runner reads
+ * the row's stored config when it dequeues the crawl (`runQueued`), so a
+ * change made while the crawl waited is the one it runs with.
+ */
+/** The `crawl` half of a config patch, parsed (`ApiService.parseCrawlPatch`). */
+interface CrawlPatch {
+  /** Each wire field's value as its own schema parsed it. */
+  values: Record<string, unknown>;
+  /** The same fields as sent, for the Ruling 12 "unchanged" comparison. */
+  sent: Record<string, unknown>;
+  /** Operator-only keys as sent: no change if equal to the stored value, else refused. */
+  operatorOnly: Record<string, unknown>;
+}
+
 interface QueueEntry {
   crawlId: string;
-  /** The effective config, `allowPrivate` included — never the stored one. */
-  config: CrawlConfig;
   /**
    * Whether this entry CONTINUES a crawl that has already run, rather than
    * starting one that has not.
@@ -2287,6 +2198,13 @@ export class ApiService {
    */
   private readonly judging = new Set<string>();
 
+  /**
+   * Crawls this process is currently rendering — one render pass at a time,
+   * per crawl, claimed and released exactly as `judging` is (see
+   * `renderCrawl`). In-process for `judging`'s reasons.
+   */
+  private readonly rendering = new Set<string>();
+
   /** Crawls accepted by this process and not yet started, in FIFO order. */
   private readonly waiting: QueueEntry[] = [];
   private running: RunningCrawl | null = null;
@@ -2323,81 +2241,107 @@ export class ApiService {
   }
 
   /**
-   * Accept a crawl: check it may be pointed at this host, create its row, and
-   * put it in this process's queue.
+   * Check a crawl-start body without starting anything: `config_validate`, and
+   * the check `startCrawl` acts on. One function, so the dry run and the real
+   * thing cannot disagree about a refusal (gate 27b, contract clause 2).
    *
-   * The order of the checks is the order of their authority. The allowlist is
-   * the operator's policy and comes first, so a host nobody permitted is
-   * refused before we spend a URL-policy verdict on it. `isUrlAllowed` is the
-   * engine's own perimeter (hard rule 5) and is applied to the seed here even
-   * though the crawl loop re-applies it at enqueue and `fetchPage` re-applies
-   * it at connect: a caller who names a blocked host deserves a 403 now, not a
-   * crawl row that fails later for a reason they must go and read.
+   * `parseStartBody` first: the shape, the bounds, the judgement block. Then,
+   * on a body that parses, what only this server can answer, in the order of
+   * its authority:
    *
-   * THE SEED IS NOT THE ONLY HOST A CRAWL FETCHES. `legacyHosts` adds hosts the
-   * host probe visits before any robots.txt has been read, and `sitemapUrls`
-   * adds documents the discovery walk fetches that no robots.txt pointed at, so
-   * both go through the same two checks — see `checkLegacyHosts` and
-   * `checkSitemapUrls`, which is where the allowlist would otherwise have had a
-   * hole big enough to drive a crawler through.
+   *  1. the seed must be an http(s) URL (`invalid`). Nothing below can be asked
+   *     of one that is not, so a bad one ends the check here;
+   *  2. the allowlist on its host (`not_allowed`). It is the operator's policy
+   *     and comes first, so a host nobody permitted is refused before a
+   *     URL-policy verdict is spent on it;
+   *  3. `isUrlAllowed` on the seed (`url_policy`), the engine's own perimeter
+   *     (hard rule 5). Applied here even though the crawl loop re-applies it at
+   *     enqueue and `fetchPage` at connect: a caller who names a blocked host
+   *     deserves a 403 now, not a crawl row that fails later for a reason they
+   *     must go and read;
+   *  4. THE SEED IS NOT THE ONLY HOST A CRAWL FETCHES. `legacyHosts` adds hosts
+   *     the host probe visits before any robots.txt has been read, and
+   *     `sitemapUrls` adds documents the discovery walk fetches that no
+   *     robots.txt pointed at, so both go through the same two checks
+   *     (`checkLegacyHosts`, `checkSitemapUrls`) — which is where the allowlist
+   *     would otherwise have had a hole big enough to drive a crawler through;
+   *  5. the judgement's `findingCap` against the top-level one, then the crawl
+   *     loop's own ranges over the EFFECTIVE config — the engine's defaults,
+   *     the API's maxPages, the operator's `crawlDefaults`, the request — which
+   *     is where the render budgets are checked (`invalid`).
+   *
+   * Every refusal found is returned, and `startCrawl` answers with the first.
+   * There is no DNS lookup: `isUrlAllowed` checks the URL as written, and the
+   * seed's resolution happens when the crawl runs, as it always has.
+   *
+   * `effective` is the config the crawl would be stored with
+   * (`storableConfig`, so the two test-only fields are never in it) and the
+   * parsed judgement block, or null when anything was refused.
    */
-  async startCrawl(input: StartCrawlInput): Promise<CrawlAccepted> {
-    if (this.closed) {
-      throw new ServiceError("CONFLICT", "the server is shutting down and is not accepting crawls");
-    }
+  async checkStartBody(raw: unknown): Promise<StartBodyCheck> {
+    const parsed = parseStartBody(raw, this.registry);
+    if (!parsed.ok) return { valid: false, errors: parsed.errors, effective: null };
+    const input = parsed.value;
 
     const siteUrl = normalizeUrl(input.siteUrl.trim());
     if (siteUrl === null) {
-      throw new ServiceError(
-        "VALIDATION",
-        `siteUrl is not an http(s) URL: ${clip(input.siteUrl)}`,
-      );
+      const message = `siteUrl is not an http(s) URL: ${clip(input.siteUrl)}`;
+      return { valid: false, errors: [{ path: "siteUrl", code: "invalid", message }], effective: null };
     }
     const host = new URL(siteUrl).hostname;
+    const allowPrivate = this.config.crawlDefaults?.allowPrivate === true;
+    const errors: ConfigError[] = [];
 
     if (!this.crawlHostAllowed(host)) {
       // The rejected host is named; the allowlist itself is NOT listed back.
       // On a multi-tenant deployment its contents are other tenants' domains
       // (obligation 6), and the caller does not need them to fix their request.
-      throw new ServiceError(
-        "FORBIDDEN",
-        this.config.allowedDomains.length === 0
-          ? `host '${host}' is not permitted: this server's crawl allowlist is empty, ` +
-            `so no crawl target is accepted (queries are unaffected)`
-          : `host '${host}' is not in this server's crawl allowlist`,
-      );
+      errors.push({
+        path: "siteUrl",
+        code: "not_allowed",
+        message:
+          this.config.allowedDomains.length === 0
+            ? `host '${host}' is not permitted: this server's crawl allowlist is empty, ` +
+              `so no crawl target is accepted (queries are unaffected)`
+            : `host '${host}' is not in this server's crawl allowlist`,
+      });
+    } else {
+      const verdict = await isUrlAllowed(siteUrl, { allowPrivate });
+      if (!verdict.allowed) {
+        errors.push({
+          path: "siteUrl",
+          code: "url_policy",
+          message: `siteUrl refused by the URL policy: ${verdict.reason ?? "no reason given"}`,
+        });
+      }
     }
 
-    const allowPrivate = this.config.crawlDefaults?.allowPrivate === true;
-    const verdict = await isUrlAllowed(siteUrl, { allowPrivate });
-    if (!verdict.allowed) {
-      throw new ServiceError(
-        "FORBIDDEN",
-        `siteUrl refused by the URL policy: ${verdict.reason ?? "no reason given"}`,
-      );
-    }
-
-    await this.checkLegacyHosts(siteUrl, input.legacyHosts, allowPrivate);
+    const legacy = await this.checkLegacyHosts(siteUrl, input.legacyHosts, allowPrivate);
+    if (legacy !== null) errors.push(legacy);
     // The other list of URLs a request adds to the crawl: documents the walk
     // will fetch that no robots.txt pointed at (hard rule 5 — the policy runs
     // on every URL a client supplies, not only on the seed).
-    await this.checkSitemapUrls(siteUrl, input.sitemapUrls, allowPrivate);
+    const sitemaps = await this.checkSitemapUrls(siteUrl, input.sitemapUrls, allowPrivate);
+    if (sitemaps !== null) errors.push(sitemaps);
 
-    // The judgement block is not crawl config: it is split off here, parsed
-    // against the ruleset, and its `findingCap` — the one key whose bytes live
-    // in `config_jsonb` (plan Deviation 1) — joins the crawl config.
-    const { judgement: rawJudgement, ...crawlInput } = input;
-    const block = rawJudgement === undefined ? null : this.parseJudgementInput(rawJudgement);
+    // The judgement block is not crawl config: it is split off here, and its
+    // `findingCap` — the one key whose bytes live in `config_jsonb` (plan
+    // Deviation 1) — joins the crawl config.
+    const { judgement, ...crawlInput } = input;
+    const block = judgement ?? null;
     if (block?.findingCap !== undefined) {
       if (crawlInput.findingCap !== undefined && crawlInput.findingCap !== block.findingCap) {
-        throw new ServiceError(
-          "VALIDATION",
-          `findingCap (${String(crawlInput.findingCap)}) and judgement.findingCap ` +
+        errors.push({
+          path: "judgement.findingCap",
+          code: "invalid",
+          message:
+            `findingCap (${String(crawlInput.findingCap)}) and judgement.findingCap ` +
             `(${String(block.findingCap)}) disagree: they are one setting, so send it once, ` +
             "or send the same value in both places",
-        );
+        });
+      } else {
+        crawlInput.findingCap = block.findingCap;
       }
-      crawlInput.findingCap = block.findingCap;
     }
 
     const crawlConfig = this.effectiveConfig(siteUrl, crawlInput);
@@ -2406,28 +2350,75 @@ export class ApiService {
     } catch (error) {
       // The loop's own range checks, surfaced where the caller can fix them.
       // Its messages name the field and the value and nothing else.
-      throw new ServiceError("VALIDATION", messageOf(error));
+      const message = messageOf(error);
+      errors.push({ path: loopCheckPath(message), code: "invalid", message });
     }
+
+    if (errors.length > 0) return { valid: false, errors, effective: null };
+    // The same strip `runCrawl` applies, by the same function: `allowPrivate`
+    // never reaches a row, so a resume of this crawl months from now cannot
+    // inherit it (build-plan §7 item 3).
+    return { valid: true, errors: [], effective: { ...storableConfig(crawlConfig), judgement: block } };
+  }
+
+  /**
+   * Accept a crawl: check the body (`checkStartBody`), create its row, and put
+   * it in this process's queue. Takes the body as it arrived — both transports
+   * hand it over unparsed, so both are refused by the one parser.
+   */
+  async startCrawl(raw: unknown): Promise<CrawlAccepted> {
+    if (this.closed) {
+      throw new ServiceError("CONFLICT", "the server is shutting down and is not accepting crawls");
+    }
+
+    const check = await this.checkStartBody(raw);
+    const refusal = check.errors[0];
+    if (refusal !== undefined) throw new ServiceError(serviceCodeOf(refusal.code), refusal.message);
+    if (check.effective === null) {
+      throw new Error("checkStartBody answered valid with no effective config");
+    }
+    const { judgement, ...config } = check.effective;
 
     const crawlId = `crawl_${randomUUID()}`;
     await this.db.insert(crawls).values({
       id: crawlId,
-      siteUrl,
-      // The same strip `runCrawl` applies, by the same function: `allowPrivate`
-      // never reaches a row, so a resume of this crawl months from now cannot
-      // inherit it (build-plan §7 item 3).
-      config: storableConfig(crawlConfig),
+      siteUrl: config.siteUrl,
+      config,
       // Null when the request named no judgement — "no overrides", the state
       // every crawl before 27a is in.
-      judgement: block === null ? null : storableBlock(block),
+      judgement: judgement === null ? null : storableBlock(judgement),
       rulesetVersion: RULESET_VERSION,
       status: "queued",
     });
 
-    const entry: QueueEntry = { crawlId, config: crawlConfig, resuming: false };
+    const entry: QueueEntry = { crawlId, resuming: false };
     this.waiting.push(entry);
     this.pump();
     return { crawlId, status: "queued", queuePosition: this.queuePosition(crawlId) ?? 0 };
+  }
+
+  /**
+   * `config_schema` (`GET /config/schema`): the crawl-start body as JSON Schema
+   * draft 2020-12 — each field's description, default and mutability, the
+   * overridable thresholds with their bounds — and the ruleset version whose
+   * rule ids it lists.
+   */
+  configSchema(): { schema: object; rulesetVersion: string } {
+    return publishedSchema(this.registry);
+  }
+
+  /** The crawl-start body schema over this server's ruleset — what MCP `crawl_start` registers. */
+  startBodySchema(): ReturnType<typeof startBodySchema> {
+    return startBodySchema(this.registry);
+  }
+
+  /**
+   * `config_validate` (`POST /config/validate`): a dry run of `crawl_start`.
+   * Every body is answered — `valid: false` with its refusals is an answer,
+   * not an error — and nothing is written.
+   */
+  async validateConfig(raw: unknown): Promise<StartBodyCheck> {
+    return await this.checkStartBody(raw);
   }
 
   /**
@@ -2615,6 +2606,13 @@ export class ApiService {
       pagesTotal: row.pagesTotal,
       renderPassCount: row.renderPassCount,
       rulesetVersion: row.rulesetVersion,
+      // Validated: a value this engine never writes is a defect of ours — a 500
+      // naming the crawl, not a null.
+      controlRequested: readControlRequest(row.controlRequest, crawlId),
+      pauseReason: readPauseReason(row.pauseReason, crawlId),
+      cancelledAt: row.cancelledAt === null ? null : row.cancelledAt.toISOString(),
+      // Unknown, not 0, on a crawl cancelled before it ran (Ruling 11).
+      neverFetched: row.status === "cancelled" && row.discovery !== null ? counts.pending : null,
       // Straight off the column, null included. The null is not defaulted to a
       // sentence here on either side of the contract: on a `finished` crawl it
       // is the correct answer, and on a `failed` one it means the row predates
@@ -2999,12 +2997,223 @@ export class ApiService {
         status: "failed",
         finishedAt: new Date(),
         failureReason: MARKED_FAILED_REASON,
+        // A request pending on a `running` orphan dies with it: the column is
+        // non-null only while the row says `running` (27b column contract),
+        // and nobody is left to answer it.
+        controlRequest: null,
       })
       // Conditioned on the status this call READ, so a crawl that started (or
       // was closed by its own worker) between the guard and here is left alone
       // rather than overwritten. `getCrawl` below reports what actually stands.
       .where(and(eq(crawls.id, crawlId), eq(crawls.status, row.status)));
     return this.getCrawl(crawlId);
+  }
+
+  /**
+   * Pause a crawl — `crawl_pause` and `POST /crawls/:id/pause` (27b).
+   *
+   * The control table, applied with a compare-and-swap on the status this call
+   * read (and, on a running crawl, on the request it read):
+   *
+   *  - **queued** → `paused` (reason `request`) now, `immediate: true`, and out
+   *    of this process's queue. The removal and the CAS's dispatch are one
+   *    synchronous step after the read, as in `pump`, so the runner cannot
+   *    dequeue the crawl between them. A queued row this process does not hold
+   *    is decided by the CAS alone, and a runner elsewhere that later reaches it
+   *    skips it (`runQueued`, `ClaimLostError`).
+   *  - **running**, nothing pending → `control_request = 'pause'`,
+   *    `immediate: false`: the loop stops at its next poll. With a pause
+   *    already pending, the same answer and no write. With a cancel pending,
+   *    409: a cancel outranks a pause, and a pause would not undo it.
+   *  - **paused** → 409, already paused.
+   *  - **finished / failed / cancelled** → 409 naming the status.
+   *
+   * It never meets a render pass or a rules run: both refuse `queued` and
+   * `running` crawls, and those are the only ones a pause moves.
+   *
+   * A REQUEST IS NOT AN OUTCOME. A 202 says the request is on the row; a run
+   * that drains its frontier before its next poll closes `finished` and clears
+   * it. `crawl_status` is where the outcome is read.
+   */
+  async pauseCrawl(crawlId: string): Promise<CrawlControlOut> {
+    const row = await this.crawlRow(crawlId);
+    const pending = readControlRequest(row.controlRequest, crawlId);
+    switch (row.status) {
+      case "queued": {
+        // From here to the UPDATE's dispatch there is no `await`.
+        this.dropFromQueue(crawlId);
+        const moved = await this.db
+          .update(crawls)
+          .set({
+            status: "paused",
+            pauseReason: "request",
+            // As the loop's own stopped close writes it: when the crawl stopped.
+            finishedAt: new Date(),
+            controlRequest: null,
+          })
+          .where(and(eq(crawls.id, crawlId), eq(crawls.status, "queued")));
+        requireMoved(moved, crawlId, row.status, "pause");
+        return { crawlId, status: "paused", controlRequested: null, immediate: true };
+      }
+      case "running": {
+        if (pending === "cancel") {
+          throw new ServiceError(
+            "CONFLICT",
+            `crawl ${crawlId} is 'running' and a cancel is already pending: a cancel ` +
+              `outranks a pause, and the crawl will close 'cancelled'`,
+          );
+        }
+        if (pending === null) {
+          const set = await this.db
+            .update(crawls)
+            .set({ controlRequest: "pause" })
+            .where(
+              and(
+                eq(crawls.id, crawlId),
+                eq(crawls.status, "running"),
+                isNull(crawls.controlRequest),
+              ),
+            );
+          requireMoved(set, crawlId, row.status, "pause");
+        }
+        return { crawlId, status: "running", controlRequested: "pause", immediate: false };
+      }
+      case "paused": {
+        const reason = readPauseReason(row.pauseReason, crawlId);
+        // The column contract: pause_reason is non-null exactly when the status
+        // is `paused`. A paused row without one is a defect of ours — a 500
+        // naming the crawl (rule 7), not a refusal quoting "reason: null".
+        if (reason === null) {
+          throw new Error(
+            `crawl ${crawlId} is 'paused' with a null pause_reason, which this engine ` +
+              `never writes: a paused row always records why it stopped`,
+          );
+        }
+        throw new ServiceError(
+          "CONFLICT",
+          `crawl ${crawlId} is already paused (reason: ${reason}): crawl_resume continues it`,
+        );
+      }
+      default:
+        throw settledRefusal(crawlId, row.status, "paused");
+    }
+  }
+
+  /**
+   * Cancel a crawl — `crawl_cancel` and `POST /crawls/:id/cancel` (27b). A
+   * cancel is FINAL: `crawl_resume` refuses a cancelled crawl, and what it
+   * crawled stays judgeable.
+   *
+   * The control table, with `pauseCrawl`'s compare-and-swap and its one
+   * synchronous step for a queued crawl this process holds:
+   *
+   *  - **queued** → `cancelled` now (`cancelled_at`), out of the queue.
+   *  - **running** → `control_request = 'cancel'`, `immediate: false`, whether
+   *    nothing or a pause was pending (a cancel outranks a pause). With a cancel
+   *    already pending, the same answer and no write.
+   *  - **paused** → `cancelled` now, `cancelled_at` set, `pause_reason` null.
+   *  - **finished / failed / cancelled** → 409 naming the status.
+   *
+   * Refused (409) while this process renders or judges the crawl
+   * (`refuseWhileBusy`): neither can be interrupted, and a cancel would change
+   * the crawl under a pass that has already read it.
+   */
+  async cancelCrawl(crawlId: string): Promise<CrawlControlOut> {
+    const row = await this.crawlRow(crawlId);
+    const pending = readControlRequest(row.controlRequest, crawlId);
+    if (row.status !== "queued" && row.status !== "running" && row.status !== "paused") {
+      throw settledRefusal(crawlId, row.status, "cancelled");
+    }
+    this.refuseWhileBusy(crawlId, "crawl_cancel");
+    switch (row.status) {
+      case "queued":
+      case "paused": {
+        // From here to the UPDATE's dispatch there is no `await`.
+        if (row.status === "queued") this.dropFromQueue(crawlId);
+        const now = new Date();
+        const moved = await this.db
+          .update(crawls)
+          .set({
+            status: "cancelled",
+            cancelledAt: now,
+            pauseReason: null,
+            controlRequest: null,
+            // A queued crawl stops now; a paused one already has the time its
+            // run stopped, and that stays.
+            ...(row.status === "queued" ? { finishedAt: now } : {}),
+          })
+          .where(and(eq(crawls.id, crawlId), eq(crawls.status, row.status)));
+        requireMoved(moved, crawlId, row.status, "cancel");
+        return { crawlId, status: "cancelled", controlRequested: null, immediate: true };
+      }
+      case "running": {
+        if (pending !== "cancel" && !(await setControlRequest(this.db, crawlId, "cancel"))) {
+          throw changedState(crawlId, row.status, "cancel");
+        }
+        return { crawlId, status: "running", controlRequested: "cancel", immediate: false };
+      }
+      default:
+        throw settledRefusal(crawlId, row.status, "cancelled");
+    }
+  }
+
+  /**
+   * Delete a crawl for good — `crawl_delete` and `DELETE /crawls/:id?confirm=`
+   * (27b). Every row the crawl owns goes in one transaction, then its files
+   * (render artifacts, exports); `crawl_compare` and every other reader answer
+   * 404 for it afterwards. There is no soft delete.
+   *
+   * `confirm` must repeat the crawl id: the call is irreversible, and an id
+   * picked from the wrong row of a list is the mistake it guards against.
+   *
+   * Refusals, in order: confirm (400), no such crawl (404), `queued` or
+   * `running` (409), a pending control request (409), a render pass or rules
+   * run on this server (409), live leases (409). The transaction locks the
+   * crawl row and checks the status and the request again, so a crawl that was
+   * resumed between the check and the delete is refused, not deleted.
+   *
+   * The files go after the commit; a file that cannot be removed throws with
+   * every path left on disk (`deleteCrawlFiles`), the rows already being gone.
+   */
+  async deleteCrawl(crawlId: string, confirm: string | undefined): Promise<CrawlDeleted> {
+    if (confirm !== crawlId) {
+      throw new ServiceError("VALIDATION", "confirm must repeat the crawl id");
+    }
+    const row = await this.crawlRow(crawlId);
+    refuseDeleteWhile(crawlId, row.status, readControlRequest(row.controlRequest, crawlId));
+    this.refuseWhileBusy(crawlId, "crawl_delete");
+    const live = await this.liveLeaseCount(crawlId);
+    if (live > 0) {
+      throw new ServiceError(
+        "CONFLICT",
+        `crawl ${crawlId} holds ${live} unexpired lease(s): a worker is still on it. ` +
+          `A dead worker's leases expire on their own — try again after they do`,
+      );
+    }
+
+    const rows = await this.db.transaction(async (tx) => {
+      const locked = await tx
+        .select({ status: crawls.status, controlRequest: crawls.controlRequest })
+        .from(crawls)
+        .where(eq(crawls.id, crawlId))
+        .limit(1)
+        .for("update");
+      const current = locked[0];
+      if (current === undefined) {
+        throw new ServiceError("NOT_FOUND", `no such crawl '${clip(crawlId)}'`);
+      }
+      refuseDeleteWhile(crawlId, current.status, readControlRequest(current.controlRequest, crawlId));
+      return await deleteCrawlRows(tx, crawlId);
+    });
+
+    const files = await deleteCrawlFiles(crawlId, slug(crawlId), this.renderDir, this.exportDir);
+    return { crawlId, rows, files };
+  }
+
+  /** Take a crawl out of this process's wait queue, if it is there. Synchronous. */
+  private dropFromQueue(crawlId: string): void {
+    const index = this.waiting.findIndex((e) => e.crawlId === crawlId);
+    if (index >= 0) this.waiting.splice(index, 1);
   }
 
   /**
@@ -3016,7 +3225,8 @@ export class ApiService {
    * Phase 1, and the API's own queue runner already calls it for every crawl it
    * starts. What was missing was reachability. When the Phase 11 gate crawl's
    * harness stopped the server 40 minutes into the resource pass, the row closed
-   * `cancelled` with 786 resource rows still unasked, and finishing them took a
+   * `cancelled` (what a shutdown wrote before 27b; it writes `paused` now) with
+   * 786 resource rows still unasked, and finishing them took a
    * script with a database handle — for an operator driving this engine over the
    * network there was no move at all (docs/gates/phase-11.md §5). This is that
    * move.
@@ -3072,8 +3282,9 @@ export class ApiService {
    *  3. **A live worker holds leases** — 409, naming the count. An unexpired
    *     `leased_until` is the frontier's own live-worker detector, and it is the
    *     test `markCrawlFailed` and the render driver already make.
-   *  4. **Nothing left to resume** — 409 on a settled crawl with no owed work,
-   *     naming every place that was looked: pending frontier rows, rows whose
+   *  4. **Nothing left to resume** — 409 on a `finished` or `failed` crawl
+   *     with no owed work (never on a `paused` one: see below), naming every
+   *     place that was looked: pending frontier rows, rows whose
    *     lease has expired, and resource rows with a null `fetch_class`. A
    *     "resume" that quietly ran discovery, found nothing to do and closed the
    *     row again would cost the site a robots.txt, a sitemap walk and up to
@@ -3084,19 +3295,41 @@ export class ApiService {
    *     zero means something else took the crawl between the guards and the
    *     write, and nothing is queued.
    *
-   * A CANCELLED CRAWL WITH WORK LEFT IS RESUMABLE, and that is a ruling rather
-   * than an oversight. `cancelled` means an abort signal fired — an operator
-   * stopped the server, or stopped the crawl — and the loop's abort path is
-   * careful to decide nothing on the way out: the URLs it never leased stay
-   * pending, the resource rows it never reached stay null with no reason, and
-   * the 404 probe and the resource pass are skipped rather than recorded as
-   * having found nothing. So the rows an abort leaves are precisely the
-   * questions nobody has answered yet, and resuming asks only those. An operator
-   * who changes their mind is the ordinary case (it is what the Phase 11 gate
-   * did), and refusing it would mean re-crawling a site from scratch to recover
-   * from a decision that cost the site nothing. `failed` is here on the same
-   * terms — a crash decided nothing either — and a caller who wants the crawl
-   * dead rather than continued still has `crawl_mark_failed`.
+   *  7. **The crawl is `cancelled`** — 409, first of all the checks after the
+   *     read. A cancel is final (27b): it is what an agent asks for when it
+   *     wants the crawl to stop for good, and a resume would undo it.
+   *  8. **A render pass or a rules run holds it** — 409 naming which
+   *     (`refuseWhileBusy`): a resume would change the crawl under a pass that
+   *     has already read it.
+   *  9. **A pause or cancel is pending on it** — 409 naming the request. A
+   *     request lives only on a `running` row, and one this server does not
+   *     hold is an orphan whose worker died before answering it. Queueing it
+   *     would carry the request into a `queued` row (the column contract says
+   *     it may not be there) and have the next run obey a question nobody is
+   *     asking any more. `crawl_mark_failed` retires the orphan and clears the
+   *     request; a failed crawl is resumable. The claim is also conditioned on
+   *     `control_request is null`, so a request set after the read is not
+   *     carried in either.
+   *
+   * A PAUSED CRAWL IS RESUMABLE, and that is the whole point of a pause (27b).
+   * `paused` means the loop stopped on purpose — an agent's `crawl_pause`
+   * (`pauseReason: "request"`) or this server shutting down (`"shutdown"`) —
+   * and its stop path decides nothing on the way out: the URLs it never leased
+   * stay pending, the resource rows it never reached stay null with no reason,
+   * and the epilogue work it had not started is skipped rather than recorded as
+   * having found nothing. So the rows a pause leaves are precisely the
+   * questions nobody has answered yet, and resuming asks only those — at the
+   * spacing the crawl earned, which the frontier and the throttle record keep.
+   * A PAUSED CRAWL IS NEVER "NOTHING TO RESUME". A stop skips whatever epilogue
+   * work had not started (the order is probe → recheck → resources): the
+   * known-404 probe if the stop came during the page crawl; otherwise the rest
+   * of the 5xx recheck and the resource pass — work `owedWork` does not count,
+   * because it is not a row. A crawl paused while still queued never ran at all and owes the whole
+   * crawl. So refusal 4 applies only to `finished` and `failed` rows, and a
+   * paused crawl is always accepted. `failed` is resumable on the same terms — a
+   * crash decided nothing either — and a caller who wants the crawl dead rather
+   * than continued has `crawl_cancel` (or `crawl_mark_failed` for an orphan).
+   * `cancelled` is NOT: see refusal 7.
    *
    * ## The honest race, stated rather than papered over
    *
@@ -3133,6 +3366,17 @@ export class ApiService {
 
     const row = await this.crawlRow(crawlId);
 
+    // Before the policy checks: a cancelled crawl is refused whatever its host,
+    // and the answer should say the true reason.
+    if (row.status === "cancelled") {
+      throw new ServiceError(
+        "CONFLICT",
+        `crawl ${crawlId} is 'cancelled', and a cancel is final: it cannot be resumed. ` +
+          `What it crawled stays judgeable; start a new crawl to continue the site`,
+      );
+    }
+    this.refuseWhileBusy(crawlId, "crawl_resume");
+
     // FIRST, BECAUSE IT IS FREE AND BECAUSE THE NEXT CHECKS ARE NOT. This one is
     // an array lookup in this process; `isUrlAllowed` below resolves the host,
     // which is a DNS round trip spent on a request this server was always going
@@ -3145,6 +3389,19 @@ export class ApiService {
         `crawl ${crawlId} is already held by this server ('${row.status}'): it is ` +
           `running now or waiting to run, and a resume would be a second worker on ` +
           `the same crawl`,
+      );
+    }
+
+    // Refusal 9: a request pending on a crawl nobody here holds. Read through
+    // the validator, so a value this engine never writes is a 500, not a pass.
+    const pendingRequest = readControlRequest(row.controlRequest, crawlId);
+    if (pendingRequest !== null) {
+      throw new ServiceError(
+        "CONFLICT",
+        `crawl ${crawlId} ('${row.status}') has a '${pendingRequest}' request pending, and ` +
+          `the worker that should act on it is gone: a resume would carry the request into ` +
+          `the next run instead of answering it. Retire the crawl with crawl_mark_failed ` +
+          `(which clears the request; a failed crawl is resumable), then resume it`,
       );
     }
 
@@ -3202,8 +3459,8 @@ export class ApiService {
 
     // Hard rule 5 over the hosts the RESUME will fetch, not the ones the first
     // run did: discovery and the host probe both run again.
-    await this.checkLegacyHosts(siteUrl, config.legacyHosts, allowPrivate);
-    await this.checkSitemapUrls(siteUrl, config.sitemapUrls, allowPrivate);
+    throwIfRefused(await this.checkLegacyHosts(siteUrl, config.legacyHosts, allowPrivate));
+    throwIfRefused(await this.checkSitemapUrls(siteUrl, config.sitemapUrls, allowPrivate));
 
     const live = await this.liveLeaseCount(crawlId);
     if (live > 0) {
@@ -3218,14 +3475,20 @@ export class ApiService {
     // Only a SETTLED crawl can be out of work. A `queued` or `running` row that
     // nobody is holding is a crawl a dead process left behind: its frontier may
     // be empty simply because it never got as far as seeding one, and resuming
-    // it does what a fresh start does — discover, seed, loop.
-    if (row.status !== "queued" && row.status !== "running") {
+    // it does what a fresh start does — discover, seed, loop. A `paused` crawl
+    // always owes work this count cannot see (the docblock's "a paused crawl is
+    // never nothing to resume"), so it is not counted at all.
+    if (row.status !== "queued" && row.status !== "running" && row.status !== "paused") {
       const work = await this.owedWork(crawlId, config);
       if (work.total === 0) {
         throw new ServiceError("CONFLICT", nothingToResume(crawlId, row.status, work));
       }
     }
 
+    // Again, synchronously before the claim: the check at the top was several
+    // `await`s ago, and a render pass or a rules run may have claimed the crawl
+    // since. Once the row says `queued`, both refuse it.
+    this.refuseWhileBusy(crawlId, "crawl_resume");
     const claimed = await this.db
       .update(crawls)
       .set({
@@ -3234,12 +3497,15 @@ export class ApiService {
         // and a row saying both would be unreadable. The crawl loop clears it
         // too when it starts, but a row can sit in this queue for a while first.
         finishedAt: null,
+        // And the pause's reason goes with the pause: non-null exactly when
+        // `status = 'paused'` (27b column contract).
+        pauseReason: null,
         // AND SO DOES `rules_run_at`, for a sharper reason than tidiness.
         //
         // It is the surface's single load-bearing sentence (talos-surface.md
         // §5): a timestamp means a complete rules pass is on record, so an empty
         // findings answer means "looked, found nothing", and null means nobody
-        // has looked. Judge a cancelled crawl and then resume it, and the
+        // has looked. Judge a paused crawl and then resume it, and the
         // timestamp would survive over a crawl that has since grown pages —
         // `findingsCount` would describe a strictly smaller crawl than
         // `pagesScanned` counts, and every reader is told to trust the pair.
@@ -3263,8 +3529,15 @@ export class ApiService {
       })
       // Conditioned on the status this call READ, for `markCrawlFailed`'s
       // reason: a crawl that started under another process between the guards
-      // and here is left exactly as it is.
-      .where(and(eq(crawls.id, crawlId), eq(crawls.status, row.status)));
+      // and here is left exactly as it is. And on no request pending (refusal
+      // 9), so one set after the read is not carried into a queued row.
+      .where(
+        and(
+          eq(crawls.id, crawlId),
+          eq(crawls.status, row.status),
+          isNull(crawls.controlRequest),
+        ),
+      );
 
     // AND THE COMPARE-AND-SWAP IS READ, which is the whole point of writing one.
     //
@@ -3296,7 +3569,7 @@ export class ApiService {
       );
     }
 
-    const entry: QueueEntry = { crawlId, config, resuming: true };
+    const entry: QueueEntry = { crawlId, resuming: true };
     this.waiting.push(entry);
     this.pump();
     return { crawlId, status: "queued", queuePosition: this.queuePosition(crawlId) ?? 0 };
@@ -3387,43 +3660,64 @@ export class ApiService {
    * The list is validated BEFORE the driver's own three refusals are reached. A
    * malformed request is refused as a malformed request; whether the crawl is
    * live is a fact about the world and is the driver's to state, in the same
-   * order `parseStartCrawlInput` puts a bad body ahead of a busy queue.
+   * order `parseStartBody` puts a bad body ahead of a busy queue.
    */
   async renderCrawl(crawlId: string, input: RenderCrawlInput = {}): Promise<RenderSummaryOut> {
-    const row = await this.crawlRow(crawlId);
-
-    let config: CrawlConfig;
-    try {
-      config = parseStoredConfig(row.config, crawlId);
-    } catch (error) {
-      throw new ServiceError("CONFLICT", messageOf(error));
+    // Check and claim in ONE synchronous step, before the first `await`, as
+    // `runRulesForCrawl` claims `judging` (see there for the window a claim
+    // taken after the reads left open): while the call runs, `refuseWhileBusy`
+    // refuses the commands that would change the crawl under it (resume,
+    // cancel, a crawl config change). The driver's own render-lease check
+    // would also refuse a second pass, but only once the first has leased a
+    // row; this hold covers the whole call, reads included.
+    if (this.rendering.has(crawlId)) {
+      throw new ServiceError(
+        "CONFLICT",
+        `crawl ${crawlId}: a render pass is running for it on this server, and two ` +
+          `passes may not share a crawl. Wait for crawl_render to answer, then ask again`,
+      );
     }
-    const robotsCrawlDelaySec = this.robotsCrawlDelay(row.discovery, crawlId);
-    const renderUrls =
-      input.urls === undefined
-        ? undefined
-        : await this.checkRenderUrls(crawlId, input.urls, config);
-
+    this.rendering.add(crawlId);
     let summary: RenderPassSummary;
     try {
-      summary = await runRenderPass(this.db, crawlId, {
-        ...config,
-        robotsCrawlDelaySec,
-        ...(renderUrls === undefined ? {} : { renderUrls }),
-        // NOT left to the pass's own cwd-relative default. The render pass
-        // writes a file per rendered page, and a server that never said where
-        // put them wherever it happened to be started — which is how this
-        // repository's own suite left twelve crawl directories in the working
-        // tree. The directory is a SERVER property (`ServiceConfig.renderDir`),
-        // absolutised at construction, and no request may name it.
-        renderHtmlDir: this.renderDir,
-        allowPrivate: this.config.crawlDefaults?.allowPrivate === true,
-        ...(this.config.resolveAddress === undefined
-          ? {}
-          : { resolveAddress: this.config.resolveAddress }),
-      });
-    } catch (error) {
-      throw mapRenderPassError(error, crawlId, this.log);
+      const row = await this.crawlRow(crawlId);
+
+      let config: CrawlConfig;
+      try {
+        config = parseStoredConfig(row.config, crawlId);
+      } catch (error) {
+        throw new ServiceError("CONFLICT", messageOf(error));
+      }
+      const robotsCrawlDelaySec = this.robotsCrawlDelay(row.discovery, crawlId);
+      const renderUrls =
+        input.urls === undefined
+          ? undefined
+          : await this.checkRenderUrls(crawlId, input.urls, config);
+
+      try {
+        summary = await runRenderPass(this.db, crawlId, {
+          ...config,
+          robotsCrawlDelaySec,
+          ...(renderUrls === undefined ? {} : { renderUrls }),
+          // NOT left to the pass's own cwd-relative default. The render pass
+          // writes a file per rendered page, and a server that never said where
+          // put them wherever it happened to be started — which is how this
+          // repository's own suite left twelve crawl directories in the working
+          // tree. The directory is a SERVER property (`ServiceConfig.renderDir`),
+          // absolutised at construction, and no request may name it.
+          renderHtmlDir: this.renderDir,
+          allowPrivate: this.config.crawlDefaults?.allowPrivate === true,
+          ...(this.config.resolveAddress === undefined
+            ? {}
+            : { resolveAddress: this.config.resolveAddress }),
+        });
+      } catch (error) {
+        throw mapRenderPassError(error, crawlId, this.log);
+      }
+    } finally {
+      // Released on every path — a refused read, a refused list, a failed
+      // pass — for `judging`'s reason.
+      this.rendering.delete(crawlId);
     }
 
     return {
@@ -3515,26 +3809,14 @@ export class ApiService {
    * a silent block is a request that appears to hang.
    */
   async runRulesForCrawl(crawlId: string): Promise<RunSummary> {
-    const row = await this.crawlRow(crawlId);
-    if (row.status === "queued" || row.status === "running") {
-      throw new ServiceError(
-        "CONFLICT",
-        `crawl ${crawlId} is '${row.status}': the rules may only run over a crawl that ` +
-          `has stopped, or they would judge a site that is still being fetched`,
-      );
-    }
-    // The stored judgement block, validated before the crawl is claimed or a
-    // row is touched: an override of a rule this ruleset lacks (a later
-    // ruleset removed it) is the CONFLICT the read surfaces answer, naming the
-    // crawl and the rule and pointing at crawl_config_set — not the bare
-    // `JudgementError` `runRules` would throw, which a transport answers 500.
-    // Synchronous, like the claim below, so nothing can move between the two.
-    // `crawl_config_set` validates against this registry, so a block that
-    // passes here cannot gain an unknown rule before `runRules` reads it.
-    readJudgementBlock(row.judgement, crawlId, this.registry);
-    // Check and claim in ONE synchronous step — no `await` between them — so
-    // two callers that both got past the status read cannot both see an
-    // unheld crawl.
+    // Check and claim in ONE synchronous step, BEFORE the first `await`. Two
+    // callers cannot both see an unheld crawl, and — the reason the claim
+    // comes before the status read rather than after it — no command that
+    // `refuseWhileBusy` guards (resume, cancel, a crawl config change) can
+    // land between the read below and the run: one issued while the read is
+    // in flight already meets the hold. A claim taken after the read left that
+    // window open, and a resume landing in it moved the crawl to `queued`
+    // under a run that had read it `paused`.
     if (this.judging.has(crawlId)) {
       throw new ServiceError(
         "CONFLICT",
@@ -3545,6 +3827,38 @@ export class ApiService {
     }
     this.judging.add(crawlId);
     try {
+      const row = await this.crawlRow(crawlId);
+      if (row.status === "queued" || row.status === "running") {
+        throw new ServiceError(
+          "CONFLICT",
+          `crawl ${crawlId} is '${row.status}': the rules may only run over a crawl that ` +
+            `has stopped, or they would judge a site that is still being fetched`,
+        );
+      }
+      // Ruling 11: a crawl with no discovery evidence never ran — it was
+      // paused or cancelled while still queued — so there is nothing to judge.
+      // Refused here, as the render driver refuses a crawl that "never
+      // completed discovery", rather than letting the first rule that reads
+      // the robots evidence throw and the transport answer 500.
+      if (row.discovery === null) {
+        throw new ServiceError(
+          "CONFLICT",
+          `crawl ${crawlId} is '${row.status}' and has no discovery evidence: it never ran ` +
+            (row.status === "paused" || row.status === "cancelled"
+              ? `(it was ${row.status} before discovery)`
+              : `(it ended before discovery completed)`) +
+            `, so there is nothing to judge`,
+        );
+      }
+      // The stored judgement block, validated before a row is touched: an
+      // override of a rule this ruleset lacks (a later ruleset removed it) is
+      // the CONFLICT the read surfaces answer, naming the crawl and the rule
+      // and pointing at crawl_config_set — not the bare `JudgementError`
+      // `runRules` would throw, which a transport answers 500.
+      // `crawl_config_set` validates against this registry and is refused
+      // while the crawl is held (above), so a block that passes here cannot
+      // gain an unknown rule before `runRules` reads it.
+      readJudgementBlock(row.judgement, crawlId, this.registry);
       return await runRules(this.db, crawlId, this.registry);
     } catch (error) {
       // The one refusal `runRules` owns: an id nothing knows. It is raced with
@@ -3571,15 +3885,26 @@ export class ApiService {
    * One read of the crawl row (`loadJudgementView`), so the block, the stamp
    * and the staleness describe one instant. Refuses as the read surfaces do: a
    * stored override of a rule this ruleset lacks is a 409 naming it, which
-   * `setCrawlJudgement` is the way out of.
+   * `setCrawlConfig` is the way out of.
    */
   async getCrawlConfig(crawlId: string): Promise<CrawlConfigOut> {
     return crawlConfigOf(crawlId, await this.judgementView(crawlId));
   }
 
   /**
-   * Change a crawl's judgement: `crawl_config_set` and
-   * `PATCH /crawls/:id/config`, body `{judgement: {...}}`.
+   * Change a crawl's config: `crawl_config_set` and `PATCH /crawls/:id/config`,
+   * body `{crawl?: {...}, judgement?: {...}}`, at least one, applied in ONE
+   * transaction — a refusal in either half writes nothing.
+   *
+   * `crawl` is a shallow set of new values, each checked with its field's own
+   * schema from `CRAWL_FIELDS` (start's messages), and only a `whenPaused`
+   * field on a queued or paused crawl may change (`never` is a CONFLICT, as is
+   * the wrong status; `maxPages` may not drop below `pages_crawled`). A `crawl`
+   * change is refused while a render pass or rules run holds the crawl
+   * (`refuseWhileBusy`); the merged config must pass `validateCrawlConfig`.
+   * The queue runner re-reads the stored config when it dequeues, and a resume
+   * reads it again, so a change here is what the next run uses (the earned
+   * spacing in `host_spacing_jsonb` still wins, rule 9).
    *
    * `judgement` is an RFC 7396 merge-patch (`mergePatch`) of the stored block:
    * objects merge key by key, and a `null` removes a key, so
@@ -3603,8 +3928,18 @@ export class ApiService {
    *
    * ## Refusals
    *
-   *  - any key other than `judgement`: VALIDATION (crawl fields are Phase 27b);
-   *  - a `judgement` that is absent, null or not an object: VALIDATION — a null
+   *  - any key other than `crawl` and `judgement`: VALIDATION;
+   *  - a body with neither `crawl` nor `judgement`, or a `crawl` null, a field with
+   *    a null value, an unknown field, or an operator-only field whose value
+   *    differs from the stored one: VALIDATION;
+   *  - a `never` field whose value differs from the stored one: CONFLICT. An
+   *    unchanged `never` or operator-only key is "no change" — not written, not
+   *    refused (Ruling 12) — and every such key is decided before any status
+   *    check, so the refusal does not depend on key order;
+   *  - a changed `whenPaused` field on a crawl that is not queued or paused, or
+   *    on a queued crawl this server's runner has already dequeued (it is
+   *    starting now and has read its config): CONFLICT;
+   *  - a `judgement` that is null or not an object: VALIDATION — a null
    *    here would mean "delete the whole block", including a cap whose null is
    *    a value, so clearing is spelled per section instead;
    *  - a merged block `parseJudgement` refuses: VALIDATION, naming the path;
@@ -3620,38 +3955,45 @@ export class ApiService {
    * crawl between that check and this write reads either block, and stamps the
    * one it read, so `judgementStale` reports the outcome truthfully either way.
    */
-  async setCrawlJudgement(crawlId: string, patch: unknown): Promise<CrawlConfigOut> {
+  async setCrawlConfig(crawlId: string, patch: unknown): Promise<CrawlConfigOut> {
     if (!isPlainObject(patch)) {
       throw new ServiceError("VALIDATION", "request body must be a JSON object");
     }
-    const others = Object.keys(patch).filter((key) => key !== "judgement");
+    const others = Object.keys(patch).filter((key) => key !== "crawl" && key !== "judgement");
     if (others.length > 0) {
       throw new ServiceError(
         "VALIDATION",
-        "only `judgement` can be set; crawl fields arrive in Phase 27b " +
-          `(refused: ${others.map(clip).join(", ")})`,
+        `only \`crawl\` and \`judgement\` can be set (refused: ${others.map(clip).join(", ")})`,
       );
     }
+    const crawlPatch = patch["crawl"];
     const judgementPatch = patch["judgement"];
-    if (judgementPatch === undefined) {
+    if (crawlPatch === undefined && judgementPatch === undefined) {
       throw new ServiceError(
         "VALIDATION",
-        "the body must carry `judgement`: the merge-patch to apply to the crawl's judgement block",
+        "the body must carry `crawl` (new values for crawl settings) or `judgement` (the " +
+          "merge-patch to apply to the crawl's judgement block), or both",
       );
     }
-    if (!isPlainObject(judgementPatch)) {
+    if (judgementPatch !== undefined && !isPlainObject(judgementPatch)) {
       throw new ServiceError(
         "VALIDATION",
         "judgement must be a JSON object (a merge-patch of the block); to clear every " +
           'override send {"rules": null, "thresholds": null}',
       );
     }
-    this.refuseWhileJudging(crawlId);
+    const crawlSet = crawlPatch === undefined ? null : this.parseCrawlPatch(crawlPatch);
+    this.refuseWhileConfigBusy(crawlId, crawlSet !== null);
 
-    const { findingCap: capPatch, ...blockPatch } = judgementPatch;
+    const { findingCap: capPatch, ...blockPatch } = judgementPatch ?? {};
     await this.db.transaction(async (tx) => {
       const rows = await tx
-        .select({ config: crawls.config, judgement: crawls.judgement })
+        .select({
+          config: crawls.config,
+          judgement: crawls.judgement,
+          status: crawls.status,
+          pagesCrawled: crawls.pagesCrawled,
+        })
         .from(crawls)
         .where(eq(crawls.id, crawlId))
         .limit(1)
@@ -3659,46 +4001,243 @@ export class ApiService {
       const row = rows[0];
       if (row === undefined) throw new ServiceError("NOT_FOUND", `no such crawl '${clip(crawlId)}'`);
 
-      // The stored block is what the patch merges onto, so it must be one.
-      // The ONE refusal let through is an override of a rule this ruleset no
-      // longer defines: removing it is the repair the read surfaces point
-      // here for, and the merged block is parsed below either way — an
-      // override the patch leaves in place is refused there, naming it.
-      try {
-        readStoredJudgement(row.judgement, crawlId, this.registry);
-      } catch (error) {
-        if (!(error instanceof JudgementError && error.reason === "unknown-rule")) throw error;
-      }
+      let config: Record<string, unknown> | undefined = undefined;
+      /** Whether the crawl half changes any value (a whenPaused key; Ruling 12 drops unchanged never keys). */
+      let crawlChanges = false;
 
-      const merged = mergePatch(row.judgement ?? {}, blockPatch) as Record<string, unknown>;
-      const block = this.parseJudgementInput(
-        capPatch === undefined ? merged : { ...merged, findingCap: capPatch },
-      );
-
-      let config: unknown = undefined;
-      if (block.findingCap !== undefined) {
-        // Read through the same validation every reader of the key uses, so a
-        // config this cannot read is refused rather than overwritten.
+      if (crawlSet !== null) {
+        if (!isPlainObject(row.config)) {
+          throw new ServiceError("CONFLICT", `crawl ${crawlId}: stored config is not readable`);
+        }
+        const storedConfig = row.config;
+        // RULING 12: a `never` or operator-only key whose value deep-equals the
+        // stored one is "no change" — not written, not refused — so get → edit
+        // → set with the whole `crawl` object works. Any change is refused as
+        // before. Every such key is decided FIRST, before any status check, so
+        // which refusal an agent reads does not depend on the order of its keys.
+        const unchanged = (key: string, ...candidates: unknown[]): boolean =>
+          Object.hasOwn(storedConfig, key) &&
+          candidates.some((value) => isDeepStrictEqual(value, storedConfig[key]));
+        for (const [key, value] of Object.entries(crawlSet.operatorOnly)) {
+          if (!unchanged(key, value)) {
+            throw new ServiceError(
+              "VALIDATION",
+              `field '${clip(key)}' is set by the operator, not over the API`,
+            );
+          }
+        }
+        const wire: Record<string, { mutable: Mutability } | undefined> = CRAWL_FIELDS;
+        const changes: Record<string, unknown> = {};
+        for (const [key, value] of Object.entries(crawlSet.values)) {
+          const mutable = wire[key]?.mutable;
+          if (mutable === "never") {
+            if (unchanged(key, crawlSet.sent[key], value)) continue;
+            throw new ServiceError(
+              "CONFLICT",
+              `field '${key}' is never mutable after a crawl starts (mutability: never)`,
+            );
+          }
+          if (mutable !== "whenPaused") {
+            throw new Error(`crawl_config_set: field '${key}' has mutability ${String(mutable)}`);
+          }
+          changes[key] = value;
+        }
+        for (const key of Object.keys(changes)) {
+          if (row.status !== "queued" && row.status !== "paused") {
+            throw new ServiceError(
+              "CONFLICT",
+              `field '${key}' can change only while the crawl is queued or paused ` +
+                `(mutability: whenPaused); crawl ${crawlId} is ${row.status}. ` +
+                "Pause it with crawl_pause, set the field, then crawl_resume",
+            );
+          }
+        }
+        this.refuseWhileStarting(crawlId, row.status, Object.keys(changes).length > 0);
+        const maxPages = changes["maxPages"];
+        if (typeof maxPages === "number" && maxPages < row.pagesCrawled) {
+          throw new ServiceError(
+            "VALIDATION",
+            `field 'maxPages' is ${maxPages}, below the ${row.pagesCrawled} pages this crawl ` +
+              "has already crawled; a budget cannot be lowered past what was spent",
+          );
+        }
+        crawlChanges = Object.keys(changes).length > 0;
+        const merged = { ...storedConfig, ...changes };
+        // The merged config is validated as a stored one is read — with the
+        // operator's `allowPrivate`, which is never stored — and written back
+        // through the same strip a start applies.
+        let readable: CrawlConfig;
         try {
-          storedFindingCap(row.config, crawlId);
+          readable = parseStoredConfig(merged, crawlId);
         } catch (error) {
           throw new ServiceError("CONFLICT", messageOf(error));
         }
-        config = { ...(row.config as Record<string, unknown>), findingCap: block.findingCap };
+        try {
+          validateCrawlConfig({
+            ...readable,
+            allowPrivate: this.config.crawlDefaults?.allowPrivate === true,
+          });
+        } catch (error) {
+          throw new ServiceError("VALIDATION", messageOf(error));
+        }
+        config = merged;
+      }
+
+      let judgementWrite: { judgement: ReturnType<typeof storableBlock> } | null = null;
+      if (judgementPatch !== undefined) {
+        // The stored block is what the patch merges onto, so it must be one.
+        // The ONE refusal let through is an override of a rule this ruleset no
+        // longer defines: removing it is the repair the read surfaces point
+        // here for, and the merged block is parsed below either way — an
+        // override the patch leaves in place is refused there, naming it.
+        try {
+          readStoredJudgement(row.judgement, crawlId, this.registry);
+        } catch (error) {
+          if (!(error instanceof JudgementError && error.reason === "unknown-rule")) throw error;
+        }
+
+        const merged = mergePatch(row.judgement ?? {}, blockPatch) as Record<string, unknown>;
+        const block = this.parseJudgementInput(
+          capPatch === undefined ? merged : { ...merged, findingCap: capPatch },
+        );
+
+        if (block.findingCap !== undefined) {
+          // Read through the same validation every reader of the key uses, so a
+          // config this cannot read is refused rather than overwritten.
+          try {
+            storedFindingCap(row.config, crawlId);
+          } catch (error) {
+            throw new ServiceError("CONFLICT", messageOf(error));
+          }
+          config = {
+            ...(config ?? (row.config as Record<string, unknown>)),
+            findingCap: block.findingCap,
+          };
+        }
+        judgementWrite = { judgement: storableBlock(block) };
       }
 
       // Again, synchronously before the write: the check above was before an
-      // `await`, and a run may have claimed the crawl since.
-      this.refuseWhileJudging(crawlId);
+      // `await`, and a pass may have claimed the crawl since — or the runner
+      // may have dequeued it.
+      this.refuseWhileConfigBusy(crawlId, crawlSet !== null);
+      this.refuseWhileStarting(crawlId, row.status, crawlChanges);
       await tx
         .update(crawls)
-        .set({ judgement: storableBlock(block), ...(config === undefined ? {} : { config }) })
+        .set({
+          ...(judgementWrite ?? {}),
+          ...(config === undefined ? {} : { config: storableConfig(config as unknown as CrawlConfig) }),
+        })
         .where(eq(crawls.id, crawlId));
     });
     return await this.getCrawlConfig(crawlId);
   }
 
-  /** The refusal `setCrawlJudgement` gives while this process is judging the crawl. */
+  /**
+   * The `crawl` half of a config patch, parsed: every key a field the wire
+   * knows, every value that field's own schema accepts (the messages are
+   * start's), no null. The lifecycle and budget checks need the crawl row and
+   * are made in the transaction.
+   */
+  private parseCrawlPatch(raw: unknown): CrawlPatch {
+    if (!isPlainObject(raw)) {
+      throw new ServiceError("VALIDATION", "crawl must be a JSON object of new setting values");
+    }
+    const wire: Record<string, CrawlField | undefined> = CRAWL_FIELDS;
+    const out: Record<string, unknown> = {};
+    const sent: Record<string, unknown> = {};
+    const operatorOnly: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(raw)) {
+      if (OPERATOR_ONLY_FIELDS.includes(key)) {
+        // Decided against the stored value in the transaction (Ruling 12): an
+        // unchanged one is no change, a changed one is refused there.
+        operatorOnly[key] = value;
+        continue;
+      }
+      if (key === "findingCap") {
+        throw new ServiceError(
+          "VALIDATION",
+          "findingCap belongs to the judgement: set it as judgement.findingCap",
+        );
+      }
+      const field = wire[key];
+      if (field === undefined) {
+        throw new ServiceError("VALIDATION", unknownField(key));
+      }
+      if (value === null) {
+        throw new ServiceError(
+          "VALIDATION",
+          `field '${key}' is null: name the value you want; a crawl field has no unset`,
+        );
+      }
+      const parsed = field.schema.safeParse(value);
+      if (!parsed.success) {
+        throw new ServiceError(
+          "VALIDATION",
+          parsed.error.issues[0]?.message ?? `field '${key}' is invalid`,
+        );
+      }
+      out[key] = parsed.data;
+      sent[key] = value;
+    }
+    return { values: out, sent, operatorOnly };
+  }
+
+  /**
+   * The refusal `setCrawlConfig` gives while this process works on the crawl:
+   * either pass for a `crawl` change (`refuseWhileBusy`), a rules run alone for
+   * a judgement-only one, which a render pass does not read.
+   */
+  private refuseWhileConfigBusy(crawlId: string, touchesCrawl: boolean): void {
+    if (touchesCrawl) this.refuseWhileBusy(crawlId, "crawl_config_set");
+    else this.refuseWhileJudging(crawlId);
+  }
+
+  /**
+   * The refusal `crawl_resume` and `crawl_cancel` give while this process
+   * renders or judges the crawl (27b). Neither pass can be interrupted in this
+   * phase, and each has already read the crawl it is working on, so a command
+   * that would change the crawl under it is refused (409), naming the
+   * operation and every pass that holds it. In-process, as the holds are (see
+   * `runRulesForCrawl` for why).
+   */
+  private refuseWhileBusy(crawlId: string, operation: string): void {
+    const holds: string[] = [];
+    if (this.judging.has(crawlId)) holds.push("rules are running");
+    if (this.rendering.has(crawlId)) holds.push("a render pass is running");
+    if (holds.length === 0) return;
+    throw new ServiceError(
+      "CONFLICT",
+      `${operation} is refused for crawl ${crawlId}: ${holds.join(" and ")} on this ` +
+        `server, and neither can be interrupted. Wait for it to answer, then ask again`,
+    );
+  }
+
+  /**
+   * The refusal `setCrawlConfig` gives for a crawl change to a `queued` crawl
+   * this server's runner has already dequeued (27b). `runQueued` reads the
+   * stored config at dequeue, while the row still says `queued`, so a change
+   * accepted now would answer 200 and not apply to the run that is starting.
+   * Checked after the row read and again synchronously before the write.
+   *
+   * WHAT IT DOES NOT CLOSE: a dequeue between that last check and this
+   * transaction's commit reads the config as committed before it. Postgres
+   * would have to hold the runner's read behind this row lock to close that,
+   * and a plain read is not blocked by one; the window is the write's own
+   * round trip. In-process, as the queue is.
+   */
+  private refuseWhileStarting(crawlId: string, status: string, changes: boolean): void {
+    if (changes && status === "queued" && this.running?.crawlId === crawlId) {
+      throw new ServiceError(
+        "CONFLICT",
+        `crawl ${crawlId} is starting now: this server has taken it off its queue and ` +
+          `read its config, so a change would not apply to the run. Pause it with ` +
+          `crawl_pause, set the field, then crawl_resume`,
+      );
+    }
+  }
+
+  /** The refusal `setCrawlConfig` gives while this process is judging the crawl. */
   private refuseWhileJudging(crawlId: string): void {
     if (this.judging.has(crawlId)) {
       throw new ServiceError(
@@ -5239,8 +5778,8 @@ export class ApiService {
   /**
    * Stop the queue: abort the crawl in flight and wait for it to close its row.
    *
-   * The abort is the crawl loop's own graceful path — the run ends `cancelled`
-   * with its frontier intact, resumable. Crawls still waiting are left as
+   * The abort is the crawl loop's own graceful path — the run ends `paused`
+   * (reason `shutdown`) with its frontier intact, resumable. Crawls still waiting are left as
    * `queued` rows and logged: this process will not run them and says so, which
    * is the restart contract in the module header.
    */
@@ -5311,9 +5850,23 @@ export class ApiService {
    * `resumeCrawl` rather than `runCrawl` because the row already exists — it
    * was created when the crawl was accepted. A queued crawl's frontier is
    * empty, so a resume of it does exactly what a fresh run does: discover,
-   * seed, loop. The config passed in is the effective one, `allowPrivate`
-   * included; the row's stored copy never had it (`storableConfig`), and
-   * `ResumeOpts.config` is the documented place to re-assert it.
+   * seed, loop.
+   *
+   * THE CONFIG IS READ HERE, AT DEQUEUE, from the row — not carried from
+   * acceptance — so a change made while the crawl waited is the one it runs
+   * with. The two test-only fields the row never holds (`storableConfig`) are
+   * re-asserted from this process (`processTrustConfig`), and
+   * `ResumeOpts.config` is the documented place to do it.
+   *
+   * THE CRAWL MAY HAVE LEFT THE QUEUE STATE WHILE IT WAITED: paused or
+   * cancelled by an agent (this process takes a crawl it holds out of its
+   * queue when it does that, but another process cannot), retired by
+   * `crawl_mark_failed` elsewhere. The read here skips such a row, and the
+   * loop's claim (`expectStatus: "queued"`) skips one that moves between this
+   * read and the claim; both are the same `ClaimLostError`. Either is logged
+   * and the row is left exactly as the other writer left it — it is not a
+   * failure of this crawl, and closing it `failed` would overwrite a decision
+   * somebody made.
    *
    * That identity is why `crawl_resume` needed no new runner: an entry put here
    * by `ApiService.resumeCrawl` differs only in that its frontier is NOT empty,
@@ -5326,14 +5879,25 @@ export class ApiService {
    * cannot tell those apart from outside.
    */
   private async runQueued(entry: QueueEntry, signal: AbortSignal): Promise<void> {
-    this.log(
-      `api: crawl ${entry.crawlId} ${entry.resuming ? "resuming" : "starting"} ` +
-        `(${entry.config.siteUrl})`,
-    );
     try {
+      const [row] = await this.db
+        .select({ status: crawls.status, config: crawls.config })
+        .from(crawls)
+        .where(eq(crawls.id, entry.crawlId));
+      if (row === undefined) throw new Error(`queue runner: no crawl ${entry.crawlId}`);
+      if (row.status !== "queued") throw new ClaimLostError(entry.crawlId, row.status, "queued");
+      const config: CrawlConfig = {
+        ...parseStoredConfig(row.config, entry.crawlId),
+        ...this.processTrustConfig(),
+      };
+      this.log(
+        `api: crawl ${entry.crawlId} ${entry.resuming ? "resuming" : "starting"} ` +
+          `(${config.siteUrl})`,
+      );
       const summary = await resumeCrawl(this.db, entry.crawlId, {
-        config: entry.config,
+        config,
         signal,
+        expectStatus: "queued",
       });
       // The template inference beside the page count, because the pair is the
       // whole of "what shape is this site" and the alternative is a second
@@ -5351,6 +5915,15 @@ export class ApiService {
           `${summary.pagesCrawled} page(s), ${templates}`,
       );
     } catch (error) {
+      if (error instanceof ClaimLostError) {
+        // Not a failure, and nothing to write: see the docblock. Matched on the
+        // type, never on the sentence.
+        this.log(
+          `api: crawl ${entry.crawlId} left the queue state ('${error.status}') before it ` +
+            `ran; not started`,
+        );
+        return;
+      }
       // The crawl's own failure path has already closed the row as `failed`
       // (see `execute` in the crawl loop) for anything thrown inside the run.
       // A throw BEFORE that — a row deleted underneath us, a config the loop
@@ -5377,6 +5950,22 @@ export class ApiService {
         })
         .where(and(eq(crawls.id, entry.crawlId), eq(crawls.status, "queued")));
     }
+  }
+
+  /**
+   * The two TEST-ONLY crawl-config fields `storableConfig` strips from every
+   * row (`allowPrivate`, `recheckMinGapMs`), re-asserted from this process's
+   * `crawlDefaults` — the process-trust seam, never a row or a request. The
+   * queue runner adds them to the stored config it reads at dequeue.
+   */
+  private processTrustConfig(): Pick<CrawlConfig, "allowPrivate" | "recheckMinGapMs"> {
+    const defaults = this.config.crawlDefaults;
+    return {
+      allowPrivate: defaults?.allowPrivate === true,
+      ...(defaults?.recheckMinGapMs === undefined
+        ? {}
+        : { recheckMinGapMs: defaults.recheckMinGapMs }),
+    };
   }
 
   /** 0 = running now or next; null = this process is not holding this crawl. */
@@ -5420,13 +6009,16 @@ export class ApiService {
    * A malformed entry is a 400 here — `hostProbeStarts` throws on one — rather
    * than an error the crawl discovers after it has been accepted, queued and
    * started.
+   *
+   * ANSWERS the refusal rather than throwing it, so `checkStartBody` can list
+   * it beside the others; `resumeCrawl` throws it (`throwIfRefused`).
    */
   private async checkLegacyHosts(
     siteUrl: string,
     legacyHosts: readonly string[] | undefined,
     allowPrivate: boolean,
-  ): Promise<void> {
-    if (legacyHosts === undefined || legacyHosts.length === 0) return;
+  ): Promise<ConfigError | null> {
+    if (legacyHosts === undefined || legacyHosts.length === 0) return null;
 
     let ownSpellings: string[];
     let everyStart: string[];
@@ -5434,10 +6026,10 @@ export class ApiService {
       ownSpellings = hostProbeStarts(siteUrl);
       everyStart = hostProbeStarts(siteUrl, legacyHosts);
     } catch (error) {
-      throw new ServiceError("VALIDATION", messageOf(error));
+      return { path: "legacyHosts", code: "invalid", message: messageOf(error) };
     }
 
-    await this.checkAddedHosts(everyStart, ownSpellings, allowPrivate, {
+    return await this.checkAddedHosts("legacyHosts", everyStart, ownSpellings, allowPrivate, {
       allowlist: (host) =>
         `legacyHosts names '${host}', which is not in this server's crawl allowlist: ` +
         `the host probe fetches every legacy host, and those fetches are the only ` +
@@ -5471,22 +6063,21 @@ export class ApiService {
    *
    * The order matters: unreadable URLs are named first (a 400 the caller can
    * fix from the message), then the allowlist, then the URL policy — the same
-   * order and the same authority as `startCrawl`'s own checks.
+   * order and the same authority as `checkStartBody`'s own checks. Answered,
+   * not thrown, as `checkLegacyHosts` is.
+   *
+   * The count is the start-body schema's bound; it is checked here too because
+   * a RESUME reads the list back from a row, which no schema parsed.
    */
   private async checkSitemapUrls(
     siteUrl: string,
     sitemapUrls: readonly string[] | undefined,
     allowPrivate: boolean,
-  ): Promise<void> {
-    if (sitemapUrls === undefined || sitemapUrls.length === 0) return;
+  ): Promise<ConfigError | null> {
+    if (sitemapUrls === undefined || sitemapUrls.length === 0) return null;
 
     if (sitemapUrls.length > MAX_SUPPLIED_SITEMAPS) {
-      throw new ServiceError(
-        "VALIDATION",
-        `sitemapUrls names ${sitemapUrls.length} documents, above this server's limit of ` +
-          `${MAX_SUPPLIED_SITEMAPS}. A site with more sitemap documents than that has a ` +
-          `sitemap INDEX — supply the index and the walk follows it, three levels deep`,
-      );
+      return { path: "sitemapUrls", code: "out_of_range", message: tooManySitemaps(sitemapUrls.length) };
     }
 
     const targets: string[] = [];
@@ -5496,12 +6087,14 @@ export class ApiService {
       // the caller wrote it; the crawl fetches that spelling too (discovery
       // normalises only to compare documents, never to rewrite one).
       if (normalizeUrl(entry) === null) {
-        throw new ServiceError(
-          "VALIDATION",
-          `sitemapUrls entry '${clip(entry)}' is not an absolute http(s) URL. A sitemap ` +
+        return {
+          path: "sitemapUrls",
+          code: "invalid",
+          message:
+            `sitemapUrls entry '${clip(entry)}' is not an absolute http(s) URL. A sitemap ` +
             `document is named in full ('https://site.example/sitemap.xml'); the walk ` +
             `resolves nothing relative`,
-        );
+        };
       }
       targets.push(entry);
     }
@@ -5510,10 +6103,10 @@ export class ApiService {
     try {
       ownSpellings = hostProbeStarts(siteUrl);
     } catch (error) {
-      throw new ServiceError("VALIDATION", messageOf(error));
+      return { path: "sitemapUrls", code: "invalid", message: messageOf(error) };
     }
 
-    await this.checkAddedHosts(targets, ownSpellings, allowPrivate, {
+    return await this.checkAddedHosts("sitemapUrls", targets, ownSpellings, allowPrivate, {
       allowlist: (host) =>
         `sitemapUrls names a document on '${host}', which is neither a spelling of this ` +
         `crawl's own site nor in this server's crawl allowlist: the walk fetches every ` +
@@ -5538,8 +6131,10 @@ export class ApiService {
    * `own` is the site's own start URLs (`hostProbeStarts(siteUrl)`), compared
    * by hostname; `targets` are absolute URLs. One check per distinct added
    * host — the policy's verdict is about the host and the scheme, not the path.
+   * The first refusal is answered, under the field's `path`.
    */
   private async checkAddedHosts(
+    path: string,
     targets: readonly string[],
     own: readonly string[],
     allowPrivate: boolean,
@@ -5547,7 +6142,7 @@ export class ApiService {
       allowlist: (host: string) => string;
       policy: (host: string, reason: string) => string;
     },
-  ): Promise<void> {
+  ): Promise<ConfigError | null> {
     const ownHosts = new Set(own.map((start) => new URL(start).hostname));
     const checked = new Set<string>();
     for (const target of targets) {
@@ -5557,16 +6152,18 @@ export class ApiService {
       checked.add(host);
 
       if (!this.crawlHostAllowed(host)) {
-        throw new ServiceError("FORBIDDEN", refusal.allowlist(host));
+        return { path, code: "not_allowed", message: refusal.allowlist(host) };
       }
       const verdict = await isUrlAllowed(target, { allowPrivate });
       if (!verdict.allowed) {
-        throw new ServiceError(
-          "FORBIDDEN",
-          refusal.policy(host, verdict.reason ?? "no reason given"),
-        );
+        return {
+          path,
+          code: "url_policy",
+          message: refusal.policy(host, verdict.reason ?? "no reason given"),
+        };
       }
     }
+    return null;
   }
 
   /**
@@ -6350,8 +6947,18 @@ function crawlConfigOf(crawlId: string, view: JudgementView): CrawlConfigOut {
       ],
     ),
   ) as Record<ThresholdName, ThresholdSetting>;
+  if (!isPlainObject(view.config)) {
+    throw new ServiceError("CONFLICT", `crawl ${crawlId}: stored config is not readable`);
+  }
+  const { findingCap: _findingCap, ...crawl } = view.config;
+  const wire: Record<string, { mutable: Mutability } | undefined> = CRAWL_FIELDS;
+  const mutability: Record<string, Mutability> = {};
+  for (const key of Object.keys(crawl)) mutability[key] = wire[key]?.mutable ?? "never";
+  mutability["judgement"] = "always";
   return {
     crawlId,
+    crawl,
+    mutability,
     judgement: {
       ...block,
       ...(view.findingCap === undefined ? {} : { findingCap: view.findingCap }),
@@ -7177,9 +7784,25 @@ function parseDataset(value: string | undefined): ExportDataset {
  * resulting path stays inside the export directory as well; neither check is
  * load-bearing alone.
  */
-function slug(value: string): string {
+export function slug(value: string): string {
   const cleaned = value.replace(/[^A-Za-z0-9_.-]/g, "_").replace(/^\.+/, "_");
   return cleaned.length > 80 ? cleaned.slice(0, 80) : cleaned;
+}
+
+/** The lifecycle refusals of `deleteCrawl`: a live crawl, or one with a request pending. */
+function refuseDeleteWhile(crawlId: string, status: string, pending: ControlRequest | null): void {
+  if (status === "queued" || status === "running") {
+    throw new ServiceError(
+      "CONFLICT",
+      `crawl ${crawlId} is ${status}: pause or cancel it, wait until it has stopped, then delete it`,
+    );
+  }
+  if (pending !== null) {
+    throw new ServiceError(
+      "CONFLICT",
+      `crawl ${crawlId} has a ${pending} request pending: wait for it to be acted on, then delete it`,
+    );
+  }
 }
 
 /** Evidence as stored, or a refusal — never a `{}` standing in for a row. */
@@ -7275,6 +7898,21 @@ function parseLimit(limit: number | undefined): number {
   return limit;
 }
 
+/** A refusal a check answered, thrown as the `ServiceError` its code maps to. */
+function throwIfRefused(refusal: ConfigError | null): void {
+  if (refusal !== null) throw new ServiceError(serviceCodeOf(refusal.code), refusal.message);
+}
+
+/**
+ * The field a crawl-loop range check is about, read off the start of its
+ * message (`CrawlConfig.maxPages must be …`, `renderBudgetPct must be …`), or
+ * "" — the effective config as a whole — when the message names no field.
+ */
+function loopCheckPath(message: string): string {
+  const named = /^(?:CrawlConfig\.)?([A-Za-z]+)\b/.exec(message)?.[1];
+  return named !== undefined && Object.hasOwn(CRAWL_FIELDS, named) ? named : "";
+}
+
 function stripUndefined<T extends object>(value: T): Partial<T> {
   return Object.fromEntries(
     Object.entries(value).filter(([, v]) => v !== undefined),
@@ -7283,6 +7921,54 @@ function stripUndefined<T extends object>(value: T): Partial<T> {
 
 function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+/**
+ * The refusal a crawl_pause / crawl_cancel answers on a settled crawl, naming
+ * its status. A status this engine never writes is not a refusal but a defect
+ * of ours, and throws as one.
+ */
+function settledRefusal(crawlId: string, status: string, target: "paused" | "cancelled"): Error {
+  if (status === "finished" || status === "failed" || status === "cancelled") {
+    // The statuses each command accepts, named per target: a pause takes a
+    // queued or running crawl, a cancel a paused one too.
+    const accepted = target === "paused" ? "a queued or running" : "a queued, running or paused";
+    return new ServiceError(
+      "CONFLICT",
+      `crawl ${crawlId} is '${status}': only ${accepted} crawl can be ${target}`,
+    );
+  }
+  return new Error(`crawl ${crawlId} has status ${JSON.stringify(status)}, which this engine never writes`);
+}
+
+/** A control command's compare-and-swap found the row moved under it. */
+function changedState(crawlId: string, status: string, verb: "pause" | "cancel"): ServiceError {
+  return new ServiceError(
+    "CONFLICT",
+    `crawl ${crawlId} changed state while this ${verb} was being applied — it was ` +
+      `'${status}' when the call began and something else has moved it since. ` +
+      `Nothing was changed; read crawl_status and try again`,
+  );
+}
+
+/**
+ * Read a control command's compare-and-swap. Zero rows is `changedState`; a
+ * missing row count means nobody knows whether the write landed, which is a
+ * defect rather than a refusal (`resumeCrawl`'s reading of its own CAS).
+ */
+function requireMoved(
+  result: { rowCount: number | null },
+  crawlId: string,
+  status: string,
+  verb: "pause" | "cancel",
+): void {
+  if (result.rowCount === null) {
+    throw new Error(
+      `${verb}Crawl: the update of crawl ${crawlId} reported no row count, so whether ` +
+        `the ${verb} was applied is unknown`,
+    );
+  }
+  if (result.rowCount === 0) throw changedState(crawlId, status, verb);
 }
 
 /**

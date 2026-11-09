@@ -1064,8 +1064,9 @@ export function defineRule<T extends AnyRule>(
   return attachTriage(rule, triage, fail) as T;
 }
 
-const ISSUE_TYPES = ["issue", "warning", "opportunity"] as const satisfies readonly IssueType[];
-const PRIORITIES = ["high", "medium", "low"] as const satisfies readonly Priority[];
+/** The closed type and priority vocabularies; the config schema publishes them too. */
+export const ISSUE_TYPES = ["issue", "warning", "opportunity"] as const satisfies readonly IssueType[];
+export const PRIORITIES = ["high", "medium", "low"] as const satisfies readonly Priority[];
 
 /**
  * The triage half of `defineRule`. ONE TABLE decides every rule's type and

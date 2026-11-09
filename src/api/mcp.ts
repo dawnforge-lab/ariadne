@@ -1,8 +1,8 @@
 /**
- * The MCP transport: twenty tools over the same service layer the HTTP routes
- * use. Six of them change something (`crawl_start`, `crawl_resume`,
- * `crawl_render`, `crawl_rules`, `crawl_mark_failed`, `crawl_config_set`);
- * every other one only reads.
+ * The MCP transport: twenty-seven tools over the same service layer the HTTP
+ * routes use. Nine of them change something (`crawl_start`, `crawl_resume`,
+ * `crawl_pause`, `crawl_cancel`, `crawl_delete`, `crawl_render`, `crawl_rules`,
+ * `crawl_mark_failed`, `crawl_config_set`); every other one only reads.
  *
  * This is a SECOND TRANSPORT, not a second API. Every tool below is a schema, a
  * description written for an agent, and one call into `ApiService` — there is no
@@ -29,10 +29,11 @@
  * refuses every crawl trigger and answers every query, exactly as over HTTP.
  *
  * **`crawlDefaults` stays code-level.** `allowPrivate` is not a tool argument at
- * any value: `crawl_start`'s schema is closed, so the field is refused as an
- * unrecognised key before the handler runs, and the handler puts what survives
- * through the same `parseStartCrawlInput` the HTTP route uses — which refuses it
- * again, by name and with the reason. A tool schema is a wire like any other.
+ * any value: `crawl_start`'s input schema IS the crawl-start body schema
+ * (src/api/config-schema.ts), which refuses it by name and with the reason
+ * before the handler runs, and the handler passes what survives to the same
+ * `startCrawl` the HTTP route calls — which parses it with that schema again.
+ * A tool schema is a wire like any other.
  *
  * ## What a tool answers with
  *
@@ -77,7 +78,6 @@ import {
   PAGE_SIZE_DEFAULT,
   PAGE_SIZE_MAX,
   ServiceError,
-  parseStartCrawlInput,
 } from "./service.js";
 
 /** The metric scopes, as a tool description says them. */
@@ -104,10 +104,15 @@ export const TOOL_NAMES = [
   "crawl_list",
   "crawl_mark_failed",
   "crawl_resume",
+  "crawl_pause",
+  "crawl_cancel",
+  "crawl_delete",
   "crawl_render",
   "crawl_rules",
   "crawl_config_get",
   "crawl_config_set",
+  "config_schema",
+  "config_validate",
   "robots_get",
   "issues_list",
   "issues_overview",
@@ -159,9 +164,10 @@ The order of operations is fixed by what the evidence means:
   1. crawl_start   accepts a crawl and returns a crawl id immediately. It is
                    queued, not finished; one crawl runs at a time per server.
   2. crawl_status  polls it. Poll until status is no longer 'queued'/'running'.
-                   A crawl that stopped with work still owed — a server shut
-                   down mid-run, a cancel somebody regrets — is continued with
-                   crawl_resume, which is the same crawl and not a new one.
+                   crawl_pause stops a crawl resumably and crawl_cancel stops
+                   it for good. A 'paused' crawl — yours, or a server that shut
+                   down mid-run — is continued with crawl_resume, which is the
+                   same crawl and not a new one. 'cancelled' is final.
   3. crawl_render  (optional) re-fetches some pages in a real browser, so
                    client-side-rendered content is measured rather than guessed.
                    Either the engine picks them or you name them with 'urls'.
@@ -257,9 +263,11 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "judgement sets how this crawl is JUDGED from the start — the same block " +
         "crawl_config_set changes later (see there for its shape). It is checked " +
         "against the ruleset before the crawl is accepted.",
-      inputSchema: z.strictObject(crawlStartShape()),
+      // The crawl-start body schema itself: one declaration for both
+      // transports, so an argument this refuses is a body POST /crawls refuses.
+      inputSchema: service.startBodySchema(),
     },
-    async (args) => run("crawl_start", () => service.startCrawl(parseStartCrawlInput(args))),
+    async (args) => run("crawl_start", () => service.startCrawl(args)),
   );
 
   server.registerTool(
@@ -419,17 +427,23 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "in pending, because nothing about them was decided. A crawl older than " +
         "the pass answers zeroes with a null passAt, which is the second reading, " +
         "not the first.\n\n" +
-        "This is the polling tool. status is one of queued, running, finished, " +
-        "cancelled, failed — the last three are terminal. Two fields answer the " +
+        "This is the polling tool. status is one of queued, running, paused, " +
+        "finished, cancelled, failed. finished, cancelled and failed are terminal; " +
+        "paused is a stop that crawl_resume continues, with pauseReason 'request' " +
+        "(crawl_pause) or 'shutdown' (the server stopped mid-run). cancelled is " +
+        "final — crawl_resume refuses it; cancelledAt says when, and neverFetched " +
+        "counts the URLs it never asked for. controlRequested is a pause or cancel " +
+        "asked of a running crawl and not yet acted on (null otherwise). Two fields answer the " +
         "question 'is anybody actually working on this': queuePosition is a " +
         "number only while THIS server holds the crawl (null otherwise), and " +
         "liveLeases counts unexpired worker leases. A 'queued' crawl with " +
         "queuePosition null was accepted by a server process that is now gone — " +
         "nobody will run it; hand it to crawl_resume, which continues the same " +
         "crawl, or retire it with crawl_mark_failed. The same pair answers a " +
-        "'running' row with liveLeases 0 long after its server died, and a " +
-        "terminal crawl that stopped with work owed: crawl_resume finishes it, " +
-        "crawl_mark_failed closes it.\n\n" +
+        "'running' row with liveLeases 0 long after its server died. A paused or " +
+        "failed crawl that stopped with work owed is finished by crawl_resume, or " +
+        "ended for good by crawl_cancel (paused) — never by crawl_mark_failed, " +
+        "which closes only an orphaned queued or running row.\n\n" +
         "blockedPages counts pages a WAF or rate limiter answered instead of the " +
         "site (401/403/429/challenge). hostSpacingMs is how far the engine has " +
         "already backed off in response: the widest per-host gap it is enforcing, " +
@@ -519,9 +533,10 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
     {
       title: "Resume an interrupted crawl",
       description:
-        "Continue a crawl that stopped with work still owed — a server that was " +
-        "shut down mid-crawl, a worker that died, or a crawl somebody cancelled " +
-        "and now wants finished. It is THE SAME CRAWL: same crawlId, same row, " +
+        "Continue a crawl that stopped with work still owed — a crawl that is " +
+        "paused (crawl_pause, or a server that was shut down mid-crawl), a worker " +
+        "that died, or a crawl that failed. A cancelled crawl is NOT resumable: a " +
+        "cancel is final, and this tool refuses it. It is THE SAME CRAWL: same crawlId, same row, " +
         "same frontier, and pages already on record are never fetched again. " +
         "Answers {crawlId, status, queuePosition} exactly as crawl_start does, " +
         "with status 'queued' — the work is accepted here and runs later.\n\n" +
@@ -554,18 +569,116 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "the resumed crawl finishes; until you do, crawl_status reads " +
         "rulesRunAt null and any findings still in the table are a pass nobody " +
         "completed.\n\n" +
-        "REFUSED, and each refusal says which: no such crawl; this server is " +
-        "already holding it; the crawl still holds an unexpired lease (a worker is " +
-        "on it — wait, a dead worker's leases expire on their own); a terminal " +
-        "crawl with nothing owed, naming what was counted (pending frontier rows, " +
+        "REFUSED, and each refusal says which: no such crawl; the crawl is " +
+        "cancelled (final); a render pass or a rules run is working on it on this " +
+        "server (wait for it to answer); this server is " +
+        "already holding it; a pause or cancel is pending on it and the worker " +
+        "that should act on it is gone (retire it with crawl_mark_failed, then " +
+        "resume); the crawl still holds an unexpired lease (a worker is " +
+        "on it — wait, a dead worker's leases expire on their own); a finished or " +
+        "failed crawl with nothing owed, naming what was counted (pending frontier rows, " +
         "expired leases, unasked resource rows); the site's host is no longer on " +
         "this server's crawl allowlist, which is policy and not a fault; or the " +
         "crawl's state changed while the call was checking it, in which case " +
         "nothing was queued and crawl_status says what it is now. Pages waiting on " +
-        "the render pass are NOT resumable work — that is crawl_render.",
+        "the render pass are NOT resumable work — that is crawl_render. A paused " +
+        "crawl is never refused as having nothing owed: a stop skips whatever " +
+        "epilogue work had not started — the known-404 probe if the stop came " +
+        "during the page crawl; otherwise the rest of the 5xx recheck and the " +
+        "resource pass — and a paused crawl may owe that work with no row " +
+        "counting it, so the resume runs to find out.",
       inputSchema: z.strictObject({ crawlId: crawlIdField() }),
     },
     async ({ crawlId }) => run("crawl_resume", () => service.resumeCrawl(crawlId)),
+  );
+
+  server.registerTool(
+    named("crawl_pause"),
+    {
+      title: "Pause a crawl",
+      description:
+        "Stop a crawl so that it can be continued later with crawl_resume. Answers " +
+        "{crawlId, status, controlRequested, immediate}.\n\n" +
+        "A QUEUED crawl is paused at once: immediate true, status 'paused', and it " +
+        "is taken out of this server's queue, so it will not start until you " +
+        "resume it. A RUNNING crawl is asked to pause: immediate false, status " +
+        "'running', controlRequested 'pause'. That is a REQUEST, not an outcome. " +
+        "In-flight page fetches are aborted and go back to the frontier, never " +
+        "recorded as failures. The status usually flips within about a second on a " +
+        "small crawl; on a deep crawl it takes longer (the 50k-page gate crawl " +
+        "flipped 5.3 s after the request). A stop during the sitemap walk waits for " +
+        "the walk to finish, and one during the recheck or resource passes lets " +
+        "the request in flight settle (up to 20 s). A crawl that finishes first " +
+        "closes 'finished' instead. Then poll crawl_status until status is 'paused' " +
+        "(pauseReason 'request').\n\n" +
+        "A pause keeps everything a resume needs: the frontier, the per-host " +
+        "spacing the crawl earned and its throttle record. A paused crawl stays " +
+        "paused across a server restart, and nothing starts it but crawl_resume. " +
+        "You can render it and run the rules on it while it is paused — looking at " +
+        "partial results is a reason to pause — once it has run: a crawl paused " +
+        "while still queued has nothing to judge, and crawl_rules refuses it.\n\n" +
+        "Asking again while a pause is pending answers the same and changes " +
+        "nothing. REFUSED: a crawl with a cancel pending (the cancel wins); a crawl " +
+        "already paused; a finished, failed or cancelled crawl, naming its status.",
+      inputSchema: z.strictObject({ crawlId: crawlIdField() }),
+    },
+    async ({ crawlId }) => run("crawl_pause", () => service.pauseCrawl(crawlId)),
+  );
+
+  server.registerTool(
+    named("crawl_cancel"),
+    {
+      title: "Cancel a crawl",
+      description:
+        "Stop a crawl FOR GOOD. A cancel is final: crawl_resume refuses a cancelled " +
+        "crawl. What a crawl cancelled after it ran had crawled stays judgeable — " +
+        "crawl_rules runs on it as on a finished crawl. A crawl cancelled while " +
+        "still queued never ran: there is nothing to judge, and crawl_rules " +
+        "refuses it (409). crawl_status reports cancelledAt and neverFetched, the " +
+        "URLs it never asked for (null on a crawl cancelled before it ran: " +
+        "nothing was seen). A cancel skips whatever epilogue work had not " +
+        "started — the 404 probe if it came during the page crawl; otherwise the " +
+        "rest of the 5xx recheck and the resource pass — and the skipped checks " +
+        "read as not measured, never as a pass. To stop a crawl you may want to " +
+        "continue, use crawl_pause instead.\n\n" +
+        "Answers {crawlId, status, controlRequested, immediate}. A QUEUED or " +
+        "PAUSED crawl is cancelled at once: immediate true, status 'cancelled'. A " +
+        "RUNNING crawl is asked to cancel: immediate false, status 'running', " +
+        "controlRequested 'cancel' — a REQUEST, which outranks a pending pause; a " +
+        "crawl that finishes before its next poll closes 'finished' instead. Then " +
+        "poll crawl_status until status is 'cancelled'.\n\n" +
+        "Asking again while a cancel is pending answers the same and changes " +
+        "nothing. REFUSED: a finished, failed or cancelled crawl, naming its " +
+        "status; and a crawl a render pass or a rules run is working on in this " +
+        "server — neither can be interrupted, so wait for crawl_render or " +
+        "crawl_rules to answer and ask again.",
+      inputSchema: z.strictObject({ crawlId: crawlIdField() }),
+    },
+    async ({ crawlId }) => run("crawl_cancel", () => service.cancelCrawl(crawlId)),
+  );
+
+  server.registerTool(
+    named("crawl_delete"),
+    {
+      title: "Delete a crawl",
+      description:
+        "Delete a crawl FOR GOOD: every row it owns (pages, links, issues, metrics, " +
+        "frontier and the rest) and its files on this server (render artifacts and " +
+        "exports). There is no undo and no soft delete: afterwards crawl_status, " +
+        "crawl_list and crawl_compare know nothing of it. Answers {crawlId, rows, " +
+        "files}: rows per table (crawls: 1 included) and {renders, exports}, the " +
+        "files removed.\n\n" +
+        "confirm must repeat crawlId exactly — it guards against deleting the wrong " +
+        "crawl from a list. REFUSED: a missing or different confirm (400); a " +
+        "queued or running crawl (409 — pause or cancel it, wait until it stops); a " +
+        "crawl with a pause or cancel pending; a crawl a render pass or rules run is " +
+        "working on in this server; a crawl a worker still holds leases on.",
+      inputSchema: z.strictObject({
+        crawlId: crawlIdField(),
+        confirm: z.string().describe("The crawl id again, exactly as in crawlId."),
+      }),
+    },
+    async ({ crawlId, confirm }) => run("crawl_delete", () => service.deleteCrawl(crawlId, confirm)),
   );
 
   server.registerTool(
@@ -661,6 +774,8 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "Refused while the crawl is 'queued' or 'running': findings about a site " +
         "that is still being fetched change under the reader (an 'orphan' page is " +
         "only orphaned because the page linking to it has not been fetched yet). " +
+        "Refused too for a crawl that never ran — paused or cancelled while still " +
+        "queued, so it has no discovery evidence and nothing to judge. " +
         "Running it a second time re-judges the crawl with the current ruleset.",
       inputSchema: z.strictObject({ crawlId: crawlIdField() }),
     },
@@ -692,11 +807,19 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
   server.registerTool(
     named("crawl_config_get"),
     {
-      title: "How a crawl is judged",
+      title: "A crawl's settings and how it is judged",
       description:
-        "A crawl's JUDGEMENT — what you have changed about how its findings are " +
-        "judged — and what its last rules run used. Answers {crawlId, judgement, " +
-        "thresholds, judgedWith, judgementStale}.\n\n" +
+        "A crawl's stored settings and its JUDGEMENT — what you have changed about " +
+        "how its findings are judged — and what its last rules run used. Answers " +
+        "{crawlId, crawl, mutability, judgement, thresholds, judgedWith, " +
+        "judgementStale}.\n\n" +
+        "crawl is every setting the crawl was stored with, at its effective value " +
+        "(findingCap is in judgement, not here); it is what config_validate " +
+        "answered as effective for the body that started it. mutability says, per " +
+        "crawl key, whether it can change after the crawl starts: never, " +
+        "whenPaused (only while the crawl is queued or paused) or always; the " +
+        "operator's own budgets (maxResources, maxResourceHosts, maxBlockedUrls, " +
+        "platformProfiles) are never, and judgement is always.\n\n" +
         "judgement is the crawl's block, {} when nothing is set: " +
         "{rules?: {[ruleId]: {disabled?: true, type?, priority?}}, " +
         "thresholds?: {[name]: number}, findingCap?: number | null}. findingCap " +
@@ -718,10 +841,27 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
   server.registerTool(
     named("crawl_config_set"),
     {
-      title: "Change how a crawl is judged",
+      title: "Change a crawl's settings or how it is judged",
       description:
-        "Change a crawl's judgement block and answer the result, exactly as " +
-        "crawl_config_get does. judgement is a MERGE-PATCH (RFC 7396) of the " +
+        "Change a crawl's settings (crawl) and/or its judgement block, and answer " +
+        "the result exactly as crawl_config_get does. Send at least one.\n\n" +
+        "crawl is a set of NEW VALUES, {maxPages: 900}: each key is validated as " +
+        "crawl_start validates it, and null is refused — a crawl field has no " +
+        "unset. Only the fields crawl_config_get marks whenPaused can be changed " +
+        "(maxPages, maxDepth, perHostDelayMs, maxConcurrency, renderBudgetPct, " +
+        "renderMaxPages, renderSamplePerType), and only while the crawl is queued " +
+        "or paused: pause a running crawl with crawl_pause, set, then " +
+        "crawl_resume. A never field (siteUrl, userAgent, the host lists, " +
+        "fetchResources) is refused 409 when its value changes; sent with the " +
+        "value already stored it is no change, so you may send back the whole " +
+        "crawl object crawl_config_get gave you with one field edited. A queued " +
+        "crawl this server is already starting is refused 409 (pause it first). " +
+        "maxPages cannot go below the pages " +
+        "already crawled; perHostDelayMs keeps its floor, and a resumed crawl " +
+        "never runs faster than the spacing it earned. A crawl change is also " +
+        "refused while a render pass or crawl_rules is running over the crawl. " +
+        "A refused request writes nothing, crawl and judgement alike.\n\n" +
+        "judgement is a MERGE-PATCH (RFC 7396) of the " +
         "stored block: objects merge key by key, and null REMOVES a key — " +
         "{rules: {'title.too-long': null}} drops that rule's override, " +
         "{thresholds: {SLOW_MS: null}} returns SLOW_MS to its default, " +
@@ -746,8 +886,16 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "Nothing is written when a change is refused.",
       inputSchema: z.strictObject({
         crawlId: crawlIdField(),
+        crawl: z
+          .record(z.string(), z.unknown())
+          .optional()
+          .describe(
+            "New values for whenPaused crawl settings, e.g. {maxPages: 900, " +
+              "perHostDelayMs: 500}. Only while the crawl is queued or paused.",
+          ),
         judgement: z
           .record(z.string(), z.unknown())
+          .optional()
           .describe(
             "The merge-patch to apply to the crawl's judgement block: {rules?, " +
               "thresholds?, findingCap?}. Validated against the ruleset after merging; " +
@@ -755,8 +903,63 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
           ),
       }),
     },
-    async ({ crawlId, judgement }) =>
-      run("crawl_config_set", () => service.setCrawlJudgement(crawlId, { judgement })),
+    async ({ crawlId, crawl, judgement }) =>
+      run("crawl_config_set", () =>
+        service.setCrawlConfig(crawlId, {
+          ...(crawl === undefined ? {} : { crawl }),
+          ...(judgement === undefined ? {} : { judgement }),
+        }),
+      ),
+  );
+
+  server.registerTool(
+    named("config_schema"),
+    {
+      title: "What crawl_start accepts",
+      description:
+        "The crawl_start arguments as a JSON Schema (draft 2020-12): {schema, " +
+        "rulesetVersion}. Every field carries its description, its default where " +
+        "it has one, and x-ariadne-mutable — never (fixed for the crawl's life: " +
+        "siteUrl, userAgent, probeHosts, legacyHosts, sitemapUrls, fetchResources), " +
+        "whenPaused (maxPages, maxDepth, perHostDelayMs, maxConcurrency and the " +
+        "render budgets) or always (findingCap and the judgement block). The " +
+        "judgement block lists every rule id it may name and every overridable " +
+        "threshold with its minimum, maximum and default; rulesetVersion says which " +
+        "ruleset those ids are from.\n\n" +
+        "A default is what the ENGINE uses when the field is absent. The server's " +
+        "operator may set their own defaults over it, so read config_validate's " +
+        "effective config, not this, for what a crawl would actually run with.",
+      inputSchema: z.strictObject({}),
+    },
+    async () => run("config_schema", () => Promise.resolve(service.configSchema())),
+  );
+
+  server.registerTool(
+    named("config_validate"),
+    {
+      title: "Check crawl_start arguments without starting a crawl",
+      description:
+        "A dry run of crawl_start: {valid, errors: [{path, code, message}], " +
+        "effective}. Nothing is created and nothing is fetched. valid: false is an " +
+        "ANSWER, not a tool error — errors lists every refusal found, and the first " +
+        "is the one crawl_start would refuse with, in the same words. code is " +
+        "unknown_field | forbidden_field | invalid_type | out_of_range | invalid | " +
+        "not_allowed | url_policy; the last two are the allowlist and the URL " +
+        "policy, which are checked here exactly as at crawl_start, with no DNS " +
+        "lookup (the seed's address is checked when the crawl runs).\n\n" +
+        "effective, on a valid config, is what the crawl would be stored with: " +
+        "the engine's defaults, then the server operator's, then yours, plus the " +
+        "parsed judgement (null when none was given). It is null when invalid.",
+      inputSchema: z.strictObject({
+        config: z
+          .unknown()
+          .describe(
+            "The crawl_start arguments to check, exactly as you would send them to " +
+              "crawl_start: {siteUrl, maxPages?, …, judgement?}.",
+          ),
+      }),
+    },
+    async ({ config }) => run("config_validate", () => service.validateConfig(config)),
   );
 
   // -------------------------------------------------------------- the results
@@ -1722,137 +1925,6 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
 }
 
 // ------------------------------------------------------------------ the pieces
-
-/**
- * `crawl_start`'s schema, one described field per accepted crawl-config field.
- *
- * Built from `START_CRAWL_FIELDS`' keys deliberately: the table in the service
- * is the wire's vocabulary, and a test asserts this shape has exactly those keys
- * — so a field added there and forgotten here fails the suite rather than
- * quietly leaving the agent surface smaller than the HTTP one.
- */
-function crawlStartShape() {
-  return {
-    siteUrl: z
-      .string()
-      .describe(
-        "The http(s) URL to crawl from. Its host must be on the server's crawl " +
-          "allowlist. The crawl treats the apex and www spellings of this host as one " +
-          "site.",
-      ),
-    maxPages: z
-      .number()
-      .describe(
-        "Stop after this many pages. Defaults to 500 — a first look at a site. Raise " +
-          "it deliberately: a full crawl of a large site is a real load on it.",
-      )
-      .optional(),
-    maxDepth: z
-      .number()
-      .describe("Stop following links past this many hops from the seed.")
-      .optional(),
-    userAgent: z
-      .string()
-      .describe(
-        "The branded user agent to identify as. Leave it alone unless the site's " +
-          "owner has asked you to use a specific string; it must stay identifiable.",
-      )
-      .optional(),
-    perHostDelayMs: z
-      .number()
-      .describe(
-        "Politeness delay between requests to one host. The floor is 250ms — a " +
-          "smaller value is refused rather than quietly raised — and robots.txt's " +
-          "own crawl-delay wins when it is longer.",
-      )
-      .optional(),
-    maxConcurrency: z
-      .number()
-      .describe("How many fetches may be in flight at once across the whole crawl.")
-      .optional(),
-    probeHosts: z
-      .boolean()
-      .describe(
-        "Probe the apex/www and http/https spellings of the seed (and any legacyHosts) " +
-          "to find where the site really lives. These are the only fetches made before " +
-          "robots.txt is read.",
-      )
-      .optional(),
-    legacyHosts: z
-      .array(z.string())
-      .describe(
-        "Extra hosts that used to serve this site, to probe alongside the seed's own " +
-          "spellings. EACH ONE must be on the allowlist in its own right — they are " +
-          "different sites by every definition the engine has.",
-      )
-      .optional(),
-    sitemapUrls: z
-      .array(z.string())
-      .describe(
-        "Sitemap documents to walk in addition to the ones robots.txt declares — the " +
-          "way to crawl a sitemap the site publishes but never points at. The engine " +
-          "does NOT probe /sitemap.xml on spec, so an undeclared sitemap is only read " +
-          "if you name it here. Full http(s) URLs; a host outside this site's own " +
-          "spellings must be on the allowlist in its own right. Supplying one does not " +
-          "hide the finding: robots.txt still declares no sitemap, and the audit still " +
-          "says so.",
-      )
-      .optional(),
-    renderBudgetPct: z
-      .number()
-      .describe("Share of the crawl's pages the later render pass may re-fetch, as a percentage.")
-      .optional(),
-    renderMaxPages: z
-      .number()
-      .describe("Hard ceiling on pages the later render pass may re-fetch.")
-      .optional(),
-    renderSamplePerType: z
-      .number()
-      .describe("How many pages of each template cohort the render pass samples.")
-      .optional(),
-    findingCap: z
-      .number()
-      .nullable()
-      .describe(
-        "How many findings each listing rule may report when this crawl is judged. " +
-          "Defaults to 200 — a bounded first look. Pass " +
-          "null for a BILLED AUDIT: every orphan, every duplicate group, every blocked " +
-          "sitemap entry, listed in full. It costs wall time on a large site and it is " +
-          "the whole picture rather than a snapshot. It is read when the RULES run, not " +
-          "while crawling, so it must be set here — crawl_rules has no cap argument of " +
-          "its own. Uncapped listings carry no 'and N more' note, but keep " +
-          "reading the note rather than the setting: a note means the list is " +
-          "incomplete and its absence means complete.",
-      )
-      .optional(),
-    fetchResources: z
-      .boolean()
-      .describe(
-        "Whether the crawl asks the site about the files its pages point at — the " +
-          "images, stylesheets and scripts. Defaults to true, and true is what an " +
-          "audit wants: it is the only source of image weight, broken-resource and " +
-          "page-weight evidence. Pass false to crawl the pages and ask about no file " +
-          "at all — a client who asked us not to touch their CDN, or a re-crawl that " +
-          "only needs the page census. It does NOT stop the references being " +
-          "recorded: crawl_status still reports resources.seen, because reading " +
-          "markup costs the site nothing. What it stops is the asking, and every " +
-          "unasked row says the operator chose so, so a silent images.oversized on " +
-          "such a crawl reads as 'nothing was weighed' rather than 'nothing is " +
-          "heavy'. The pass runs under the same politeness the page crawl earned; " +
-          "turning it off is a decision about somebody's servers, not a speed knob.",
-      )
-      .optional(),
-    judgement: z
-      .record(z.string(), z.unknown())
-      .describe(
-        "How this crawl will be judged: {rules?: {[ruleId]: {disabled?: true, type?, " +
-          "priority?}}, thresholds?: {[name]: number}, findingCap?: number | null} — " +
-          "the block crawl_config_set changes later. findingCap may be given here " +
-          "instead of at the top level; given in both places, the two must agree.",
-      )
-      .optional(),
-  };
-}
 
 function crawlIdField() {
   return z
