@@ -990,11 +990,11 @@ describe("runCrawl", () => {
     poisonNextPage = false;
 
     expect(thrown).toBeInstanceOf(AggregateError);
-    const aggregate = thrown as AggregateError;
-    expect(aggregate.errors).toHaveLength(2);
-    const text = aggregate.errors.map((e) => String((e as Error).message ?? e)).join("\n");
+    const flat = (e: unknown): unknown[] => (e instanceof AggregateError ? e.errors.flatMap(flat) : [e]);
+    const text = flat(thrown).map((e) => String((e as Error).message ?? e)).join("\n");
     expect(text).toMatch(/frontier/); // the loop's error survived
     expect(text).toMatch(/pages/); // and so did the flush's
+    expect(text).toMatch(/the crawls row is gone/); // and the failed close says it closed nothing (27b M3)
   });
 });
 
