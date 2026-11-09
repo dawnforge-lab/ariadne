@@ -28,8 +28,10 @@
  *    reason `too_long`. Every column a URL is keyed by is btree-indexed, and
  *    Postgres refuses an entry that large, so such a URL can be neither queued
  *    nor recorded; refusing it here keeps it off every fetch path at once.
+ *  - Phase 27c: `UrlPolicyOpts.maxUrlLength` lowers that limit for one crawl
+ *    (`CrawlConfig.maxUrlLength`); it can never raise it past the index's.
  */
-import { fitsIndex, INDEXED_URL_MAX } from "./parse/url-utils.js";
+import { INDEXED_URL_MAX } from "./parse/url-utils.js";
 
 /**
  * Hosts that are never crawlable, whatever they resolve to. Exported so the
@@ -474,6 +476,13 @@ export interface UrlPolicyOpts {
    * refused even here (see hardBlockedReason).
    */
   allowPrivate?: boolean;
+  /**
+   * The crawl's own URL length limit (`CrawlConfig.maxUrlLength`, Phase 27c).
+   * A URL longer than `min(maxUrlLength, INDEXED_URL_MAX)` is refused with the
+   * same `too_long` reason the index limit gives. Absent is `INDEXED_URL_MAX`;
+   * a larger value cannot lift the index's ceiling, which is a storage fact.
+   */
+  maxUrlLength?: number;
 }
 
 /**
@@ -588,10 +597,11 @@ export async function isUrlAllowed(
 
   // Measured on the serialized URL, the ASCII form a row would hold. Not a
   // host question, so `allowPrivate` does not relax it.
-  if (!fitsIndex(parsed.href)) {
+  const limit = Math.min(opts.maxUrlLength ?? INDEXED_URL_MAX, INDEXED_URL_MAX);
+  if (parsed.href.length > limit) {
     return {
       allowed: false,
-      reason: `too_long (${parsed.href.length} characters; the limit is ${INDEXED_URL_MAX})`,
+      reason: `too_long (${parsed.href.length} characters; the limit is ${limit})`,
     };
   }
 

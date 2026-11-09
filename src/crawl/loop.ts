@@ -107,7 +107,12 @@ import {
 } from "./render/select.js";
 import { inferPageTemplates, type PageTemplateInference } from "./page-type.js";
 import { analyzePage } from "./parse/page-analyzer.js";
-import { hostProbeStarts, isSameOrigin, normalizeUrl } from "./parse/url-utils.js";
+import {
+  hostProbeStarts,
+  INDEXED_URL_MAX,
+  isSameOrigin,
+  normalizeUrl,
+} from "./parse/url-utils.js";
 import { PageWriter, type PageWriterStats } from "./persist.js";
 import { CrawlWindow, HostGate, type BatchOutcome } from "./politeness.js";
 import {
@@ -120,6 +125,13 @@ import {
   type ResourcePassSummary,
 } from "./resources/fetch-resources.js";
 import { isUrlAllowed } from "./url-policy.js";
+import {
+  MAX_PATTERN_LENGTH,
+  MAX_SCOPE_PATTERNS,
+  scopeRefusesSql,
+  scopeVerdict,
+  type CrawlScope,
+} from "./url-scope.js";
 import { engineVersion, redactRequestHeaders } from "./versions.js";
 import { storableCap, storableDeep } from "./storable-text.js";
 
@@ -311,6 +323,46 @@ export interface CrawlConfig extends RenderSelectionConfig {
    * crawl out of the pace the platform tolerates.
    */
   platformProfiles?: boolean;
+  /**
+   * THE CRAWL'S SCOPE (Phase 27c): anchored wildcard patterns over the whole
+   * normalised URL (`src/crawl/url-scope.ts`). A URL an `exclude` pattern
+   * matches, or — with a non-empty `include` — one no `include` pattern
+   * matches, is refused at admission: after url-policy, before robots, for
+   * every link, sitemap entry and redirect target. The seed is not asked; the
+   * API refuses a seed its own scope excludes before the row exists.
+   *
+   * A refused link or redirect target is an `excluded` page row naming the
+   * pattern, never a request, written against the `maxBlockedUrls` budget it
+   * shares with robots-blocked rows; past it the URL is counted in
+   * `crawls.excluded_dropped`. A refused sitemap entry is skipped, not written
+   * (the robots-blocked precedent; Deviation 8): it is on record in
+   * `sitemap_urls` already.
+   *
+   * Stored, and changeable while paused: a resume whose scope refuses URLs
+   * still pending re-files them as `excluded` rows before its first lease
+   * (`refileOutOfScope`). At most `MAX_SCOPE_PATTERNS` patterns of at most
+   * `MAX_PATTERN_LENGTH` characters each.
+   */
+  exclude?: string[];
+  include?: string[];
+  /**
+   * How many redirects one chain may follow (Phase 27c), counted on the
+   * frontier row (`frontier.redirect_hops`): a redirect target inherits its
+   * source's count plus one, and a target already in the frontier keeps its
+   * own (Deviation 12). The redirect whose target would exceed the cap is
+   * written with the reason and its target is not queued. Absent is
+   * `CRAWL_DEFAULTS.maxRedirectHops` (10); an integer from 1 to 20.
+   */
+  maxRedirectHops?: number;
+  /**
+   * The longest URL this crawl will queue or request (Phase 27c), passed to
+   * every `isUrlAllowed` and `fetchPage` call the loop makes
+   * (`UrlPolicyOpts.maxUrlLength`). Absent is `CRAWL_DEFAULTS.maxUrlLength`,
+   * the index's own limit (`INDEXED_URL_MAX`, 2,500); an integer from 256 to
+   * 2,500. Not changeable after start: lowering it mid-crawl would need the
+   * re-filter the scope lists get (Deviation 11).
+   */
+  maxUrlLength?: number;
 }
 
 /**
@@ -408,6 +460,10 @@ export const CRAWL_DEFAULTS = {
   userAgent: "AriadneBot/0.1 (+https://github.com/dawnforge-lab/ariadne)",
   perHostDelayMs: 1000,
   maxConcurrency: 16,
+  // Phase 27c. A chain longer than ten hops is a site defect worth a finding,
+  // not a path worth following further; the URL limit is the index's own.
+  maxRedirectHops: 10,
+  maxUrlLength: INDEXED_URL_MAX,
   // The render pass's three, from the module that spends them. Spread rather
   // than copied so there is one place a budget can be changed.
   ...RENDER_DEFAULTS,
@@ -888,6 +944,10 @@ export function parseStoredConfig(value: unknown, crawlId: string): CrawlConfig 
     fetchResources: raw["fetchResources"],
     maxBlockedUrls: raw["maxBlockedUrls"],
     platformProfiles: raw["platformProfiles"],
+    exclude: raw["exclude"],
+    include: raw["include"],
+    maxRedirectHops: raw["maxRedirectHops"],
+    maxUrlLength: raw["maxUrlLength"],
   };
   for (const [field, expected] of [
     ["siteUrl", "string"],
@@ -932,6 +992,9 @@ export function parseStoredConfig(value: unknown, crawlId: string): CrawlConfig 
     "maxResourceHosts",
     // The blocked-row budget (Phase 23 T3), on the same terms.
     "maxBlockedUrls",
+    // Phase 27c's two limits, on the same terms.
+    "maxRedirectHops",
+    "maxUrlLength",
   ] as const) {
     if (config[field] !== undefined && typeof config[field] !== "number") {
       throw new Error(`crawl ${crawlId}: stored config.${field} is not a number`);
@@ -958,7 +1021,10 @@ export function parseStoredConfig(value: unknown, crawlId: string): CrawlConfig 
   // is a config we cannot read, not a list to quietly treat as empty. A resume
   // that dropped `sitemapUrls` would walk fewer documents than the first run
   // and report the difference as the site's.
-  for (const field of ["legacyHosts", "sitemapUrls"] as const) {
+  // The scope lists join them (Phase 27c): a resume that read a mangled
+  // `exclude` as empty would fetch every URL the agent fenced off. The same
+  // shape rule `storedScope` (src/rules/query/crawl-evidence.ts) applies.
+  for (const field of ["legacyHosts", "sitemapUrls", "exclude", "include"] as const) {
     const value = config[field];
     if (
       value !== undefined &&
@@ -971,6 +1037,12 @@ export function parseStoredConfig(value: unknown, crawlId: string): CrawlConfig 
   }
   return config as CrawlConfig;
 }
+
+/** `CrawlConfig.maxRedirectHops`' range (Phase 27c). */
+const MIN_REDIRECT_HOPS = 1;
+const MAX_REDIRECT_HOPS = 20;
+/** `CrawlConfig.maxUrlLength`'s floor; its ceiling is `INDEXED_URL_MAX`. */
+const MIN_URL_LENGTH = 256;
 
 /**
  * Range-check a crawl configuration, throwing on anything a crawl must not be
@@ -1053,6 +1125,56 @@ export function validateCrawlConfig(config: CrawlConfig): void {
       throw new RangeError(
         `CrawlConfig.${field} must be an integer ≥ 1, got ${String(value)}`,
       );
+    }
+  }
+  // Phase 27c's limits: a nonsense value is refused before the row exists,
+  // never clamped.
+  if (
+    config.maxRedirectHops !== undefined &&
+    (!Number.isInteger(config.maxRedirectHops) ||
+      config.maxRedirectHops < MIN_REDIRECT_HOPS ||
+      config.maxRedirectHops > MAX_REDIRECT_HOPS)
+  ) {
+    throw new RangeError(
+      `CrawlConfig.maxRedirectHops must be an integer from ${MIN_REDIRECT_HOPS} to ` +
+        `${MAX_REDIRECT_HOPS}, got ${String(config.maxRedirectHops)}`,
+    );
+  }
+  if (
+    config.maxUrlLength !== undefined &&
+    (!Number.isInteger(config.maxUrlLength) ||
+      config.maxUrlLength < MIN_URL_LENGTH ||
+      config.maxUrlLength > INDEXED_URL_MAX)
+  ) {
+    throw new RangeError(
+      `CrawlConfig.maxUrlLength must be an integer from ${MIN_URL_LENGTH} to ` +
+        `${INDEXED_URL_MAX}, got ${String(config.maxUrlLength)}`,
+    );
+  }
+  // The scope lists. An empty pattern matches only the empty string, so it can
+  // never match a URL: in `exclude` it is dead, and in `include` it would
+  // quietly fence off every link — refused either way.
+  for (const field of ["exclude", "include"] as const) {
+    const patterns = config[field];
+    if (patterns === undefined) continue;
+    if (!Array.isArray(patterns) || !patterns.every((p) => typeof p === "string")) {
+      throw new TypeError(`CrawlConfig.${field} must be an array of strings`);
+    }
+    if (patterns.length > MAX_SCOPE_PATTERNS) {
+      throw new RangeError(
+        `CrawlConfig.${field} holds ${patterns.length} patterns; the limit is ${MAX_SCOPE_PATTERNS}`,
+      );
+    }
+    for (const pattern of patterns) {
+      if (pattern === "") {
+        throw new RangeError(`CrawlConfig.${field} pattern is empty, and can never match a URL`);
+      }
+      if (pattern.length > MAX_PATTERN_LENGTH) {
+        throw new RangeError(
+          `CrawlConfig.${field} pattern is ${pattern.length} characters; the limit is ` +
+            `${MAX_PATTERN_LENGTH}`,
+        );
+      }
     }
   }
   // The test-only recheck gap, checked here for `findingCap`'s reason: the pass
@@ -1270,6 +1392,12 @@ async function runToCompletion(
   // Everything below stops on the watcher's signal, never on the caller's
   // directly: the caller's is one of the watcher's inputs (a shutdown).
   const signal = watcher.signal;
+  // Phase 27c: what this crawl admits, resolved once. Absent is the default,
+  // never "no limit".
+  const scope: CrawlScope = { exclude: config.exclude ?? [], include: config.include ?? [] };
+  const scoped = scope.exclude.length > 0 || scope.include.length > 0;
+  const maxUrlLength = config.maxUrlLength ?? CRAWL_DEFAULTS.maxUrlLength;
+  const maxRedirectHops = config.maxRedirectHops ?? CRAWL_DEFAULTS.maxRedirectHops;
 
   // THE PLATFORM PROFILE (Phase 24a §3.1; src/crawl/platform.ts). The first
   // classifiable response — an `ok` HTML page from the crawl's origin — is
@@ -1518,6 +1646,35 @@ async function runToCompletion(
   // that read those as uncrawled would re-fetch every rendered page and would
   // let the frontier grow past `maxPages` by however many rows the selection
   // took (hard rule 7 — the miscount would be silent).
+  /**
+   * THE NEVER-REQUESTED BUDGET (Phase 23 T3, study D1; shared since 27c), kept
+   * beside the frontier's and never mixed with it: `blockedRows` counts the
+   * page rows this crawl has RECORDED without a request — robots-blocked
+   * `disallowed` rows and scope-refused `excluded` rows alike — against
+   * `maxBlockedUrls` (default `maxPages`). A counter, not a set — the dedupe is
+   * the `pages (crawl_id, url)` unique index's, as the frontier's is its
+   * primary key's (hard rule 6).
+   *
+   * Read off the table on every start rather than assumed zero, so a resume
+   * spends what is left of the budget rather than a second one.
+   */
+  const blockedBudget = config.maxBlockedUrls ?? config.maxPages;
+  let blockedRows = await neverRequestedRowCount(db, crawlId);
+
+  /**
+   * THE RE-FILTER (Phase 27c). A crawl paused under one scope and resumed under
+   * another holds unfetched URLs its scope now refuses; they are re-filed as
+   * `excluded` rows (or counted past the budget) and leave the frontier before
+   * the first lease, so none of them is ever requested. Run on every start
+   * with a non-empty scope — a fresh crawl's frontier is empty and it costs one
+   * lookup. Before the frontier counts below, so they never count a row this
+   * deletes.
+   */
+  const refiled = scoped
+    ? await refileOutOfScope(db, crawlId, scope, Math.max(0, blockedBudget - blockedRows))
+    : { refiled: 0, dropped: 0 };
+  blockedRows += refiled.refiled;
+
   const startCounts = await frontierCounts(db, crawlId);
   let pagesCrawled = crawledRows(startCounts);
   // Whether pages were already on record when this run began — the same number,
@@ -1563,34 +1720,37 @@ async function runToCompletion(
   }
 
   /**
-   * THE ROBOTS-BLOCKED BUDGET (Phase 23 T3, study D1), kept beside the frontier's
-   * and never mixed with it: `blockedRows` counts the `disallowed` page rows
-   * this crawl has RECORDED for robots.txt, against `maxBlockedUrls` (default
-   * `maxPages`). A counter, not a set — the dedupe is the `pages (crawl_id,
-   * url)` unique index's, as the frontier's is its primary key's (hard rule 6).
-   *
-   * Read off the table on every start rather than assumed zero, so a resume
-   * spends what is left of the budget rather than a second one.
-   *
-   * The overflow column is stamped 0 on a crawl that holds no pages yet — the
-   * row then says "counted, nothing turned away" rather than the null a pre-0020
-   * crawl carries. A resume adds to whatever is there, and `null + n` stays null
-   * in SQL: a crawl whose first run predates 0020 never acquires a partial count
-   * that reads like a whole one (`resource_refs_capped_pages`' rule).
+   * The two overflow columns are stamped 0 on a crawl that holds no pages yet —
+   * the row then says "counted, nothing turned away" rather than the null a
+   * pre-0020 (robots) or pre-0036 (excluded) crawl carries. A resume adds to
+   * whatever is there, and `null + n` stays null in SQL: a crawl whose first
+   * run predates the column never acquires a partial count that reads like a
+   * whole one (`resource_refs_capped_pages`' rule). The re-filter's overflow is
+   * added after the stamp, so a fresh row counts it too.
    */
-  const blockedBudget = config.maxBlockedUrls ?? config.maxPages;
-  let blockedRows = await robotsBlockedRowCount(db, crawlId);
   if (!resumed) {
-    await db.update(crawls).set({ robotsBlockedDropped: 0 }).where(eq(crawls.id, crawlId));
+    await db
+      .update(crawls)
+      .set({ robotsBlockedDropped: 0, excludedDropped: 0 })
+      .where(eq(crawls.id, crawlId));
+  }
+  if (refiled.dropped > 0) {
+    await db
+      .update(crawls)
+      .set({ excludedDropped: sql`${crawls.excludedDropped} + ${refiled.dropped}` })
+      .where(eq(crawls.id, crawlId));
   }
 
   /**
-   * Record robots-blocked URLs: a page row each while the budget lasts, a count
-   * on the crawl row past it. Never a request (the caller has already decided
-   * robots.txt forbids every one of them), and never a frontier row.
+   * Record URLs the crawl will never request — robots-blocked (`kind:
+   * "robots"`) or scope-refused (`"excluded"`): a page row each while the
+   * shared budget lasts, a count on the crawl row past it, in the column that
+   * names the cause. Never a request (the caller has already decided), and
+   * never a frontier row.
    *
-   * `blocked` is one `enqueue` call's distinct candidates — bounded by the call
-   * (one page's links, the analyzer caps them at 2,000), never by the crawl.
+   * `refused` is one `enqueue` call's distinct candidates, url -> the
+   * `fetch_reason` it is recorded with — bounded by the call (one page's
+   * links, the analyzer caps them at 2,000), never by the crawl.
    *
    * A URL ALREADY ON RECORD is neither a new row nor a drop: a site whose every
    * page links to `/cart` has one `/cart` row, and the thousandth page's link to
@@ -1599,21 +1759,23 @@ async function runToCompletion(
    *
    * The budget is RESERVED in one synchronous step after that lookup — the
    * check and the increment with no `await` between them — for the frontier's
-   * reason: up to `maxConcurrency` handlers are in here at once. The count is
-   * then corrected downwards by however many rows the conflict dropped (a
-   * sibling handler recorded the same URL a moment earlier). What that race can
-   * still do, and it is stated rather than hidden: when the budget is full, two
-   * handlers that both met a URL neither had seen recorded may count it twice,
-   * and one that a sibling recorded in the same instant may be counted as
-   * turned away. `robots_blocked_dropped` is a count of discoveries turned away,
-   * documented as such (src/db/schema.ts), and never claimed as distinct URLs.
+   * reason: up to `maxConcurrency` handlers are in here at once, and the two
+   * kinds spend ONE counter. The count is then corrected downwards by however
+   * many rows the conflict dropped (a sibling handler recorded the same URL a
+   * moment earlier). What that race can still do, and it is stated rather than
+   * hidden: when the budget is full, two handlers that both met a URL neither
+   * had seen recorded may count it twice, and one that a sibling recorded in
+   * the same instant may be counted as turned away. The dropped columns are
+   * counts of discoveries turned away, documented as such (src/db/schema.ts),
+   * and never claimed as distinct URLs.
    */
-  const recordRobotsBlocked = async (
-    blocked: ReadonlyMap<string, string>,
+  const recordNeverRequested = async (
+    kind: "robots" | "excluded",
+    refused: ReadonlyMap<string, string>,
     depth: number,
     discoveredVia: DiscoveredVia,
   ): Promise<void> => {
-    const candidates = [...blocked.keys()];
+    const candidates = [...refused.keys()];
     const known = await db.execute<{ url: string }>(sql`
       select url from pages
       where crawl_id = ${crawlId} and url = any(${sql.param(candidates)}::text[])`);
@@ -1627,21 +1789,27 @@ async function runToCompletion(
     const overflow = fresh.length - take;
 
     if (take > 0) {
-      const inserted = await writer.insertRobotsBlocked(
-        fresh.slice(0, take).map((url) => {
-          const reason = blocked.get(url);
-          if (reason === undefined) {
-            throw new Error(`recordRobotsBlocked: ${url} lost its robots.txt line`);
-          }
-          return { item: { url, depth, discoveredVia }, reason };
-        }),
-      );
+      const rows = fresh.slice(0, take).map((url) => {
+        const reason = refused.get(url);
+        if (reason === undefined) {
+          throw new Error(`recordNeverRequested: ${url} lost its ${kind} reason`);
+        }
+        return { item: { url, depth, discoveredVia }, reason };
+      });
+      const inserted =
+        kind === "robots"
+          ? await writer.insertRobotsBlocked(rows)
+          : await writer.insertExcluded(rows);
       blockedRows -= take - inserted;
     }
     if (overflow > 0) {
       await db
         .update(crawls)
-        .set({ robotsBlockedDropped: sql`${crawls.robotsBlockedDropped} + ${overflow}` })
+        .set(
+          kind === "robots"
+            ? { robotsBlockedDropped: sql`${crawls.robotsBlockedDropped} + ${overflow}` }
+            : { excludedDropped: sql`${crawls.excludedDropped} + ${overflow}` },
+        )
         .where(eq(crawls.id, crawlId));
     }
   };
@@ -1705,8 +1873,9 @@ async function runToCompletion(
    *
    * A candidate robots.txt disallows is NOT enqueued — it is never fetched —
    * and since Phase 23 T3 it is not dropped either: it is collected with the
-   * line that blocked it and recorded by `recordRobotsBlocked`, against its own
-   * budget. That is why a full frontier no longer ends the scan early for a
+   * line that blocked it and recorded by `recordNeverRequested`, against its own
+   * budget. A candidate the crawl's scope refuses (Phase 27c) takes the same
+   * path one step earlier, as an `excluded` row on the same budget. That is why a full frontier no longer ends the scan early for a
    * page's links (a blocked link past the frontier cap is still a fact), while
    * the sitemap's entries, which are never recorded as blocked rows, still stop
    * at the cap as they always did.
@@ -1718,10 +1887,18 @@ async function runToCompletion(
     // filters `pages` by this value against `DISCOVERED_VIA`, so a fifth kind
     // of discovery has to be declared there before it can be enqueued here.
     discoveredVia: DiscoveredVia,
+    // The chain length a redirect target carries (Deviation 12); 0 for every
+    // other kind of discovery. A URL the frontier already holds keeps its own.
+    redirectHops = 0,
   ): Promise<void> => {
     // Sitemap entries robots.txt disallows are on record in `sitemap_urls` and
     // reported by `robots.blocks-sitemap-urls`; see `CrawlConfig.maxBlockedUrls`.
+    // Entries the scope refuses are skipped for the same reason (Deviation 8).
     const recordsBlocked = discoveredVia !== "sitemap";
+    // The seed is the API's to check against the scope (a seed the scope
+    // refuses is a validation error before the row exists); here it is the
+    // crawl's starting point, and refusing it would be an empty crawl.
+    const checksScope = scoped && discoveredVia !== "seed";
     // A full frontier is only taken at its word once the cap is on record: until
     // then the candidates are looked up, so that a new URL turned away stamps
     // `frontier_capped` rather than vanishing unrecorded.
@@ -1734,6 +1911,8 @@ async function runToCompletion(
     // url -> the `fetch_reason` it will be recorded with. Distinct within the
     // call, bounded by it.
     const blocked = new Map<string, string>();
+    // url -> the scope's reason, on `blocked`'s terms.
+    const excluded = new Map<string, string>();
     // Whether this call is the one that met the cap first (see below).
     let stampCapped = false;
     for (let start = 0; start < urls.length; start += ENQUEUE_LOOKUP_CHUNK) {
@@ -1753,8 +1932,18 @@ async function runToCompletion(
         // Rule 5 first, for every candidate — a blocked row is recorded only
         // for a URL the policy would have let us fetch; robots.txt is then the
         // reason no fetch follows.
-        const verdict = await isUrlAllowed(url, { allowPrivate });
+        const verdict = await isUrlAllowed(url, { allowPrivate, maxUrlLength });
         if (!verdict.allowed) continue;
+        // The crawl's scope (Phase 27c), after the policy and BEFORE robots: a
+        // URL the agent fenced off is the agent's decision whatever robots.txt
+        // says, and its row names the pattern rather than a Disallow line.
+        if (checksScope) {
+          const inScope = scopeVerdict(url, scope);
+          if (!inScope.admitted) {
+            if (recordsBlocked) excluded.set(url, inScope.reason);
+            continue;
+          }
+        }
         // isSameOrigin admits www<->apex and http->https spellings, and the
         // robots wrapper judges those by the same rules (RobotsInfo.isAllowed):
         // a variant spelling is never a way around Disallow.
@@ -1804,7 +1993,7 @@ async function runToCompletion(
           break;
         }
         frontierRows += 1;
-        items.push({ url, depth, discoveredVia });
+        items.push({ url, depth, discoveredVia, redirectHops });
       }
     }
     if (stampCapped) {
@@ -1822,7 +2011,10 @@ async function runToCompletion(
     }
     // After the frontier: the URLs that will be fetched are queued before the
     // ones that never will be are written down.
-    if (blocked.size > 0) await recordRobotsBlocked(blocked, depth, discoveredVia);
+    if (excluded.size > 0) {
+      await recordNeverRequested("excluded", excluded, depth, discoveredVia);
+    }
+    if (blocked.size > 0) await recordNeverRequested("robots", blocked, depth, discoveredVia);
   };
 
   /**
@@ -1904,6 +2096,7 @@ async function runToCompletion(
         result = await fetchPage(item.url, {
           userAgent: config.userAgent,
           allowPrivate,
+          maxUrlLength,
           timeoutMs: FETCH_TIMEOUT_MS,
           // A pause or cancel reaches the request on the wire (Phase 27b).
           signal,
@@ -1976,9 +2169,12 @@ async function runToCompletion(
       // commits this page row — never here, where the row is only buffered.
       // A page whose retries are spent is the loop's to settle instead: it
       // becomes `failed` below, and a completion would overwrite that.
-      await writer.addPage(item, settledResult(result, item, gate.spacingMs(host)), analysis, {
-        complete: !RETRYABLE.has(result.fetchClass),
-      });
+      await writer.addPage(
+        item,
+        settledResult(result, item, gate.spacingMs(host), maxRedirectHops),
+        analysis,
+        { complete: !RETRYABLE.has(result.fetchClass) },
+      );
 
       if (analysis !== null && item.depth < config.maxDepth) {
         await enqueue(
@@ -1990,8 +2186,16 @@ async function runToCompletion(
       // Same depth: a redirect is one URL wearing two names, not a step further
       // into the site. `redirectUrl` is null when the target was policy-refused
       // (fetch-page drops it and says why in `disallowedReason`).
-      if (result.fetchClass === "redirect" && result.redirectUrl !== null) {
-        await enqueue([result.redirectUrl], item.depth, "redirect");
+      //
+      // The redirect cap (Deviation 12): the target is queued one hop further
+      // down this chain, unless that is past the cap — then the row written
+      // above says so (`settledResult`) and the chain stops here.
+      if (
+        result.fetchClass === "redirect" &&
+        result.redirectUrl !== null &&
+        item.redirectHops + 1 <= maxRedirectHops
+      ) {
+        await enqueue([result.redirectUrl], item.depth, "redirect", item.redirectHops + 1);
       }
 
       if (RETRYABLE.has(result.fetchClass)) {
@@ -2589,6 +2793,7 @@ async function probeKnownMissing(
   const result = await fetchPage(probeUrl, {
     userAgent: config.userAgent,
     allowPrivate: opts.allowPrivate,
+    maxUrlLength: config.maxUrlLength ?? CRAWL_DEFAULTS.maxUrlLength,
     timeoutMs: FETCH_TIMEOUT_MS,
   });
   // Only a 200 with HTML carries a template. Everything else — the 404 we
@@ -2611,7 +2816,11 @@ async function probeKnownMissing(
  * The result as it should be RECORDED, which is not always the result as it was
  * fetched.
  *
- * One case today: a block whose retries are spent. `fetch_class: 'blocked'`
+ * Two cases. The second (Phase 27c) is a redirect whose target would be one
+ * hop past `maxRedirectHops`: the row keeps the target in `redirect_url`, and
+ * its reason says why nothing was queued behind it.
+ *
+ * The first: a block whose retries are spent. `fetch_class: 'blocked'`
  * says a WAF answered; it does not say whether we tried once or three times, or
  * how far the engine had already backed off when it gave up. Both belong in the
  * row, because the operator's next decision turns on them — a block at 8s of
@@ -2627,7 +2836,25 @@ function settledResult(
   result: FetchResult,
   item: LeasedUrl,
   spacingMs: number,
+  maxRedirectHops: number,
 ): FetchResult {
+  // A redirect whose target would be one hop past the cap (Phase 27c): the
+  // target is not queued, and the row is the one place that can say why.
+  if (
+    result.fetchClass === "redirect" &&
+    result.redirectUrl !== null &&
+    item.redirectHops + 1 > maxRedirectHops
+  ) {
+    const capped =
+      `redirect not followed: this URL is ${item.redirectHops} redirect` +
+      `${item.redirectHops === 1 ? "" : "s"} into its chain and maxRedirectHops is ` +
+      `${maxRedirectHops}`;
+    return {
+      ...result,
+      disallowedReason:
+        result.disallowedReason === null ? capped : `${result.disallowedReason}; ${capped}`,
+    };
+  }
   if (result.fetchClass !== "blocked") return result;
   const status = result.statusCode === null ? "no status" : String(result.statusCode);
   const attempts = `${item.attempts} attempt${item.attempts === 1 ? "" : "s"}`;
@@ -2772,23 +2999,123 @@ export class SitemapRowSink implements SitemapSink {
 }
 
 /**
- * How many robots-blocked page rows this crawl already holds — the starting
- * point of the blocked budget (`CrawlConfig.maxBlockedUrls`), read once per run
- * so a resume spends what is left rather than a second budget. The predicate is
- * the one `ROBOTS_BLOCKED` (src/rules/helpers.ts) spells: the class AND the
- * robots reason, so a url-policy refusal is not counted against robots.txt.
+ * How many never-requested page rows this crawl already holds — robots-blocked
+ * and scope-excluded alike, the starting point of the budget they share
+ * (`CrawlConfig.maxBlockedUrls`), read once per run so a resume spends what is
+ * left rather than a second budget. The robots half is the predicate
+ * `ROBOTS_BLOCKED` (src/rules/helpers.ts) spells: the class AND the robots
+ * reason, so a url-policy refusal is not counted against robots.txt.
  */
-async function robotsBlockedRowCount(db: Db, crawlId: string): Promise<number> {
+async function neverRequestedRowCount(db: Db, crawlId: string): Promise<number> {
   const res = await db.execute<{ n: number }>(sql`
     select count(*)::int as n from pages
     where crawl_id = ${crawlId}
-      and fetch_class = 'disallowed'
-      and starts_with(coalesce(fetch_reason, ''), ${ROBOTS_BLOCKED_REASON_PREFIX})`);
+      and (
+        fetch_class = 'excluded'
+        or (fetch_class = 'disallowed'
+          and starts_with(coalesce(fetch_reason, ''), ${ROBOTS_BLOCKED_REASON_PREFIX})))`);
   const n = res.rows[0]?.n;
   if (typeof n !== "number") {
-    throw new Error(`robotsBlockedRowCount: count came back as ${typeof n}, not a number`);
+    throw new Error(`neverRequestedRowCount: count came back as ${typeof n}, not a number`);
   }
   return n;
+}
+
+/** Frontier rows the re-filter reads, writes and deletes per round trip. */
+const REFILE_CHUNK_ROWS = 500;
+
+/**
+ * THE RE-FILTER ON RESUME (Phase 27c): retire every PENDING frontier URL the
+ * crawl's scope refuses, so a scope changed while the crawl was paused binds
+ * the URLs already queued, not only the ones found next. Each becomes an
+ * `excluded` page row — the one admission would have written, through
+ * `PageWriter.insertExcluded`, its reason from `scopeVerdict` — while `budget`
+ * (the rows the shared never-requested budget has left) lasts; the rest are
+ * counted in `dropped`, which the caller adds to `crawls.excluded_dropped`. A
+ * URL that already has a page row is retired without a row or a count, on
+ * admission's terms. Every one of them leaves the frontier.
+ *
+ * THE SELECTION IS SQL — `scopeRefusesSql`, the one SQL form of the patterns,
+ * pinned to the matcher by the parity test in test/crawl/url-scope.test.ts
+ * (Ruling P1) — and the rows are read, written and deleted in chunks of
+ * `REFILE_CHUNK_ROWS`, so memory is bounded by the chunk and never by the
+ * frontier (hard rule 6). Rows past the budget go in ONE `DELETE … RETURNING`
+ * counted in the same statement. The page rows are shaped in TypeScript
+ * rather than by an `INSERT … SELECT`, deliberately: `page_type`
+ * (`derivePageType`), the per-pattern reason and the ~80 columns `pageRow`
+ * fills have one author, and an SQL copy of them would drift.
+ *
+ * ONE TRANSACTION, so a crash leaves the frontier and the rows as they were or
+ * as they end, never a URL in both or in neither. A row the SQL refuses and
+ * `scopeVerdict` admits means the two forms disagree — our defect, and it
+ * throws rather than guessing which one is right (hard rule 7).
+ *
+ * Only `pending` rows: a paused crawl holds no leases (the pause returns
+ * them), and a leased row belongs to a worker that may still be fetching it.
+ *
+ * Exported for test/crawl/scope-admission.test.ts.
+ */
+export async function refileOutOfScope(
+  db: Db,
+  crawlId: string,
+  scope: CrawlScope,
+  budget: number,
+): Promise<{ refiled: number; dropped: number }> {
+  if (!Number.isInteger(budget) || budget < 0) {
+    throw new RangeError(`refileOutOfScope: budget must be an integer ≥ 0, got ${budget}`);
+  }
+  if (scope.exclude.length === 0 && scope.include.length === 0) {
+    return { refiled: 0, dropped: 0 };
+  }
+  const refuses = scopeRefusesSql(sql`frontier.url`, scope);
+  const writer = new PageWriter(db, crawlId);
+  return db.transaction(async (tx) => {
+    let refiled = 0;
+    let left = budget;
+    while (left > 0) {
+      const chunk = await tx.execute<{ url: string; depth: number; discovered_via: string }>(sql`
+        select url, depth, discovered_via from frontier
+        where crawl_id = ${crawlId} and state = 'pending' and ${refuses}
+        order by depth asc, discovered_at asc, url asc
+        limit ${Math.min(REFILE_CHUNK_ROWS, left)}`);
+      if (chunk.rows.length === 0) break;
+      const rows = chunk.rows.map((row) => {
+        const verdict = scopeVerdict(row.url, scope);
+        if (verdict.admitted) {
+          throw new Error(
+            `refileOutOfScope: crawl ${crawlId}: the SQL form of the scope refuses ${row.url} ` +
+              `and scopeVerdict admits it; the two forms disagree`,
+          );
+        }
+        return {
+          item: { url: row.url, depth: Number(row.depth), discoveredVia: row.discovered_via },
+          reason: verdict.reason,
+        };
+      });
+      const inserted = await writer.insertExcluded(rows, tx);
+      await tx.execute(sql`
+        delete from frontier
+        where crawl_id = ${crawlId}
+          and url = any(${sql.param(rows.map((r) => r.item.url))}::text[])`);
+      refiled += inserted;
+      // Only rows that landed spend the budget: one already on record did not.
+      left -= inserted;
+    }
+    // Past the budget: retired and counted, a URL already on record excepted.
+    const rest = await tx.execute<{ n: number }>(sql`
+      with gone as (
+        delete from frontier
+        where crawl_id = ${crawlId} and state = 'pending' and ${refuses}
+        returning url)
+      select count(*)::int as n from gone
+      where not exists (
+        select 1 from pages where pages.crawl_id = ${crawlId} and pages.url = gone.url)`);
+    const dropped = rest.rows[0]?.n;
+    if (typeof dropped !== "number") {
+      throw new Error(`refileOutOfScope: count came back as ${typeof dropped}, not a number`);
+    }
+    return { refiled, dropped };
+  });
 }
 
 /**

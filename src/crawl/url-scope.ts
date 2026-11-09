@@ -18,6 +18,10 @@ export interface CrawlScope {
 
 export const EXCLUDED_REASON_PREFIX = "crawl scope: ";
 
+/** Patterns per list (`exclude`, `include`), and characters per pattern. */
+export const MAX_SCOPE_PATTERNS = 100;
+export const MAX_PATTERN_LENGTH = 512;
+
 /**
  * Leftmost occurrence of `pat` in `text[from, to)`, or -1. Knuth-Morris-Pratt,
  * O(|pat| + (to - from)) in the worst case (String.indexOf promises no bound).
