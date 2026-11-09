@@ -1,11 +1,128 @@
 # The Ariadne surface Talos codes against
 
-**Status:** the contract as of Phase 27b (ruleset 0.23.0, migrations 0000–0035,
+**Status:** the contract as of Phase 27c (ruleset 0.24.0, migrations 0000–0036,
 27 MCP tools / 27 HTTP routes; every column label in this document is served
 under the ruleset version the engine reports — `rules_catalog`'s
 `rulesetVersion`, which the metric-table pass moves).
 `docs/talos-integration.md` says *why* the seam exists and what obligations bind
 it; this document says *what the seam is*.
+
+**What Phase 27c changed here: a crawl can be a list, it can be fenced by URL
+patterns, and it can carry credentials.** Ruleset 0.24.0, 189 rules (72 page / 103
+query / 14 metric), one new marker. Migration 0036: the `list_urls` table (a list
+crawl's URLs, keyed `(crawl_id, position)`, removed by `crawl_delete` with the rest),
+`frontier.redirect_hops`, `crawls.excluded_dropped` and `crawls.scope_changed_at`. No
+tool or route is added (27 / 27); every change is a new field, value or refusal on an
+existing one. The gate evidence is `docs/gates/phase-27c.md`.
+- **Nine `crawl_start` fields** (§4.1), all in `config_schema` with their bounds:
+
+  | field | default | bounds | mutability | secret |
+  |---|---|---|---|---|
+  | `mode` | `spider` | `spider` \| `list` | `never` | |
+  | `urls` | — | 1–10,000 URLs; `mode: "list"` only, and required there | `never` | |
+  | `exclude` | `[]` | up to 100 patterns of up to 512 characters | `whenPaused` | |
+  | `include` | `[]` | as `exclude` | `whenPaused` | |
+  | `requestHeaders` | — | up to 20 `{name: value}`; a value at most 1,024 bytes | `whenPaused` | yes |
+  | `httpAuth` | — | `{username, password}`, Basic, each at most 1,024 bytes | `whenPaused` | yes |
+  | `cookies` | — | up to 50 `{name, value}`, sent as one `Cookie` header | `whenPaused` | yes |
+  | `maxRedirectHops` | 10 | integer 1–20 | `whenPaused` | |
+  | `maxUrlLength` | 2,500 | integer 256–2,500 | `never` | |
+
+  The three secret fields carry `x-ariadne-secret: true` in the published schema.
+- **List mode** (`mode: "list"`, `urls`). The crawl fetches exactly the listed URLs at
+  depth 0 (`discoveredVia: "list"`), follows each one's redirects to a classified row
+  within `maxRedirectHops`, records links without following them, reads robots.txt
+  and obeys it, and reads no sitemap unless `sitemapUrls` is given (given, it walks
+  the sitemaps robots.txt declares as well as the named ones, and queues none of
+  their entries; `sitemapUrls: []` on a list crawl is refused as a contradiction).
+  Each listed URL is normalised, passes the URL policy at the crawl's
+  `maxUrlLength`, must be in `siteUrl`'s site
+  family (`isSameOrigin`: its host or the `www`/apex twin, `http` or `https`) and must
+  pass `exclude`/`include`; a list spanning sites is refused, not split. The allowlist
+  is checked on `siteUrl`, not on each listed URL: the list's boundary is the one a
+  spider crawl of the same seed already has (it fetches the `www` twin too). Two
+  spellings of one URL are collapsed and counted: the accepted answer and
+  `config_validate`'s `effective` carry `listUrlCount` (distinct) and
+  `listDuplicates`; the URLs themselves are never echoed back. `maxPages` defaults to
+  twice the distinct list (room for one redirect target each), and an explicit value
+  below the list is refused. The resource and render passes work as in spider mode.
+- **`crawl.list-mode`** (info, CHECK-83, a NOT MEASURED marker) fires on every list
+  crawl and on no spider crawl, one site finding with `{notMeasured,
+  partiallyMeasured, sitemapsRead}`. Rules that need the whole site (`needsSpider`,
+  18: the link graph, click depth, orphans, sitemap coverage, unlinked canonical and
+  hreflang targets) do not run on a list crawl, and those that need a sitemap read
+  (`needsSitemaps`, 13) do not run when none was read; `notMeasured` names every one
+  of them. `partiallyMeasured` names the 11 `listPartial` rules (broken and 5xx link
+  targets, canonical, hreflang and pagination targets): they run, but judge only the
+  targets the list fetched, so their silence about any other URL is not a clean
+  result. `links.broken-internal` also reports a listed URL that answered 4xx with no
+  inlink (`inlinks: 0`, the optional column `listed`), which no other rule would.
+- **Scope** (`exclude`, `include`). A pattern matches the whole normalised URL, `*`
+  is any run of characters and nothing else is special, and the match is
+  linear-time (no regular expressions). Exclude wins; a non-empty `include` refuses
+  what matches none. Checked at admission for every link, sitemap entry and redirect
+  target, after the URL policy and before robots. A refused URL is a `pages` row of
+  the new fetch class **`excluded`** (`indexabilityStatus` `Excluded by crawl
+  settings`), never fetched, whose `fetchReason` is `crawl scope: matches exclude
+  pattern '<p>'` or `crawl scope: matches no include pattern`. A URL longer than a
+  `maxUrlLength` below 2,500 is an `excluded` row too, reason `crawl scope: longer
+  than maxUrlLength (<n> characters; the limit is <limit>)`. `excluded` rows share
+  the robots-blocked budget (`maxBlockedUrls`, default `maxPages`); past it they are
+  counted in `crawl_status.excludedDropped` (§4.2). A refused sitemap entry is
+  skipped, not written. Every rule treats an `excluded` row as it treats a
+  `disallowed` one (not judged, not a broken link), and the rules that report a
+  sitemap, pagination or hreflang URL as "not crawled" leave out the same-origin
+  URLs the crawl's current scope refuses. Refused at start: a pattern whose host is
+  not the site's (it could never match), a seed the scope refuses, and a listed URL
+  the scope refuses.
+- **Scope changes while paused.** `crawl_config_set` takes `exclude`/`include` on a
+  queued or paused crawl and stamps `scopeChangedAt`. The next run re-files before
+  its first lease, both ways: pending URLs the new lists refuse become `excluded`
+  rows (past the budget, counted in `excludedDropped`), and `excluded` rows the new
+  lists admit go back to the frontier within the `maxPages` room (beyond it the row
+  is deleted and `crawls.frontier_capped` is stamped, which `links.orphan-skipped`
+  reads as a capped crawl). Pages already fetched stay.
+- **Credentials** (`requestHeaders`, `httpAuth`, `cookies`), §4.1 and §4.1a. Sent
+  only to the site family, robots.txt and sitemaps included, and never to another
+  host (a CDN resource, a cross-host redirect hop, the render pass's third-party
+  requests); an `https` site never sends them over `http`, while an `http`-only site
+  sends them on its own `http` URLs. Refused header names: `host`, `user-agent`,
+  `accept`, `accept-encoding`, `content-length`, `connection`, `transfer-encoding`,
+  `te`, `upgrade`, `expect`, `keep-alive`, `cookie` (use `cookies`), `authorization`
+  (use `httpAuth`) and any `proxy-*` name — 13 names and a prefix. `Set-Cookie` from
+  the site is ignored. **They are held only in this server's memory**: never in
+  `config_jsonb`, a log line, an error or a response, and dropped on `crawl_cancel`
+  and `crawl_delete`. What is stored is which kinds were given and the header and
+  cookie names, shown by `crawl_config_get` with every value `"[redacted]"` (§4.9).
+  **After a restart** a crawl that needs them is refused by `crawl_resume` and
+  `crawl_render` with **`CREDENTIALS_REQUIRED` (409)** until they are sent again on
+  that call, of exactly the stored kinds and names; a crawl that needed them never
+  runs without them. `crawl_config_set` takes them too while the crawl is queued or
+  paused, and a patch that replaces one kind after a restart must send the other
+  kinds the crawl needs in the same call, or it is `CREDENTIALS_REQUIRED` as well.
+  Credentials cannot be added on `crawl_resume` or `crawl_render` to a crawl that
+  started without any (400, pointing at `crawl_config_set` while paused), so a
+  finished crawl that ran without them cannot be rendered with them. `httpAuth:
+  null` in `crawl_config_set` removes Basic auth, as an empty `requestHeaders` or
+  `cookies` removes that kind. They cannot change the user agent, the delay floor
+  or robots. A gated URL fetched without its credential is the classified row the
+  site answered: a 401 or 403 is `blocked`, retried under back-off like any other
+  refusal.
+- **`maxRedirectHops`**: a chain longer than the cap ends on the last hop fetched,
+  whose `fetchReason` says `redirect not followed: this URL is <n> redirects into its
+  chain and maxRedirectHops is <cap>`; the next target is not fetched.
+- **Every refusal body gains `code`** (§1): `{error, code}` over HTTP and the same
+  two keys in MCP's JSON error, `code` one of `VALIDATION`, `FORBIDDEN`,
+  `NOT_FOUND`, `CONFLICT`, `CREDENTIALS_REQUIRED`. Additive.
+- **A 1 MiB body cap on five routes**: `POST /crawls`, `POST /config/validate`,
+  `POST /crawls/:id/resume`, `POST /crawls/:id/render` and `PATCH
+  /crawls/:id/config` (a 10,000-URL list, or a maximal credential set of about 74
+  KB re-supplied after a restart). Every other route keeps 64 KiB. Over the cap is a
+  413.
+- **`crawl_config_get.crawl` gains** `listUrlCount` and `listDuplicates` (a list
+  crawl), the three credential fields redacted, and `scopeChangedAt` on every crawl.
+  It no longer equals `config_validate`'s `effective` for a crawl with credentials
+  (§4.9).
 
 **What Phase 27b changed here: a crawl can be paused, cancelled and deleted, and
 the crawl's own settings have one schema.** Migrations 0034 (`crawls.control_request`,
@@ -727,7 +844,7 @@ Two properties make the double-transport claim below cheap to trust:
 | Where | `node:http`, one port (`ARIADNE_API_PORT`) | stdio |
 | Who may call | anyone with the bearer token | the process that started this one |
 | Auth | `Authorization: Bearer <token>`, checked **before routing** | none, deliberately |
-| Errors | status code + `{error}` | `isError: true` + one text block of `{error}` |
+| Errors | status code + `{error, code}` (since 27c; `code` on every `ServiceError`) | `isError: true` + one text block of `{error, code}` |
 | Bulk data | `GET …/export` streams `text/csv` | `export_crawl` writes a file, answers with its path |
 
 - The token is `ARIADNE_API_TOKEN`, minimum 16 characters, compared in constant
@@ -779,7 +896,19 @@ Two properties make the double-transport claim below cheap to trust:
 | Allowlist / URL policy refusal | 403 `{error}` | tool error `{error}` |
 | No such crawl / rule / route | 404 `{error}` | tool error `{error}` |
 | The row's own state forbids it (still running, retired rule id, unreadable stored evidence; since Phase 27a also: a rule the crawl's judgement disables, asked for by `issue_urls` / `issue_inlinks`; a stored judgement that overrides a retired rule; `crawl_config_set` while the crawl's rules run; `issues_overview` on an unjudged crawl) | 409 `{error}` | tool error `{error}` |
+| The crawl needs credentials this server does not hold (Phase 27c: after a restart; `crawl_resume`, `crawl_render`, a credential patch to `crawl_config_set`) | 409 `{error, code: "CREDENTIALS_REQUIRED"}` | tool error, same body |
+| A body over the route's cap (64 KiB; 1 MiB on `POST /crawls`, `POST /config/validate`, `POST /crawls/:id/resume`, `POST /crawls/:id/render`, `PATCH /crawls/:id/config`) | 413 `{error}` (no `code`: the transport's own refusal) | n/a (stdio) |
 | A defect of ours | 500 `{error: "internal error", correlationId}` | `{error: "internal error", correlationId}` |
+
+**`code` (Phase 27c, additive).** Every refusal the service raises carries `code` beside
+the sentence: `VALIDATION` (400), `FORBIDDEN` (403), `NOT_FOUND` (404), `CONFLICT` (409)
+and `CREDENTIALS_REQUIRED` (409). The table above shows `{error}` where the code is the
+one the status already implies; read `code` to tell `CREDENTIALS_REQUIRED` from any other
+409 without parsing the sentence. The transport's own refusals (401, an unknown route's
+404, 405, 413, malformed JSON) and the 500 carry no `code`, and neither does an MCP
+schema refusal (the SDK's plain-text "Input validation error", §4.1). Pinned:
+`test/api/credentials-restart.test.ts:285` "crawl_resume and crawl_render refuse
+CREDENTIALS_REQUIRED and write nothing".
 
 `correlationId` is a UUID; the stack goes to the server log under that id and
 nowhere else (`test/api/mcp.test.ts:2881` "turns an unexpected throw into a tool
@@ -920,15 +1049,15 @@ webhooks**: polling `crawl_status` is the contract until Talos asks otherwise.
 
 | MCP tool | HTTP | Arguments |
 |---|---|---|
-| `crawl_start` | `POST /crawls` | `siteUrl` (required), `maxPages`, `maxDepth`, `userAgent`, `perHostDelayMs`, `maxConcurrency`, `probeHosts`, `legacyHosts[]`, `sitemapUrls[]`, `renderBudgetPct`, `renderMaxPages`, `renderSamplePerType`, `findingCap`, `fetchResources`, `judgement` (the block `crawl_config_set` changes later, §4.9) |
+| `crawl_start` | `POST /crawls` | `siteUrl` (required), `maxPages`, `maxDepth`, `userAgent`, `perHostDelayMs`, `maxConcurrency`, `probeHosts`, `legacyHosts[]`, `sitemapUrls[]`, `renderBudgetPct`, `renderMaxPages`, `renderSamplePerType`, `findingCap`, `fetchResources`, `judgement` (the block `crawl_config_set` changes later, §4.9); since 27c `mode`, `urls[]`, `exclude[]`, `include[]`, `requestHeaders`, `httpAuth`, `cookies`, `maxRedirectHops`, `maxUrlLength` (§4.1) |
 | `crawl_status` | `GET /crawls/:id` | — |
 | `crawl_list` | `GET /crawls` | `siteUrl`, `limit`, `cursor` |
-| `crawl_resume` | `POST /crawls/:id/resume` | — (a paused crawl resumes; a cancelled one is final and refused) |
+| `crawl_resume` | `POST /crawls/:id/resume` | `requestHeaders`, `httpAuth`, `cookies` (optional: the crawl's credentials, re-supplied after a restart, §4.1a). A paused crawl resumes; a cancelled one is final and refused |
 | `crawl_pause` | `POST /crawls/:id/pause` | — (queued: paused now, 200; running: requested of the loop, 202) |
 | `crawl_cancel` | `POST /crawls/:id/cancel` | — (final; queued or paused: cancelled now, 200; running: requested, 202) |
 | `crawl_delete` | `DELETE /crawls/:id?confirm=<crawlId>` | `confirm` (required; must repeat `crawlId`). Hard delete of every row and the render and export files; 409 while queued or running |
 | `crawl_mark_failed` | `POST /crawls/:id/fail` | — |
-| `crawl_render` | `POST /crawls/:id/render` | `urls[]` (optional; replaces the automatic selection) |
+| `crawl_render` | `POST /crawls/:id/render` | `urls[]` (optional; replaces the automatic selection); `requestHeaders`, `httpAuth`, `cookies` (optional, as on `crawl_resume`) |
 | `crawl_rules` | `POST /crawls/:id/rules` | — |
 | `crawl_config_get` | `GET /crawls/:id/config` | — (`crawl` and its `mutability`, the judgement block, every overridable threshold, the last run's stamp and `judgementStale`, §4.9) |
 | `crawl_config_set` | `PATCH /crawls/:id/config` | `crawl` and/or `judgement` (at least one; `crawl` is new values for the whenPaused fields, `judgement` an RFC 7396 merge-patch of the block, except `findingCap: null`, which is uncapped, §4.9) |
@@ -960,7 +1089,7 @@ drives every field through both transports
 every body through POST /crawls and crawl_start"). `crawl_render`'s is asserted
 against the service's own `RENDER_CRAWL_FIELDS` table.
 
-### 4.1 `crawl_start` → `{crawlId, status, queuePosition}`
+### 4.1 `crawl_start` → `{crawlId, status, queuePosition, listUrlCount?, listDuplicates?}`
 
 `status` is always `queued` at acceptance. Refusals: a host off the allowlist
 (403, naming it), a legacy host or supplied sitemap off the allowlist (403), a
@@ -990,6 +1119,45 @@ or the start is refused naming both (`test/api/judgement-config.test.ts:273`
 `test/api/judgement-config.test.ts:347` "refuses findingCap at both levels when
 they disagree, naming both"; over MCP, `test/api/judgement-config.test.ts:668`
 "crawl_start takes the judgement field").
+
+**List mode, scope and credentials (Phase 27c).** The fields, their bounds and what
+each does are in the Phase 27c summary at the top of this document; this is what
+`crawl_start` refuses for them, all before a row exists, and all answered the same by
+`config_validate`:
+- `mode: "list"` without `urls`, or `urls` without `mode: "list"` (400);
+  `sitemapUrls: []` on a list crawl (400: "read no sitemap" is to omit the key); more
+  than 10,000 URLs (400; the list is never trimmed, split it across crawls); a listed
+  URL outside `siteUrl`'s site family (400), one the URL policy refuses (403), one
+  `exclude`/`include` refuses (400: listing and excluding a URL is a contradiction to
+  fix); an explicit `maxPages` below the distinct list (400);
+- a pattern whose scheme and host name a host outside the site family, an upper-case
+  scheme or host, an empty pattern, more than 100 patterns or one over 512 characters
+  (400); a spider seed the scope refuses (400: an empty crawl is not an answer);
+- a refused header name, a header or cookie name that is not an HTTP token, a header
+  value with CR, LF or another control character but tab, or a character above
+  U+00FF, a value over 1,024 bytes, a header name given twice (case-insensitive) or a
+  cookie name given twice, a cookie value with `;`, `,` or whitespace, a username
+  holding `:`, more than 20 headers or 50 cookies (400). **No refusal quotes a value**: the
+  message names the field and the header or cookie name only.
+
+A list crawl's answer adds `listUrlCount` (distinct URLs) and `listDuplicates` (how
+many were collapsed as another's spelling); a spider crawl's has neither. Pinned:
+`test/api/scope-start.test.ts:279` "refuses an off-site URL, an excluded listed URL,
+an excluded seed, a typo'd host and maxPages below the list",
+`test/api/scope-start.test.ts:375` "collapses two spellings of one URL, counts it, and
+stores the distinct URLs in order", `test/api/scope-start.test.ts:238` "413s a 1.5 MiB
+body to POST /crawls, and accepts 900 KiB carrying 10,000 URLs",
+`test/api/scope-start.test.ts:397` "refuses an invalid credential set with a body that
+quotes no secret, on both transports" and `test/api/scope-start.test.ts:431` "accepts
+a valid set and shows no value in crawl_status, effective, crawl_config_get, the row
+or the log". The crawl side: `test/crawl/list-mode.test.ts:177` "fetches every listed
+URL at depth 0 and follows redirects but no link", `test/crawl/scope-admission.test.ts:243`
+"writes an excluded row for a URL an exclude pattern matches, never requests it, and
+stamps excluded_dropped 0", `test/crawl/credentials.test.ts:417` "sends none of them to
+another host: a resource, its robots.txt, a legacy host's probe, a redirect hop", and
+the secret scan, `test/fixtures/scope-and-requests.test.ts:337` "after a crawl with all
+three credential kinds and a render pass, no secret is in any stored column or the
+log".
 
 ### 4.1a `crawl_resume` → `{crawlId, status, queuePosition}`
 
@@ -1067,6 +1235,29 @@ count — `leased_until` is the frontier's own live-worker detector); a settled
 crawl with nothing owed (409, naming what was counted — pending frontier rows,
 expired leases, unasked resource rows); the allowlist (403, naming the host); and
 the row changing state under the call (409 — see the race below).
+
+**Credentials and scope on a resume (Phase 27c).** A crawl started with
+`requestHeaders`, `httpAuth` or `cookies` resumes with the values this server holds.
+After a restart it holds none, and the resume is refused **409 `CREDENTIALS_REQUIRED`**,
+naming the kinds and the header and cookie names it needs, until the same call sends
+them (`{requestHeaders?, httpAuth?, cookies?}` in the body; over MCP beside `crawlId`).
+What is sent must be exactly the stored kinds and names, or it is a 400 naming both
+shapes (names only); a crawl that started without credentials cannot gain them here
+(400, pointing at `crawl_config_set` while paused). Nothing is written by a refused
+resume, and the values sent are never stored, logged or answered. `crawl_render`
+takes the same three fields on the same terms, and stores what it was sent only once
+the render is accepted, so a refused render leaves the held values as they were. A
+resume also re-applies the crawl's current `exclude`/`include` before its first lease,
+both ways (the Phase 27c summary at the top). Pinned:
+`test/api/credentials-restart.test.ts:285` "crawl_resume and crawl_render refuse
+CREDENTIALS_REQUIRED and write nothing; a resume with them finishes with no 401 row",
+`test/api/credentials-restart.test.ts:554` "a maximal credential set is re-supplied
+over HTTP after a restart (1 MiB cap); a 64 KiB route still 413s",
+`test/api/credentials-restart.test.ts:589` "a refused render leaves the held
+credentials as they were", `test/crawl/scope-admission.test.ts:374` "re-files pending
+URLs a changed scope refuses as excluded rows before any lease, leaving fetched ones
+alone" and `test/crawl/scope-admission.test.ts:678` "re-admits an excluded URL the
+cleared scope admits, and fetches it to an ok row".
 
 **A `paused` crawl is always resumable, and a `cancelled` one never is** (Phase 27b
 rulings 5 and 6). The stop path decides nothing on its way out: URLs never leased
@@ -1497,6 +1688,15 @@ own answer, not an invented example).
 - **`status`** is one of `queued | running | paused | finished | failed | cancelled`.
   `finished`, `failed` and `cancelled` are closed; only `cancelled` is final.
 
+**`excludedDropped` (Phase 27c)**, beside `robotsBlocked`: discoveries the crawl's
+scope (`exclude`/`include`, or a `maxUrlLength` below 2,500) turned away after the
+never-requested budget was full. The budget is the one robots-blocked rows spend
+(`maxBlockedUrls`, default `maxPages`), and below it every refused URL is a `pages` row
+of fetch class `excluded`, read with `pages_query` (`fetchClass: "excluded"`). Like
+`robotsBlocked.dropped` it counts DISCOVERIES, not distinct URLs. Zero is a
+measurement; null is a crawl written before migration 0036, where nobody counted.
+`crawl_status` carries no credential, value or name.
+
 ### 4.3 `issues_list` → `{items: IssueGroup[], nextCursor, disabledRules, judgementStale}`
 
 The gate crawl's first group, as it came back (2026-11-08, ruleset 0.23.0):
@@ -1634,7 +1834,11 @@ Its ten sections, in this order: `urls`, `fetch-class`, `status-class`,
   `robotsBlocked.dropped`. Percents are against Encountered, except the dropped
   count: it counts DISCOVERIES turned away, is not a subset of Encountered, and
   has a null percent. **The entries are not a partition and are never asserted
-  to sum**, because a resume reseeds `pagesCrawled`.
+  to sum**, because a resume reseeds `pagesCrawled`. **Phase 27c's `excluded` rows
+  are not in this section**: Encountered counts the frontier and the robots-blocked
+  rows only, and `excludedDropped` has no entry. They are `pages` rows, so they are in
+  the `fetch-class` and `indexability` partitions below (`excluded`, `Excluded by crawl
+  settings`); read their dropped count off `crawl_status.excludedDropped`.
 - `fetch-class`, `status-class`, `indexability`, `click-depth`, `discovery` and
   `response-time` are each a partition of the crawl's `pages` rows (each summed
   to the gate crawl's 602), with percents against that count. `status-class` is
@@ -1731,6 +1935,7 @@ read:
 | `server_error` | Non-Indexable | `Server Error` |
 | `blocked` (any status, or none) | Non-Indexable | `Blocked by bot protection` |
 | `disallowed` | Non-Indexable | `Blocked by robots.txt` |
+| `excluded` (Phase 27c: the crawl's own scope refused it, never requested) | Non-Indexable | `Excluded by crawl settings` |
 | `timeout`, `network_error` | Non-Indexable | `No Response` |
 | `non_html`, `too_large`, `unsupported_encoding` | Non-Indexable | `Not HTML` |
 | `ok`, status ≠ 200 | Non-Indexable | `Not HTML` |
@@ -2200,16 +2405,32 @@ the gate crawl answered them, 2026-11-08):
 **The crawl half (Phase 27b).** `crawl_config_get.crawl` is every setting the crawl
 was stored with, at its effective value (`findingCap` lives in `judgement`, not here).
 At start it equals what `config_validate` answered as `effective` for the body that
-started it, minus `findingCap` and `judgement`; it diverges from that after a
-`crawl_config_set`.
+started it, minus `findingCap` and `judgement`, **with two Phase 27c departures**:
+on a crawl started with credentials, `effective` carries `credentialShape` (the kinds
+and names) where `crawl` shows the three credential fields themselves with every value
+`"[redacted]"` (`requestHeaders: {<name>: "[redacted]"}`, `httpAuth: "[redacted]"`,
+`cookies: [{name, value: "[redacted]"}]`, each present only when the crawl was given
+it); and every crawl's `crawl` adds `scopeChangedAt` (ISO, or null until
+`crawl_config_set` changes `exclude` or `include`). A list crawl's `crawl` also
+carries `listUrlCount` and `listDuplicates`, as `effective` did; the URLs are never
+shown. It diverges from `effective` after a `crawl_config_set`.
 `mutability` says, per `crawl` key, when it can change: **`never`** (`siteUrl`,
-`userAgent`, `probeHosts`, `legacyHosts`, `sitemapUrls`, `fetchResources`, and the
-operator-only stored budgets `maxResources`, `maxResourceHosts`, `maxBlockedUrls` and
-`platformProfiles`, which are reported but not in the published schema), **`whenPaused`**
-(`maxPages`, `maxDepth`, `perHostDelayMs`, `maxConcurrency`, `renderBudgetPct`,
-`renderMaxPages`, `renderSamplePerType`; accepted while the crawl is `queued` or
+`userAgent`, `probeHosts`, `legacyHosts`, `sitemapUrls`, `fetchResources`, since 27c
+`mode`, `urls` and `maxUrlLength`, the reported facts `listUrlCount`,
+`listDuplicates` and `scopeChangedAt`, and the operator-only stored budgets
+`maxResources`, `maxResourceHosts`, `maxBlockedUrls` and `platformProfiles`, which are
+reported but not in the published schema), **`whenPaused`** (`maxPages`, `maxDepth`,
+`perHostDelayMs`, `maxConcurrency`, `renderBudgetPct`, `renderMaxPages`,
+`renderSamplePerType`, and since 27c `exclude`, `include`, `maxRedirectHops`,
+`requestHeaders`, `httpAuth` and `cookies`; accepted while the crawl is `queued` or
 `paused`, so pause a running crawl, set, then `crawl_resume`) or **`always`**
-(`judgement`). `crawl_config_set`'s `crawl` is a set of NEW VALUES, each validated as
+(`judgement`). A credential sent back as `"[redacted]"` is "no change", like any field
+sent with the value `crawl_config_get` shows; a partial redaction is refused. A
+credential sent with values replaces that kind whole in this server's memory (the
+row stores only the new kinds and names), and an empty `requestHeaders` or `cookies`, or
+`httpAuth: null` (the one `null` a crawl field accepts), drops it. A changed `exclude`
+or `include` is checked as `crawl_start` checks it and stamps `scopeChangedAt`; the
+resumed run applies it (§4.1a). `crawl_config_set`'s `crawl` is a set of NEW VALUES, each validated as
 `crawl_start` validates it; `null` is refused (a crawl field has no unset). A `never`
 or operator-only key sent with the value already stored is "no change" — not written,
 not refused (Phase 27b ruling 12) — so get, edit one field, set the whole `crawl`
@@ -2227,8 +2448,10 @@ per-host record still wins over a lowered `perHostDelayMs`.
 **The repair route.** A crawl whose STORED block overrides a rule this ruleset
 does not define (a rule removed by a later release) is a 409 on every surface
 that reads the judgement, `crawl_config_get` included, naming the rule (§4.2),
-and on `crawl_rules` too, with the same text, refused before the run claims the
-crawl or touches a finding or the stamp.
+and on `crawl_rules` too, with the same text. The `crawl_rules` refusal comes
+AFTER the run takes its in-process claim on the crawl (since 27b's final review the
+claim is the first step, so a command arriving meanwhile meets the hold; this
+sentence was corrected in 27c), and still before it touches a finding or the stamp.
 `crawl_config_set` is the one surface that accepts the crawl in that state, so
 that `{judgement: {rules: {<id>: null}}}` can remove the override. A patch that
 leaves such an override in place is refused (400), naming its path.
@@ -3060,7 +3283,7 @@ Obligation 6, as a checked property rather than a promise:
 - Rule `evidence` is built from crawled rows by the registry's own discipline;
   the wrapper around it is a closed shape.
 
-Five postures a Talos integrator should know about rather than discover:
+Six postures a Talos integrator should know about rather than discover:
 
 1. **`export_crawl`'s file-writing mode answers with an absolute server path.**
    That is the answer to a tool whose job is to write a file, and the audience
@@ -3103,6 +3326,16 @@ Five postures a Talos integrator should know about rather than discover:
    token who knows a crawl id can delete it, as for every per-crawl command.** A
    tenant-facing Talos surface must not expose it without its own ownership check on
    the id.
+6. **A crawl's credentials never come back** (Phase 27c). `requestHeaders`,
+   `httpAuth` and `cookies` values are held in this server's memory only and appear in
+   no stored column, log line, error message or response: refusals name the field and
+   a header or cookie NAME, never a value; `crawl_config_get` shows `"[redacted]"`;
+   the stored request-header evidence redacts the custom header names as it already
+   redacted `authorization` and `cookie`. The names themselves are stored and shown,
+   so do not put a secret in a header or cookie NAME. Pinned by the secret scan,
+   `test/fixtures/scope-and-requests.test.ts:337` "after a crawl with all three
+   credential kinds and a render pass, no secret is in any stored column or the log",
+   which reads every text and jsonb column of every crawl-scoped table.
 
 ---
 
@@ -3140,6 +3373,11 @@ Five postures a Talos integrator should know about rather than discover:
   `howToFix` copy.**
 - **No webhooks, no scheduling, no cron.** `crawl_status` polling is the
   contract.
+- **No stored credentials, no login flows, no robots override** (Phase 27c). Basic
+  auth, cookies and custom headers are held in memory for the crawl and re-supplied
+  after a restart; there is no form login, no JavaScript-driven login and no session
+  refresh. No credential, header or cookie changes the user agent, the delay floor
+  or robots.txt. No regular expressions in scope patterns, and no proxies.
 - **No tenancy isolation on listing** (§9.3) and no per-tenant credentials: one
   bearer token per server.
 - **No writes from a read surface.** Every query path runs read-only; the nine
@@ -3682,10 +3920,26 @@ byte for byte, as it writes it".
   threshold by name, so a release that adds one to the allowlist must rewrite
   the stored stamps with the value those runs used, as migration 0033 did;
   until then such a stamp is a loud error, never "judged with the new default".
+- **Credentials live in ONE server process's memory** (Phase 27c). A second Ariadne
+  process pointed at the same database does not hold them, so a crawl that needs them
+  is `CREDENTIALS_REQUIRED` there exactly as after a restart; Talos, which holds the
+  secrets, re-supplies them to whichever process it asks. A `crawl_config_set` that
+  replaces a queued crawl's credentials in the instant a runner dequeues it can leave
+  the runner with the new shape and the old values; the loop then refuses loudly and
+  the crawl fails, never running unauthenticated (re-run it).
+- **`crawl_overview`'s `urls` section does not count `excluded` rows** (§4.3b); read
+  them from the `fetch-class` partition and `crawl_status.excludedDropped`.
+- **A list crawl measures the listed pages, not the site.** `crawl.list-mode` names
+  the 18 site-wide rules that did not run (plus the 13 sitemap rules when no sitemap
+  was read) and the 11 target rules judged only against what the list fetched; their
+  silence on a list crawl is "not measured", never "clean".
+- **`excludedDropped` counts discoveries under the scope that refused them.** A URL
+  turned away past the budget is a count, not a row, so widening the scope later
+  cannot re-admit it; only an `excluded` row can be re-admitted.
 
 ## Cross-references
 
-- `docs/talos-integration.md` — why the seam exists, the six obligations, and
+- `docs/talos-integration.md` — why the seam exists, the eight obligations, and
   what Talos must eventually do.
 - `docs/gates/phase-10.md` and `docs/gates/phase-11.md` — the measurements
   behind this file's Phase 10 and Phase 11 numbers; each number here also names

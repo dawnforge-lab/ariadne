@@ -148,6 +148,33 @@ A crawl is fit to audit when:
   crawl instead;
 - the frontier drained — `pending` and `leased` at 0. A crawl that stopped at its page
   cap makes CHECK-32 unanswerable (`links.orphan-skipped` fires and says why);
+- **it is a spider crawl, or you are not auditing the site.** A LIST crawl (`mode:
+  "list"` in `crawl_config_get`, `listUrlCount` beside it) fetched only the URLs it was
+  handed and followed no link. It carries one `crawl.list-mode` finding (info, CHECK-83),
+  and that finding decides what the crawl can answer:
+  - every rule id in its `notMeasured` evidence did NOT run: the link graph, orphans,
+    click depth, inlinks, sitemap coverage, unlinked canonical and hreflang targets,
+    and, when `sitemapsRead` is false, every sitemap rule. Each check those rules claim
+    is SKIP, never PASS, however clean its listing looks;
+  - every rule id in `partiallyMeasured` ran, but only against targets the list
+    itself fetched (listed URLs and their redirect targets). Its findings are true; its
+    silence about any other URL is not a pass, so a check it alone answers is SKIP
+    unless the listing has findings;
+  - the rules about the listed pages themselves (titles, meta, headings, status codes,
+    duplicates within the list) ran normally. `links.broken-internal` also reports a
+    listed URL that answered 4xx with no inlink (its `listed` column).
+  A list crawl is the right tool for re-checking a known set of pages (last audit's
+  failures, a redirect map), not for a full audit: say which in `crawl.caveats`, and
+  run a spider crawl for anything site-wide;
+- **you know what the crawl's scope fenced off.** `crawl_config_get` shows `exclude`
+  and `include` (and `scopeChangedAt` when they changed mid-crawl). Every URL they
+  refused is a `pages` row of fetch class `excluded` — read them with `pages_query`
+  (`fetchClass: "excluded"`); `fetchReason` names the pattern — and
+  `crawl_status.excludedDropped` counts those turned away once the budget was full. An
+  excluded URL was never fetched, so it is neither a finding nor a pass: no rule judges
+  it, no link to it is broken, and the "not crawled" sitemap, pagination and hreflang
+  checks leave it out on purpose. State the patterns in `crawl.caveats` and scope
+  every site-wide claim to "within the crawled scope";
 - `renderPassCount` ≥ 1 if the site needs rendering. Without it, CHECK-01, CHECK-02,
   CHECK-34 and CHECK-10's JS-redirect half are SKIP, not PASS;
 - **the rules have run — `crawl_status`'s `rulesRunAt` carries a timestamp.** That is
@@ -394,9 +421,13 @@ of three ways:
 - **Two `pages_query` filters answer cross-checks nothing else can.** `fetchClass`
   separates the pages the site served from the ones it refused (`blocked`), dropped or
   disallowed — the census behind CHECK-05 and behind every "% of pages" denominator on
-  a crawl that met a WAF. `discoveredVia` says how the crawler reached each URL —
-  `seed`, `link`, `sitemap` or `redirect` — which is the other half of the orphan
-  finding: a page whose only discovery was `sitemap` was linked from nowhere the crawl
+  a crawl that met a WAF — and, since Phase 27c, from the ones the crawl's own scope
+  fenced off (`excluded`, never requested: leave them out of every denominator, as
+  you would `disallowed`). A `blocked` 401 or 403 on a crawl started with credentials
+  is a gate the credentials did not open: report it as an access problem of the crawl,
+  not a site defect, until you have checked the credentials. `discoveredVia` says how
+  the crawler reached each URL — `seed`, `link`, `sitemap`, `redirect` or (a list
+  crawl) `list` — which is the other half of the orphan finding: a page whose only discovery was `sitemap` was linked from nowhere the crawl
   walked. Both are closed vocabularies and a value outside them is refused by name.
 - **The robots.txt the crawl obeyed is readable.** `robots_get` returns the stored
   file — `raw` (the text as served, `truncated` when it is only the first 500KB),
@@ -1104,7 +1135,9 @@ broken there.
 - **`crawl.caveats`** is where the evidence's limits go: a page cap reached, a render
   pass that covered a fraction, URLs that failed to fetch, a crawl that ended
   `cancelled` (give `neverFetched`; a null there means the crawl never ran, and such a
-  crawl has no findings file). Empty array when there are none — never absent.
+  crawl has no findings file), a list crawl (give `listUrlCount` and name the
+  `crawl.list-mode` gaps), and the scope patterns with the `excluded` count and
+  `excludedDropped`. Empty array when there are none — never absent.
 - **`coverage`** counts the verdicts. It must sum to `checklist.checksTotal`.
 
 ### Before you hand it over

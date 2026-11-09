@@ -266,7 +266,31 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "asked for something specific.\n\n" +
         "judgement sets how this crawl is JUDGED from the start — the same block " +
         "crawl_config_set changes later (see there for its shape). It is checked " +
-        "against the ruleset before the crawl is accepted.",
+        "against the ruleset before the crawl is accepted.\n\n" +
+        "LIST MODE. mode 'list' with urls (1 to 10,000, all on siteUrl's own site: its " +
+        "host or the www/apex twin, http or https) fetches exactly those URLs at depth 0, " +
+        "follows their redirects (within maxRedirectHops) so each ends in a classified " +
+        "row, records links without following them, obeys robots.txt and reads no " +
+        "sitemap unless sitemapUrls is given. maxPages defaults to twice the distinct " +
+        "list. The answer adds listUrlCount and listDuplicates (two spellings of one URL " +
+        "are collapsed and counted). Rules that need the whole site do not run on a list " +
+        "crawl: the crawl.list-mode finding names them (notMeasured) and the target " +
+        "checks judged only against what the list fetched (partiallyMeasured) — their " +
+        "silence is 'not measured', never 'clean'. Use it to check a known set of pages, " +
+        "not to audit a site.\n\n" +
+        "SCOPE. exclude and include are URL patterns matched against the whole URL, '*' " +
+        "for any run of characters ('*/cart*', 'https://example.com/blog/*'); exclude " +
+        "wins, and a non-empty include admits only what matches. A refused URL is " +
+        "recorded as a page row of fetch class 'excluded' naming the pattern, never " +
+        "fetched; past the shared never-requested budget it is counted in " +
+        "crawl_status.excludedDropped. A seed or listed URL the scope refuses, and a " +
+        "pattern naming a host that is not this site's, are refused at start.\n\n" +
+        "CREDENTIALS. requestHeaders, httpAuth (Basic) and cookies reach only the site's " +
+        "own hosts (never a CDN or another host, never https credentials over http), " +
+        "are held in this server's memory only — never stored, logged or answered — and " +
+        "after a server restart must be sent again on crawl_resume / crawl_render " +
+        "(refused with code CREDENTIALS_REQUIRED until they are). They cannot change the " +
+        "user agent, the pacing floor or robots.txt.",
       // The crawl-start body schema itself: one declaration for both
       // transports, so an argument this refuses is a body POST /crawls refuses.
       inputSchema: service.startBodySchema(),
@@ -598,7 +622,14 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "header/cookie names it needs, until you send them again here — exactly those " +
         "kinds and names (crawl_config_get shows them, values [redacted]); another " +
         "shape is a VALIDATION refusal. A crawl that needed them never runs without " +
-        "them. Values sent are never stored, logged or answered.",
+        "them. Values sent are never stored, logged or answered. A crawl started " +
+        "without credentials cannot be given them here: set them with " +
+        "crawl_config_set while it is paused.\n\n" +
+        "SCOPE. Before its first fetch the resumed run re-applies the crawl's current " +
+        "exclude and include (changed with crawl_config_set while paused), both ways: " +
+        "pending URLs they now refuse become 'excluded' rows, and 'excluded' rows they " +
+        "now admit go back into the frontier within maxPages. Pages already fetched " +
+        "stay as they are.",
       inputSchema: z.strictObject({ crawlId: crawlIdField(), ...credentialInputSchemas() }),
     },
     async ({ crawlId, ...credentials }) =>
@@ -757,7 +788,9 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "with them, sent only to the site's own hosts. After a server restart (or a " +
         "cancel) the server no longer holds them: this tool refuses with code " +
         "CREDENTIALS_REQUIRED (409) until you send them here, of exactly the shape " +
-        "crawl_config_get shows.",
+        "crawl_config_get shows. A crawl started without credentials cannot be " +
+        "rendered with them: set them with crawl_config_set while it is paused, or " +
+        "start a new crawl.",
       inputSchema: z.strictObject({
         crawlId: crawlIdField(),
         ...credentialInputSchemas(),

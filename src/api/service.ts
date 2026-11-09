@@ -2278,7 +2278,7 @@ const CREDENTIAL_FIELDS: readonly CredentialField[] = ["requestHeaders", "httpAu
  * scope lists last changed. Their mutability is `never`; the whole `crawl`
  * object sent back carries them unchanged, and that is no change.
  */
-const REPORTED_CRAWL_KEYS: readonly string[] = ["listUrlCount", "listDuplicates", "scopeChangedAt"];
+export const REPORTED_CRAWL_KEYS: readonly string[] = ["listUrlCount", "listDuplicates", "scopeChangedAt"];
 
 /**
  * Why a credential field's value, as a request carries it, is refused — the

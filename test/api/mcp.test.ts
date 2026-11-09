@@ -3263,3 +3263,49 @@ describe("crawl_status — the platform profile", () => {
     expect(answer.text).toContain("platformProfiles");
   });
 });
+
+// 27c T12: the descriptions an agent reads before it starts, resumes or renders
+// a list, scoped or credentialed crawl, pinned as claims.
+describe("crawl tool descriptions — list mode, scope and credentials (27c)", () => {
+  const descriptionOf = async (name: string): Promise<string> => {
+    const listed = await client.listTools();
+    return listed.tools.find((t) => t.name === name)?.description ?? "";
+  };
+
+  it("crawl_start describes list mode, the crawl.list-mode marker, scope and credentials", async () => {
+    const text = await descriptionOf("crawl_start");
+    for (const claim of [
+      "LIST MODE",
+      "mode 'list' with urls",
+      "listUrlCount and listDuplicates",
+      "crawl.list-mode",
+      "notMeasured",
+      "partiallyMeasured",
+      "SCOPE",
+      "exclude and include",
+      "'excluded'",
+      "excludedDropped",
+      "CREDENTIALS",
+      "CREDENTIALS_REQUIRED",
+      "never stored, logged or answered",
+    ]) {
+      expect(text, `crawl_start's description does not say '${claim}'`).toContain(claim);
+    }
+  });
+
+  it("crawl_resume and crawl_render say credentials cannot be added to a crawl started without any", async () => {
+    for (const name of ["crawl_resume", "crawl_render"]) {
+      const text = await descriptionOf(name);
+      expect(text, name).toContain("CREDENTIALS_REQUIRED");
+      expect(text, name).toContain("crawl_config_set while it is paused");
+    }
+    expect(await descriptionOf("crawl_resume")).toContain("re-applies the crawl's current");
+  });
+
+  it("crawl_config_set names the scope and credential fields it can change while paused", async () => {
+    const text = await descriptionOf("crawl_config_set");
+    for (const field of ["exclude", "include", "maxRedirectHops", "requestHeaders", "httpAuth", "cookies", "scopeChangedAt"]) {
+      expect(text, field).toContain(field);
+    }
+  });
+});

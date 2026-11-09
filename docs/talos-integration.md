@@ -106,11 +106,31 @@ crawler inside Talos. The intended shape:
    destroys a crawl, guarded only by its confirm echo until Phase 28's tenant key
    (`docs/talos-surface.md` §4.1c and §9).
 
+8. **Talos holds a crawl's credentials; Ariadne only borrows them.** Since Phase 27c a
+   crawl can carry custom request headers, HTTP Basic auth and cookies (staging sites,
+   pre-issued sessions). Ariadne keeps their values in the API process's memory for
+   the crawl and nowhere else: never in a stored column, a log line, an error or a
+   response, encrypted or not. It stores which kinds were given and the header and
+   cookie names, and drops the values on cancel and delete. **After an Ariadne restart
+   the values are gone**: `crawl_resume` and `crawl_render` answer 409 with `code:
+   "CREDENTIALS_REQUIRED"` (`crawl_config_set` too, for a patch that would keep a kind
+   it no longer holds) until Talos sends them again on that call, of exactly the
+   stored kinds and names. A crawl that needed them never runs without them, so a
+   restart never turns a gated site into a crawl of 401 rows. So the secret store is
+   Talos's (tenant-scoped, like model keys), and every Talos call that resumes or
+   renders a credentialed crawl must be able to re-supply them; match on `code`, not
+   on the sentence. The values are sent only to the crawl's own site family, never
+   to another host, and cannot change the user agent, the delay floor or robots
+   (obligation 4). The surface is `docs/talos-surface.md`'s Phase 27c summary, §1 and
+   §4.1a.
+
 ## What Talos must eventually do (not Ariadne's job, recorded so it isn't lost)
 
 - Add agent tools wrapping Ariadne's API (mirroring the sf-skill vocabulary).
 - Decide deployment topology (Ariadne as a sidecar service vs shared instance)
   and credential management (admin-managed, like model keys).
+- Hold each tenant's crawl credentials (headers, Basic auth, cookies) and re-supply
+  them on `CREDENTIALS_REQUIRED` (obligation 8): Ariadne never stores them.
 - Update `docs/talos/api-contract.md` if any tenant-visible surface changes.
 
 ## Runtime requirements
