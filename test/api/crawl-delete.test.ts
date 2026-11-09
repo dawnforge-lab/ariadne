@@ -29,7 +29,7 @@ import { crawls, frontier } from "../../src/db/schema.js";
 import { closeFetchAgents } from "../../src/crawl/http.js";
 import { createApiServer, type ApiServer } from "../../src/api/http.js";
 import { createMcpServer, type AriadneMcpServer } from "../../src/api/mcp.js";
-import { CRAWL_CHILD_TABLES } from "../../src/api/crawl-delete.js";
+import { CRAWL_CHILD_TABLES, deleteCrawlFiles } from "../../src/api/crawl-delete.js";
 import { ApiService, slug } from "../../src/api/service.js";
 import { ServiceError } from "../../src/api/errors.js";
 
@@ -418,6 +418,7 @@ describe("crawl_delete refusals", () => {
 
 describe("crawl_delete file failures", () => {
   it("throws after the commit, naming the rows as gone and every path left on disk", async () => {
+    if (process.getuid?.() === 0) throw new Error("this test cannot run as root: chmod 0555 would not deny the unlink");
     const id = await seedCrawl({ status: "finished" });
     const stuck = join(exportDir, `${slug(id)}-pages.csv`);
     await writeFile(stuck, "url\n");
@@ -446,5 +447,60 @@ describe("crawl_delete file failures", () => {
     }
     const gone = await rowCounts(id);
     for (const [table, n] of Object.entries(gone)) expect(n, table).toBe(0);
+  });
+});
+
+describe("crawl_delete's file step: unreadable directories and containment (27b final M9)", () => {
+  it("an unreadable render or export directory is wrapped: the rows are gone, and the directory is left on disk", async () => {
+    if (process.getuid?.() === 0) throw new Error("this test cannot run as root: chmod 0000 would not deny the read");
+    const root = await mkdtemp(join(tmpdir(), "ariadne-delete-unreadable-"));
+    const renders = join(root, "renders");
+    const exports = join(root, "exports");
+    const id = `crawl_unreadable_${randomUUID()}`;
+    const renderRoot = join(renders, id);
+    await mkdir(join(renderRoot, "nested"), { recursive: true });
+    await mkdir(exports, { recursive: true });
+    await chmod(join(renderRoot, "nested"), 0o000);
+    await chmod(exports, 0o000);
+    try {
+      const error = await deleteCrawlFiles(id, slug(id), renders, exports).then(
+        () => null,
+        (e: unknown) => e,
+      );
+      expect(error).toBeInstanceOf(Error);
+      const message = (error as Error).message;
+      expect(message).toContain(`crawl ${id}`);
+      expect(message).toContain("its database rows are deleted");
+      expect(message).toContain(renderRoot);
+      expect(message).toContain(exports);
+      expect(message).toContain("EACCES");
+    } finally {
+      await chmod(join(renderRoot, "nested"), 0o755);
+      await chmod(exports, 0o755);
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses a crawl id that would resolve outside the render directory, before removing anything", async () => {
+    const root = await mkdtemp(join(tmpdir(), "ariadne-delete-contain-"));
+    const renders = join(root, "renders");
+    const outside = join(root, "outside");
+    await mkdir(renders, { recursive: true });
+    await mkdir(outside, { recursive: true });
+    await writeFile(join(outside, "keep.txt"), "x");
+    try {
+      for (const id of ["../outside", "..", ""]) {
+        const error = await deleteCrawlFiles(id, "x", renders, join(root, "exports")).then(
+          () => null,
+          (e: unknown) => e,
+        );
+        expect(error, JSON.stringify(id)).toBeInstanceOf(Error);
+        expect((error as Error).message).toContain("outside the render directory");
+      }
+      expect(await readdir(outside)).toEqual(["keep.txt"]);
+      expect(await readdir(renders)).toEqual([]);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 });

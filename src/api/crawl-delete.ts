@@ -17,7 +17,7 @@ import { eq, getTableName } from "drizzle-orm";
 import type { PgColumn, PgTable } from "drizzle-orm/pg-core";
 import { readdir, rm } from "node:fs/promises";
 import type { Dirent } from "node:fs";
-import { join as joinPath } from "node:path";
+import { join as joinPath, resolve as resolvePath, sep as pathSep } from "node:path";
 
 import type { Db } from "../db/client.js";
 import {
@@ -122,25 +122,62 @@ export async function deleteCrawlFiles(
   renderDir: string,
   exportDir: string,
 ): Promise<{ renders: number; exports: number }> {
+  // CONTAINMENT, as `exportCrawl` checks its file: the recursive remove below
+  // must only ever reach a directory INSIDE the render directory. Crawl ids are
+  // server-generated, but this is a recursive delete, and an id that resolved
+  // to the render directory itself or above it would take what is not this
+  // crawl's. Checked before anything is removed.
+  const renderBase = resolvePath(renderDir);
+  const renderRoot = resolvePath(renderBase, crawlId);
+  if (!renderRoot.startsWith(renderBase + pathSep)) {
+    throw new Error(
+      `crawl ${crawlId}: its database rows are deleted, but its render directory ` +
+        `would resolve outside the render directory (${renderRoot}, not under ` +
+        `${renderBase}); refusing to remove it, and no file was removed`,
+    );
+  }
+
   const leftOnDisk: string[] = [];
   const causes: string[] = [];
 
-  const renderRoot = joinPath(renderDir, crawlId);
-  const renderFiles = await filesUnder(renderRoot);
+  // A directory that cannot be listed is left on disk and named, not thrown
+  // raw: by now the rows are gone, and the caller must be told that and where
+  // the files still are. The remove is not attempted on a tree nobody could
+  // count.
+  let renderFiles: string[] | null = null;
   try {
-    await rm(renderRoot, { recursive: true, force: true });
+    renderFiles = await filesUnder(renderRoot);
   } catch (error) {
     leftOnDisk.push(renderRoot);
-    causes.push(`${renderRoot}: ${describe(error)}`);
+    causes.push(`${renderRoot}: could not be listed: ${describe(error)}`);
+  }
+  if (renderFiles !== null) {
+    try {
+      await rm(renderRoot, { recursive: true, force: true });
+    } catch (error) {
+      leftOnDisk.push(renderRoot);
+      causes.push(`${renderRoot}: ${describe(error)}`);
+    }
   }
 
   let exportEntries: Dirent[];
   try {
     exportEntries = await readdir(exportDir, { withFileTypes: true });
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+      leftOnDisk.push(exportDir);
+      causes.push(
+        `${exportDir}: could not be listed, so any export of this crawl in it is left: ` +
+          describe(error),
+      );
+    }
     exportEntries = [];
   }
+  // A PREFIX MATCH, which is only safe because crawl ids are server-generated
+  // in one fixed format (`crawl_<uuid>`): no crawl's slug is a prefix of
+  // another's followed by a dash, so `<slug>-` names this crawl's exports and
+  // nobody else's. A caller-chosen id, or a slug that collapsed or truncated
+  // two ids to one, would break that, and this match with it.
   const prefix = `${crawlSlug}-`;
   let exports = 0;
   for (const entry of exportEntries) {
@@ -160,6 +197,10 @@ export async function deleteCrawlFiles(
       `crawl ${crawlId}: its database rows are deleted, but ${leftOnDisk.length} path(s) could ` +
         `not be removed and are still on disk: ${leftOnDisk.join(", ")} (${causes.join("; ")})`,
     );
+  }
+  if (renderFiles === null) {
+    // A listing failure is in `leftOnDisk`, which threw above; never a 0.
+    throw new Error(`crawl ${crawlId}: the render directory could not be listed (${renderRoot})`);
   }
   return { renders: renderFiles.length, exports };
 }
