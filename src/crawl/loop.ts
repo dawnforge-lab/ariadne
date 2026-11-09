@@ -52,7 +52,7 @@
 import { randomUUID } from "node:crypto";
 import { and, eq, ne, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
-import { crawls, sitemapHreflang, sitemapMemberships, sitemapUrls } from "../db/schema.js";
+import { crawls, frontier, sitemapHreflang, sitemapMemberships, sitemapUrls } from "../db/schema.js";
 // Ruleset provenance for the `crawls` row: the registry owns the number, the
 // loop only stamps it.
 import { RULESET_VERSION } from "../rules/registry/registry.js";
@@ -126,6 +126,7 @@ import {
 } from "./resources/fetch-resources.js";
 import { isUrlAllowed } from "./url-policy.js";
 import {
+  EXCLUDED_REASON_PREFIX,
   MAX_PATTERN_LENGTH,
   MAX_SCOPE_PATTERNS,
   scopeRefusesSql,
@@ -355,9 +356,13 @@ export interface CrawlConfig extends RenderSelectionConfig {
    */
   maxRedirectHops?: number;
   /**
-   * The longest URL this crawl will queue or request (Phase 27c), passed to
-   * every `isUrlAllowed` and `fetchPage` call the loop makes
-   * (`UrlPolicyOpts.maxUrlLength`). Absent is `CRAWL_DEFAULTS.maxUrlLength`,
+   * The longest URL this crawl will queue or request (Phase 27c). At
+   * admission a link or redirect target longer than it (and within the
+   * index's ceiling) is an `excluded` row naming the limit, on the shared
+   * budget; a sitemap entry is skipped (Deviation 8). Every `fetchPage` call
+   * the loop makes is passed it too (`UrlPolicyOpts.maxUrlLength`), which
+   * covers the seed and a redirect target's resolution. Absent is
+   * `CRAWL_DEFAULTS.maxUrlLength`,
    * the index's own limit (`INDEXED_URL_MAX`, 2,500); an integer from 256 to
    * 2,500. Not changeable after start: lowering it mid-crawl would need the
    * re-filter the scope lists get (Deviation 11).
@@ -1659,21 +1664,24 @@ async function runToCompletion(
    * spends what is left of the budget rather than a second one.
    */
   const blockedBudget = config.maxBlockedUrls ?? config.maxPages;
-  let blockedRows = await neverRequestedRowCount(db, crawlId);
 
   /**
-   * THE RE-FILTER (Phase 27c). A crawl paused under one scope and resumed under
-   * another holds unfetched URLs its scope now refuses; they are re-filed as
-   * `excluded` rows (or counted past the budget) and leave the frontier before
-   * the first lease, so none of them is ever requested. Run on every start
-   * with a non-empty scope — a fresh crawl's frontier is empty and it costs one
-   * lookup. Before the frontier counts below, so they never count a row this
-   * deletes.
+   * THE RE-FILTER (Phase 27c), both ways. A crawl paused under one scope and
+   * resumed under another holds unfetched URLs its scope now refuses — they
+   * are re-filed as `excluded` rows (or counted past the budget) and leave the
+   * frontier — and `excluded` rows its scope now admits, which go back into
+   * the frontier (or, with no room, are deleted and the cap stamped). All of
+   * it before the first lease. Run on every start: a fresh crawl has neither
+   * and it costs two lookups. Before the frontier counts and the budget count
+   * below, so both read what the re-filter left.
    */
-  const refiled = scoped
-    ? await refileOutOfScope(db, crawlId, scope, Math.max(0, blockedBudget - blockedRows))
-    : { refiled: 0, dropped: 0 };
-  blockedRows += refiled.refiled;
+  const refiled = await refileOutOfScope(db, crawlId, scope, {
+    budget: Math.max(0, blockedBudget - (await neverRequestedRowCount(db, crawlId))),
+    maxPages: config.maxPages,
+    maxUrlLength,
+    robots: discovery.robots,
+  });
+  let blockedRows = await neverRequestedRowCount(db, crawlId);
 
   const startCounts = await frontierCounts(db, crawlId);
   let pagesCrawled = crawledRows(startCounts);
@@ -1717,6 +1725,13 @@ async function runToCompletion(
   } else {
     await db.update(crawls).set({ frontierCapped: false }).where(eq(crawls.id, crawlId));
     frontierCapped = false;
+  }
+  // The re-filter turned a re-admitted URL away for want of room: the cap's
+  // meaning exactly. It stamped the row in its transaction; a fresh crawl's
+  // stamp above has just overwritten that, so it is stamped again here.
+  if (refiled.unroomed > 0 && frontierCapped !== true) {
+    frontierCapped = true;
+    await db.update(crawls).set({ frontierCapped: true }).where(eq(crawls.id, crawlId));
   }
 
   /**
@@ -1899,6 +1914,11 @@ async function runToCompletion(
     // refuses is a validation error before the row exists); here it is the
     // crawl's starting point, and refusing it would be an empty crawl.
     const checksScope = scoped && discoveredVia !== "seed";
+    // The crawl's own URL length limit, on the same terms: below the index's
+    // ceiling it is this crawl's decision, so it is a row, not a silence
+    // (rule 7). The seed is left to `fetchPage`, which refuses it as a
+    // `disallowed` row naming the limit.
+    const checksLength = discoveredVia !== "seed";
     // A full frontier is only taken at its word once the cap is on record: until
     // then the candidates are looked up, so that a new URL turned away stamps
     // `frontier_capped` rather than vanishing unrecorded.
@@ -1932,8 +1952,21 @@ async function runToCompletion(
         // Rule 5 first, for every candidate — a blocked row is recorded only
         // for a URL the policy would have let us fetch; robots.txt is then the
         // reason no fetch follows.
-        const verdict = await isUrlAllowed(url, { allowPrivate, maxUrlLength });
+        // Asked at the index's own ceiling, not the crawl's limit, so a URL only
+        // `maxUrlLength` refuses can be told apart below and recorded. Over the
+        // ceiling it is url-policy's `too_long`, with no row, as it always was.
+        const verdict = await isUrlAllowed(url, { allowPrivate });
         if (!verdict.allowed) continue;
+        if (checksLength && url.length > maxUrlLength) {
+          if (recordsBlocked) {
+            excluded.set(
+              url,
+              `${EXCLUDED_REASON_PREFIX}longer than maxUrlLength (${url.length} characters; ` +
+                `the limit is ${maxUrlLength})`,
+            );
+          }
+          continue;
+        }
         // The crawl's scope (Phase 27c), after the policy and BEFORE robots: a
         // URL the agent fenced off is the agent's decision whatever robots.txt
         // says, and its row names the pattern rather than a Disallow line.
@@ -2171,7 +2204,7 @@ async function runToCompletion(
       // becomes `failed` below, and a completion would overwrite that.
       await writer.addPage(
         item,
-        settledResult(result, item, gate.spacingMs(host), maxRedirectHops),
+        settledResult(result, item, gate.spacingMs(host), maxRedirectHops, config.siteUrl),
         analysis,
         { complete: !RETRYABLE.has(result.fetchClass) },
       );
@@ -2837,13 +2870,17 @@ function settledResult(
   item: LeasedUrl,
   spacingMs: number,
   maxRedirectHops: number,
+  siteUrl: string,
 ): FetchResult {
   // A redirect whose target would be one hop past the cap (Phase 27c): the
-  // target is not queued, and the row is the one place that can say why.
+  // target is not queued, and the row is the one place that can say why. Not
+  // a cross-origin target: `enqueue` would never have queued it, so the cap
+  // is not why it was not followed.
   if (
     result.fetchClass === "redirect" &&
     result.redirectUrl !== null &&
-    item.redirectHops + 1 > maxRedirectHops
+    item.redirectHops + 1 > maxRedirectHops &&
+    isSameOrigin(result.redirectUrl, siteUrl)
   ) {
     const capped =
       `redirect not followed: this URL is ${item.redirectHops} redirect` +
@@ -3021,37 +3058,91 @@ async function neverRequestedRowCount(db: Db, crawlId: string): Promise<number> 
   return n;
 }
 
-/** Frontier rows the re-filter reads, writes and deletes per round trip. */
+/** Rows the re-filter reads, writes and deletes per round trip. */
 const REFILE_CHUNK_ROWS = 500;
 
 /**
- * THE RE-FILTER ON RESUME (Phase 27c): retire every PENDING frontier URL the
- * crawl's scope refuses, so a scope changed while the crawl was paused binds
- * the URLs already queued, not only the ones found next. Each becomes an
- * `excluded` page row — the one admission would have written, through
- * `PageWriter.insertExcluded`, its reason from `scopeVerdict` — while `budget`
- * (the rows the shared never-requested budget has left) lasts; the rest are
- * counted in `dropped`, which the caller adds to `crawls.excluded_dropped`. A
- * URL that already has a page row is retired without a row or a count, on
- * admission's terms. Every one of them leaves the frontier.
+ * What the re-filter needs besides the scope (`refileOutOfScope`).
+ */
+export interface RefileLimits {
+  /** Rows the shared never-requested budget has left for the forward pass. */
+  budget: number;
+  /** `CrawlConfig.maxPages`: the frontier cap a re-admitted URL must fit under. */
+  maxPages: number;
+  /** The crawl's URL length limit: an `excluded` row longer than it stays. */
+  maxUrlLength: number;
+  /**
+   * robots.txt as this run read it. A URL the scope now admits and robots
+   * disallows is never queued (rule 9): its row becomes the robots-blocked row
+   * admission would have written.
+   */
+  robots: Pick<RobotsInfo, "isAllowed" | "matchingRule" | "outcome">;
+}
+
+export interface RefileResult {
+  /** Leasable frontier URLs the scope refuses, written as `excluded` rows. */
+  refiled: number;
+  /** The same, past the budget: retired and counted, never written. */
+  dropped: number;
+  /** `excluded` rows the scope now admits, back in the frontier as pending. */
+  readmitted: number;
+  /** `excluded` rows the scope now admits and robots.txt disallows, re-classed. */
+  reblocked: number;
+  /** `excluded` rows the scope now admits with no frontier room: row deleted. */
+  unroomed: number;
+}
+
+/**
+ * LEASABLE, in `leaseBatch`'s own words (src/crawl/frontier.ts): pending, or
+ * leased by a worker whose lease has run out. A dead worker's expired leases
+ * survive a pause (the pause returns only its own worker's), and they are
+ * leased again the moment a run starts, so they are re-filtered with the
+ * pending ones. `now()` is the transaction's start, so the select and the
+ * deletes read one instant.
+ */
+const LEASABLE = sql`(frontier.state = 'pending' or (frontier.state = 'leased' and frontier.leased_until < now()))`;
+
+/**
+ * THE RE-FILTER (Phase 27c), run on every start before the first lease, BOTH
+ * WAYS, so the crawl's records match the scope it runs under now — not the one
+ * a URL was first judged by.
+ *
+ * FORWARD — every LEASABLE frontier URL the scope refuses leaves the frontier.
+ * Each becomes an `excluded` page row — the one admission would have written,
+ * through `PageWriter.insertExcluded`, its reason from `scopeVerdict` — while
+ * `limits.budget` lasts; the rest are counted in `dropped`, which the caller
+ * adds to `crawls.excluded_dropped`. A URL that already has a page row is
+ * retired without a row or a count, on admission's terms. Skipped for an empty
+ * scope, which refuses nothing.
+ *
+ * BACKWARD — every `excluded` row the scope now ADMITS (a pattern removed or
+ * widened while paused; an empty scope admits them all) is undone, because
+ * otherwise the URL is re-fetched only if some page links it again, and then
+ * the fetch is lost to the `pages (crawl_id, url)` conflict behind the stale
+ * row. Not a row longer than `maxUrlLength`: that refusal is the length, not a
+ * pattern, and the limit does not change. Each such row, in order:
+ *  - robots.txt disallows it: re-classed as the robots-blocked row admission
+ *    would write (`disallowed`, the matching line) — never queued (rule 9),
+ *    and budget-neutral (the two kinds share one budget);
+ *  - the frontier has room under `maxPages` (rows ever inserted, as `enqueue`
+ *    counts them): back in the frontier, pending, at its depth and discovery
+ *    kind with `redirect_hops` 0, and its row deleted;
+ *  - no room: its row deleted, and `crawls.frontier_capped` stamped true — the
+ *    cap turned a URL away, which is that column's existing meaning.
  *
  * THE SELECTION IS SQL — `scopeRefusesSql`, the one SQL form of the patterns,
  * pinned to the matcher by the parity test in test/crawl/url-scope.test.ts
- * (Ruling P1) — and the rows are read, written and deleted in chunks of
- * `REFILE_CHUNK_ROWS`, so memory is bounded by the chunk and never by the
- * frontier (hard rule 6). Rows past the budget go in ONE `DELETE … RETURNING`
- * counted in the same statement. The page rows are shaped in TypeScript
- * rather than by an `INSERT … SELECT`, deliberately: `page_type`
- * (`derivePageType`), the per-pattern reason and the ~80 columns `pageRow`
- * fills have one author, and an SQL copy of them would drift.
+ * (Ruling P1) — and rows are read, written and deleted in chunks of
+ * `REFILE_CHUNK_ROWS`, locked as they are read, so memory is bounded by the
+ * chunk and never by the crawl (hard rule 6). The page rows are shaped in
+ * TypeScript rather than by an `INSERT … SELECT`, deliberately (controller
+ * ruling, fix round 1): `page_type` (`derivePageType`), the per-pattern reason
+ * and the ~80 columns `pageRow` fills have one author.
  *
  * ONE TRANSACTION, so a crash leaves the frontier and the rows as they were or
  * as they end, never a URL in both or in neither. A row the SQL refuses and
  * `scopeVerdict` admits means the two forms disagree — our defect, and it
  * throws rather than guessing which one is right (hard rule 7).
- *
- * Only `pending` rows: a paused crawl holds no leases (the pause returns
- * them), and a leased row belongs to a worker that may still be fetching it.
  *
  * Exported for test/crawl/scope-admission.test.ts.
  */
@@ -3059,62 +3150,161 @@ export async function refileOutOfScope(
   db: Db,
   crawlId: string,
   scope: CrawlScope,
-  budget: number,
-): Promise<{ refiled: number; dropped: number }> {
+  limits: RefileLimits,
+): Promise<RefileResult> {
+  const { budget, maxPages, maxUrlLength, robots } = limits;
   if (!Number.isInteger(budget) || budget < 0) {
     throw new RangeError(`refileOutOfScope: budget must be an integer ≥ 0, got ${budget}`);
   }
-  if (scope.exclude.length === 0 && scope.include.length === 0) {
-    return { refiled: 0, dropped: 0 };
-  }
-  const refuses = scopeRefusesSql(sql`frontier.url`, scope);
   const writer = new PageWriter(db, crawlId);
   return db.transaction(async (tx) => {
-    let refiled = 0;
-    let left = budget;
-    while (left > 0) {
-      const chunk = await tx.execute<{ url: string; depth: number; discovered_via: string }>(sql`
-        select url, depth, discovered_via from frontier
-        where crawl_id = ${crawlId} and state = 'pending' and ${refuses}
-        order by depth asc, discovered_at asc, url asc
-        limit ${Math.min(REFILE_CHUNK_ROWS, left)}`);
+    const result: RefileResult = {
+      refiled: 0,
+      dropped: 0,
+      readmitted: 0,
+      reblocked: 0,
+      unroomed: 0,
+    };
+
+    // ---- Forward: the frontier's leasable URLs the scope refuses.
+    if (scope.exclude.length > 0 || scope.include.length > 0) {
+      const refuses = scopeRefusesSql(sql`frontier.url`, scope);
+      let left = budget;
+      while (left > 0) {
+        const chunk = await tx.execute<{ url: string; depth: number; discovered_via: string }>(sql`
+          select url, depth, discovered_via from frontier
+          where crawl_id = ${crawlId} and ${LEASABLE} and ${refuses}
+          order by depth asc, discovered_at asc, url asc
+          limit ${Math.min(REFILE_CHUNK_ROWS, left)}
+          for update`);
+        if (chunk.rows.length === 0) break;
+        const rows = chunk.rows.map((row) => {
+          const verdict = scopeVerdict(row.url, scope);
+          if (verdict.admitted) {
+            throw new Error(
+              `refileOutOfScope: crawl ${crawlId}: the SQL form of the scope refuses ${row.url} ` +
+                `and scopeVerdict admits it; the two forms disagree`,
+            );
+          }
+          return {
+            item: { url: row.url, depth: Number(row.depth), discoveredVia: row.discovered_via },
+            reason: verdict.reason,
+          };
+        });
+        const inserted = await writer.insertExcluded(rows, tx);
+        // The same predicate as the read, so it deletes exactly what was read
+        // (the rows are locked; `leaseBatch` skips locked rows).
+        await tx.execute(sql`
+          delete from frontier
+          where crawl_id = ${crawlId} and ${LEASABLE}
+            and url = any(${sql.param(rows.map((r) => r.item.url))}::text[])`);
+        result.refiled += inserted;
+        // Only rows that landed spend the budget: one already on record did not.
+        left -= inserted;
+      }
+      // Past the budget: retired and counted, a URL already on record excepted.
+      const rest = await tx.execute<{ n: number }>(sql`
+        with gone as (
+          delete from frontier
+          where crawl_id = ${crawlId} and ${LEASABLE} and ${refuses}
+          returning url)
+        select count(*)::int as n from gone
+        where not exists (
+          select 1 from pages where pages.crawl_id = ${crawlId} and pages.url = gone.url)`);
+      const dropped = rest.rows[0]?.n;
+      if (typeof dropped !== "number") {
+        throw new Error(`refileOutOfScope: count came back as ${typeof dropped}, not a number`);
+      }
+      result.dropped = dropped;
+    }
+
+    // ---- Backward: `excluded` rows the scope now admits.
+    const held = await tx.execute<{ n: number }>(sql`
+      select count(*)::int as n from frontier where crawl_id = ${crawlId}`);
+    const frontierRows = held.rows[0]?.n;
+    if (typeof frontierRows !== "number") {
+      throw new Error(`refileOutOfScope: count came back as ${typeof frontierRows}, not a number`);
+    }
+    let room = Math.max(0, maxPages - frontierRows);
+    const admits = sql`not ${scopeRefusesSql(sql`pages.url`, scope)}
+      and char_length(pages.url) <= ${maxUrlLength}`;
+    for (;;) {
+      const chunk = await tx.execute<{
+        id: string;
+        url: string;
+        depth: number;
+        discovered_via: string;
+      }>(sql`
+        select id, url, depth, discovered_via from pages
+        where crawl_id = ${crawlId} and fetch_class = 'excluded' and ${admits}
+        order by depth asc, url asc
+        limit ${REFILE_CHUNK_ROWS}
+        for update`);
       if (chunk.rows.length === 0) break;
-      const rows = chunk.rows.map((row) => {
-        const verdict = scopeVerdict(row.url, scope);
-        if (verdict.admitted) {
-          throw new Error(
-            `refileOutOfScope: crawl ${crawlId}: the SQL form of the scope refuses ${row.url} ` +
-              `and scopeVerdict admits it; the two forms disagree`,
-          );
+      const readmit: { id: string; url: string; depth: number; discoveredVia: string }[] = [];
+      const reblock: { id: string; reason: string }[] = [];
+      const unroom: string[] = [];
+      for (const row of chunk.rows) {
+        if (!robots.isAllowed(row.url)) {
+          const line = robots.matchingRule(row.url);
+          if (line === null) {
+            throw new Error(
+              `refileOutOfScope: robots.txt disallows ${row.url} but names no line that ` +
+                `decided it (robots outcome '${robots.outcome}')`,
+            );
+          }
+          reblock.push({ id: row.id, reason: robotsBlockedReason(line) });
+        } else if (room > 0) {
+          room -= 1;
+          readmit.push({
+            id: row.id,
+            url: row.url,
+            depth: Number(row.depth),
+            discoveredVia: row.discovered_via,
+          });
+        } else {
+          unroom.push(row.id);
         }
-        return {
-          item: { url: row.url, depth: Number(row.depth), discoveredVia: row.discovered_via },
-          reason: verdict.reason,
-        };
-      });
-      const inserted = await writer.insertExcluded(rows, tx);
-      await tx.execute(sql`
-        delete from frontier
-        where crawl_id = ${crawlId}
-          and url = any(${sql.param(rows.map((r) => r.item.url))}::text[])`);
-      refiled += inserted;
-      // Only rows that landed spend the budget: one already on record did not.
-      left -= inserted;
+      }
+      if (readmit.length > 0) {
+        const inserted = await tx
+          .insert(frontier)
+          .values(
+            readmit.map((r) => ({
+              crawlId,
+              url: r.url,
+              depth: r.depth,
+              discoveredVia: r.discoveredVia,
+              redirectHops: 0,
+            })),
+          )
+          .onConflictDoNothing({ target: [frontier.crawlId, frontier.url] })
+          .returning({ url: frontier.url });
+        // A URL the frontier already held cost no room.
+        room += readmit.length - inserted.length;
+        result.readmitted += inserted.length;
+      }
+      const deleted = [...readmit.map((r) => r.id), ...unroom];
+      if (deleted.length > 0) {
+        await tx.execute(sql`
+          delete from pages
+          where crawl_id = ${crawlId} and id = any(${sql.param(deleted)}::text[])`);
+      }
+      if (reblock.length > 0) {
+        await tx.execute(sql`
+          update pages set fetch_class = 'disallowed', fetch_reason = v.reason
+          from unnest(
+            ${sql.param(reblock.map((r) => r.id))}::text[],
+            ${sql.param(reblock.map((r) => r.reason))}::text[]) as v(id, reason)
+          where pages.crawl_id = ${crawlId} and pages.id = v.id`);
+        result.reblocked += reblock.length;
+      }
+      result.unroomed += unroom.length;
     }
-    // Past the budget: retired and counted, a URL already on record excepted.
-    const rest = await tx.execute<{ n: number }>(sql`
-      with gone as (
-        delete from frontier
-        where crawl_id = ${crawlId} and state = 'pending' and ${refuses}
-        returning url)
-      select count(*)::int as n from gone
-      where not exists (
-        select 1 from pages where pages.crawl_id = ${crawlId} and pages.url = gone.url)`);
-    const dropped = rest.rows[0]?.n;
-    if (typeof dropped !== "number") {
-      throw new Error(`refileOutOfScope: count came back as ${typeof dropped}, not a number`);
+    if (result.unroomed > 0) {
+      await tx.update(crawls).set({ frontierCapped: true }).where(eq(crawls.id, crawlId));
     }
-    return { refiled, dropped };
+    return result;
   });
 }
 

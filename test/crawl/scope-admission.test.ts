@@ -11,7 +11,7 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createServer, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
-import { and, eq } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import { closeDb, createDb, type Db } from "../../src/db/client.js";
 import { runMigrations } from "../../src/db/migrate.js";
 import { crawls, frontier, pages } from "../../src/db/schema.js";
@@ -23,6 +23,7 @@ import {
   parseStoredConfig,
   refileOutOfScope,
   resumeCrawl,
+  type RefileLimits,
   runCrawl,
   validateCrawlConfig,
   type CrawlConfig,
@@ -56,8 +57,8 @@ let base: string;
 let requested: string[] = [];
 const createdCrawls: string[] = [];
 
-/** Released by the resume test once it has paused the crawl. */
-let holdAnswers = false;
+/** Paths that hang until a test releases them (the resume tests' pause point). */
+const heldPaths = new Set<string>();
 const heldResponses = new Set<ServerResponse>();
 
 /** A path long enough that `${base}${LONG_PATH}` is 400 characters. */
@@ -73,6 +74,9 @@ let LONG_PATH = "";
  *   /short/      -> /h/0;  /h/0 -> /h/1 -> /h/2 -> /hend (3 hops)
  *   /long/       -> LONG_PATH
  *   /res/        -> /x/0, /hold;  /x/0 -> /x/1, /x/2;  /hold hangs until released
+ *   /wid/        -> /x/1, /hold2 (hangs until released)
+ *   /redir/      -> /go;  /go -> 301 /nope/1
+ *   /smseed/     -> nothing; /sm.xml (supplied) lists /sm/keep and /sm/nope/1
  */
 const LINKS: Record<string, string[]> = {
   "/": ["/a", "/b1"],
@@ -96,6 +100,13 @@ const LINKS: Record<string, string[]> = {
   "/x/0": ["/x/1", "/x/2"],
   "/x/1": [],
   "/x/2": [],
+  "/wid/": ["/x/1", "/hold2"],
+  "/redir/": ["/go"],
+  "/xochain/": ["/xo/0"],
+  "/nope/1": [],
+  "/smseed/": [],
+  "/sm/keep": [],
+  "/sm/nope/1": [],
 };
 
 function html(path: string, links: string[]): string {
@@ -130,12 +141,39 @@ function site(): Server {
       res.end();
       return;
     }
-    if (path === "/hold" && !holdAnswers) {
+    // A two-hop chain whose last hop leaves the origin (127.0.0.1 -> localhost).
+    if (path === "/xo/0") {
+      res.writeHead(301, { location: "/xo/1" });
+      res.end();
+      return;
+    }
+    if (path === "/xo/1") {
+      res.writeHead(301, { location: base.replace("127.0.0.1", "localhost") + "/elsewhere" });
+      res.end();
+      return;
+    }
+    if (path === "/go") {
+      res.writeHead(301, { location: "/nope/1" });
+      res.end();
+      return;
+    }
+    if (path === "/sm.xml") {
+      res.writeHead(200, { "content-type": "application/xml" });
+      res.end(
+        `<?xml version="1.0" encoding="UTF-8"?>` +
+          `<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">` +
+          `<url><loc>${base}/sm/keep</loc></url>` +
+          `<url><loc>${base}/sm/nope/1</loc></url>` +
+          `</urlset>`,
+      );
+      return;
+    }
+    if (heldPaths.has(path)) {
       heldResponses.add(res);
       res.on("close", () => heldResponses.delete(res));
       return;
     }
-    const links = path === "/hold" || path === LONG_PATH ? [] : LINKS[path];
+    const links = path === "/hold" || path === "/hold2" || path === LONG_PATH ? [] : LINKS[path];
     if (links === undefined) {
       res.writeHead(404, { "content-type": "text/html; charset=utf-8" });
       res.end("<!doctype html><title>Not found</title><p>nothing here</p>");
@@ -284,6 +322,16 @@ describe("the redirect cap", () => {
     expect(hops?.redirectHops).toBe(10);
   });
 
+  it("does not name the cap on a redirect at the cap whose target leaves the origin", async () => {
+    const summary = await crawl(cfg("/xochain/", { maxRedirectHops: 1 }));
+    const rows = await rowsOf(summary.crawlId);
+    expect(rows.get("/xo/0")?.fetchClass).toBe("redirect");
+    const last = rows.get("/xo/1");
+    expect(last?.fetchClass).toBe("redirect");
+    expect(last?.redirectUrl).toMatch(/^http:\/\/localhost:\d+\/elsewhere$/);
+    expect(last?.fetchReason).toBeNull();
+  });
+
   it("follows a 3-hop chain to its target under the default cap", async () => {
     expect(CRAWL_DEFAULTS.maxRedirectHops).toBe(10);
     const summary = await crawl(cfg("/short/"));
@@ -297,7 +345,7 @@ describe("the redirect cap", () => {
 });
 
 describe("the URL length limit", () => {
-  it("never requests or queues a link longer than maxUrlLength", async () => {
+  it("never requests or queues a link longer than maxUrlLength, and records it as an excluded row", async () => {
     expect(`${base}${LONG_PATH}`).toHaveLength(400);
     expect(CRAWL_DEFAULTS.maxUrlLength).toBe(2500);
     const summary = await crawl(cfg("/long/", { maxUrlLength: 300 }));
@@ -307,7 +355,12 @@ describe("the URL length limit", () => {
       .from(frontier)
       .where(and(eq(frontier.crawlId, summary.crawlId), eq(frontier.url, `${base}${LONG_PATH}`)));
     expect(queued).toHaveLength(0);
-    expect((await rowsOf(summary.crawlId)).has(LONG_PATH)).toBe(false);
+    const row = (await rowsOf(summary.crawlId)).get(LONG_PATH);
+    expect(row?.fetchClass).toBe("excluded");
+    expect(row?.fetchReason).toBe(
+      "crawl scope: longer than maxUrlLength (400 characters; the limit is 300)",
+    );
+    expect(row?.statusCode).toBeNull();
   });
 
   it("requests the same link under the default limit", async () => {
@@ -319,7 +372,7 @@ describe("the URL length limit", () => {
 
 describe("the re-filter on resume", () => {
   it("re-files pending URLs a changed scope refuses as excluded rows before any lease, leaving fetched ones alone", async () => {
-    holdAnswers = false;
+    heldPaths.add("/hold");
     requested = [];
     // Two at a time, so the seed's two links (/x/0, /hold) are one batch:
     // /x/0 answers and queues /x/1 and /x/2, while /hold keeps the batch open.
@@ -357,8 +410,18 @@ describe("the re-filter on resume", () => {
       .update(crawls)
       .set({ config: { ...stored, exclude: ["*/x/*"] } })
       .where(eq(crawls.id, id));
+    // A dead worker's lease on /x/2, run out: the pause returned only its own
+    // worker's leases, and `leaseBatch` would hand this one out at once.
+    await db
+      .update(frontier)
+      .set({
+        state: "leased",
+        leaseId: "worker_dead",
+        leasedUntil: sql`now() - interval '1 minute'`,
+      })
+      .where(and(eq(frontier.crawlId, id), eq(frontier.url, `${base}/x/2`)));
 
-    holdAnswers = true;
+    heldPaths.delete("/hold");
     requested = [];
     const config = { ...parseStoredConfig((await crawlRow(id)).config, id), allowPrivate: true };
     expect(config.exclude).toEqual(["*/x/*"]);
@@ -386,6 +449,19 @@ describe("the re-filter on resume", () => {
 });
 
 describe("refileOutOfScope", () => {
+  const allowAll: RefileLimits["robots"] = {
+    outcome: "read",
+    isAllowed: () => true,
+    matchingRule: () => null,
+  };
+  const limits = (budget: number, over: Partial<RefileLimits> = {}): RefileLimits => ({
+    budget,
+    maxPages: 100,
+    maxUrlLength: 2500,
+    robots: allowAll,
+    ...over,
+  });
+
   async function seededCrawl(): Promise<string> {
     const id = `crawl_refile_${Math.random().toString(36).slice(2)}`;
     await db.insert(crawls).values({
@@ -407,8 +483,8 @@ describe("refileOutOfScope", () => {
 
   it("writes refused pending rows up to the budget, counts the rest, and deletes them all from the frontier", async () => {
     const id = await seededCrawl();
-    const result = await refileOutOfScope(db, id, { exclude: ["*/drop/*"], include: [] }, 2);
-    expect(result).toEqual({ refiled: 2, dropped: 1 });
+    const result = await refileOutOfScope(db, id, { exclude: ["*/drop/*"], include: [] }, limits(2));
+    expect(result).toEqual({ refiled: 2, dropped: 1, readmitted: 0, reblocked: 0, unroomed: 0 });
 
     const rows = await db.select().from(pages).where(eq(pages.crawlId, id));
     expect(rows).toHaveLength(2);
@@ -424,14 +500,22 @@ describe("refileOutOfScope", () => {
 
   it("refiles under an include list, and changes nothing for an empty scope", async () => {
     const id = await seededCrawl();
-    expect(await refileOutOfScope(db, id, { exclude: [], include: [] }, 10)).toEqual({
+    expect(await refileOutOfScope(db, id, { exclude: [], include: [] }, limits(10))).toEqual({
       refiled: 0,
       dropped: 0,
+      readmitted: 0,
+      reblocked: 0,
+      unroomed: 0,
     });
     expect((await frontierCounts(db, id)).pending).toBe(4);
 
-    const result = await refileOutOfScope(db, id, { exclude: [], include: ["*/keep"] }, 10);
-    expect(result).toEqual({ refiled: 3, dropped: 0 });
+    const result = await refileOutOfScope(
+      db,
+      id,
+      { exclude: [], include: ["*/keep"] },
+      limits(10),
+    );
+    expect(result).toEqual({ refiled: 3, dropped: 0, readmitted: 0, reblocked: 0, unroomed: 0 });
     const rows = await db.select().from(pages).where(eq(pages.crawlId, id));
     expect(new Set(rows.map((r) => r.fetchReason))).toEqual(
       new Set(["crawl scope: matches no include pattern"]),
@@ -447,12 +531,189 @@ describe("refileOutOfScope", () => {
 
   it("with no budget left, counts every refused row and writes none", async () => {
     const id = await seededCrawl();
-    expect(await refileOutOfScope(db, id, { exclude: ["*/drop/*"], include: [] }, 0)).toEqual({
-      refiled: 0,
-      dropped: 3,
-    });
+    expect(
+      await refileOutOfScope(db, id, { exclude: ["*/drop/*"], include: [] }, limits(0)),
+    ).toEqual({ refiled: 0, dropped: 3, readmitted: 0, reblocked: 0, unroomed: 0 });
     expect(await db.select().from(pages).where(eq(pages.crawlId, id))).toHaveLength(0);
     expect((await frontierCounts(db, id)).pending).toBe(1);
+  });
+
+  it("re-files a dead worker's expired lease, and leaves a live lease alone", async () => {
+    const id = await seededCrawl();
+    await db
+      .update(frontier)
+      .set({ state: "leased", leaseId: "worker_dead", leasedUntil: sql`now() - interval '1 minute'` })
+      .where(and(eq(frontier.crawlId, id), eq(frontier.url, "https://refile.example/drop/1")));
+    await db
+      .update(frontier)
+      .set({ state: "leased", leaseId: "worker_live", leasedUntil: sql`now() + interval '1 hour'` })
+      .where(and(eq(frontier.crawlId, id), eq(frontier.url, "https://refile.example/drop/2")));
+
+    const result = await refileOutOfScope(db, id, { exclude: ["*/drop/*"], include: [] }, limits(10));
+    expect(result.refiled).toBe(2);
+    const rows = await db.select({ url: pages.url }).from(pages).where(eq(pages.crawlId, id));
+    expect(rows.map((r) => r.url).sort()).toEqual([
+      "https://refile.example/drop/1",
+      "https://refile.example/drop/3",
+    ]);
+    const left = await db
+      .select({ url: frontier.url, state: frontier.state })
+      .from(frontier)
+      .where(eq(frontier.crawlId, id));
+    expect(new Map(left.map((r) => [r.url, r.state]))).toEqual(
+      new Map([
+        ["https://refile.example/keep", "pending"],
+        ["https://refile.example/drop/2", "leased"],
+      ]),
+    );
+  });
+
+  /** A crawl whose `/drop/*` URLs are excluded rows, and only `/keep` is queued. */
+  async function excludedCrawl(): Promise<string> {
+    const id = await seededCrawl();
+    await refileOutOfScope(db, id, { exclude: ["*/drop/*"], include: [] }, limits(10));
+    return id;
+  }
+
+  it("re-admits excluded rows the scope now admits: back in the frontier, pending, row deleted", async () => {
+    const id = await excludedCrawl();
+    const result = await refileOutOfScope(db, id, { exclude: [], include: [] }, limits(10));
+    expect(result).toEqual({ refiled: 0, dropped: 0, readmitted: 3, reblocked: 0, unroomed: 0 });
+    expect(await db.select().from(pages).where(eq(pages.crawlId, id))).toHaveLength(0);
+    const back = await db
+      .select({
+        url: frontier.url,
+        state: frontier.state,
+        depth: frontier.depth,
+        via: frontier.discoveredVia,
+        hops: frontier.redirectHops,
+      })
+      .from(frontier)
+      .where(eq(frontier.crawlId, id));
+    expect(back.sort((a, b) => a.url.localeCompare(b.url))).toEqual([
+      { url: "https://refile.example/drop/1", state: "pending", depth: 1, via: "link", hops: 0 },
+      { url: "https://refile.example/drop/2", state: "pending", depth: 2, via: "sitemap", hops: 0 },
+      { url: "https://refile.example/drop/3", state: "pending", depth: 3, via: "redirect", hops: 0 },
+      { url: "https://refile.example/keep", state: "pending", depth: 1, via: "link", hops: 0 },
+    ]);
+  });
+
+  it("with no frontier room, deletes the excluded row and stamps frontier_capped", async () => {
+    const id = await excludedCrawl();
+    // One frontier row (/keep) held, so maxPages 2 leaves room for one.
+    const result = await refileOutOfScope(
+      db,
+      id,
+      { exclude: [], include: [] },
+      limits(10, { maxPages: 2 }),
+    );
+    expect(result).toEqual({ refiled: 0, dropped: 0, readmitted: 1, reblocked: 0, unroomed: 2 });
+    expect(await db.select().from(pages).where(eq(pages.crawlId, id))).toHaveLength(0);
+    expect((await frontierCounts(db, id)).pending).toBe(2);
+    expect((await crawlRow(id)).frontierCapped).toBe(true);
+  });
+
+  it("re-classes a re-admitted URL robots.txt disallows as a robots-blocked row, never queued", async () => {
+    const id = await excludedCrawl();
+    const robots: RefileLimits["robots"] = {
+      outcome: "read",
+      isAllowed: (url) => !url.endsWith("/drop/1"),
+      matchingRule: (url) => (url.endsWith("/drop/1") ? "Disallow: /drop/1" : null),
+    };
+    const result = await refileOutOfScope(
+      db,
+      id,
+      { exclude: [], include: [] },
+      limits(10, { robots }),
+    );
+    expect(result).toEqual({ refiled: 0, dropped: 0, readmitted: 2, reblocked: 1, unroomed: 0 });
+    const rows = await db.select().from(pages).where(eq(pages.crawlId, id));
+    expect(rows.map((r) => [r.url, r.fetchClass, r.fetchReason])).toEqual([
+      ["https://refile.example/drop/1", "disallowed", "robots.txt: Disallow: /drop/1"],
+    ]);
+    const queued = await db.select({ url: frontier.url }).from(frontier).where(eq(frontier.crawlId, id));
+    expect(queued.map((r) => r.url)).not.toContain("https://refile.example/drop/1");
+  });
+
+  it("keeps an excluded row longer than maxUrlLength: that refusal is the length, not a pattern", async () => {
+    const id = await excludedCrawl();
+    const result = await refileOutOfScope(
+      db,
+      id,
+      { exclude: [], include: [] },
+      // "https://refile.example/drop/N" is 29 characters.
+      limits(10, { maxUrlLength: 28 }),
+    );
+    expect(result.readmitted).toBe(0);
+    expect(await db.select().from(pages).where(eq(pages.crawlId, id))).toHaveLength(3);
+  });
+});
+
+describe("scope admission, the other discovery kinds", () => {
+  it("records a redirect target the scope refuses as an excluded row discovered via redirect", async () => {
+    const summary = await crawl(cfg("/redir/", { exclude: ["*/nope/*"] }));
+    const rows = await rowsOf(summary.crawlId);
+    expect(rows.get("/go")?.fetchClass).toBe("redirect");
+    const target = rows.get("/nope/1");
+    expect(target?.fetchClass).toBe("excluded");
+    expect(target?.discoveredVia).toBe("redirect");
+    expect(target?.fetchReason).toBe("crawl scope: matches exclude pattern '*/nope/*'");
+    expect(requested).not.toContain("/nope/1");
+  });
+
+  it("skips a sitemap entry the scope refuses: no row and no request (Deviation 8)", async () => {
+    const summary = await crawl(
+      cfg("/smseed/", { exclude: ["*/nope/*"], sitemapUrls: [`${base}/sm.xml`] }),
+    );
+    const rows = await rowsOf(summary.crawlId);
+    expect(requested).toContain("/sm.xml");
+    expect(rows.get("/sm/keep")?.fetchClass).toBe("ok");
+    expect(rows.has("/sm/nope/1")).toBe(false);
+    expect(requested).not.toContain("/sm/nope/1");
+    expect((await crawlRow(summary.crawlId)).excludedDropped).toBe(0);
+  });
+});
+
+describe("the re-filter on resume, widening", () => {
+  it("re-admits an excluded URL the cleared scope admits, and fetches it to an ok row", async () => {
+    heldPaths.add("/hold2");
+    requested = [];
+    const run = runCrawl(db, cfg("/wid/", { exclude: ["*/x/*"], maxConcurrency: 2 }));
+    run.catch(() => undefined);
+    let id = "";
+    await until("the crawl row", async () => {
+      const rows = await db
+        .select({ id: crawls.id })
+        .from(crawls)
+        .where(eq(crawls.siteUrl, `${base}/wid/`));
+      const fresh = rows.filter((r) => !createdCrawls.includes(r.id));
+      if (fresh.length === 1) id = fresh[0]!.id;
+      return id !== "";
+    });
+    createdCrawls.push(id);
+    await until("/hold2 in flight with /x/1 excluded", async () => {
+      if (!requested.includes("/hold2")) return false;
+      return (await rowsOf(id)).get("/x/1")?.fetchClass === "excluded";
+    });
+    expect(await setControlRequest(db, id, "pause")).toBe(true);
+    expect((await run).status).toBe("paused");
+    expect(requested).not.toContain("/x/1");
+
+    const stored = (await crawlRow(id)).config as Record<string, unknown>;
+    const { exclude: _cleared, ...widened } = stored;
+    await db.update(crawls).set({ config: widened }).where(eq(crawls.id, id));
+
+    heldPaths.delete("/hold2");
+    requested = [];
+    const config = { ...parseStoredConfig((await crawlRow(id)).config, id), allowPrivate: true };
+    expect(config.exclude).toBeUndefined();
+    expect((await resumeCrawl(db, id, { config })).status).toBe("finished");
+
+    expect(requested).toContain("/x/1");
+    const x1 = (await rowsOf(id)).get("/x/1");
+    expect(x1?.fetchClass).toBe("ok");
+    expect(x1?.depth).toBe(1);
+    expect(x1?.discoveredVia).toBe("link");
   });
 });
 
