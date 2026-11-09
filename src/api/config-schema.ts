@@ -446,7 +446,7 @@ export function judgementSchema(registry: Registry) {
           ? issue.keys[0] === "severity"
             ? JUDGEMENT_DETAIL.severity
             : JUDGEMENT_DETAIL.unknownKey
-          : "must be a JSON object",
+          : JUDGEMENT_DETAIL.notObject,
     },
   );
 
@@ -463,7 +463,7 @@ export function judgementSchema(registry: Registry) {
   const thresholdShape = Object.fromEntries(
     (Object.keys(OVERRIDABLE_THRESHOLDS) as ThresholdName[]).map((name) => {
       const row = OVERRIDABLE_THRESHOLDS[name];
-      const range = (): string => `must be an integer in [${row.min}, ${row.max}]`;
+      const range = (): string => JUDGEMENT_DETAIL.thresholdRange(row.min, row.max);
       return [
         name,
         z

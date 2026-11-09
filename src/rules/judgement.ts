@@ -108,20 +108,36 @@ export const JUDGEMENT_DETAIL = {
   metricRule: (id: string): string =>
     `'${id}' is a metric rule; it produces no findings, so it cannot be ` +
     "disabled, retyped or reprioritised",
+  /** A threshold that is not a number, not an integer, or outside its range. */
+  thresholdRange: (min: number, max: number): string => `must be an integer in [${min}, ${max}]`,
+  /** A rule override (or a section of the block) that is not an object. */
+  notObject: "must be a JSON object",
 } as const;
 
 const ruleOverrideSchema = z
-  .strictObject({
-    disabled: z.literal(true, { error: JUDGEMENT_DETAIL.disabledNotTrue }).optional(),
-    type: z.enum(["issue", "warning", "opportunity"]).optional(),
-    priority: z.enum(["high", "medium", "low"]).optional(),
-  })
+  .strictObject(
+    {
+      disabled: z.literal(true, { error: JUDGEMENT_DETAIL.disabledNotTrue }).optional(),
+      type: z.enum(["issue", "warning", "opportunity"]).optional(),
+      priority: z.enum(["high", "medium", "low"]).optional(),
+    },
+    {
+      // Only the not-an-object case: unrecognized keys are named by
+      // `firstIssue`, which knows their path.
+      error: (issue) => (issue.code === "invalid_type" ? JUDGEMENT_DETAIL.notObject : undefined),
+    },
+  )
   .refine((o) => Object.keys(o).length > 0, {
     message: "an empty override changes nothing; remove the rule's entry instead",
   });
 
 function thresholdValue(row: ThresholdRow) {
-  return z.number().int().min(row.min).max(row.max);
+  const range = (): string => JUDGEMENT_DETAIL.thresholdRange(row.min, row.max);
+  return z
+    .number({ error: range })
+    .int({ error: range })
+    .min(row.min, { error: range })
+    .max(row.max, { error: range });
 }
 
 const thresholdsSchema = z.strictObject(

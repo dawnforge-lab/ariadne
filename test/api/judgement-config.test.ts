@@ -919,13 +919,20 @@ describe("the crawl part of crawl_config_get / crawl_config_set (27b T7)", () =>
   });
 
   it("writes nothing when the judgement half is refused: crawl and judgement are one transaction", async () => {
-    const id = await seedStatus("paused");
+    // A VALID crawl half (maxPages 900 on a paused crawl, which alone is
+    // accepted) and a judgement half that only `parseJudgement` refuses, and
+    // only AFTER the merge is built: the patch empties the stored override, so
+    // the merged `{}` is refused. Both halves pass every check made before the
+    // transaction, so only the one transaction keeps maxPages at 100.
+    const id = await seedStatus("paused", {}, { judgement: { rules: { "title.too-long": { disabled: true } } } });
     const before = await storedRow(id);
     const res = await patch(id, {
       crawl: { maxPages: 900 },
-      judgement: { rules: { "no.such": { disabled: true } } },
+      judgement: { rules: { "title.too-long": { disabled: null } } },
     });
     expect(res.status).toBe(400);
+    expect(String(res.body["error"])).toContain("rules.title.too-long");
+    expect((await storedConfig(id))["maxPages"]).toBe(100);
     expect(await storedRow(id)).toEqual(before);
   });
 
@@ -946,5 +953,58 @@ describe("the crawl part of crawl_config_get / crawl_config_set (27b T7)", () =>
     const id = await seedStatus("running");
     const res = await patch(id, { judgement: { thresholds: { SLOW_MS: 900 } } });
     expect(res.status).toBe(200);
+  });
+});
+
+describe("judgement refusal wording: the start body and crawl_config_set say the same sentence (27b final M10)", () => {
+  /** The sentence after the path, so the start body's `judgement.` prefix does not matter. */
+  const detailAfter = (message: string, path: string): string => {
+    const at = message.indexOf(`${path}: `);
+    if (at === -1) throw new Error(`'${message}' does not name ${path}`);
+    return message.slice(at + path.length + 2);
+  };
+
+  it("an out-of-range threshold", async () => {
+    const { min, max } = OVERRIDABLE_THRESHOLDS.SLOW_MS;
+    const judgement = { thresholds: { SLOW_MS: max + 1 } };
+    const started = await call("POST", "/crawls", { siteUrl: `${site}/`, maxPages: 1, judgement });
+    expect(started.status).toBe(400);
+    const id = `crawl_wording_${randomUUID()}`;
+    await db.insert(crawls).values({
+      id,
+      siteUrl: `${SITE}/`,
+      config: { siteUrl: `${SITE}/`, maxPages: 10, maxDepth: 3, userAgent: "AriadneBot-test", perHostDelayMs: 1000, maxConcurrency: 1 },
+      rulesetVersion: "test",
+      status: "finished",
+    });
+    createdCrawls.push(id);
+    const set = await patch(id, { judgement });
+    expect(set.status).toBe(400);
+
+    const sentence = `must be an integer in [${min}, ${max}]`;
+    const fromStart = detailAfter(String(started.body["error"]), "thresholds.SLOW_MS");
+    const fromSet = detailAfter(String(set.body["error"]), "thresholds.SLOW_MS");
+    expect(fromStart).toBe(sentence);
+    expect(fromSet).toBe(sentence);
+  });
+
+  it("a non-object rule override", async () => {
+    const judgement = { rules: { "title.too-long": "off" } };
+    const started = await call("POST", "/crawls", { siteUrl: `${site}/`, maxPages: 1, judgement });
+    expect(started.status).toBe(400);
+    const id = `crawl_wording_${randomUUID()}`;
+    await db.insert(crawls).values({
+      id,
+      siteUrl: `${SITE}/`,
+      config: { siteUrl: `${SITE}/`, maxPages: 10, maxDepth: 3, userAgent: "AriadneBot-test", perHostDelayMs: 1000, maxConcurrency: 1 },
+      rulesetVersion: "test",
+      status: "finished",
+    });
+    createdCrawls.push(id);
+    const set = await patch(id, { judgement });
+    expect(set.status).toBe(400);
+    const fromStart = detailAfter(String(started.body["error"]), "rules.title.too-long");
+    const fromSet = detailAfter(String(set.body["error"]), "rules.title.too-long");
+    expect(fromSet).toBe(fromStart);
   });
 });
