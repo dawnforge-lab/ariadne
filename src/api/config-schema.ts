@@ -171,7 +171,17 @@ function finiteNumber(key: string) {
 function positiveInteger(key: string) {
   const range = (issue: { input?: unknown }): string =>
     `field '${key}' must be an integer ≥ 1, got ${String(issue.input)}`;
-  return finiteNumber(key).int({ error: range }).min(1, { error: range });
+  // zod's `.int()` is bounded by Number.MAX_SAFE_INTEGER, so 1e20 is not an
+  // "integer" to it — and "must be an integer ≥ 1" about 1e20 is a sentence
+  // that cannot be acted on. The ceiling is checked FIRST, so it is the issue
+  // reported, and it names the real range.
+  const tooLarge = (issue: { input?: unknown }): string =>
+    `field '${key}' must be an integer from 1 to ${Number.MAX_SAFE_INTEGER}, got ` +
+    `${typeof issue.input === "number" ? issue.input.toLocaleString("en-US", { useGrouping: false }) : String(issue.input)}`;
+  return finiteNumber(key)
+    .max(Number.MAX_SAFE_INTEGER, { error: tooLarge })
+    .int({ error: range })
+    .min(1, { error: range });
 }
 
 function booleanField(key: string) {

@@ -376,3 +376,18 @@ describe("parseStartBody: the judgement block", () => {
     expect(crossed.message).toContain("must be strictly below");
   });
 });
+
+describe("a positive integer too large to be one (27b final M11)", () => {
+  it("names the real ceiling for maxPages, maxDepth and maxConcurrency instead of '≥ 1'", () => {
+    for (const field of ["maxPages", "maxDepth", "maxConcurrency"]) {
+      const error = first({ siteUrl: SITE, [field]: 1e20 });
+      expect(error.code, field).toBe("out_of_range");
+      expect(error.message).toBe(
+        `field '${field}' must be an integer from 1 to ${Number.MAX_SAFE_INTEGER}, got 100000000000000000000`,
+      );
+      expect(error.message).not.toContain("≥ 1");
+      // The ceiling itself is accepted.
+      expect(parseStartBody({ siteUrl: SITE, [field]: Number.MAX_SAFE_INTEGER }, registry).ok, field).toBe(true);
+    }
+  });
+});
