@@ -1163,6 +1163,7 @@ export const hreflangRules: QueryRule[] = [
   defineRule<QueryRule>({
     kind: "query",
     id: NOT_CRAWLED.id,
+    needsSpider: true,
     checkIds: ["CHECK-24", "CHECK-26"],
     category: CATEGORY,
     severity: NOT_CRAWLED.severity,

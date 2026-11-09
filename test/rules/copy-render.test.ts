@@ -21,14 +21,23 @@ const FIXTURE: Record<string, Entry> = JSON.parse(
 
 const FIELDS = ["title", "explanation", "howToFix"] as const;
 
+// Rules added after 0.22.0 have no entry in the fixture, which is frozen text.
+// Each is named here, so a rule that is missing from the fixture by accident
+// still fails the key comparison below.
+const ADDED_SINCE_0_22 = ["crawl.list-mode"]; // 0.24.0, Phase 27c
+
 describe("copy rendering (27a T4)", () => {
   it("renders every entry at the defaults exactly as 0.22.0 wrote it", () => {
-    expect(Object.keys(COPY_TEMPLATES).sort()).toEqual(Object.keys(FIXTURE).sort());
+    const withoutAdded = (o: Record<string, unknown>): Record<string, unknown> =>
+      Object.fromEntries(Object.entries(o).filter(([id]) => !ADDED_SINCE_0_22.includes(id)));
+    expect(Object.keys(COPY_TEMPLATES).sort()).toEqual(
+      [...Object.keys(FIXTURE), ...ADDED_SINCE_0_22].sort(),
+    );
     for (const id of Object.keys(FIXTURE)) {
       expect(renderCopy(id, DEFAULT_THRESHOLDS), id).toEqual(FIXTURE[id]);
       expect(copyFor(id), id).toEqual(FIXTURE[id]);
     }
-    expect(ISSUE_COPY).toEqual(FIXTURE);
+    expect(withoutAdded(ISSUE_COPY)).toEqual(FIXTURE);
   });
 
   it("only names overridable thresholds in placeholders", () => {

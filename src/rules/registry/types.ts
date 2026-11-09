@@ -171,6 +171,24 @@ interface RuleMeta {
    */
   marker?: string;
   /**
+   * Phase 27c: the rule's answer depends on the part of the site a LIST crawl
+   * never fetches — an inlink count, a click depth, "linked from nowhere",
+   * "not crawled". On a list crawl there is no link graph to read, so the run
+   * does not execute the rule (a silent rule reads as a clean site, hard rule 1)
+   * and `crawl.list-mode` names it under `notMeasured`. Absent on every other
+   * rule; `true` or absent, never `false`. Refused on `crawl.list-mode` itself,
+   * the one rule that must run on a list crawl to say the others did not.
+   */
+  needsSpider?: true;
+  /**
+   * Phase 27c: the rule reads sitemap documents the crawl fetched. A list crawl
+   * reads none unless the client names `sitemapUrls`, and then a sitemap rule's
+   * silence says nothing about the sitemaps the site declares. On a list crawl
+   * that read no sitemap the run does not execute the rule and `crawl.list-mode`
+   * names it. With a sitemap read, the rule runs exactly as on a spider crawl.
+   */
+  needsSitemaps?: true;
+  /**
    * THE RULE'S REPORT, column by column — what a reader sees after the four
    * standard columns every finding row carries (`address`, `statusCode`,
    * `indexability`, `indexabilityStatus`).
@@ -307,6 +325,13 @@ export interface RuleCaps {
 export interface JudgementContext {
   thresholds: Thresholds;
   disabledRules: ReadonlySet<string>;
+  /**
+   * Present ONLY on a list crawl (Phase 27c), read once by `runRules` from the
+   * crawl's own row: whether a sitemap was read, and the sorted ids of the rules
+   * this run did not execute (`needsSpider`, plus `needsSitemaps` when no
+   * sitemap was read). `crawl.list-mode` reports it and is the only reader.
+   */
+  listMode?: { sitemapsRead: boolean; notMeasured: readonly string[] };
 }
 
 /** The context of a crawl with no overrides. */

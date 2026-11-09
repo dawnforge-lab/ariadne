@@ -246,6 +246,7 @@ export const canonicalGraphRules: QueryRule[] = [
   defineRule<QueryRule>({
     kind: "query",
     id: UNLINKED.id,
+    needsSpider: true,
     checkIds: ["CHECK-17"],
     category: CATEGORY,
     severity: UNLINKED.severity,

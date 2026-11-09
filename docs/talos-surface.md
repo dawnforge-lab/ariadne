@@ -1777,9 +1777,9 @@ not name", `test/api/query.test.ts:1476` "carries a finding with no page as a
 null url", `test/rules/helpers.test.ts:697` "maps each fetch class to the status
 a reader acts on", `test/rules/helpers.test.ts:717` "names a block a block,
 whatever status the challenge was served with",
-`test/fixtures/harness.test.ts:1287` "declares a column for every evidence key it
+`test/fixtures/harness.test.ts:1292` "declares a column for every evidence key it
 writes, and writes every column it declares",
-`test/rules/registry.test.ts:769` "finds one defining file per rule, and the key
+`test/rules/registry.test.ts:774` "finds one defining file per rule, and the key
 spelled inside it".
 
 **A rule the crawl's judgement disables is refused, 409** (Deviation 3), and so
@@ -1940,7 +1940,7 @@ header on the catalog, and only on metric rules",
 and one row per scope",
 `test/rules/metric-table.test.ts:377` "gives every metric rule a table whose
 columns are the catalog's",
-`test/fixtures/harness.test.ts:2383` "renders every metric's table, with no
+`test/fixtures/harness.test.ts:2388` "renders every metric's table, with no
 empty column and no unmapped key".
 
 **`judgementStale`** (Phase 27a) is the answer's last key, `crawl_status`'s flag
@@ -2812,10 +2812,10 @@ canonicalises under noindex", `test/rules/health-metrics.test.ts:412`
 are over", `test/rules/copy.test.ts:1549` "says the counts are the authority, not the
 ratio", `test/rules/copy.test.ts:1566` "grades nothing: no score, no label, no
 threshold";
-`test/rules/coverage.test.ts:607` "site.health is filed under the
+`test/rules/coverage.test.ts:614` "site.health is filed under the
 engine-coverage check, and CHECK-32 lost no claimant" (the re-file in both
 directions, and CHECK-83 outside the crawl-derived universe);
-`test/fixtures/harness.test.ts:3276` "the health rollup agrees with a
+`test/fixtures/harness.test.ts:3281` "the health rollup agrees with a
 page-by-page recount" — an independent recount in JavaScript over the end-to-end
 fixture crawl.
 
@@ -3152,7 +3152,7 @@ Five postures a Talos integrator should know about rather than discover:
 
 ## 11. Versioning, and what a ruleset change does to a served crawl
 
-`RULESET_VERSION` (**0.23.0** as of Phase 27a) stamps **judgement**: bump it when
+`RULESET_VERSION` (**0.24.0** as of Phase 27c) stamps **judgement**: bump it when
 a rule's verdict or copy changes. Adding a rule or a metric family adds rows
 without changing a verdict — `metrics` rows carry no version column at all —
 which is the argument Phase 10 held 0.7.0 on.

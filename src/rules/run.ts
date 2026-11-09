@@ -7,9 +7,11 @@ import { deriveSitemapHreflang } from "./derive/sitemap-hreflang.js";
 import { deriveUrlParams } from "./derive/url-params.js";
 import { effectiveThresholds, judgedWithOf, readStoredJudgement } from "./judgement.js";
 import { resolveRuleCaps, storedFindingCap } from "./query/crawl-evidence.js";
+import { listModeSkips, readListScope, skipsOnList } from "./query/list-mode.js";
 import { RULESET_VERSION, type Registry } from "./registry/registry.js";
 import {
   METRIC_SCOPES,
+  type AnyRule,
   type Finding,
   type JudgementContext,
   type Metric,
@@ -130,7 +132,12 @@ export async function runRules(
   // first so a typo or a deleted crawl is an error rather than a green report
   // about nothing (hard rule 7).
   const crawl = await db
-    .select({ id: crawls.id, config: crawls.config, judgement: crawls.judgement })
+    .select({
+      id: crawls.id,
+      config: crawls.config,
+      judgement: crawls.judgement,
+      discovery: crawls.discovery,
+    })
     .from(crawls)
     .where(eq(crawls.id, crawlId))
     .limit(1);
@@ -171,9 +178,27 @@ export async function runRules(
   // here at once (the finding cap's argument, and the concurrency test in
   // test/rules/thresholds-override.test.ts). Disabled rules are in it for
   // `site.health` alone: they still run and their findings are still stored.
+  // THE CRAWL'S MODE, read once and validated with the rest, before anything is
+  // deleted (27c). A list crawl fetched only the URLs it was given and followed
+  // no link, so a rule that needs the whole site's link graph (`needsSpider`),
+  // or a sitemap read the crawl did not make (`needsSitemaps`), is not run: its
+  // silence would read as a clean site (hard rule 1). `crawl.list-mode` names
+  // what was left out, from the list built here. A crawl's mode never changes,
+  // so the skipped rules have written nothing on an earlier run to delete.
+  const scope = readListScope(row.config, row.discovery, crawlId);
+  const onList = scope.mode === "list";
+  const skipped = (rule: AnyRule): boolean => onList && skipsOnList(rule, scope.sitemapsRead);
   const judgement: JudgementContext = {
     thresholds: effectiveThresholds(block),
     disabledRules: new Set(judgedWith.disabledRules),
+    ...(onList
+      ? {
+          listMode: {
+            sitemapsRead: scope.sitemapsRead,
+            notMeasured: listModeSkips(registry.all(), scope.sitemapsRead),
+          },
+        }
+      : {}),
   };
 
   // Planner statistics, before any rule reads a table.
@@ -320,7 +345,7 @@ export async function runRules(
     summary.byRule[f.ruleId] = (summary.byRule[f.ruleId] ?? 0) + 1;
   };
 
-  const pageRules = registry.byKind("page");
+  const pageRules = registry.byKind("page").filter((rule) => !skipped(rule));
   let cursor = "";
   for (;;) {
     const batch = await db
@@ -399,6 +424,7 @@ export async function runRules(
   // Query rules run after the page rules: they read the crawl's tables whole
   // (in SQL), so they are unaffected by the page cursor.
   for (const rule of registry.byKind("query")) {
+    if (skipped(rule)) continue;
     let produced: Finding[];
     try {
       produced = await rule.run(db, crawlId, caps, judgement);
@@ -464,6 +490,7 @@ export async function runRules(
   // this: their buffer batches across rules, so they get one phase-level delete
   // and pay for it with the crash window documented up there.
   for (const rule of registry.byKind("metric")) {
+    if (skipped(rule)) continue;
     let returned: unknown;
     try {
       returned = await rule.run(db, crawlId, judgement);

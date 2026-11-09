@@ -528,7 +528,9 @@ describe("check universe", () => {
     // 0.23.0: Phase 27a — every rule that finds gains an issue type and a
     // priority from src/rules/registry/triage.ts; client-facing judgement
     // changed, no verdict moved; registry.ts carries the grounds.
-    expect(RULESET_VERSION).toBe("0.23.0");
+    // 0.24.0: Phase 27c — list mode: needsSpider / needsSitemaps and the
+    // crawl.list-mode marker; a spider crawl's findings do not move.
+    expect(RULESET_VERSION).toBe("0.24.0");
   });
   it("every listed check id is a well-formed CHECK-NN and unique", () => {
     expect(new Set(CRAWL_CHECK_IDS).size).toBe(CRAWL_CHECK_IDS.length);
@@ -626,15 +628,18 @@ describe("check annotations", () => {
  *
  * The PR #24 review (0.22.0, no bump) adds the marker
  * `hreflang.declarations-incomplete` (info): 89 info, sixteen markers.
+ *
+ * Phase 27c Task 7 (0.24.0) adds the marker `crawl.list-mode` (info): 90 info,
+ * seventeen markers.
  */
 describe("severity shape of the ruleset", () => {
   const all = buildRegistry().all();
 
-  it("holds 33 critical, 66 warning and 89 info rules", () => {
+  it("holds 33 critical, 66 warning and 90 info rules", () => {
     const counts = { critical: 0, warning: 0, info: 0 };
     for (const r of all) counts[r.severity] += 1;
-    expect(counts).toEqual({ critical: 33, warning: 66, info: 89 });
-    expect(all).toHaveLength(188);
+    expect(counts).toEqual({ critical: 33, warning: 66, info: 90 });
+    expect(all).toHaveLength(189);
   });
 
   it("names exactly the rules that are critical", () => {

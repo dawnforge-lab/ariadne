@@ -393,6 +393,7 @@ export const linkGraphRules: QueryRule[] = [
   defineRule<QueryRule>({
     kind: "query",
     id: ORPHAN.id,
+    needsSpider: true,
     checkIds: ["CHECK-32"],
     category: "links",
     severity: ORPHAN.severity,
@@ -416,6 +417,7 @@ export const linkGraphRules: QueryRule[] = [
   defineRule<QueryRule>({
     kind: "query",
     id: SKIPPED.id,
+    needsSpider: true,
     checkIds: ["CHECK-32"],
     category: "links",
     severity: SKIPPED.severity,
@@ -465,6 +467,7 @@ export const linkGraphRules: QueryRule[] = [
   defineRule<QueryRule>({
     kind: "query",
     id: DEEP.id,
+    needsSpider: true,
     checkIds: ["CHECK-31"],
     category: "technical",
     severity: DEEP.severity,

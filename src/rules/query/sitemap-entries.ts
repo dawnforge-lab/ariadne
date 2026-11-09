@@ -212,6 +212,7 @@ export const sitemapEntryRules: QueryRule[] = [
   defineRule<QueryRule>({
     kind: "query",
     id: OVER_50K.id,
+    needsSitemaps: true,
     checkIds: ["CHECK-08"],
     category: CATEGORY,
     severity: OVER_50K.severity,
@@ -268,6 +269,7 @@ export const sitemapEntryRules: QueryRule[] = [
   defineRule<QueryRule>({
     kind: "query",
     id: TOO_LONG.id,
+    needsSitemaps: true,
     checkIds: ["CHECK-07"],
     category: CATEGORY,
     severity: TOO_LONG.severity,
@@ -312,6 +314,7 @@ export const sitemapEntryRules: QueryRule[] = [
   defineRule<QueryRule>({
     kind: "query",
     id: OVERSIZED.id,
+    needsSitemaps: true,
     checkIds: ["CHECK-08"],
     category: CATEGORY,
     severity: OVERSIZED.severity,
@@ -351,6 +354,7 @@ export const sitemapEntryRules: QueryRule[] = [
   defineRule<QueryRule>({
     kind: "query",
     id: IN_MULTIPLE.id,
+    needsSitemaps: true,
     checkIds: ["CHECK-08"],
     category: CATEGORY,
     severity: IN_MULTIPLE.severity,
@@ -420,6 +424,7 @@ export const sitemapEntryRules: QueryRule[] = [
   defineRule<QueryRule>({
     kind: "query",
     id: CROSS_HOST.id,
+    needsSitemaps: true,
     checkIds: ["CHECK-07"],
     category: CATEGORY,
     severity: CROSS_HOST.severity,
@@ -447,6 +452,7 @@ export const sitemapEntryRules: QueryRule[] = [
   defineRule<QueryRule>({
     kind: "query",
     id: LASTMOD.id,
+    needsSitemaps: true,
     checkIds: ["CHECK-07"],
     category: CATEGORY,
     severity: LASTMOD.severity,

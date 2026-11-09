@@ -122,7 +122,7 @@ describe("the published schema", () => {
       .filter((rule) => rule.kind !== "metric")
       .map((rule) => rule.id);
     expect([...names].sort()).toEqual([...findingRules].sort());
-    expect(names).toHaveLength(174);
+    expect(names).toHaveLength(175);
     for (const metric of registry.byKind("metric")) {
       expect(names, metric.id).not.toContain(metric.id);
     }

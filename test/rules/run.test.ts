@@ -162,7 +162,7 @@ describe("buildRegistry", () => {
     expect(ids).toContain("hreflang.source-conflict");
     // PR #24 review: hreflang declarations not read in full.
     expect(ids).toContain("hreflang.declarations-incomplete");
-    expect(ids.length).toBe(188);
+    expect(ids.length).toBe(189);
   });
 
   it("registers every kind the runner drives", () => {

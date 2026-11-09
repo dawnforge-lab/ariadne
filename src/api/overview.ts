@@ -11,7 +11,7 @@
  *
  * Hard rule 3: the findings are counted by ONE `GROUP BY rule_id` statement
  * with the disabled filter in SQL; nothing loads `issues` into memory. The
- * answer is bounded by the rule count (at most 174 finding rules), which is why
+ * answer is bounded by the rule count (at most 175 finding rules), which is why
  * ordering the aggregate in code is not an unbounded structure.
  *
  * `urls` is the number of DISTINCT URLs, as `issue_urls` lists them: the

@@ -683,6 +683,7 @@ export const hreflangIntegrityRules: QueryRule[] = [
   defineRule<QueryRule>({
     kind: "query",
     id: UNLINKED.id,
+    needsSpider: true,
     checkIds: ["CHECK-24"],
     category: CATEGORY,
     severity: UNLINKED.severity,
@@ -698,6 +699,7 @@ export const hreflangIntegrityRules: QueryRule[] = [
   defineRule<QueryRule>({
     kind: "query",
     id: SOURCE_CONFLICT.id,
+    needsSitemaps: true,
     checkIds: ["CHECK-24"],
     category: CATEGORY,
     severity: SOURCE_CONFLICT.severity,

@@ -79,6 +79,7 @@ describe("linkTargetRules against the database", () => {
     path: string;
     canonicalHtml?: string;
     canonicalHeader?: string;
+    discoveredVia?: string;
   }
 
   async function newCrawl(): Promise<string> {
@@ -102,7 +103,7 @@ describe("linkTargetRules against the database", () => {
       robotsMeta: s.robotsMeta ?? null,
       xRobotsTag: s.xRobotsTag ?? null,
       depth: 1,
-      discoveredVia: "link",
+      discoveredVia: s.discoveredVia ?? "link",
     }));
     await db.insert(pages).values(rows);
     return new Map(rows.map((r, i) => [specs[i]!.path, r.id]));
@@ -645,6 +646,48 @@ describe("linkTargetRules against the database", () => {
       ]);
 
       expect(await findings("canonical.non-indexable-target", crawlId)).toHaveLength(0);
+    });
+  });
+
+  // Phase 27c, Deviation 7: a list crawl follows no link, so a listed URL that
+  // returns a 4xx has no inlink row, and 4xx has no page rule.
+  describe("links.broken-internal on a list crawl", () => {
+    it("reports a listed 404 that nothing links to, and a linked listed 4xx once", async () => {
+      const crawlId = await newCrawl();
+      const ids = await addPages(crawlId, [
+        { path: "/listed-ok", discoveredVia: "list" },
+        { path: "/listed-404", fetchClass: "client_error", statusCode: 404, discoveredVia: "list" },
+        { path: "/listed-linked", fetchClass: "client_error", statusCode: 410, discoveredVia: "list" },
+        { path: "/listed-500", fetchClass: "server_error", statusCode: 500, discoveredVia: "list" },
+      ]);
+      await addLinks(crawlId, ["/listed-ok"], ids, "/listed-linked");
+
+      const found = await findings("links.broken-internal", crawlId);
+      expect(found.map((f) => f.pageUrl)).toEqual([url("/listed-404"), url("/listed-linked")]);
+      expect(found[0]!.evidence).toEqual({
+        targetUrl: url("/listed-404"),
+        statusCode: 404,
+        inlinkCount: 0,
+        sampleSources: [],
+        listed: true,
+      });
+      // A listed URL that IS linked to is the link's finding, unchanged.
+      expect(found[1]!.evidence).toEqual({
+        targetUrl: url("/listed-linked"),
+        statusCode: 410,
+        inlinkCount: 1,
+        sampleSources: [url("/listed-ok")],
+      });
+      // 5xx has http.server-error, and the 5xx rule is unchanged.
+      expect(await findings("links.to-server-error", crawlId)).toHaveLength(0);
+    });
+
+    it("does not report an unlinked 404 on a spider crawl", async () => {
+      const crawlId = await newCrawl();
+      await addPages(crawlId, [
+        { path: "/stray-404", fetchClass: "client_error", statusCode: 404, discoveredVia: "sitemap" },
+      ]);
+      expect(await findings("links.broken-internal", crawlId)).toHaveLength(0);
     });
   });
 });

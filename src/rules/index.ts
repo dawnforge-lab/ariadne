@@ -29,6 +29,7 @@ import { hreflangRules } from "./query/hreflang.js";
 import { hreflangIntegrityRules } from "./query/hreflang-integrity.js";
 import { linkGraphRules } from "./query/link-graph.js";
 import { linkHygieneRules } from "./query/link-hygiene.js";
+import { listModeRules } from "./query/list-mode.js";
 import { linkTargetRules } from "./query/link-targets.js";
 import { pageFactsRules } from "./query/page-facts.js";
 import { paginationRules } from "./query/pagination.js";
@@ -115,6 +116,8 @@ export function buildRegistry(): Registry {
     ...securityRules,
     // The v2 page-fact marker (26b): speaks for every rule gated on `v2Gate`.
     ...pageFactsRules,
+    // The list-crawl marker (27c): names the site-wide rules a list crawl does not run.
+    ...listModeRules,
     // The metric kind. Registered in the same list because a rule is a rule to
     // the registry — the runner is what tells the kinds apart, driving these
     // last, after everything that writes evidence.

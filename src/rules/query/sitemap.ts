@@ -214,6 +214,7 @@ export const sitemapRules: QueryRule[] = [
   defineRule<QueryRule>({
     kind: "query",
     id: INVALID.id,
+    needsSitemaps: true,
     checkIds: ["CHECK-06"],
     category: CATEGORY,
     severity: INVALID.severity,
@@ -267,6 +268,7 @@ export const sitemapRules: QueryRule[] = [
   defineRule<QueryRule>({
     kind: "query",
     id: NON_200.id,
+    needsSitemaps: true,
     checkIds: ["CHECK-07"],
     category: CATEGORY,
     severity: NON_200.severity,
@@ -292,6 +294,7 @@ export const sitemapRules: QueryRule[] = [
   defineRule<QueryRule>({
     kind: "query",
     id: REDIRECTED.id,
+    needsSitemaps: true,
     checkIds: ["CHECK-07"],
     category: CATEGORY,
     severity: REDIRECTED.severity,
@@ -360,6 +363,7 @@ export const sitemapRules: QueryRule[] = [
   defineRule<QueryRule>({
     kind: "query",
     id: NON_INDEXABLE.id,
+    needsSitemaps: true,
     checkIds: ["CHECK-07"],
     category: CATEGORY,
     severity: NON_INDEXABLE.severity,
@@ -433,6 +437,7 @@ export const sitemapRules: QueryRule[] = [
   defineRule<QueryRule>({
     kind: "query",
     id: UNCRAWLED.id,
+    needsSpider: true,
     checkIds: ["CHECK-07"],
     category: CATEGORY,
     severity: UNCRAWLED.severity,
@@ -511,6 +516,7 @@ export const sitemapRules: QueryRule[] = [
   defineRule<QueryRule>({
     kind: "query",
     id: NOT_IN_SITEMAP.id,
+    needsSpider: true,
     checkIds: ["CHECK-09"],
     category: CATEGORY,
     severity: NOT_IN_SITEMAP.severity,

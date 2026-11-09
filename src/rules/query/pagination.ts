@@ -535,6 +535,7 @@ export const paginationRules: QueryRule[] = [
   defineRule<QueryRule>({
     kind: "query",
     id: NEXT_UNCRAWLED.id,
+    needsSpider: true,
     checkIds: ["CHECK-22"],
     category: CATEGORY,
     severity: NEXT_UNCRAWLED.severity,
@@ -571,6 +572,7 @@ export const paginationRules: QueryRule[] = [
   defineRule<QueryRule>({
     kind: "query",
     id: NEXT_NOT_LINKED.id,
+    needsSpider: true,
     checkIds: ["CHECK-22"],
     category: CATEGORY,
     severity: NEXT_NOT_LINKED.severity,

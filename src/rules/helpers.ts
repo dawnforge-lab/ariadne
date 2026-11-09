@@ -1203,6 +1203,8 @@ export function metricRule(
     self: MetricIdentity,
     judgement: JudgementContext,
   ) => Promise<Metric[]>,
+  /** List-mode flags (Phase 27c), see `RuleMeta.needsSpider` / `needsSitemaps`. */
+  listMode: { needsSpider?: true; needsSitemaps?: true } = {},
 ): MetricRule {
   const self: MetricIdentity = { id };
   return defineRule<MetricRule>({
@@ -1214,6 +1216,7 @@ export function metricRule(
     ...copyFor(id),
     rulesetVersion: RULESET_VERSION,
     table,
+    ...listMode,
     run: (db, crawlId, ctx) => run(db, crawlId, self, judgementOr(ctx)),
   });
 }

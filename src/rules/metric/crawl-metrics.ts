@@ -485,5 +485,6 @@ export const crawlMetrics: MetricRule[] = [
       { key: "alternatesCapped", label: "Alternates Over Per-URL Cap" },
     ], 10),
     async (db, crawlId, self) => sitemapStructure(db, crawlId, self),
+    { needsSitemaps: true },
   ),
 ];
