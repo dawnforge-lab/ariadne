@@ -1167,7 +1167,7 @@ body to POST /crawls, and accepts 900 KiB carrying 10,000 URLs",
 `test/api/scope-start.test.ts:397` "refuses an invalid credential set with a body that
 quotes no secret, on both transports" and `test/api/scope-start.test.ts:431` "accepts
 a valid set and shows no value in crawl_status, effective, crawl_config_get, the row
-or the log". The crawl side: `test/crawl/list-mode.test.ts:177` "fetches every listed
+or the log". The crawl side: `test/crawl/list-mode.test.ts:178` "fetches every listed
 URL at depth 0 and follows redirects but no link", `test/crawl/scope-admission.test.ts:243`
 "writes an excluded row for a URL an exclude pattern matches, never requests it, and
 stamps excluded_dropped 0", `test/crawl/credentials.test.ts:421` "sends none of them to
@@ -2456,8 +2456,11 @@ object back works. Refused, nothing written, `crawl` and `judgement` alike: a ch
 not depend on key order), a changed operator-only field (400), a change while the
 crawl is `running` or closed (409 naming the status), a change to a `queued` crawl
 this server has already taken off its queue (409: it is starting now and has read its
-config; pause it first), `maxPages` below the pages already crawled, `perHostDelayMs`
-under the politeness floor (400), and any change while a render pass or `crawl_rules`
+config; pause it first), `maxPages` below the pages already crawled or, on a list
+crawl, below its distinct list (400, the start's wording; pinned:
+`test/api/lifecycle.test.ts:1159` "refuses maxPages below the distinct list, as a start
+does"), `perHostDelayMs` under the politeness floor (400), and any change while a
+render pass or `crawl_rules`
 runs over the crawl (409).
 **A resumed crawl never runs faster than the spacing it earned** (hard rule 9): the
 per-host record still wins over a lowered `perHostDelayMs`.

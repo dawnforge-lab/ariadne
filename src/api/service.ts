@@ -2273,6 +2273,19 @@ type CredentialField = keyof CrawlCredentials;
 const CREDENTIAL_FIELDS: readonly CredentialField[] = ["requestHeaders", "httpAuth", "cookies"];
 
 /**
+ * Why a list crawl's `maxPages` below its distinct list is refused (Deviation
+ * 4) — one wording for `crawl_start` and `crawl_config_set` (27c final wave
+ * M14). The caller appends what else it can offer.
+ */
+function listBudgetShortfall(maxPages: number, listCount: number): string {
+  return (
+    `maxPages ${maxPages} is below the ${listCount} distinct URLs this list crawl ` +
+    "names, so some would never be fetched, and every listed URL must end in a " +
+    `classified row. Raise maxPages to at least ${listCount}`
+  );
+}
+
+/**
  * Keys of `crawl_config_get`'s `crawl` that report a fact about the crawl
  * rather than a setting (27c T9): the list's size and duplicates, and when the
  * scope lists last changed. Their mutability is `never`; the whole `crawl`
@@ -2726,9 +2739,7 @@ export class ApiService {
         path: "maxPages",
         code: "out_of_range",
         message:
-          `maxPages ${crawlConfig.maxPages} is below the ${listCount} distinct URLs this ` +
-          "list crawl names, so some would never be fetched, and every listed URL must " +
-          `end in a classified row. Raise maxPages to at least ${listCount}, or omit it: ` +
+          `${listBudgetShortfall(crawlConfig.maxPages, listCount)}, or omit it: ` +
           "a list crawl's default is twice its distinct URLs",
       });
     }
@@ -4764,6 +4775,20 @@ export class ApiService {
             const why = patternFamilyError(pattern, readable.siteUrl);
             if (why !== null) throw new ServiceError("VALIDATION", `${key} ${why}`);
           }
+        }
+        // A list crawl's budget may not fall below its list, the rule a start
+        // applies (Deviation 4): a listed URL left pending would never end in
+        // a classified row (27c final wave M14).
+        if (
+          Object.hasOwn(changes, "maxPages") &&
+          readable.mode === "list" &&
+          readable.listUrlCount !== undefined &&
+          readable.maxPages < readable.listUrlCount
+        ) {
+          throw new ServiceError(
+            "VALIDATION",
+            `field 'maxPages': ${listBudgetShortfall(readable.maxPages, readable.listUrlCount)}`,
+          );
         }
         try {
           validateCrawlConfig({

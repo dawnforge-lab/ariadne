@@ -15,6 +15,7 @@ import { closeFetchAgents } from "../../src/crawl/http.js";
 import {
   parseStoredConfig,
   resumeCrawl,
+  runCrawl,
   storableConfig,
   validateCrawlConfig,
   type CrawlConfig,
@@ -275,5 +276,30 @@ describe("list mode", () => {
         path === "/p/1" || path === "/p/2" ? 0 : 1,
       );
     }
+  });
+});
+
+describe("list mode, the final wave (27c M8)", () => {
+  it("runCrawl refuses mode list before a row exists: only the API creates a list crawl", async () => {
+    const before = await db.select({ id: crawls.id }).from(crawls).where(eq(crawls.siteUrl, `${base}/`));
+    requested = [];
+    await expect(runCrawl(db, cfg(["/p/1"]))).rejects.toThrow(/mode "list"/);
+    const after = await db.select({ id: crawls.id }).from(crawls).where(eq(crawls.siteUrl, `${base}/`));
+    expect(after.length).toBe(before.length);
+    expect(requested).toEqual([]);
+  });
+
+  it("throws when the list_urls rows it read are not listUrlCount, before any page is fetched", async () => {
+    // Two URLs promised, one stored: a short table, never a quietly short crawl.
+    const config = cfg(["/p/1", "/p/2"]);
+    const id = await createListCrawl(["/p/1"], config);
+    requested = [];
+    const error = await resumeCrawl(db, id, { config, expectStatus: "queued" }).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toContain(id);
+    expect((error as Error).message).toContain("listUrlCount");
+    expect((error as Error).message).toMatch(/read 1 .*2/);
+    expect(requested).not.toContain("/p/1");
+    expect((await rowsOf(id)).size).toBe(0);
   });
 });

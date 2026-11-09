@@ -927,7 +927,8 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "is refused CREDENTIALS_REQUIRED (409). A queued " +
         "crawl this server is already starting is refused 409 (pause it first). " +
         "maxPages cannot go below the pages " +
-        "already crawled; perHostDelayMs keeps its floor, and a resumed crawl " +
+        "already crawled, nor, on a list crawl, below its distinct list; " +
+        "perHostDelayMs keeps its floor, and a resumed crawl " +
         "never runs faster than the spacing it earned. A crawl change is also " +
         "refused while a render pass or crawl_rules is running over the crawl. " +
         "A refused request writes nothing, crawl and judgement alike.\n\n" +

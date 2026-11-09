@@ -1154,3 +1154,33 @@ describe("crawl_rules on a legacy crawl with pages and no discovery (27c T11)", 
     expect(String(refused.body["error"])).toContain("it never ran");
   });
 });
+
+describe("crawl_config_set on a paused list crawl (27c final wave M14)", () => {
+  it("refuses maxPages below the distinct list, as a start does, and takes one at or above it", async () => {
+    const id = await seedRow("paused", {
+      pauseReason: "request",
+      config: {
+        siteUrl: `${site}/`,
+        maxPages: 10,
+        maxDepth: 3,
+        userAgent: "AriadneBot/0.1 (test)",
+        perHostDelayMs: 0,
+        maxConcurrency: 1,
+        probeHosts: false,
+        mode: "list",
+        listUrlCount: 5,
+      },
+    });
+    const low = await call("PATCH", `/crawls/${id}/config`, { body: { crawl: { maxPages: 4 } } });
+    expect(low.status, JSON.stringify(low.body)).toBe(400);
+    expect(low.body["code"]).toBe("VALIDATION");
+    const error = String(low.body["error"]);
+    expect(error).toContain("maxPages 4 is below the 5 distinct URLs this list crawl names");
+    expect(error).toContain("every listed URL must end in a classified row");
+    const [row] = await db.select({ config: crawls.config }).from(crawls).where(eq(crawls.id, id));
+    expect(row?.config).toMatchObject({ maxPages: 10 });
+
+    const ok = await call("PATCH", `/crawls/${id}/config`, { body: { crawl: { maxPages: 5 } } });
+    expect(ok.status, JSON.stringify(ok.body)).toBe(200);
+  });
+});

@@ -775,6 +775,17 @@ export async function runCrawl(
   signal?: AbortSignal,
 ): Promise<CrawlSummary> {
   validateCrawlConfig(config);
+  // A list crawl's URLs live in `list_urls`, written by the API's start with
+  // the row (src/api/service.ts) and run through `resumeCrawl`. A crawl minted
+  // here has a fresh id and so no listed URL: it would be a silently empty
+  // crawl blaming robots.txt (27c final wave M8). Refused, before the row.
+  if (config.mode === "list") {
+    throw new Error(
+      `runCrawl cannot start a mode "list" crawl of ${config.siteUrl}: its URLs are the ` +
+        "list_urls rows the API's crawl start writes with the crawl row, and a crawl " +
+        "minted here has none. Start a list crawl through the API (crawl_start)",
+    );
+  }
   // Before the row exists and before any request: a crawl that needs
   // credentials it was not given is refused, never run unauthenticated.
   requireCredentials(null, config.siteUrl, config.credentialShape, config.credentials);
@@ -2447,6 +2458,7 @@ async function runToCompletion(
       // The listed URLs, in position order, a chunk at a time (rule 6). A
       // resume reads them again: enqueue is idempotent on the frontier and the
       // pages table, so a URL already fetched is not queued twice.
+      let read = 0;
       for (let after = -1; ; ) {
         const chunk = await db
           .select({ position: listUrls.position, url: listUrls.url })
@@ -2455,12 +2467,23 @@ async function runToCompletion(
           .orderBy(asc(listUrls.position))
           .limit(ENQUEUE_LOOKUP_CHUNK);
         if (chunk.length === 0) break;
+        read += chunk.length;
         await enqueue(
           chunk.map((row) => row.url),
           0,
           "list",
         );
         after = chunk[chunk.length - 1]!.position;
+      }
+      // The table must hold what the start promised, before a page is leased:
+      // a short or missing list would otherwise run as a short crawl whose
+      // "nothing to crawl" note blames robots.txt (27c final wave M8; rule 7).
+      if (read !== config.listUrlCount) {
+        throw new Error(
+          `crawl ${crawlId}: read ${read} list_urls rows, but its config.listUrlCount ` +
+            `is ${String(config.listUrlCount)}; the listed URLs are not what the crawl's ` +
+            "start stored, so it is refused rather than run on part of its list",
+        );
       }
     } else {
       await enqueue([config.siteUrl], 0, "seed");
