@@ -937,3 +937,32 @@ describe("the rules guard claims before it reads (in-process TOCTOU)", () => {
     expect((await run).status).toBe(200);
   }, 60_000);
 });
+
+describe("control refusals: wording and the column contract (27b final M1, M2)", () => {
+  it("a settled crawl's refusal lists the statuses each command accepts", async () => {
+    const id = await seedRow("finished");
+    const paused = await pause(id);
+    expect(paused.status).toBe(409);
+    expect(String(paused.body["error"])).toContain("only a queued or running crawl can be paused");
+    const cancelled = await cancel(id);
+    expect(cancelled.status).toBe(409);
+    expect(String(cancelled.body["error"])).toContain("only a queued, running or paused crawl can be cancelled");
+  });
+
+  it("pause on a paused row with no pause_reason is a contract violation (500 naming the crawl), not 'reason: null'", async () => {
+    const id = await seedRow("paused", { pauseReason: null });
+    const res = await pause(id);
+    expect(res.status).toBe(500);
+    expect(serverLog.some((line) => line.includes(id) && line.includes("pause_reason"))).toBe(true);
+    expect((await stored(id)).status).toBe("paused");
+  });
+
+  it("GET /crawls/:id on a paused crawl reports pauseReason 'request' (ledger T1)", async () => {
+    const id = await seedPausedJudgeable();
+    const body = await detail(id);
+    expect(body["status"]).toBe("paused");
+    expect(body["pauseReason"]).toBe("request");
+    expect(body["controlRequested"]).toBeNull();
+    expect(body["cancelledAt"]).toBeNull();
+  });
+});

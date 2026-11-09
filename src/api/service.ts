@@ -3066,12 +3066,22 @@ export class ApiService {
         }
         return { crawlId, status: "running", controlRequested: "pause", immediate: false };
       }
-      case "paused":
+      case "paused": {
+        const reason = readPauseReason(row.pauseReason, crawlId);
+        // The column contract: pause_reason is non-null exactly when the status
+        // is `paused`. A paused row without one is a defect of ours — a 500
+        // naming the crawl (rule 7), not a refusal quoting "reason: null".
+        if (reason === null) {
+          throw new Error(
+            `crawl ${crawlId} is 'paused' with a null pause_reason, which this engine ` +
+              `never writes: a paused row always records why it stopped`,
+          );
+        }
         throw new ServiceError(
           "CONFLICT",
-          `crawl ${crawlId} is already paused (reason: ` +
-            `${String(readPauseReason(row.pauseReason, crawlId))}): crawl_resume continues it`,
+          `crawl ${crawlId} is already paused (reason: ${reason}): crawl_resume continues it`,
         );
+      }
       default:
         throw settledRefusal(crawlId, row.status, "paused");
     }
@@ -7845,10 +7855,12 @@ function messageOf(error: unknown): string {
  */
 function settledRefusal(crawlId: string, status: string, target: "paused" | "cancelled"): Error {
   if (status === "finished" || status === "failed" || status === "cancelled") {
+    // The statuses each command accepts, named per target: a pause takes a
+    // queued or running crawl, a cancel a paused one too.
+    const accepted = target === "paused" ? "a queued or running" : "a queued, running or paused";
     return new ServiceError(
       "CONFLICT",
-      `crawl ${crawlId} is '${status}': only a queued, running or ` +
-        `${target === "paused" ? "" : "paused "}crawl can be ${target}`,
+      `crawl ${crawlId} is '${status}': only ${accepted} crawl can be ${target}`,
     );
   }
   return new Error(`crawl ${crawlId} has status ${JSON.stringify(status)}, which this engine never writes`);
