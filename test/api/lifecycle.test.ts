@@ -966,3 +966,97 @@ describe("control refusals: wording and the column contract (27b final M1, M2)",
     expect(body["cancelledAt"]).toBeNull();
   });
 });
+
+describe("crawl_config_set: an unchanged never key is no change (Ruling 12, 27b final M4)", () => {
+  const setConfig = (id: string, body: unknown): Promise<Res> =>
+    call("PATCH", `/crawls/${id}/config`, { body });
+  /** A stored config every wire field of which passes its own schema, plus an operator-only key. */
+  const storedConfig = (): Record<string, unknown> => ({
+    siteUrl: `${site}/`,
+    maxPages: 3,
+    maxDepth: 3,
+    userAgent: "AriadneBot/0.1 (test)",
+    perHostDelayMs: 500,
+    maxConcurrency: 1,
+    probeHosts: false,
+    maxResources: 1000,
+  });
+
+  it("accepts the whole crawl object from crawl_config_get with only maxPages changed, on a paused crawl", async () => {
+    const id = await seedRow("paused", { pauseReason: "request", config: storedConfig() });
+    const got = await call("GET", `/crawls/${id}/config`);
+    expect(got.status).toBe(200);
+    const crawl = { ...(got.body["crawl"] as Record<string, unknown>), maxPages: 9 };
+    expect(crawl).toHaveProperty("siteUrl");
+    expect(crawl).toHaveProperty("maxResources");
+
+    const res = await setConfig(id, { crawl });
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    const [row] = await db.select({ config: crawls.config }).from(crawls).where(eq(crawls.id, id));
+    expect(row?.config).toMatchObject({ maxPages: 9, siteUrl: `${site}/`, maxResources: 1000 });
+  });
+
+  it("refuses a changed never key with the same 409 whatever the key order, on a running and a paused crawl", async () => {
+    for (const status of ["running", "paused"]) {
+      const id = await seedRow(status, {
+        config: storedConfig(),
+        ...(status === "paused" ? { pauseReason: "request" } : {}),
+      });
+      const other = `${site}/elsewhere`;
+      const first = await setConfig(id, { crawl: { siteUrl: other, maxPages: 9 } });
+      const last = await setConfig(id, { crawl: { maxPages: 9, siteUrl: other } });
+      expect(first.status, status).toBe(409);
+      expect(last.status, status).toBe(409);
+      expect(String(first.body["error"])).toContain("never");
+      expect(last.body).toEqual(first.body);
+      const [row] = await db.select({ config: crawls.config }).from(crawls).where(eq(crawls.id, id));
+      expect(row?.config).toMatchObject({ maxPages: 3, siteUrl: `${site}/` });
+    }
+  });
+
+  it("still refuses a changed operator-only key", async () => {
+    const id = await seedRow("paused", { pauseReason: "request", config: storedConfig() });
+    const res = await setConfig(id, { crawl: { maxResources: 5, maxPages: 9 } });
+    expect(res.status).toBe(400);
+    expect(String(res.body["error"])).toContain("maxResources");
+    const [row] = await db.select({ config: crawls.config }).from(crawls).where(eq(crawls.id, id));
+    expect(row?.config).toMatchObject({ maxPages: 3, maxResources: 1000 });
+  });
+});
+
+describe("crawl_config_set on a queued crawl the runner has already dequeued (27b final M8)", () => {
+  it("is refused (409): it is starting now, and the change would not apply", async () => {
+    const svc = api.service as unknown as { runQueued: (...args: unknown[]) => Promise<void> };
+    const realRunQueued = svc.runQueued.bind(svc);
+    let release!: () => void;
+    const held = new Promise<void>((r) => {
+      release = r;
+    });
+    let entered!: () => void;
+    const dequeued = new Promise<void>((r) => {
+      entered = r;
+    });
+    const spy = vi.spyOn(svc, "runQueued").mockImplementationOnce(async (...args: unknown[]) => {
+      entered();
+      await held;
+      return await realRunQueued(...args);
+    });
+    let id: string | null = null;
+    try {
+      ({ id } = await start());
+      await dequeued;
+      expect((await stored(id)).status).toBe("queued");
+      const res = await call("PATCH", `/crawls/${id}/config`, { body: { crawl: { maxPages: 3 } } });
+      expect(res.status).toBe(409);
+      expect(String(res.body["error"])).toContain(id);
+      expect(String(res.body["error"])).toContain("starting");
+      const [row] = await db.select({ config: crawls.config }).from(crawls).where(eq(crawls.id, id));
+      expect((row?.config as Record<string, unknown>)["maxPages"]).toBe(400);
+    } finally {
+      release();
+      spy.mockRestore();
+    }
+    await until("it runs", id, (b) => b["status"] === "running");
+    await stopRunning(id);
+  }, 60_000);
+});

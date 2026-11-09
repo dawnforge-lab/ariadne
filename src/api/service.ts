@@ -64,6 +64,7 @@ import { mkdir, rename, stat, unlink } from "node:fs/promises";
 import { join as joinPath, resolve as resolvePath, sep as pathSep } from "node:path";
 import { PassThrough, type Duplex } from "node:stream";
 import { pipeline } from "node:stream/promises";
+import { isDeepStrictEqual } from "node:util";
 import { createGzip } from "node:zlib";
 import { and, asc, desc, eq, getTableColumns, gt, inArray, isNotNull, isNull, sql, type SQL } from "drizzle-orm";
 
@@ -985,8 +986,9 @@ export interface CrawlConfigOut {
   /**
    * The crawl's stored settings, less `findingCap` (which is the judgement's and
    * appears there): every key of `config_jsonb` at its effective value, the
-   * operator-only ones included. The same object `config_validate` answers as
-   * `effective` for the body that started the crawl.
+   * operator-only ones included. At start it equals what `config_validate`
+   * answers as `effective` for the body that started the crawl, minus
+   * `findingCap` and `judgement`; it diverges after a `crawl_config_set`.
    */
   crawl: Record<string, unknown>;
   /**
@@ -2109,6 +2111,16 @@ export interface PageQuery {
  * the row's stored config when it dequeues the crawl (`runQueued`), so a
  * change made while the crawl waited is the one it runs with.
  */
+/** The `crawl` half of a config patch, parsed (`ApiService.parseCrawlPatch`). */
+interface CrawlPatch {
+  /** Each wire field's value as its own schema parsed it. */
+  values: Record<string, unknown>;
+  /** The same fields as sent, for the Ruling 12 "unchanged" comparison. */
+  sent: Record<string, unknown>;
+  /** Operator-only keys as sent: no change if equal to the stored value, else refused. */
+  operatorOnly: Record<string, unknown>;
+}
+
 interface QueueEntry {
   crawlId: string;
   /**
@@ -3918,7 +3930,15 @@ export class ApiService {
    *
    *  - any key other than `crawl` and `judgement`: VALIDATION;
    *  - a body with neither `crawl` nor `judgement`, or a `crawl` null, a field with
-   *    a null value, an unknown or operator-only field: VALIDATION;
+   *    a null value, an unknown field, or an operator-only field whose value
+   *    differs from the stored one: VALIDATION;
+   *  - a `never` field whose value differs from the stored one: CONFLICT. An
+   *    unchanged `never` or operator-only key is "no change" — not written, not
+   *    refused (Ruling 12) — and every such key is decided before any status
+   *    check, so the refusal does not depend on key order;
+   *  - a changed `whenPaused` field on a crawl that is not queued or paused, or
+   *    on a queued crawl this server's runner has already dequeued (it is
+   *    starting now and has read its config): CONFLICT;
    *  - a `judgement` that is null or not an object: VALIDATION — a null
    *    here would mean "delete the whole block", including a cap whose null is
    *    a value, so clearing is spelled per section instead;
@@ -3982,12 +4002,36 @@ export class ApiService {
       if (row === undefined) throw new ServiceError("NOT_FOUND", `no such crawl '${clip(crawlId)}'`);
 
       let config: Record<string, unknown> | undefined = undefined;
+      /** Whether the crawl half changes any value (a whenPaused key; Ruling 12 drops unchanged never keys). */
+      let crawlChanges = false;
 
       if (crawlSet !== null) {
+        if (!isPlainObject(row.config)) {
+          throw new ServiceError("CONFLICT", `crawl ${crawlId}: stored config is not readable`);
+        }
+        const storedConfig = row.config;
+        // RULING 12: a `never` or operator-only key whose value deep-equals the
+        // stored one is "no change" — not written, not refused — so get → edit
+        // → set with the whole `crawl` object works. Any change is refused as
+        // before. Every such key is decided FIRST, before any status check, so
+        // which refusal an agent reads does not depend on the order of its keys.
+        const unchanged = (key: string, ...candidates: unknown[]): boolean =>
+          Object.hasOwn(storedConfig, key) &&
+          candidates.some((value) => isDeepStrictEqual(value, storedConfig[key]));
+        for (const [key, value] of Object.entries(crawlSet.operatorOnly)) {
+          if (!unchanged(key, value)) {
+            throw new ServiceError(
+              "VALIDATION",
+              `field '${clip(key)}' is set by the operator, not over the API`,
+            );
+          }
+        }
         const wire: Record<string, { mutable: Mutability } | undefined> = CRAWL_FIELDS;
-        for (const key of Object.keys(crawlSet)) {
+        const changes: Record<string, unknown> = {};
+        for (const [key, value] of Object.entries(crawlSet.values)) {
           const mutable = wire[key]?.mutable;
           if (mutable === "never") {
+            if (unchanged(key, crawlSet.sent[key], value)) continue;
             throw new ServiceError(
               "CONFLICT",
               `field '${key}' is never mutable after a crawl starts (mutability: never)`,
@@ -3996,6 +4040,9 @@ export class ApiService {
           if (mutable !== "whenPaused") {
             throw new Error(`crawl_config_set: field '${key}' has mutability ${String(mutable)}`);
           }
+          changes[key] = value;
+        }
+        for (const key of Object.keys(changes)) {
           if (row.status !== "queued" && row.status !== "paused") {
             throw new ServiceError(
               "CONFLICT",
@@ -4005,10 +4052,8 @@ export class ApiService {
             );
           }
         }
-        if (!isPlainObject(row.config)) {
-          throw new ServiceError("CONFLICT", `crawl ${crawlId}: stored config is not readable`);
-        }
-        const maxPages = crawlSet["maxPages"];
+        this.refuseWhileStarting(crawlId, row.status, Object.keys(changes).length > 0);
+        const maxPages = changes["maxPages"];
         if (typeof maxPages === "number" && maxPages < row.pagesCrawled) {
           throw new ServiceError(
             "VALIDATION",
@@ -4016,7 +4061,8 @@ export class ApiService {
               "has already crawled; a budget cannot be lowered past what was spent",
           );
         }
-        const merged = { ...row.config, ...crawlSet };
+        crawlChanges = Object.keys(changes).length > 0;
+        const merged = { ...storedConfig, ...changes };
         // The merged config is validated as a stored one is read — with the
         // operator's `allowPrivate`, which is never stored — and written back
         // through the same strip a start applies.
@@ -4072,8 +4118,10 @@ export class ApiService {
       }
 
       // Again, synchronously before the write: the check above was before an
-      // `await`, and a pass may have claimed the crawl since.
+      // `await`, and a pass may have claimed the crawl since — or the runner
+      // may have dequeued it.
       this.refuseWhileConfigBusy(crawlId, crawlSet !== null);
+      this.refuseWhileStarting(crawlId, row.status, crawlChanges);
       await tx
         .update(crawls)
         .set({
@@ -4091,18 +4139,20 @@ export class ApiService {
    * start's), no null. The lifecycle and budget checks need the crawl row and
    * are made in the transaction.
    */
-  private parseCrawlPatch(raw: unknown): Record<string, unknown> {
+  private parseCrawlPatch(raw: unknown): CrawlPatch {
     if (!isPlainObject(raw)) {
       throw new ServiceError("VALIDATION", "crawl must be a JSON object of new setting values");
     }
     const wire: Record<string, CrawlField | undefined> = CRAWL_FIELDS;
     const out: Record<string, unknown> = {};
+    const sent: Record<string, unknown> = {};
+    const operatorOnly: Record<string, unknown> = {};
     for (const [key, value] of Object.entries(raw)) {
       if (OPERATOR_ONLY_FIELDS.includes(key)) {
-        throw new ServiceError(
-          "VALIDATION",
-          `field '${clip(key)}' is set by the operator, not over the API`,
-        );
+        // Decided against the stored value in the transaction (Ruling 12): an
+        // unchanged one is no change, a changed one is refused there.
+        operatorOnly[key] = value;
+        continue;
       }
       if (key === "findingCap") {
         throw new ServiceError(
@@ -4128,8 +4178,9 @@ export class ApiService {
         );
       }
       out[key] = parsed.data;
+      sent[key] = value;
     }
-    return out;
+    return { values: out, sent, operatorOnly };
   }
 
   /**
@@ -4160,6 +4211,30 @@ export class ApiService {
       `${operation} is refused for crawl ${crawlId}: ${holds.join(" and ")} on this ` +
         `server, and neither can be interrupted. Wait for it to answer, then ask again`,
     );
+  }
+
+  /**
+   * The refusal `setCrawlConfig` gives for a crawl change to a `queued` crawl
+   * this server's runner has already dequeued (27b). `runQueued` reads the
+   * stored config at dequeue, while the row still says `queued`, so a change
+   * accepted now would answer 200 and not apply to the run that is starting.
+   * Checked after the row read and again synchronously before the write.
+   *
+   * WHAT IT DOES NOT CLOSE: a dequeue between that last check and this
+   * transaction's commit reads the config as committed before it. Postgres
+   * would have to hold the runner's read behind this row lock to close that,
+   * and a plain read is not blocked by one; the window is the write's own
+   * round trip. In-process, as the queue is.
+   */
+  private refuseWhileStarting(crawlId: string, status: string, changes: boolean): void {
+    if (changes && status === "queued" && this.running?.crawlId === crawlId) {
+      throw new ServiceError(
+        "CONFLICT",
+        `crawl ${crawlId} is starting now: this server has taken it off its queue and ` +
+          `read its config, so a change would not apply to the run. Pause it with ` +
+          `crawl_pause, set the field, then crawl_resume`,
+      );
+    }
   }
 
   /** The refusal `setCrawlConfig` gives while this process is judging the crawl. */

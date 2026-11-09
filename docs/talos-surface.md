@@ -2198,8 +2198,10 @@ the gate crawl answered them, 2026-11-08):
   running for crawl <id>: …`. Wait for the run to answer, then set it again.
 
 **The crawl half (Phase 27b).** `crawl_config_get.crawl` is every setting the crawl
-was stored with, at its effective value (`findingCap` lives in `judgement`, not here),
-and equals what `config_validate` answered as `effective` for the body that started it.
+was stored with, at its effective value (`findingCap` lives in `judgement`, not here).
+At start it equals what `config_validate` answered as `effective` for the body that
+started it, minus `findingCap` and `judgement`; it diverges from that after a
+`crawl_config_set`.
 `mutability` says, per `crawl` key, when it can change: **`never`** (`siteUrl`,
 `userAgent`, `probeHosts`, `legacyHosts`, `sitemapUrls`, `fetchResources`, and the
 operator-only stored budgets `maxResources`, `maxResourceHosts`, `maxBlockedUrls` and
@@ -2208,11 +2210,17 @@ operator-only stored budgets `maxResources`, `maxResourceHosts`, `maxBlockedUrls
 `renderMaxPages`, `renderSamplePerType`; accepted while the crawl is `queued` or
 `paused`, so pause a running crawl, set, then `crawl_resume`) or **`always`**
 (`judgement`). `crawl_config_set`'s `crawl` is a set of NEW VALUES, each validated as
-`crawl_start` validates it; `null` is refused (a crawl field has no unset). Refused,
-nothing written, `crawl` and `judgement` alike: a `never` field (409, naming it), a
-change while the crawl is `running` or closed (409 naming the status), `maxPages`
-below the pages already crawled, `perHostDelayMs` under the politeness floor (400),
-and any change while a render pass or `crawl_rules` runs over the crawl (409).
+`crawl_start` validates it; `null` is refused (a crawl field has no unset). A `never`
+or operator-only key sent with the value already stored is "no change" — not written,
+not refused (Phase 27b ruling 12) — so get, edit one field, set the whole `crawl`
+object back works. Refused, nothing written, `crawl` and `judgement` alike: a changed
+`never` field (409, naming it; checked before any status check, so the refusal does
+not depend on key order), a changed operator-only field (400), a change while the
+crawl is `running` or closed (409 naming the status), a change to a `queued` crawl
+this server has already taken off its queue (409: it is starting now and has read its
+config; pause it first), `maxPages` below the pages already crawled, `perHostDelayMs`
+under the politeness floor (400), and any change while a render pass or `crawl_rules`
+runs over the crawl (409).
 **A resumed crawl never runs faster than the spacing it earned** (hard rule 9): the
 per-host record still wins over a lowered `perHostDelayMs`.
 

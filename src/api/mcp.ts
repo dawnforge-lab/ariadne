@@ -852,7 +852,11 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "renderMaxPages, renderSamplePerType), and only while the crawl is queued " +
         "or paused: pause a running crawl with crawl_pause, set, then " +
         "crawl_resume. A never field (siteUrl, userAgent, the host lists, " +
-        "fetchResources) is refused 409; maxPages cannot go below the pages " +
+        "fetchResources) is refused 409 when its value changes; sent with the " +
+        "value already stored it is no change, so you may send back the whole " +
+        "crawl object crawl_config_get gave you with one field edited. A queued " +
+        "crawl this server is already starting is refused 409 (pause it first). " +
+        "maxPages cannot go below the pages " +
         "already crawled; perHostDelayMs keeps its floor, and a resumed crawl " +
         "never runs faster than the spacing it earned. A crawl change is also " +
         "refused while a render pass or crawl_rules is running over the crawl. " +
