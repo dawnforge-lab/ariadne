@@ -987,15 +987,46 @@ export class HostGate {
    * host chain at the host's spacing apart rather than all waking on the same
    * timestamp. A host untouched for longer than the delay is admitted with no
    * wait at all (elapsed-time credit).
+   *
+   * Answers `true` when the slot has come due, and `false` when `signal`
+   * aborted first (Phase 27b): a crawl that is stopping must not sit out a
+   * queue of slots under a long spacing before it notices. A `false` is never
+   * a slot — the caller must not send. An already-aborted signal claims
+   * nothing; one that fires during the wait wakes it at once and does NOT hand
+   * the claimed slot back (the crawl is stopping, and a resume builds a fresh
+   * gate from `host_spacing_jsonb`). With no signal this is the old acquire,
+   * always `true`.
+   *
+   * Overloaded so the callers that pass no signal (the host probe, the
+   * renderer, the 404 probe) keep `Promise<void>` exactly as before; only a
+   * caller that hands a signal over gets the answer to branch on.
    */
-  async acquire(host: string): Promise<void> {
+  acquire(host: string): Promise<void>;
+  acquire(host: string, signal: AbortSignal | undefined): Promise<boolean>;
+  async acquire(host: string, signal?: AbortSignal): Promise<boolean | void> {
+    if (signal?.aborted === true) return false;
     const state = this.stateFor(host);
     const now = Date.now();
     const startAt = Math.max(now, state.nextAllowedAt);
     state.nextAllowedAt = startAt + this.spacingMs(host);
 
     const waitMs = startAt - now;
-    if (waitMs > 0) await new Promise<void>((resolve) => setTimeout(resolve, waitMs));
+    if (waitMs <= 0) return true;
+    if (signal === undefined) {
+      await new Promise<void>((resolve) => setTimeout(resolve, waitMs));
+      return true;
+    }
+    return new Promise<boolean>((resolve) => {
+      const onAbort = (): void => {
+        clearTimeout(timer);
+        resolve(false);
+      };
+      const timer = setTimeout(() => {
+        signal.removeEventListener("abort", onAbort);
+        resolve(true);
+      }, waitMs);
+      signal.addEventListener("abort", onAbort, { once: true });
+    });
   }
 
   /**

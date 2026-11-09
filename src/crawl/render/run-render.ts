@@ -474,7 +474,8 @@ export async function runRenderPass(
   // crawl whose row still says `running` — either a live one between leases
   // (its next `leaseBatch` is coming for rows we would have promoted) or one
   // that died mid-run and was never resumed or marked failed. Both leave a
-  // frontier in flight; `finished`, `cancelled` and `failed` do not.
+  // frontier in flight; `finished`, `paused`, `cancelled` and `failed` do not
+  // (a pause releases its leases before the row says `paused`).
   const { status, hostSpacingMs, hostSpacingJsonb, platformProfile } = await crawlRow(
     db,
     crawlId,
@@ -498,7 +499,7 @@ export async function runRenderPass(
       `runRenderPass: crawl ${crawlId} is still marked 'running' — the render pass may ` +
         `not run over a crawl that has not stopped (a live worker's next lease would ` +
         `take rows this pass promoted, and a crashed crawl's frontier is mid-flight). ` +
-        `Resume it to completion, or mark it failed or cancelled first.`,
+        `Resume it to completion, pause or cancel it, or mark it failed first.`,
       "live",
     );
   }

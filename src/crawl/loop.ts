@@ -1838,7 +1838,13 @@ async function runToCompletion(
       sending += 1;
       // Claimed immediately before a fetch we are certainly going to issue —
       // acquiring earlier would burn the host's slot on work we then skip.
-      await gate.acquire(host);
+      // The crawl's signal wakes the wait (Phase 27b, Ruling 2): a stop must
+      // not sit out a queue of slots under a long spacing. An aborted claim is
+      // not a slot; the wire goes back and nothing is sent.
+      if (!(await gate.acquire(host, signal))) {
+        sending -= 1;
+        return false;
+      }
       if (platformEpoch === epoch) return true;
       // The profile landed while we slept on a slot claimed at the old pace:
       // that slot is void. Give the wire back and claim at the new one.

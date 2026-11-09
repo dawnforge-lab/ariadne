@@ -1752,7 +1752,7 @@ describe("resumeCrawl", () => {
   it("re-persists a non-widest host's escalation mid-crawl, not only at close", async () => {
     const originHost = new URL(throttle).host;
 
-    // A cancelled first run, only to mint a resumable crawl row + frontier.
+    // A paused (shutdown) first run, only to mint a resumable crawl row + frontier.
     const preAborted = new AbortController();
     preAborted.abort();
     const first = await crawl(

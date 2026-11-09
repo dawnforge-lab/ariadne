@@ -333,6 +333,41 @@ describe("pause and resume", () => {
   }, 60_000);
 });
 
+describe("a pause under a long per-host spacing (Ruling 2)", () => {
+  it("does not wait out the queued host slots before it pauses", async () => {
+    stallAnswers = false;
+    // One host, 2 s apart, four wide: the batch after the seed has its
+    // handlers queued on the gate at +2 s, +4 s, +6 s and +8 s. Without the
+    // signal reaching `HostGate.acquire` the pause would land after the last.
+    const config = stallConfig({ perHostDelayMs: 2_000, maxConcurrency: 4 });
+    const run = runCrawl(db, config);
+    run.catch(() => undefined);
+    const id = await newCrawlOf(`${stallBase}/`);
+    await until("the seed to be done", async () => (await frontierCounts(db, id)).done >= 1);
+
+    const setAt = Date.now();
+    expect(await setControlRequest(db, id, "pause")).toBe(true);
+    await until("the row to read paused", async () => (await crawlRow(id)).status === "paused", 15_000);
+    const latencyMs = Date.now() - setAt;
+    console.log(`paced pause latency: ${latencyMs} ms (poll ${CONTROL_POLL_MS} ms, spacing 2000 ms)`);
+    expect(latencyMs).toBeLessThanOrEqual(CONTROL_POLL_MS + 2_000);
+
+    const summary = await run;
+    expect(summary.status).toBe("paused");
+    expect(summary.pauseReason).toBe("request");
+    const failed = await db
+      .select()
+      .from(frontier)
+      .where(and(eq(frontier.crawlId, id), eq(frontier.state, "failed")));
+    expect(failed).toEqual([]);
+    const leased = await db
+      .select()
+      .from(frontier)
+      .where(and(eq(frontier.crawlId, id), eq(frontier.state, "leased")));
+    expect(leased).toEqual([]);
+  }, 60_000);
+});
+
 describe("cancel", () => {
   it("cancels within one poll interval, skips the epilogue passes, still infers templates, and is final", async () => {
     const { id, run } = await startStalled();
