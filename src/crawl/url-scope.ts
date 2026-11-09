@@ -19,31 +19,50 @@ export interface CrawlScope {
 export const EXCLUDED_REASON_PREFIX = "crawl scope: ";
 
 /**
- * Anchored wildcard match, linear in pattern + url length: the greedy
- * two-pointer algorithm with a single backtrack point (the last `*`). Never a
- * RegExp, so an agent-supplied pattern cannot cause catastrophic backtracking.
+ * Leftmost occurrence of `pat` in `text[from, to)`, or -1. Knuth-Morris-Pratt,
+ * O(|pat| + (to - from)) in the worst case (String.indexOf promises no bound).
+ */
+function kmpFind(text: string, from: number, to: number, pat: string): number {
+  const m = pat.length;
+  if (m === 0) return from;
+  const fail = new Int32Array(m);
+  for (let i = 1, k = 0; i < m; i++) {
+    while (k > 0 && pat[i] !== pat[k]) k = fail[k - 1]!;
+    if (pat[i] === pat[k]) k++;
+    fail[i] = k;
+  }
+  for (let i = from, k = 0; i < to; i++) {
+    while (k > 0 && text[i] !== pat[k]) k = fail[k - 1]!;
+    if (text[i] === pat[k]) k++;
+    if (k === m) return i - m + 1;
+  }
+  return -1;
+}
+
+/**
+ * Anchored wildcard match in O(|pattern| + |url|). The pattern is split on `*`
+ * into literal segments: the first must match at the URL start, the last at
+ * its end, and each middle one is taken at its leftmost occurrence after the
+ * previous (optimal for `*`, which can absorb anything between) by KMP. Never
+ * a RegExp, so an agent-supplied pattern cannot cause catastrophic backtracking.
  */
 export function matchesPattern(pattern: string, url: string): boolean {
-  let p = 0;
-  let u = 0;
-  let starP = -1;
-  let starU = 0;
-  while (u < url.length) {
-    if (p < pattern.length && pattern[p] === "*") {
-      starP = p++;
-      starU = u;
-    } else if (p < pattern.length && pattern[p] === url[u]) {
-      p++;
-      u++;
-    } else if (starP !== -1) {
-      p = starP + 1;
-      u = ++starU;
-    } else {
-      return false;
-    }
+  const segs = pattern.split("*");
+  if (segs.length === 1) return pattern === url;
+  const first = segs[0]!;
+  const last = segs[segs.length - 1]!;
+  if (url.length < first.length + last.length) return false;
+  if (!url.startsWith(first) || !url.endsWith(last)) return false;
+  let pos = first.length;
+  const end = url.length - last.length;
+  for (let i = 1; i < segs.length - 1; i++) {
+    const seg = segs[i]!;
+    if (seg.length === 0) continue;
+    const at = kmpFind(url, pos, end, seg);
+    if (at === -1) return false;
+    pos = at + seg.length;
   }
-  while (p < pattern.length && pattern[p] === "*") p++;
-  return p === pattern.length;
+  return true;
 }
 
 export type ScopeVerdict = { admitted: true } | { admitted: false; reason: string };
@@ -82,7 +101,8 @@ function likeAny(urlExpr: SQL, patterns: readonly string[]): SQL {
 
 /**
  * True where `scopeVerdict` would refuse the URL. Patterns are bound
- * parameters, never spliced text. `false` for an empty scope.
+ * parameters, never spliced text. `false` for an empty scope. A NULL urlExpr
+ * yields NULL, not true, so callers pass a non-null column.
  */
 export function scopeRefusesSql(urlExpr: SQL, scope: CrawlScope): SQL {
   const parts: SQL[] = [];
@@ -105,6 +125,10 @@ export function patternFamilyError(pattern: string, siteUrl: string): string | n
   if (schemeEnd === -1) return null;
   const hostStart = schemeEnd + 3;
   const slash = prefix.indexOf("/", hostStart);
+  const literalOrigin = slash === -1 ? prefix : prefix.slice(0, slash);
+  if (/[A-Z]/.test(literalOrigin)) {
+    return `pattern '${pattern}' has an upper-case letter in its scheme or host, so it can never match: stored URLs have a lower-case scheme and host and matching is case-sensitive`;
+  }
   if (slash === -1 && star !== -1) return null;
   const origin = slash === -1 ? prefix : prefix.slice(0, slash);
   const host = origin.slice(hostStart);

@@ -35,6 +35,14 @@ describe("matchesPattern", () => {
     expect(hit).toBe(false);
     expect(performance.now() - start).toBeLessThan(50);
   });
+
+  it("stays linear when a long middle segment almost matches everywhere", () => {
+    const pattern = `*${"a".repeat(250)}b*`;
+    const start = performance.now();
+    expect(matchesPattern(pattern, "a".repeat(2500))).toBe(false);
+    expect(performance.now() - start).toBeLessThan(50);
+    expect(matchesPattern(pattern, `${"a".repeat(2000)}b`)).toBe(true);
+  });
 });
 
 describe("scopeVerdict", () => {
@@ -139,6 +147,14 @@ describe("scope SQL parity", () => {
     }
   });
 
+  it("scopeRefusesSql yields NULL, not true, for a NULL url", async () => {
+    const r = await db.execute<{ refused: boolean | null }>(
+      sql`select ${scopeRefusesSql(sql`t.url`, { exclude: ["*/a"], include: [] })} as refused
+          from (select null::text as url) t`,
+    );
+    expect(r.rows[0]!.refused).toBeNull();
+  });
+
   it("scopeRefusesSql refuses exactly the URLs scopeVerdict refuses", async () => {
     const scopes = [
       { exclude: ["*/blog/*", "*%*"], include: [] },
@@ -162,6 +178,9 @@ describe("patternFamilyError", () => {
   const site = "https://ex.com/";
   it("names the host of a pattern outside the site's family", () => {
     expect(patternFamilyError("https://typo.example/*", site)).toContain("typo.example");
+  });
+  it("refuses an upper-case scheme or host, which can never match", () => {
+    expect(patternFamilyError("https://EX.com/*", site)).toContain("upper-case");
   });
   it("accepts the site's own spellings and host-less patterns", () => {
     expect(patternFamilyError("https://www.ex.com/*", site)).toBeNull();
