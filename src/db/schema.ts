@@ -21,7 +21,11 @@ export const crawls = pgTable("crawls", {
   // .status`); `queued` is written by the API's crawl queue, which creates the
   // row when a crawl is ACCEPTED and runs it when its turn comes
   // (src/api/service.ts) — so a queued row is durable work that no process has
-  // started, and it is never a summary outcome.
+  // started, and it is never a summary outcome. The API service also writes
+  // `paused` and `cancelled` directly (27b): `crawl_pause` on a queued crawl,
+  // and `crawl_cancel` on a queued or paused one, move the row at once
+  // (`pauseCrawl` / `cancelCrawl`); `failed` is also written by
+  // `crawl_mark_failed`.
   //
   // Free text, no enum constraint, so adding a value is a code change and not a
   // migration — which means every consumer must be audited by hand when one is

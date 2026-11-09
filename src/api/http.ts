@@ -45,13 +45,20 @@
  *                                      instead, replacing the automatic
  *                                      selection for that pass
  *   POST /crawls/:id/rules             run the rules
- *   GET  /crawls/:id/config            the crawl's judgement block, every
- *                                      overridable threshold, the last run's
- *                                      stamp and `judgementStale`
- *   PATCH /crawls/:id/config           `{judgement: {...}}`, an RFC 7396
- *                                      merge-patch of the block (null removes a
- *                                      key, except `findingCap`, where null is
- *                                      uncapped). 409 while the rules run
+ *   GET  /crawls/:id/config            `{crawl, mutability, judgement, ...}`:
+ *                                      the crawl's stored settings with each
+ *                                      key's mutability, its judgement block,
+ *                                      every overridable threshold, the last
+ *                                      run's stamp and `judgementStale`
+ *   PATCH /crawls/:id/config           `{crawl?: {...}, judgement?: {...}}`:
+ *                                      `crawl` is new values for whenPaused
+ *                                      settings (queued or paused crawls only;
+ *                                      409 for a changed never field),
+ *                                      `judgement` an RFC 7396 merge-patch of
+ *                                      the block (null removes a key, except
+ *                                      `findingCap`, where null is uncapped).
+ *                                      One transaction; 409 while the rules
+ *                                      (or, for `crawl`, a render pass) run
  *   GET  /crawls/:id/issues            findings grouped by rule (the triage view).
  *                                      A group's `count` is the rows the rule
  *                                      wrote; `truncated` + `total`|`atLeast`
