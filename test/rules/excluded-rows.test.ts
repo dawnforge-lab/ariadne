@@ -241,6 +241,41 @@ describe("excluded rows and fenced-off URLs", () => {
       expect(mentions(sitemap, "/private/s")).toBe(false);
       expect(mentions(sitemap, "/open/s")).toBe(true);
     });
+
+    it("with an include list, off-origin URLs are still reported and same-origin ones outside it are not", async () => {
+      const crawlId = await newMetricCrawl(db, SITE, created, {
+        config: { userAgent: "AriadneBot-test", maxPages: 500, include: ["*/keep/*"] },
+        discovery: mkDiscovery() as unknown as Record<string, unknown>,
+      });
+      const home = await addPage(crawlId, "/keep/home");
+      const off = "https://elsewhere.example/page";
+      await db.insert(sitemapUrls).values(
+        [url("/outside/s"), off].map((u) => ({
+          crawlId,
+          url: u,
+          urlNormalised: u,
+          sitemapSource: url("/sitemap.xml"),
+          lastmod: null,
+        })),
+      );
+      await db.insert(hreflang).values(
+        [url("/outside/fr"), off].map((u) => ({
+          crawlId,
+          pageId: home,
+          hreflangCode: "fr",
+          targetUrl: u,
+          targetPageId: null,
+          source: "html",
+        })),
+      );
+      const sitemap = await qrule("sitemap.uncrawled").run(db, crawlId);
+      expect(mentions(sitemap, off)).toBe(true);
+      expect(mentions(sitemap, "/outside/s")).toBe(false);
+      const alt = await qrule("hreflang.alternates-not-crawled").run(db, crawlId);
+      const text = JSON.stringify(alt);
+      expect(text).toContain("elsewhere.example");
+      expect(text).toContain('"total":1');
+    });
   });
 
   describe("storedScope", () => {
@@ -249,12 +284,12 @@ describe("excluded rows and fenced-off URLs", () => {
     }
 
     it("reads absent keys as empty lists", async () => {
-      expect(await storedScope(db, await crawlWith({}))).toEqual({ exclude: [], include: [] });
+      expect(await storedScope(db, await crawlWith({}))).toMatchObject({ exclude: [], include: [] });
     });
 
     it("reads both lists", async () => {
       const id = await crawlWith({ exclude: ["*/a/*"], include: ["*/b/*"] });
-      expect(await storedScope(db, id)).toEqual({ exclude: ["*/a/*"], include: ["*/b/*"] });
+      expect(await storedScope(db, id)).toMatchObject({ exclude: ["*/a/*"], include: ["*/b/*"] });
     });
 
     it("throws naming the crawl for any other shape", async () => {

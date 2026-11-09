@@ -5,7 +5,7 @@ import type { Db } from "../../db/client.js";
 import { MAX_HREFLANG_PAIRS } from "../../crawl/parse/page-analyzer.js";
 import { normalizeUrl } from "../../crawl/parse/url-utils.js";
 import { SITEMAP_MAX_BYTES } from "../../crawl/sitemap-stream.js";
-import { scopeRefusesSql } from "../../crawl/url-scope.js";
+import { fencedOffSql } from "../../crawl/url-scope.js";
 import {
   CANONICALISED_ELSEWHERE,
   FETCHED_OK,
@@ -699,7 +699,7 @@ async function alternatesNotCrawledFindings(db: Db, crawlId: string): Promise<Fi
         and not ${CANONICALISED_ELSEWHERE("p")}
         -- An alternate the crawl's CURRENT scope fences off is our decision,
         -- not the site's gap (27c). hreflang.target_url is NOT NULL.
-        and not ${scopeRefusesSql(sql`h.target_url`, scope)}
+        and not ${fencedOffSql(sql`h.target_url`, scope, scope.siteUrl)}
         and not exists (
           select 1 from pages t
           where t.crawl_id = ${crawlId} and t.url = h.target_url

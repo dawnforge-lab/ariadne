@@ -743,9 +743,12 @@ export function noteAtLeastTruncation(findings: Finding[], seen: number): Findin
  * cannot read would otherwise turn into "nothing is fenced off" and the rules
  * that leave fenced-off URLs out would report every one of them (hard rule 7).
  */
-export async function storedScope(db: Db, crawlId: string): Promise<CrawlScope> {
+export async function storedScope(
+  db: Db,
+  crawlId: string,
+): Promise<CrawlScope & { siteUrl: string }> {
   const rows = await db
-    .select({ config: crawls.config })
+    .select({ config: crawls.config, siteUrl: crawls.siteUrl })
     .from(crawls)
     .where(eq(crawls.id, crawlId))
     .limit(1);
@@ -766,5 +769,5 @@ export async function storedScope(db: Db, crawlId: string): Promise<CrawlScope> 
     }
     return value as string[];
   };
-  return { exclude: read("exclude"), include: read("include") };
+  return { exclude: read("exclude"), include: read("include"), siteUrl: row.siteUrl };
 }

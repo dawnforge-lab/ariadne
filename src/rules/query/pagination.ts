@@ -22,7 +22,7 @@ import {
 } from "../registry/registry.js";
 import type { RuleCaps } from "../registry/types.js";
 import { PAGINATION_WALK_MAX } from "../thresholds.js";
-import { scopeRefusesSql } from "../../crawl/url-scope.js";
+import { fencedOffSql } from "../../crawl/url-scope.js";
 import { cappedListing, capsOr, limitTo, noteTruncation, storedScope } from "./crawl-evidence.js";
 
 export { PAGINATION_WALK_MAX };
@@ -195,7 +195,7 @@ async function eachPaginatedPage(
         select u.url
         from unnest(${sql.param(wanted)}::text[]) as u(url)
         -- u.url is never NULL: the array holds only non-null resolved URLs.
-        where ${scopeRefusesSql(sql`u.url`, scope)}`);
+        where ${fencedOffSql(sql`u.url`, scope, scope.siteUrl)}`);
       for (const row of fenced.rows) fencedOff.add(String(row.url));
       for (const row of rows.rows) {
         targets.set(String(row.url), {

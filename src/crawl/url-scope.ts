@@ -113,6 +113,42 @@ export function scopeRefusesSql(urlExpr: SQL, scope: CrawlScope): SQL {
 }
 
 /**
+ * SQL: the URL is in the crawl's site family, the family `isSameOrigin`
+ * (src/crawl/parse/url-utils.ts) admits for `siteUrl`: the site's host or its
+ * www/apex twin, same scheme and port, or an http->https default-port upgrade.
+ * It mirrors `isSameOrigin` by enumerating the admissible origins in
+ * TypeScript (each candidate is checked with `isSameOrigin` itself) and
+ * matching the URL's `scheme://authority` prefix against them, so the two
+ * cannot drift. NULL for a NULL urlExpr. Userinfo in the authority is not
+ * understood (such a URL reads as off-origin, the safe direction here).
+ */
+export function sameOriginSql(urlExpr: SQL, siteUrl: string): SQL {
+  const site = new URL(siteUrl);
+  const bare = site.hostname.toLowerCase().replace(/^www\./, "");
+  const origins: string[] = [];
+  for (const host of [bare, `www.${bare}`]) {
+    for (const scheme of ["http:", "https:"]) {
+      for (const port of ["", site.port]) {
+        const authority = port === "" ? host : `${host}:${port}`;
+        const origin = `${scheme}//${authority}`;
+        if (isSameOrigin(`${origin}/`, siteUrl) && !origins.includes(origin)) origins.push(origin);
+      }
+    }
+  }
+  return sql`lower(substring(${urlExpr} from '^[a-zA-Z][a-zA-Z0-9+.-]*://[^/?#]*')) = any(${sql.param(origins)}::text[])`;
+}
+
+/**
+ * True where the crawl's scope fenced the URL off: it is in the site family
+ * (`sameOriginSql`) AND `scopeRefusesSql`. Frontier admission checks
+ * `isSameOrigin` before the scope, so an off-origin URL is never a scope
+ * decision and stays "not crawled" for the site-boundary reason.
+ */
+export function fencedOffSql(urlExpr: SQL, scope: CrawlScope, siteUrl: string): SQL {
+  return sql`(${sameOriginSql(urlExpr, siteUrl)} AND ${scopeRefusesSql(urlExpr, scope)})`;
+}
+
+/**
  * A message when the pattern's literal prefix (up to the first `*`) names a
  * scheme and host that `isSameOrigin` rejects for the site; null otherwise.
  * A pattern whose host is cut short by a `*` (or that has no scheme) cannot

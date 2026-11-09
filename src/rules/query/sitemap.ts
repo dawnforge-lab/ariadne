@@ -72,7 +72,7 @@ import {
   limitTo,
   storedScope,
 } from "./crawl-evidence.js";
-import { scopeRefusesSql } from "../../crawl/url-scope.js";
+import { fencedOffSql } from "../../crawl/url-scope.js";
 
 const CATEGORY = "sitemap";
 
@@ -452,11 +452,11 @@ export const sitemapRules: QueryRule[] = [
         url_normalised: string;
         page_id: string | null;
         fetch_class: string | null;
-        robots_blocked: boolean;
+        never_requested: boolean;
         total_matches: number;
       }>(sql`
         select s.url, s.url_normalised, p.id as page_id, p.fetch_class,
-               coalesce(${NEVER_REQUESTED("p")}, false) as robots_blocked,
+               coalesce(${NEVER_REQUESTED("p")}, false) as never_requested,
                count(*) over ()::int as total_matches
         from sitemap_urls s
         left join pages p on p.crawl_id = ${crawlId} and p.url = s.url_normalised
@@ -465,7 +465,7 @@ export const sitemapRules: QueryRule[] = [
           -- An entry the crawl's CURRENT scope fences off was not crawled by
           -- our own decision (27c). url_normalised is NOT NULL, and
           -- assertNormalisedSitemap has refused the empty default.
-          and not ${scopeRefusesSql(sql`s.url_normalised`, scope)}
+          and not ${fencedOffSql(sql`s.url_normalised`, scope, scope.siteUrl)}
         order by s.url
         ${limitTo(capsOr(caps).listing)}`);
 
@@ -481,7 +481,7 @@ export const sitemapRules: QueryRule[] = [
             // A robots-blocked or scope-excluded row (Phase 23 T3, 27c) has a row and was NEVER
             // REQUESTED — recorded because a page links to it — so it is not
             // an attempt; its `fetchClass` still says why there is no page.
-            attempted: row.page_id !== null && !row.robots_blocked,
+            attempted: row.page_id !== null && !row.never_requested,
             // The frontier key, not the published `<loc>`: `isSameOrigin` is
             // asked the same question about the same string the loop asked it
             // about. `assertNormalisedSitemap` has already refused a crawl
