@@ -5,7 +5,7 @@ import {
   CANONICALISED_ELSEWHERE,
   FETCHED_OK,
   queryFinding,
-  ROBOTS_BLOCKED,
+  NEVER_REQUESTED,
   URL_MATCH_KEY,
   type RuleIdentity,
 } from "../helpers.js";
@@ -143,7 +143,7 @@ async function returnCodeFindings(db: Db, crawlId: string, caps: RuleCaps): Prom
       join pages b on b.crawl_id = ${crawlId}
         and ${URL_MATCH_KEY("b.url")} = a.target_key and b.id <> a.page_id
       join decl r on r.page_id = b.id and r.target_key = a.page_key
-      where not ${ROBOTS_BLOCKED("b")} and not ${CANONICALISED_ELSEWHERE("b")}
+      where not ${NEVER_REQUESTED("b")} and not ${CANONICALISED_ELSEWHERE("b")}
       group by a.page_id, a.page_url, b.id, b.url
     ),
     hits as (
@@ -345,7 +345,7 @@ async function unlinkedTargetFindings(
       from decl d
       join pages t on t.crawl_id = ${crawlId}
         and ${URL_MATCH_KEY("t.url")} = d.target_key and t.id <> d.page_id
-      where ${FETCHED_OK("t")} and not ${ROBOTS_BLOCKED("t")}
+      where ${FETCHED_OK("t")} and not ${NEVER_REQUESTED("t")}
         and not ${CANONICALISED_ELSEWHERE("t")}
         and not exists (
           select 1 from links l

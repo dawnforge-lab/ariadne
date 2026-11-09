@@ -52,7 +52,7 @@ import {
   hasNoindex,
   JUDGED,
   queryFinding,
-  ROBOTS_BLOCKED,
+  NEVER_REQUESTED,
   type RuleIdentity,
 } from "../helpers.js";
 import { copyFor } from "../registry/copy/index.js";
@@ -70,7 +70,9 @@ import {
   robotsUnreadable,
   capsOr,
   limitTo,
+  storedScope,
 } from "./crawl-evidence.js";
+import { scopeRefusesSql } from "../../crawl/url-scope.js";
 
 const CATEGORY = "sitemap";
 
@@ -444,6 +446,7 @@ export const sitemapRules: QueryRule[] = [
     run: async (db, crawlId, caps): Promise<Finding[]> => {
       const { siteUrl } = await readCrawlEvidence(db, crawlId, UNCRAWLED.id);
       await assertNormalisedSitemap(db, crawlId, UNCRAWLED.id);
+      const scope = await storedScope(db, crawlId);
       const result = await db.execute<{
         url: string;
         url_normalised: string;
@@ -453,12 +456,16 @@ export const sitemapRules: QueryRule[] = [
         total_matches: number;
       }>(sql`
         select s.url, s.url_normalised, p.id as page_id, p.fetch_class,
-               coalesce(${ROBOTS_BLOCKED("p")}, false) as robots_blocked,
+               coalesce(${NEVER_REQUESTED("p")}, false) as robots_blocked,
                count(*) over ()::int as total_matches
         from sitemap_urls s
         left join pages p on p.crawl_id = ${crawlId} and p.url = s.url_normalised
         where s.crawl_id = ${crawlId}
           and (p.id is null or p.status_code is null)
+          -- An entry the crawl's CURRENT scope fences off was not crawled by
+          -- our own decision (27c). url_normalised is NOT NULL, and
+          -- assertNormalisedSitemap has refused the empty default.
+          and not ${scopeRefusesSql(sql`s.url_normalised`, scope)}
         order by s.url
         ${limitTo(capsOr(caps).listing)}`);
 
@@ -471,7 +478,7 @@ export const sitemapRules: QueryRule[] = [
           pageUrl: row.url,
           evidence: {
             url: row.url,
-            // A robots-blocked row (Phase 23 T3) has a row and was NEVER
+            // A robots-blocked or scope-excluded row (Phase 23 T3, 27c) has a row and was NEVER
             // REQUESTED — recorded because a page links to it — so it is not
             // an attempt; its `fetchClass` still says why there is no page.
             attempted: row.page_id !== null && !row.robots_blocked,

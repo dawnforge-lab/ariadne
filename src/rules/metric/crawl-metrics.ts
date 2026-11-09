@@ -20,7 +20,7 @@
 import { sql } from "drizzle-orm";
 
 import type { Db } from "../../db/client.js";
-import { metricRow, metricRule, ROBOTS_BLOCKED, type MetricIdentity } from "../helpers.js";
+import { metricRow, metricRule, NEVER_REQUESTED, type MetricIdentity } from "../helpers.js";
 import { assertCrawl, readCrawlEvidence } from "../query/crawl-evidence.js";
 import { readSitemapFacts } from "../query/page-facts.js";
 import { CHAIN, LOOP } from "../query/redirects.js";
@@ -220,7 +220,7 @@ async function redirectVolume(db: Db, crawlId: string, self: MetricIdentity): Pr
     where p.crawl_id = ${crawlId}
       -- What was FETCHED: a robots-blocked row was never requested (Phase 23
       -- T3), and a share of "what the crawl fetched" must not count it.
-      and not ${ROBOTS_BLOCKED("p")}`);
+      and not ${NEVER_REQUESTED("p")}`);
 
   const row = rows.rows[0];
   if (row === undefined) {

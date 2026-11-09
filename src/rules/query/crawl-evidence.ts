@@ -3,6 +3,7 @@ import { and, eq, sql, type SQL } from "drizzle-orm";
 import { ROBOTS_OUTCOMES } from "../../crawl/discovery.js";
 import type { DiscoveryTruncation } from "../../crawl/discovery.js";
 import type { FetchClass } from "../../crawl/fetch-page.js";
+import type { CrawlScope } from "../../crawl/url-scope.js";
 import type { HostProbeHop, HostProbeResult, HostProbeVariant } from "../../crawl/host-probe.js";
 import type {
   DiscoveryEvidence,
@@ -733,4 +734,37 @@ export function cappedListing(
 export function noteAtLeastTruncation(findings: Finding[], seen: number): Finding[] {
   if (seen <= findings.length) return findings;
   return noteOnLast(findings, { reported: findings.length, atLeast: seen });
+}
+
+/**
+ * The scope patterns the crawl ran under, read raw off `crawls.config_jsonb`
+ * (`exclude` and `include`, string arrays). Absent keys are empty lists — a
+ * crawl without scope. Any other shape throws naming the crawl: a scope we
+ * cannot read would otherwise turn into "nothing is fenced off" and the rules
+ * that leave fenced-off URLs out would report every one of them (hard rule 7).
+ */
+export async function storedScope(db: Db, crawlId: string): Promise<CrawlScope> {
+  const rows = await db
+    .select({ config: crawls.config })
+    .from(crawls)
+    .where(eq(crawls.id, crawlId))
+    .limit(1);
+  const row = rows[0];
+  if (row === undefined) throw new Error(`storedScope: no such crawl '${crawlId}'`);
+  const config = row.config;
+  if (!isRecord(config)) {
+    throw new Error(`storedScope: crawl '${crawlId}' config is not an object`);
+  }
+  const read = (key: "exclude" | "include"): readonly string[] => {
+    const value = config[key];
+    if (value === undefined) return [];
+    if (!Array.isArray(value) || !value.every((v) => typeof v === "string")) {
+      throw new Error(
+        `storedScope: crawl '${crawlId}' stored config.${key} is ${JSON.stringify(value)}, ` +
+          "which is not an array of strings",
+      );
+    }
+    return value as string[];
+  };
+  return { exclude: read("exclude"), include: read("include") };
 }
