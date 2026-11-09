@@ -1134,3 +1134,23 @@ describe("crawl_config_set: the scope lists while paused (27c T9)", () => {
     expect(row?.config).not.toHaveProperty("mode");
   }, 60_000);
 });
+
+describe("crawl_rules on a legacy crawl with pages and no discovery (27c T11)", () => {
+  it("is 409 without claiming the crawl never ran, while a crawl with no pages keeps the never-ran sentence", async () => {
+    const legacy = await seedRow("finished");
+    const url = `${site}/`;
+    await db.insert(pages).values(
+      mkPage({ id: `page_${randomUUID()}`, crawlId: legacy, url, urlNormalised: url, depth: 0, clickDepth: 0, discoveredVia: "seed" }),
+    );
+    const res = await call("POST", `/crawls/${legacy}/rules`);
+    expect(res.status).toBe(409);
+    expect(String(res.body["error"])).toContain(legacy);
+    expect(String(res.body["error"])).toContain("no discovery evidence");
+    expect(String(res.body["error"])).not.toContain("never ran");
+
+    const empty = await seedRow("cancelled");
+    const refused = await call("POST", `/crawls/${empty}/rules`);
+    expect(refused.status).toBe(409);
+    expect(String(refused.body["error"])).toContain("it never ran");
+  });
+});

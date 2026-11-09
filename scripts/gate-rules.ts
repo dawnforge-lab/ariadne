@@ -242,10 +242,22 @@ async function requestPauseAtFraction(
         flippedTo = current;
         break;
       }
-      // The run has ended (returned or thrown) and the row still says
-      // `running`: stop polling. The caller surfaces the run's own error, or
-      // reports that the status never flipped; this loop must not spin on.
-      if (ended.value) break;
+      // The run has ended (returned or thrown) and the last read said
+      // `running`. The flip may have landed between that read and the run
+      // returning (the sampler sleeps 100 ms), so take ONE final read before
+      // deciding it was never observed (27c T11). Its timestamp is the moment
+      // the flip was seen, at most one sample late. Still `running` after it:
+      // stop polling, and the caller reports that the flip was never observed.
+      if (ended.value) {
+        const last = await db.select({ status: crawls.status }).from(crawls).where(eq(crawls.id, id));
+        const final = last[0]?.status;
+        if (final === undefined) throw new Error(`gate: crawl ${id} vanished while pausing`);
+        if (final !== "running") {
+          flippedAt = Date.now();
+          flippedTo = final;
+        }
+        break;
+      }
       await new Promise((r) => setTimeout(r, 100));
     }
     return { requestedAt, flippedAt, flippedTo, done: n };

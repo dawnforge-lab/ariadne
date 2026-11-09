@@ -4226,10 +4226,12 @@ export class ApiService {
    * refusal that stands in front of it, because each one is a status code and a
    * sentence rather than a database question: see `checkRenderUrls`.
    *
-   * The list is validated BEFORE the driver's own three refusals are reached. A
-   * malformed request is refused as a malformed request; whether the crawl is
-   * live is a fact about the world and is the driver's to state, in the same
-   * order `parseStartBody` puts a bad body ahead of a busy queue.
+   * The list is validated BEFORE the driver's own three refusals are reached,
+   * but AFTER the in-process claim: `rendering` is taken first (27b I3,
+   * claim-first), so a crawl already rendering on this server is refused 409
+   * before a malformed `urls` list is refused 400. Past the claim, a malformed
+   * request is refused as a malformed request; whether the crawl is live is a
+   * fact about the world and is the driver's to state.
    */
   async renderCrawl(crawlId: string, input: RenderCrawlInput = {}): Promise<RenderSummaryOut> {
     // The credentials sent, validated before anything is claimed: a malformed
@@ -4422,12 +4424,26 @@ export class ApiService {
             `has stopped, or they would judge a site that is still being fetched`,
         );
       }
-      // Ruling 11: a crawl with no discovery evidence never ran — it was
-      // paused or cancelled while still queued — so there is nothing to judge.
-      // Refused here, as the render driver refuses a crawl that "never
+      // Ruling 11: a crawl with no discovery evidence and no pages never ran —
+      // it was paused or cancelled while still queued — so there is nothing to
+      // judge. Refused here, as the render driver refuses a crawl that "never
       // completed discovery", rather than letting the first rule that reads
-      // the robots evidence throw and the transport answer 500.
+      // the robots evidence throw and the transport answer 500. A legacy row
+      // (written before the discovery column existed) can hold pages yet a
+      // null `discovery`: it DID run, so the sentence must not say it did not
+      // (27c T11); it names the missing evidence and stops there.
       if (row.discovery === null) {
+        const [{ n: pageCount } = { n: 0 }] = await this.db
+          .select({ n: sql<number>`count(*)::int` })
+          .from(pages)
+          .where(eq(pages.crawlId, crawlId));
+        if (pageCount > 0) {
+          throw new ServiceError(
+            "CONFLICT",
+            `crawl ${crawlId} is '${row.status}' and has ${pageCount} page(s) but no discovery ` +
+              `evidence (it predates the discovery record), so the rules cannot judge it`,
+          );
+        }
         throw new ServiceError(
           "CONFLICT",
           `crawl ${crawlId} is '${row.status}' and has no discovery evidence: it never ran ` +

@@ -1029,3 +1029,39 @@ describe("HostGate.acquire with an abort signal (Phase 27b, Ruling 2)", () => {
     expect(Date.now() - started).toBeGreaterThanOrEqual(140);
   });
 });
+
+describe("HostGate restore with a zero base (27b Ruling 9)", () => {
+  const H = "z.example";
+  const throttled: HostOutcome = { fetchClass: "blocked", statusCode: 429, retryAfterMs: null, url: "https://z.example/t" };
+  const clean: HostOutcome = { fetchClass: "ok", statusCode: 200, retryAfterMs: null, url: "https://z.example/" };
+
+  it("a host escalated under a base of 0 resumes at no less than the spacing it earned", () => {
+    for (const [hits, recoveredSteps] of [[1, 0], [2, 0], [3, 0], [3, 1], [3, 2]] as const) {
+      const g = new HostGate({ perHostDelayMs: 0, robotsCrawlDelaySec: null });
+      for (let i = 0; i < hits; i += 1) g.report(H, throttled);
+      for (let s = 0; s < recoveredSteps; s += 1) {
+        for (let i = 0; i < RECOVERY_STREAK; i += 1) g.report(H, clean);
+      }
+      const earned = g.spacingMs(H);
+      expect(earned).toBeGreaterThan(0);
+      const r = new HostGate({ perHostDelayMs: 0, robotsCrawlDelaySec: null });
+      r.restore(JSON.parse(JSON.stringify(g.snapshot())));
+      expect(r.spacingMs(H), `${hits} hits, ${recoveredSteps} recoveries`).toBeGreaterThanOrEqual(earned);
+    }
+  });
+});
+
+describe("HostGate restore, stored spacing above what a zero base derives (27b Ruling 9)", () => {
+  const H = "y.example";
+  it("keeps the stored spacing as the floor of a restored zero-base host, and still recovers from it", () => {
+    const g = new HostGate({ perHostDelayMs: 0, robotsCrawlDelaySec: null });
+    g.restore({
+      [H]: { spacingMs: 2000, baseMs: 0, responses429: 1, retryAfterSeen: 0, escalations: 1, recoveries: 0, recoveryLocked: false, peakSpacingMs: 2000 },
+    });
+    expect(g.spacingMs(H)).toBeGreaterThanOrEqual(2000);
+    expect(g.snapshot()[H]?.spacingMs).toBe(2000);
+    const clean: HostOutcome = { fetchClass: "ok", statusCode: 200, retryAfterMs: null, url: "https://y.example/" };
+    for (let i = 0; i < RECOVERY_STREAK; i += 1) g.report(H, clean);
+    expect(g.spacingMs(H)).toBe(0);
+  });
+});
