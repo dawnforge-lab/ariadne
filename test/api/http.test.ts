@@ -30,7 +30,7 @@ import { crawls, frontier, issues, pages, resources } from "../../src/db/schema.
 import { closeFetchAgents } from "../../src/crawl/http.js";
 import { createApiServer, type ApiServer } from "../../src/api/http.js";
 import { isHostAllowed, loadApiConfig, parseAllowedDomains } from "../../src/api/config.js";
-import { MAX_SUPPLIED_SITEMAPS, MIN_PER_HOST_DELAY_MS } from "../../src/api/service.js";
+import { MIN_PER_HOST_DELAY_MS } from "../../src/api/service.js";
 import { UrlPolicyError, type AddressResolver } from "../../src/crawl/url-policy.js";
 import { DEFAULT_THRESHOLDS } from "../../src/rules/judgement.js";
 import { URL_FINDING_CAP } from "../../src/rules/query/crawl-evidence.js";
@@ -522,51 +522,16 @@ describe("routing and body handling", () => {
 });
 
 describe("crawl-start validation", () => {
-  it("refuses allowPrivate at any value, saying why", async () => {
-    for (const value of [true, false]) {
-      const res = await call("POST", "/crawls", { body: { siteUrl: `${site}/`, allowPrivate: value } });
-      expect(res.status).toBe(400);
-      expect(String(res.body["error"])).toContain("allowPrivate is not accepted over the API");
-    }
-  });
-
-  it("refuses an unknown field by name rather than ignoring it", async () => {
-    const res = await call("POST", "/crawls", { body: { siteUrl: `${site}/`, maxpages: 3 } });
-    expect(res.status).toBe(400);
-    expect(String(res.body["error"])).toContain("unknown field 'maxpages'");
-  });
-
-  it("refuses a field of the wrong type", async () => {
-    const res = await call("POST", "/crawls", { body: { siteUrl: `${site}/`, maxPages: "5" } });
-    expect(res.status).toBe(400);
-    expect(String(res.body["error"])).toContain("must be a finite number");
-  });
-
-  it("requires siteUrl", async () => {
-    const res = await call("POST", "/crawls", { body: { maxPages: 5 } });
-    expect(res.status).toBe(400);
-    expect(String(res.body["error"])).toContain("siteUrl is required");
-  });
-
-  // The floor the MCP tool descriptions promise, enforced on the field as it
-  // arrives over the wire. Refused rather than clamped: raising it silently
-  // would answer a request nobody made. The server's own
-  // `crawlDefaults.perHostDelayMs: 0` is untouched by this — that is the
-  // construction-trust path, and it is how the fixture crawls above run at all.
-  it("refuses a perHostDelayMs under the politeness floor rather than raising it", async () => {
-    for (const value of [0, 10, MIN_PER_HOST_DELAY_MS - 1]) {
-      const res = await call("POST", "/crawls", {
-        body: { siteUrl: `${site}/`, perHostDelayMs: value },
-      });
-      expect(res.status, `perHostDelayMs ${value}`).toBe(400);
-      expect(String(res.body["error"])).toContain(`${MIN_PER_HOST_DELAY_MS}ms`);
-    }
-  });
+  // The body's own refusals — the test-only fields, unknown fields, types,
+  // the required siteUrl, the politeness floor and the integer ranges — are the
+  // schema's, and are pinned against `parseStartBody` in
+  // test/api/config-schema.test.ts; test/api/transport-parity.test.ts holds this
+  // transport and MCP to the same answers.
 
   // The floor stops exactly where it says it does. Asked of the read-only
   // server so the assertion costs no crawl: validation runs before the
   // allowlist, so a 403 naming the allowlist is proof the value got past the
-  // floor, and the case above proves a smaller one does not.
+  // floor, and config-schema.test.ts proves a smaller one does not.
   it("lets a perHostDelayMs at the floor through validation", async () => {
     const res = await call("POST", "/crawls", {
       base: closedBase,
@@ -580,12 +545,6 @@ describe("crawl-start validation", () => {
     const res = await call("POST", "/crawls", { body: { siteUrl: "ftp://example.com/x" } });
     expect(res.status).toBe(400);
     expect(String(res.body["error"])).toContain("not an http(s) URL");
-  });
-
-  it("surfaces the crawl loop's own range checks as a 400", async () => {
-    const res = await call("POST", "/crawls", { body: { siteUrl: `${site}/`, maxPages: 0 } });
-    expect(res.status).toBe(400);
-    expect(String(res.body["error"])).toContain("maxPages");
   });
 });
 
@@ -749,18 +708,6 @@ describe("domain allowlist", () => {
     expect(String(res.body["error"])).toContain("/sitemap.xml");
   });
 
-  it("400s a sitemapUrls list longer than the server's limit rather than trimming it", async () => {
-    const many = Array.from(
-      { length: MAX_SUPPLIED_SITEMAPS + 1 },
-      (_unused, i) => `${site}/sitemap-${i}.xml`,
-    );
-    const res = await call("POST", "/crawls", {
-      body: { siteUrl: `${site}/`, sitemapUrls: many },
-    });
-    expect(res.status).toBe(400);
-    expect(String(res.body["error"])).toContain(String(MAX_SUPPLIED_SITEMAPS));
-  });
-
   it("accepts a supplied sitemap on the site's own host, and echoes it", async () => {
     const res = await startCrawl({
       siteUrl: `${site}/`,
@@ -778,17 +725,8 @@ describe("domain allowlist", () => {
   // `findingCap` is the one wire field where NULL IS A VALUE: it says "list
   // everything", which is a different instruction from omitting the field ("the
   // engine's defaults"). Both have to cross the wire, and everything else has to
-  // be refused at accept time rather than by a rules run hours later.
-  it("400s a findingCap that is neither a positive integer nor null", async () => {
-    for (const bad of [0, -1, 1.5, "none"]) {
-      const res = await call("POST", "/crawls", {
-        body: { siteUrl: `${site}/`, findingCap: bad },
-      });
-      expect(res.status, JSON.stringify(bad)).toBe(400);
-      expect(String(res.body["error"])).toContain("findingCap");
-    }
-  });
-
+  // be refused at accept time rather than by a rules run hours later — which
+  // the schema does (test/api/config-schema.test.ts).
   it("accepts findingCap: null, stores it, and echoes it on the detail", async () => {
     const res = await startCrawl({ siteUrl: `${site}/`, maxPages: 1, findingCap: null });
     expect(res.status).toBe(202);
@@ -814,7 +752,7 @@ describe("domain allowlist", () => {
   });
 
   // THE OFF SWITCH, ROUND TRIP (P11-T4). `fetchResources` crosses four seams
-  // between the request and the answer — `parseStartCrawlInput`'s field table,
+  // between the request and the answer — the crawl-start schema,
   // `effectiveConfig`, the stored `config_jsonb` a resume reads back, and
   // `configFetchResources` — and a break in any one of them is silent: the crawl
   // runs, the pass runs or does not, and nothing says which was asked for.
@@ -850,16 +788,6 @@ describe("domain allowlist", () => {
     const rows = await db.select().from(crawls).where(eq(crawls.id, crawlId));
     expect((rows[0]!.config as Record<string, unknown>)["fetchResources"]).toBeUndefined();
     expect(detail["fetchResources"]).toBe(true);
-  });
-
-  it("400s a fetchResources that is not a boolean", async () => {
-    for (const bad of ["false", 0, null]) {
-      const res = await call("POST", "/crawls", {
-        body: { siteUrl: `${site}/`, fetchResources: bad },
-      });
-      expect(res.status, JSON.stringify(bad)).toBe(400);
-      expect(String(res.body["error"])).toContain("fetchResources");
-    }
   });
 
   it("echoes a stated finding cap on the detail", async () => {

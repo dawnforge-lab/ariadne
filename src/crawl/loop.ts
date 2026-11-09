@@ -171,7 +171,7 @@ export interface CrawlConfig extends RenderSelectionConfig {
    *    it back, so no resume months later inherits a one-second gap from a row
    *    nobody reads (hard rule 7).
    *  - **It is not accepted over the API at any value.** `StartCrawlInput`'s
-   *    field allowlist is closed (`parseStartCrawlInput`, src/api/service.ts),
+   *    field allowlist is closed (`parseStartBody`, src/api/config-schema.ts),
    *    so a body carrying this key is refused by both transports; it wants the
    *    named refusal `allowPrivate` gets, so the message says WHY rather than
    *    "unknown field". A client that could shrink the gap could make every
@@ -295,7 +295,7 @@ export interface CrawlConfig extends RenderSelectionConfig {
    *
    * CRAWL config rather than an engine constant for the resource budgets'
    * reason: a resume must spend the same budget the first attempt was given.
-   * Not accepted over the API (yet): `parseStartCrawlInput`'s allowlist is
+   * Not accepted over the API (yet): the crawl-start schema is
    * closed, so every API crawl takes the `maxPages` default.
    */
   maxBlockedUrls?: number;
@@ -307,7 +307,7 @@ export interface CrawlConfig extends RenderSelectionConfig {
    *
    * ENGINE config, on `maxBlockedUrls`'s terms: stored on the row so a resume
    * makes the same choice, and NOT accepted over the API — the
-   * `parseStartCrawlInput` allowlist is closed, so a client cannot opt a
+   * crawl-start schema is closed, so a client cannot opt a
    * crawl out of the pace the platform tolerates.
    */
   platformProfiles?: boolean;

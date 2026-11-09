@@ -4032,7 +4032,7 @@ describe("nothing inside the process reaches a caller", () => {
  * THE TWO TEST-ONLY CRAWL-CONFIG FIELDS, REFUSED BY NAME.
  *
  * Here rather than beside a live crawl because the refusal happens in
- * `parseStartCrawlInput`, before anything this read-only server would decline
+ * `parseStartBody`, before anything this read-only server would decline
  * for its own reasons — the body is judged on its keys, and the answer is the
  * same on both transports (the parser is shared).
  *

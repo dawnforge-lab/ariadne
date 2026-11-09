@@ -104,7 +104,8 @@ import { fileURLToPath } from "node:url";
 
 import { describe, expect, it } from "vitest";
 
-import { PAGE_FIELDS, START_CRAWL_FIELDS } from "../../src/api/service.js";
+import { PAGE_FIELDS } from "../../src/api/service.js";
+import { CRAWL_FIELDS } from "../../src/api/config-schema.js";
 import { TOOL_NAMES } from "../../src/api/mcp.js";
 import { METRIC_SCOPES } from "../../src/rules/registry/types.js";
 import { buildRegistry } from "../../src/rules/index.js";
@@ -154,7 +155,7 @@ const ENV_READS = new Set(
  */
 const API_FIELDS = new Set<string>([
   ...Object.keys(PAGE_FIELDS),
-  ...Object.keys(START_CRAWL_FIELDS),
+  ...Object.keys(CRAWL_FIELDS),
   ...declaredFields(join(ROOT, "src/api/service.ts"), [
     "CrawlAccepted",
     "CrawlListItem",

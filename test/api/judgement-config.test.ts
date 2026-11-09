@@ -668,10 +668,10 @@ describe("over MCP", () => {
   it("crawl_start takes the judgement field", async () => {
     const refused = await tool("crawl_start", {
       siteUrl: `${SITE}/`,
-      judgement: { rules: { "title.too-long": { severity: "info" } } },
+      judgement: { rules: { "title.too-long": { priority: "low" } } },
     });
-    // The MCP server's allowlist is empty, which is refused first — what this
-    // pins is that the schema admits the field at all.
+    // A valid block passes the tool's schema; the MCP server's allowlist is
+    // empty, so the handler refuses it — the schema admits the field at all.
     expect(refused.isError).toBe(true);
     expect(String(refused.body["error"])).toContain("allowlist");
   });

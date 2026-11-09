@@ -37,7 +37,7 @@ import type { AddressResolver } from "../crawl/url-policy.js";
  * that holds the database handle and the token, so it may set crawl fields the
  * surface refuses to accept from a client — `allowPrivate` above all, which is
  * how the test suite crawls its 127.0.0.1 fixture server and which a request
- * body (or an MCP tool argument) may never carry (`parseStartCrawlInput`
+ * body (or an MCP tool argument) may never carry (`parseStartBody`
  * refuses it if it is present at all, per build-plan §7 item 3 and Task 1's
  * persistence strip).
  *

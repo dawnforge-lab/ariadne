@@ -1,5 +1,5 @@
 /**
- * The MCP transport: twenty-five tools over the same service layer the HTTP
+ * The MCP transport: twenty-seven tools over the same service layer the HTTP
  * routes use. Nine of them change something (`crawl_start`, `crawl_resume`,
  * `crawl_pause`, `crawl_cancel`, `crawl_delete`, `crawl_render`, `crawl_rules`,
  * `crawl_mark_failed`, `crawl_config_set`); every other one only reads.
@@ -29,10 +29,11 @@
  * refuses every crawl trigger and answers every query, exactly as over HTTP.
  *
  * **`crawlDefaults` stays code-level.** `allowPrivate` is not a tool argument at
- * any value: `crawl_start`'s schema is closed, so the field is refused as an
- * unrecognised key before the handler runs, and the handler puts what survives
- * through the same `parseStartCrawlInput` the HTTP route uses — which refuses it
- * again, by name and with the reason. A tool schema is a wire like any other.
+ * any value: `crawl_start`'s input schema IS the crawl-start body schema
+ * (src/api/config-schema.ts), which refuses it by name and with the reason
+ * before the handler runs, and the handler passes what survives to the same
+ * `startCrawl` the HTTP route calls — which parses it with that schema again.
+ * A tool schema is a wire like any other.
  *
  * ## What a tool answers with
  *
@@ -77,7 +78,6 @@ import {
   PAGE_SIZE_DEFAULT,
   PAGE_SIZE_MAX,
   ServiceError,
-  parseStartCrawlInput,
 } from "./service.js";
 
 /** The metric scopes, as a tool description says them. */
@@ -111,6 +111,8 @@ export const TOOL_NAMES = [
   "crawl_rules",
   "crawl_config_get",
   "crawl_config_set",
+  "config_schema",
+  "config_validate",
   "robots_get",
   "issues_list",
   "issues_overview",
@@ -261,9 +263,11 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "judgement sets how this crawl is JUDGED from the start — the same block " +
         "crawl_config_set changes later (see there for its shape). It is checked " +
         "against the ruleset before the crawl is accepted.",
-      inputSchema: z.strictObject(crawlStartShape()),
+      // The crawl-start body schema itself: one declaration for both
+      // transports, so an argument this refuses is a body POST /crawls refuses.
+      inputSchema: service.startBodySchema(),
     },
-    async (args) => run("crawl_start", () => service.startCrawl(parseStartCrawlInput(args))),
+    async (args) => run("crawl_start", () => service.startCrawl(args)),
   );
 
   server.registerTool(
@@ -853,6 +857,56 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
     },
     async ({ crawlId, judgement }) =>
       run("crawl_config_set", () => service.setCrawlJudgement(crawlId, { judgement })),
+  );
+
+  server.registerTool(
+    named("config_schema"),
+    {
+      title: "What crawl_start accepts",
+      description:
+        "The crawl_start arguments as a JSON Schema (draft 2020-12): {schema, " +
+        "rulesetVersion}. Every field carries its description, its default where " +
+        "it has one, and x-ariadne-mutable — never (fixed for the crawl's life: " +
+        "siteUrl, userAgent, probeHosts, legacyHosts, sitemapUrls, fetchResources), " +
+        "whenPaused (maxPages, maxDepth, perHostDelayMs, maxConcurrency and the " +
+        "render budgets) or always (findingCap and the judgement block). The " +
+        "judgement block lists every rule id it may name and every overridable " +
+        "threshold with its minimum, maximum and default; rulesetVersion says which " +
+        "ruleset those ids are from.\n\n" +
+        "A default is what the ENGINE uses when the field is absent. The server's " +
+        "operator may set their own defaults over it, so read config_validate's " +
+        "effective config, not this, for what a crawl would actually run with.",
+      inputSchema: z.strictObject({}),
+    },
+    async () => run("config_schema", () => Promise.resolve(service.configSchema())),
+  );
+
+  server.registerTool(
+    named("config_validate"),
+    {
+      title: "Check crawl_start arguments without starting a crawl",
+      description:
+        "A dry run of crawl_start: {valid, errors: [{path, code, message}], " +
+        "effective}. Nothing is created and nothing is fetched. valid: false is an " +
+        "ANSWER, not a tool error — errors lists every refusal found, and the first " +
+        "is the one crawl_start would refuse with, in the same words. code is " +
+        "unknown_field | forbidden_field | invalid_type | out_of_range | invalid | " +
+        "not_allowed | url_policy; the last two are the allowlist and the URL " +
+        "policy, which are checked here exactly as at crawl_start, with no DNS " +
+        "lookup (the seed's address is checked when the crawl runs).\n\n" +
+        "effective, on a valid config, is what the crawl would be stored with: " +
+        "the engine's defaults, then the server operator's, then yours, plus the " +
+        "parsed judgement (null when none was given). It is null when invalid.",
+      inputSchema: z.strictObject({
+        config: z
+          .unknown()
+          .describe(
+            "The crawl_start arguments to check, exactly as you would send them to " +
+              "crawl_start: {siteUrl, maxPages?, …, judgement?}.",
+          ),
+      }),
+    },
+    async ({ config }) => run("config_validate", () => service.validateConfig(config)),
   );
 
   // -------------------------------------------------------------- the results
@@ -1818,137 +1872,6 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
 }
 
 // ------------------------------------------------------------------ the pieces
-
-/**
- * `crawl_start`'s schema, one described field per accepted crawl-config field.
- *
- * Built from `START_CRAWL_FIELDS`' keys deliberately: the table in the service
- * is the wire's vocabulary, and a test asserts this shape has exactly those keys
- * — so a field added there and forgotten here fails the suite rather than
- * quietly leaving the agent surface smaller than the HTTP one.
- */
-function crawlStartShape() {
-  return {
-    siteUrl: z
-      .string()
-      .describe(
-        "The http(s) URL to crawl from. Its host must be on the server's crawl " +
-          "allowlist. The crawl treats the apex and www spellings of this host as one " +
-          "site.",
-      ),
-    maxPages: z
-      .number()
-      .describe(
-        "Stop after this many pages. Defaults to 500 — a first look at a site. Raise " +
-          "it deliberately: a full crawl of a large site is a real load on it.",
-      )
-      .optional(),
-    maxDepth: z
-      .number()
-      .describe("Stop following links past this many hops from the seed.")
-      .optional(),
-    userAgent: z
-      .string()
-      .describe(
-        "The branded user agent to identify as. Leave it alone unless the site's " +
-          "owner has asked you to use a specific string; it must stay identifiable.",
-      )
-      .optional(),
-    perHostDelayMs: z
-      .number()
-      .describe(
-        "Politeness delay between requests to one host. The floor is 250ms — a " +
-          "smaller value is refused rather than quietly raised — and robots.txt's " +
-          "own crawl-delay wins when it is longer.",
-      )
-      .optional(),
-    maxConcurrency: z
-      .number()
-      .describe("How many fetches may be in flight at once across the whole crawl.")
-      .optional(),
-    probeHosts: z
-      .boolean()
-      .describe(
-        "Probe the apex/www and http/https spellings of the seed (and any legacyHosts) " +
-          "to find where the site really lives. These are the only fetches made before " +
-          "robots.txt is read.",
-      )
-      .optional(),
-    legacyHosts: z
-      .array(z.string())
-      .describe(
-        "Extra hosts that used to serve this site, to probe alongside the seed's own " +
-          "spellings. EACH ONE must be on the allowlist in its own right — they are " +
-          "different sites by every definition the engine has.",
-      )
-      .optional(),
-    sitemapUrls: z
-      .array(z.string())
-      .describe(
-        "Sitemap documents to walk in addition to the ones robots.txt declares — the " +
-          "way to crawl a sitemap the site publishes but never points at. The engine " +
-          "does NOT probe /sitemap.xml on spec, so an undeclared sitemap is only read " +
-          "if you name it here. Full http(s) URLs; a host outside this site's own " +
-          "spellings must be on the allowlist in its own right. Supplying one does not " +
-          "hide the finding: robots.txt still declares no sitemap, and the audit still " +
-          "says so.",
-      )
-      .optional(),
-    renderBudgetPct: z
-      .number()
-      .describe("Share of the crawl's pages the later render pass may re-fetch, as a percentage.")
-      .optional(),
-    renderMaxPages: z
-      .number()
-      .describe("Hard ceiling on pages the later render pass may re-fetch.")
-      .optional(),
-    renderSamplePerType: z
-      .number()
-      .describe("How many pages of each template cohort the render pass samples.")
-      .optional(),
-    findingCap: z
-      .number()
-      .nullable()
-      .describe(
-        "How many findings each listing rule may report when this crawl is judged. " +
-          "Defaults to 200 — a bounded first look. Pass " +
-          "null for a BILLED AUDIT: every orphan, every duplicate group, every blocked " +
-          "sitemap entry, listed in full. It costs wall time on a large site and it is " +
-          "the whole picture rather than a snapshot. It is read when the RULES run, not " +
-          "while crawling, so it must be set here — crawl_rules has no cap argument of " +
-          "its own. Uncapped listings carry no 'and N more' note, but keep " +
-          "reading the note rather than the setting: a note means the list is " +
-          "incomplete and its absence means complete.",
-      )
-      .optional(),
-    fetchResources: z
-      .boolean()
-      .describe(
-        "Whether the crawl asks the site about the files its pages point at — the " +
-          "images, stylesheets and scripts. Defaults to true, and true is what an " +
-          "audit wants: it is the only source of image weight, broken-resource and " +
-          "page-weight evidence. Pass false to crawl the pages and ask about no file " +
-          "at all — a client who asked us not to touch their CDN, or a re-crawl that " +
-          "only needs the page census. It does NOT stop the references being " +
-          "recorded: crawl_status still reports resources.seen, because reading " +
-          "markup costs the site nothing. What it stops is the asking, and every " +
-          "unasked row says the operator chose so, so a silent images.oversized on " +
-          "such a crawl reads as 'nothing was weighed' rather than 'nothing is " +
-          "heavy'. The pass runs under the same politeness the page crawl earned; " +
-          "turning it off is a decision about somebody's servers, not a speed knob.",
-      )
-      .optional(),
-    judgement: z
-      .record(z.string(), z.unknown())
-      .describe(
-        "How this crawl will be judged: {rules?: {[ruleId]: {disabled?: true, type?, " +
-          "priority?}}, thresholds?: {[name]: number}, findingCap?: number | null} — " +
-          "the block crawl_config_set changes later. findingCap may be given here " +
-          "instead of at the top level; given in both places, the two must agree.",
-      )
-      .optional(),
-  };
-}
 
 function crawlIdField() {
   return z

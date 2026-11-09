@@ -90,6 +90,17 @@
  *                                      the metric's own declaration
  *   GET  /crawls/:id/pages             the crawled pages, slim and filtered
  *   GET  /crawls/:id/robots            the site's robots.txt as this crawl read it
+ *   GET  /config/schema                the crawl-start body as JSON Schema draft
+ *                                      2020-12 — each field's description,
+ *                                      default and `x-ariadne-mutable`, the
+ *                                      overridable thresholds with their bounds
+ *                                      — and the `rulesetVersion` it names
+ *                                      rules from
+ *   POST /config/validate              a dry run of `POST /crawls`: always 200
+ *                                      with `{valid, errors: [{path, code,
+ *                                      message}], effective}`. The same checks,
+ *                                      allowlist and URL policy included, and no
+ *                                      DNS lookup; only a non-JSON body is 400
  *   GET  /rules                        the rule catalog: every rule with its
  *                                      client-facing copy. `?crawlId=` joins
  *                                      one crawl's fired state onto it —
@@ -152,7 +163,6 @@ import {
   ApiService,
   ServiceError,
   parseRenderCrawlInput,
-  parseStartCrawlInput,
   type CsvStream,
   type ServiceErrorCode,
 } from "./service.js";
@@ -235,7 +245,7 @@ interface Route {
    * Every query parameter this route accepts — a CLOSED list, checked before
    * the handler runs.
    *
-   * `parseStartCrawlInput`'s discipline, applied to the other half of the
+   * The crawl-start schema's discipline, applied to the other half of the
    * request. A filter the server does not know is not a harmless extra: a
    * caller who writes `?serverity=critical` gets an unfiltered listing and
    * reads it as "these are the critical findings", which is a wrong answer
@@ -305,9 +315,32 @@ function buildRoutes(): Route[] {
       method: "POST",
       pattern: ["crawls"],
       query: [],
+      // The body as it arrived: `startCrawl` parses it with the one schema
+      // both transports share (src/api/config-schema.ts).
       handler: async (service, ctx) => ({
         status: 202,
-        body: await service.startCrawl(parseStartCrawlInput(ctx.body)),
+        body: await service.startCrawl(ctx.body),
+      }),
+    },
+    {
+      method: "GET",
+      pattern: ["config", "schema"],
+      query: [],
+      handler: async (service, ctx) => {
+        noBody(ctx);
+        return { status: 200, body: service.configSchema() };
+      },
+    },
+    {
+      method: "POST",
+      pattern: ["config", "validate"],
+      query: [],
+      // ALWAYS 200: an invalid body is the answer this route exists to give,
+      // `{valid: false, errors}`, not a refusal of the request. Only a body
+      // that is not JSON at all is a 400, and that is `handle`'s, before here.
+      handler: async (service, ctx) => ({
+        status: 200,
+        body: await service.validateConfig(ctx.body),
       }),
     },
     {
@@ -783,7 +816,7 @@ function param(ctx: RequestCtx, name: string): string {
 /**
  * A query string this route understands, or a 400 naming the parameter.
  *
- * The same argument as `noBody` and as `parseStartCrawlInput`'s unknown-field
+ * The same argument as `noBody` and as the crawl-start schema's unknown-field
  * refusal, made about the third place a request can carry an instruction. An
  * ignored `?serverity=critical` is worse than an ignored body: the caller gets
  * a 200 full of rows and believes they are the critical ones.

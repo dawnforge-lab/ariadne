@@ -167,6 +167,17 @@ import { resolveRuleCaps, storedFindingCap } from "../rules/query/crawl-evidence
 import { runRules, type RunSummary } from "../rules/run.js";
 import { isHostAllowed, type ServiceConfig } from "./config.js";
 import {
+  API_CRAWL_DEFAULTS,
+  CRAWL_FIELDS,
+  MAX_SUPPLIED_SITEMAPS,
+  parseStartBody,
+  publishedSchema,
+  serviceCodeOf,
+  startBodySchema,
+  tooManySitemaps,
+  type ConfigError,
+} from "./config-schema.js";
+import {
   CSV_VIEWS,
   CSV_VIEW_DEFS,
   CRAWL_OVERVIEW_HEADER,
@@ -207,72 +218,9 @@ import {
 
 export { ServiceError, type ServiceErrorCode } from "./errors.js";
 
-/**
- * The crawl budget a request that does not name one gets.
- *
- * `CRAWL_DEFAULTS` deliberately has no `maxPages` — the crawl loop refuses to
- * invent a budget, because a budget is a politeness decision (rule 9). The API
- * has to have an answer anyway, and "unbounded" is the one answer that must not
- * be it: an agent that forgets the field would otherwise crawl a 400k-page site
- * to the end. 500 is a first look at a site, and a caller who wants more says
- * so in the request.
- */
-export const API_CRAWL_DEFAULTS = { maxPages: 500 } as const;
-
-/**
- * The politeness floor under `perHostDelayMs` for a crawl a CLIENT asked for.
- *
- * The MCP tool descriptions have said "perHostDelayMs has a floor" since the
- * agent surface was written, and until now there was none: an agent that sent
- * `perHostDelayMs: 0` got a crawl that hit one host as fast as the concurrency
- * window allowed. A claim the engine does not keep is worse than no claim, and
- * the yellow.com.mt incident (docs/talos-integration.md) is what being wrong
- * about this costs.
- *
- * 250ms — four requests a second to one host — is not a tuned number and is not
- * meant to be a comfortable one. It is the point below which a crawler is no
- * longer plausibly reading a site and is measurably load-testing it. The
- * genuinely polite delays are ten times this (`CRAWL_DEFAULTS` is 1000ms, the
- * crawl skill recommends 2000ms on anything Cloudflare-fronted); a caller who
- * hits this floor has already ignored all of that.
- *
- * REFUSED, NOT CLAMPED. Silently raising the value to 250 would answer a
- * request nobody made and leave the caller believing their number took effect
- * (hard rule 7). The refusal names the floor, so the fix is one edit.
- *
- * ## The boundary this does NOT cross, stated because it is load-bearing
- *
- * The floor binds `parseStartCrawlInput`, which is the request-field seam and
- * the ONLY seam both transports pass through (`POST /crawls` parses a body with
- * it, `crawl_start` parses its arguments with it). It deliberately does NOT
- * bind `effectiveConfig` or `validateCrawlConfig`, which is where a
- * `crawlDefaults.perHostDelayMs` supplied by the process that CONSTRUCTS the
- * server would be caught.
- *
- * That is the same process-trust seam `allowPrivate` rests on: the constructor
- * holds the database handle and the auth token, and it is how the test suite
- * crawls its own 127.0.0.1 fixture site at `perHostDelayMs: 0` without waiting
- * a second per page. A floor there would not make anything more polite — a
- * loopback fixture server has nobody to be rude to — and it would make the
- * suite unrunnable. The distinction is: a delay that arrived over the wire is
- * subject to the floor; a delay the operator compiled into the process is that
- * operator's decision.
- */
-export const MIN_PER_HOST_DELAY_MS = 250;
-
-/**
- * How many sitemap documents one crawl-start request may name.
- *
- * The walk itself is capped at 300 documents including everything a sitemap
- * INDEX points at (`MAX_SITEMAP_DOCS`, src/crawl/discovery.ts), so this is not
- * the limit that protects the origin — it is the limit on what a REQUEST may
- * carry into `config_jsonb`, which is a column every resume and every render
- * pass reads back. Fifty root documents is already a site whose sitemap has an
- * index, and supplying the index is both shorter and more faithful to what the
- * site publishes. Refused rather than trimmed: a list this engine silently cut
- * would leave the caller believing every document was walked (hard rule 7).
- */
-export const MAX_SUPPLIED_SITEMAPS = 50;
+// The request's defaults and bounds live with the schema that enforces them;
+// re-exported because the transports, the demo and the suite read them here.
+export { API_CRAWL_DEFAULTS, MAX_SUPPLIED_SITEMAPS, MIN_PER_HOST_DELAY_MS } from "./config-schema.js";
 
 /** `CrawlDetail.platform` and `.platformProfile`, off the two crawls columns. */
 function platformFields(
@@ -289,8 +237,9 @@ export const PAGE_SIZE_DEFAULT = 50;
 export const PAGE_SIZE_MAX = 200;
 
 /**
- * The crawl-start body, after validation. Every field except `siteUrl` is an
- * override of a default; the set is closed (see `parseStartCrawlInput`).
+ * The crawl-start body, after validation (`parseStartBody`,
+ * src/api/config-schema.ts). Every field except `siteUrl` is an override of a
+ * default; the set is closed.
  */
 export interface StartCrawlInput {
   siteUrl: string;
@@ -308,52 +257,29 @@ export interface StartCrawlInput {
   findingCap?: number | null;
   fetchResources?: boolean;
   /**
-   * The crawl's judgement block (Phase 27a), as the caller sent it: checked to
-   * be a JSON object here and parsed against the ruleset by `startCrawl`
-   * (`parseJudgement`), which is where the registry is. Its `findingCap` is
-   * stored in `config_jsonb.findingCap`; the rest in `judgement_jsonb`.
+   * The crawl's judgement block (Phase 27a), parsed against the ruleset by the
+   * schema (`parseJudgement` is its semantic check). Its `findingCap` is stored
+   * in `config_jsonb.findingCap`; the rest in `judgement_jsonb`.
    */
-  judgement?: unknown;
+  judgement?: JudgementBlock;
 }
 
-type FieldKind = "string" | "number" | "boolean" | "string[]" | "number|null" | "object";
+/** What a started crawl stores in `config_jsonb`: its effective config, less the test-only fields. */
+export type StoredConfig = ReturnType<typeof storableConfig>;
+
+/** `config_validate`'s answer, and what `startCrawl` acts on. */
+export interface StartBodyCheck {
+  valid: boolean;
+  errors: ConfigError[];
+  /** The config the crawl would be stored with, and its judgement; null when invalid. */
+  effective: (StoredConfig & { judgement: JudgementBlock | null }) | null;
+}
+
+type FieldKind = "string[]";
 
 /**
- * The wire's whole vocabulary for starting a crawl.
- *
- * A closed table rather than a cast: a body is validated field by field and an
- * unknown key is a 400 naming it. The alternative — spreading the body into a
- * config and letting the extra keys ride along — is how a field that was never
- * meant to cross the wire crosses it, which is precisely the failure
- * `allowPrivate` demonstrates below.
- *
- * EXPORTED because the MCP transport advertises a schema rather than parsing a
- * body: `crawl_start`'s tool schema names these fields with a description each,
- * and a test asserts the two sets are equal. A field added here and forgotten
- * there would be a field the HTTP surface accepts and the agent surface cannot
- * see — which is how a second, quietly smaller API appears.
- */
-export const START_CRAWL_FIELDS: Record<keyof StartCrawlInput, FieldKind> = {
-  siteUrl: "string",
-  maxPages: "number",
-  maxDepth: "number",
-  userAgent: "string",
-  perHostDelayMs: "number",
-  maxConcurrency: "number",
-  probeHosts: "boolean",
-  legacyHosts: "string[]",
-  sitemapUrls: "string[]",
-  renderBudgetPct: "number",
-  renderMaxPages: "number",
-  renderSamplePerType: "number",
-  findingCap: "number|null",
-  fetchResources: "boolean",
-  judgement: "object",
-};
-
-/**
- * The fields `POST /crawls/:id/render` accepts, on the same terms and for the
- * same reason as `START_CRAWL_FIELDS`: the MCP tool advertises a schema, the
+ * The fields `POST /crawls/:id/render` accepts, closed on the same terms as the
+ * crawl-start schema (src/api/config-schema.ts): the MCP tool advertises a schema, the
  * HTTP route parses a body, and a test asserts the two sets are the same one.
  */
 export const RENDER_CRAWL_FIELDS: Record<keyof RenderCrawlInput, FieldKind> = {
@@ -371,7 +297,7 @@ export const RENDER_CRAWL_FIELDS: Record<keyof RenderCrawlInput, FieldKind> = {
 const MISSING_URLS_NAMED = 5;
 
 /**
- * Validate a render body. Same discipline as `parseStartCrawlInput`: an unknown
+ * Validate a render body. Same discipline as `parseStartBody`: an unknown
  * field is a refusal naming it, never an ignored instruction. A caller who sent
  * `{"pages": [...]}` and got a 200 would believe the engine rendered what they
  * named, and it would have rendered its own automatic selection instead.
@@ -403,120 +329,12 @@ export function parseRenderCrawlInput(raw: unknown): RenderCrawlInput {
   return input as RenderCrawlInput;
 }
 
-/**
- * Validate a crawl-start body. Never casts, never ignores a field it does not
- * know, and never accepts either TEST-ONLY crawl-config field at any value
- * (`allowPrivate`, `recheckMinGapMs`).
- *
- * Shared by both transports on purpose: the MCP server's `crawl_start` gets the
- * same field allowlist and the same refusals as the HTTP route, because the
- * argument that a test-only escape hatch must not be reachable from outside the
- * process does not weaken when the caller is on stdio.
- */
-export function parseStartCrawlInput(raw: unknown): StartCrawlInput {
-  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
-    throw new ServiceError("VALIDATION", "request body must be a JSON object");
-  }
-  const body = raw as Record<string, unknown>;
-
-  // Named before the unknown-field loop so the refusal says WHY rather than
-  // "unknown field": a caller sending this has read about the flag somewhere
-  // and needs to be told it is not an API field at all, at any value.
-  if ("allowPrivate" in body) {
-    throw new ServiceError(
-      "VALIDATION",
-      "allowPrivate is not accepted over the API at any value: it is a test-only " +
-        "escape hatch that admits loopback and private targets, it is never persisted " +
-        "on a crawl row, and it can only be set by the process that constructs the " +
-        "server",
-    );
-  }
-
-  // The second test-only field, refused by name for the same reason and with
-  // the same weight (P17). The 60-second floor between a page's two
-  // observations is the CLAIM the evidence makes — "still broken a minute
-  // later" — not a tuning knob: a caller who could shrink it could make every
-  // transient 5xx clear and turn a `critical` into a `warning` on demand.
-  if ("recheckMinGapMs" in body) {
-    throw new ServiceError(
-      "VALIDATION",
-      "recheckMinGapMs is not accepted over the API at any value: it is a test-only " +
-        "crawl-config field that shortens the minimum gap between a page's two fetch " +
-        "observations, it is never persisted on a crawl row, and it can only be set by " +
-        "the process that constructs the server",
-    );
-  }
-
-  const input: Record<string, unknown> = {};
-  for (const [key, value] of Object.entries(body)) {
-    const kind = START_CRAWL_FIELDS[key as keyof StartCrawlInput];
-    if (kind === undefined) {
-      throw new ServiceError(
-        "VALIDATION",
-        `unknown field '${clip(key)}' (accepted: ${Object.keys(START_CRAWL_FIELDS).join(", ")})`,
-      );
-    }
-    if (value === undefined) continue;
-    assertKind(key, value, kind);
-    input[key] = value;
-  }
-
-  if (typeof input["siteUrl"] !== "string" || input["siteUrl"].trim() === "") {
-    throw new ServiceError("VALIDATION", "siteUrl is required and must be a non-empty string");
-  }
-
-  // The politeness floor the tool descriptions promise. Here rather than in
-  // `validateCrawlConfig` because this is the seam BOTH transports pass through
-  // and the construction-trust path does not — see `MIN_PER_HOST_DELAY_MS`.
-  const delay = input["perHostDelayMs"];
-  if (typeof delay === "number" && delay < MIN_PER_HOST_DELAY_MS) {
-    throw new ServiceError(
-      "VALIDATION",
-      `perHostDelayMs ${delay} is below this server's politeness floor of ` +
-        `${MIN_PER_HOST_DELAY_MS}ms: the per-host delay is not a throughput knob, and a ` +
-        `crawl faster than four requests a second to one host is load-testing it. ` +
-        `robots.txt's own crawl-delay still wins when it is longer`,
-    );
-  }
-  return input as unknown as StartCrawlInput;
-}
-
 function assertKind(key: string, value: unknown, kind: FieldKind): void {
-  const bad = (expected: string): never => {
-    throw new ServiceError("VALIDATION", `field '${key}' must be ${expected}`);
-  };
   switch (kind) {
-    case "string":
-      if (typeof value !== "string") bad("a string");
-      return;
-    case "number":
-      // A number that is not finite is not a number a config can use, and
-      // JSON.parse produces no NaN — so this only ever catches a caller who
-      // sent a string. Naming the type beats a RangeError three layers down.
-      if (typeof value !== "number" || !Number.isFinite(value)) bad("a finite number");
-      return;
-    case "boolean":
-      if (typeof value !== "boolean") bad("a boolean");
-      return;
     case "string[]":
       if (!Array.isArray(value) || value.some((v) => typeof v !== "string")) {
-        bad("an array of strings");
+        throw new ServiceError("VALIDATION", `field '${key}' must be an array of strings`);
       }
-      return;
-    case "number|null":
-      // NULL IS A VALUE HERE, not an omission, and it is the whole reason this
-      // kind exists: `findingCap: null` says "list everything", which is a
-      // different instruction from leaving the field out ("use the defaults").
-      // Every other field on the wire treats a null as a caller who meant to
-      // send nothing.
-      if (value !== null && (typeof value !== "number" || !Number.isFinite(value))) {
-        bad("a finite number, or null");
-      }
-      return;
-    case "object":
-      // A JSON object and nothing else: a null here is not "no judgement" (an
-      // absent field is), and an array is not a block with no keys.
-      if (!isPlainObject(value)) bad("a JSON object");
       return;
   }
 }
@@ -2388,81 +2206,107 @@ export class ApiService {
   }
 
   /**
-   * Accept a crawl: check it may be pointed at this host, create its row, and
-   * put it in this process's queue.
+   * Check a crawl-start body without starting anything: `config_validate`, and
+   * the check `startCrawl` acts on. One function, so the dry run and the real
+   * thing cannot disagree about a refusal (gate 27b, contract clause 2).
    *
-   * The order of the checks is the order of their authority. The allowlist is
-   * the operator's policy and comes first, so a host nobody permitted is
-   * refused before we spend a URL-policy verdict on it. `isUrlAllowed` is the
-   * engine's own perimeter (hard rule 5) and is applied to the seed here even
-   * though the crawl loop re-applies it at enqueue and `fetchPage` re-applies
-   * it at connect: a caller who names a blocked host deserves a 403 now, not a
-   * crawl row that fails later for a reason they must go and read.
+   * `parseStartBody` first: the shape, the bounds, the judgement block. Then,
+   * on a body that parses, what only this server can answer, in the order of
+   * its authority:
    *
-   * THE SEED IS NOT THE ONLY HOST A CRAWL FETCHES. `legacyHosts` adds hosts the
-   * host probe visits before any robots.txt has been read, and `sitemapUrls`
-   * adds documents the discovery walk fetches that no robots.txt pointed at, so
-   * both go through the same two checks — see `checkLegacyHosts` and
-   * `checkSitemapUrls`, which is where the allowlist would otherwise have had a
-   * hole big enough to drive a crawler through.
+   *  1. the seed must be an http(s) URL (`invalid`). Nothing below can be asked
+   *     of one that is not, so a bad one ends the check here;
+   *  2. the allowlist on its host (`not_allowed`). It is the operator's policy
+   *     and comes first, so a host nobody permitted is refused before a
+   *     URL-policy verdict is spent on it;
+   *  3. `isUrlAllowed` on the seed (`url_policy`), the engine's own perimeter
+   *     (hard rule 5). Applied here even though the crawl loop re-applies it at
+   *     enqueue and `fetchPage` at connect: a caller who names a blocked host
+   *     deserves a 403 now, not a crawl row that fails later for a reason they
+   *     must go and read;
+   *  4. THE SEED IS NOT THE ONLY HOST A CRAWL FETCHES. `legacyHosts` adds hosts
+   *     the host probe visits before any robots.txt has been read, and
+   *     `sitemapUrls` adds documents the discovery walk fetches that no
+   *     robots.txt pointed at, so both go through the same two checks
+   *     (`checkLegacyHosts`, `checkSitemapUrls`) — which is where the allowlist
+   *     would otherwise have had a hole big enough to drive a crawler through;
+   *  5. the judgement's `findingCap` against the top-level one, then the crawl
+   *     loop's own ranges over the EFFECTIVE config — the engine's defaults,
+   *     the API's maxPages, the operator's `crawlDefaults`, the request — which
+   *     is where the render budgets are checked (`invalid`).
+   *
+   * Every refusal found is returned, and `startCrawl` answers with the first.
+   * There is no DNS lookup: `isUrlAllowed` checks the URL as written, and the
+   * seed's resolution happens when the crawl runs, as it always has.
+   *
+   * `effective` is the config the crawl would be stored with
+   * (`storableConfig`, so the two test-only fields are never in it) and the
+   * parsed judgement block, or null when anything was refused.
    */
-  async startCrawl(input: StartCrawlInput): Promise<CrawlAccepted> {
-    if (this.closed) {
-      throw new ServiceError("CONFLICT", "the server is shutting down and is not accepting crawls");
-    }
+  async checkStartBody(raw: unknown): Promise<StartBodyCheck> {
+    const parsed = parseStartBody(raw, this.registry);
+    if (!parsed.ok) return { valid: false, errors: parsed.errors, effective: null };
+    const input = parsed.value;
 
     const siteUrl = normalizeUrl(input.siteUrl.trim());
     if (siteUrl === null) {
-      throw new ServiceError(
-        "VALIDATION",
-        `siteUrl is not an http(s) URL: ${clip(input.siteUrl)}`,
-      );
+      const message = `siteUrl is not an http(s) URL: ${clip(input.siteUrl)}`;
+      return { valid: false, errors: [{ path: "siteUrl", code: "invalid", message }], effective: null };
     }
     const host = new URL(siteUrl).hostname;
+    const allowPrivate = this.config.crawlDefaults?.allowPrivate === true;
+    const errors: ConfigError[] = [];
 
     if (!this.crawlHostAllowed(host)) {
       // The rejected host is named; the allowlist itself is NOT listed back.
       // On a multi-tenant deployment its contents are other tenants' domains
       // (obligation 6), and the caller does not need them to fix their request.
-      throw new ServiceError(
-        "FORBIDDEN",
-        this.config.allowedDomains.length === 0
-          ? `host '${host}' is not permitted: this server's crawl allowlist is empty, ` +
-            `so no crawl target is accepted (queries are unaffected)`
-          : `host '${host}' is not in this server's crawl allowlist`,
-      );
+      errors.push({
+        path: "siteUrl",
+        code: "not_allowed",
+        message:
+          this.config.allowedDomains.length === 0
+            ? `host '${host}' is not permitted: this server's crawl allowlist is empty, ` +
+              `so no crawl target is accepted (queries are unaffected)`
+            : `host '${host}' is not in this server's crawl allowlist`,
+      });
+    } else {
+      const verdict = await isUrlAllowed(siteUrl, { allowPrivate });
+      if (!verdict.allowed) {
+        errors.push({
+          path: "siteUrl",
+          code: "url_policy",
+          message: `siteUrl refused by the URL policy: ${verdict.reason ?? "no reason given"}`,
+        });
+      }
     }
 
-    const allowPrivate = this.config.crawlDefaults?.allowPrivate === true;
-    const verdict = await isUrlAllowed(siteUrl, { allowPrivate });
-    if (!verdict.allowed) {
-      throw new ServiceError(
-        "FORBIDDEN",
-        `siteUrl refused by the URL policy: ${verdict.reason ?? "no reason given"}`,
-      );
-    }
-
-    await this.checkLegacyHosts(siteUrl, input.legacyHosts, allowPrivate);
+    const legacy = await this.checkLegacyHosts(siteUrl, input.legacyHosts, allowPrivate);
+    if (legacy !== null) errors.push(legacy);
     // The other list of URLs a request adds to the crawl: documents the walk
     // will fetch that no robots.txt pointed at (hard rule 5 — the policy runs
     // on every URL a client supplies, not only on the seed).
-    await this.checkSitemapUrls(siteUrl, input.sitemapUrls, allowPrivate);
+    const sitemaps = await this.checkSitemapUrls(siteUrl, input.sitemapUrls, allowPrivate);
+    if (sitemaps !== null) errors.push(sitemaps);
 
-    // The judgement block is not crawl config: it is split off here, parsed
-    // against the ruleset, and its `findingCap` — the one key whose bytes live
-    // in `config_jsonb` (plan Deviation 1) — joins the crawl config.
-    const { judgement: rawJudgement, ...crawlInput } = input;
-    const block = rawJudgement === undefined ? null : this.parseJudgementInput(rawJudgement);
+    // The judgement block is not crawl config: it is split off here, and its
+    // `findingCap` — the one key whose bytes live in `config_jsonb` (plan
+    // Deviation 1) — joins the crawl config.
+    const { judgement, ...crawlInput } = input;
+    const block = judgement ?? null;
     if (block?.findingCap !== undefined) {
       if (crawlInput.findingCap !== undefined && crawlInput.findingCap !== block.findingCap) {
-        throw new ServiceError(
-          "VALIDATION",
-          `findingCap (${String(crawlInput.findingCap)}) and judgement.findingCap ` +
+        errors.push({
+          path: "judgement.findingCap",
+          code: "invalid",
+          message:
+            `findingCap (${String(crawlInput.findingCap)}) and judgement.findingCap ` +
             `(${String(block.findingCap)}) disagree: they are one setting, so send it once, ` +
             "or send the same value in both places",
-        );
+        });
+      } else {
+        crawlInput.findingCap = block.findingCap;
       }
-      crawlInput.findingCap = block.findingCap;
     }
 
     const crawlConfig = this.effectiveConfig(siteUrl, crawlInput);
@@ -2471,20 +2315,43 @@ export class ApiService {
     } catch (error) {
       // The loop's own range checks, surfaced where the caller can fix them.
       // Its messages name the field and the value and nothing else.
-      throw new ServiceError("VALIDATION", messageOf(error));
+      const message = messageOf(error);
+      errors.push({ path: loopCheckPath(message), code: "invalid", message });
     }
+
+    if (errors.length > 0) return { valid: false, errors, effective: null };
+    // The same strip `runCrawl` applies, by the same function: `allowPrivate`
+    // never reaches a row, so a resume of this crawl months from now cannot
+    // inherit it (build-plan §7 item 3).
+    return { valid: true, errors: [], effective: { ...storableConfig(crawlConfig), judgement: block } };
+  }
+
+  /**
+   * Accept a crawl: check the body (`checkStartBody`), create its row, and put
+   * it in this process's queue. Takes the body as it arrived — both transports
+   * hand it over unparsed, so both are refused by the one parser.
+   */
+  async startCrawl(raw: unknown): Promise<CrawlAccepted> {
+    if (this.closed) {
+      throw new ServiceError("CONFLICT", "the server is shutting down and is not accepting crawls");
+    }
+
+    const check = await this.checkStartBody(raw);
+    const refusal = check.errors[0];
+    if (refusal !== undefined) throw new ServiceError(serviceCodeOf(refusal.code), refusal.message);
+    if (check.effective === null) {
+      throw new Error("checkStartBody answered valid with no effective config");
+    }
+    const { judgement, ...config } = check.effective;
 
     const crawlId = `crawl_${randomUUID()}`;
     await this.db.insert(crawls).values({
       id: crawlId,
-      siteUrl,
-      // The same strip `runCrawl` applies, by the same function: `allowPrivate`
-      // never reaches a row, so a resume of this crawl months from now cannot
-      // inherit it (build-plan §7 item 3).
-      config: storableConfig(crawlConfig),
+      siteUrl: config.siteUrl,
+      config,
       // Null when the request named no judgement — "no overrides", the state
       // every crawl before 27a is in.
-      judgement: block === null ? null : storableBlock(block),
+      judgement: judgement === null ? null : storableBlock(judgement),
       rulesetVersion: RULESET_VERSION,
       status: "queued",
     });
@@ -2493,6 +2360,30 @@ export class ApiService {
     this.waiting.push(entry);
     this.pump();
     return { crawlId, status: "queued", queuePosition: this.queuePosition(crawlId) ?? 0 };
+  }
+
+  /**
+   * `config_schema` (`GET /config/schema`): the crawl-start body as JSON Schema
+   * draft 2020-12 — each field's description, default and mutability, the
+   * overridable thresholds with their bounds — and the ruleset version whose
+   * rule ids it lists.
+   */
+  configSchema(): { schema: object; rulesetVersion: string } {
+    return publishedSchema(this.registry);
+  }
+
+  /** The crawl-start body schema over this server's ruleset — what MCP `crawl_start` registers. */
+  startBodySchema(): ReturnType<typeof startBodySchema> {
+    return startBodySchema(this.registry);
+  }
+
+  /**
+   * `config_validate` (`POST /config/validate`): a dry run of `crawl_start`.
+   * Every body is answered — `valid: false` with its refusals is an answer,
+   * not an error — and nothing is written.
+   */
+  async validateConfig(raw: unknown): Promise<StartBodyCheck> {
+    return await this.checkStartBody(raw);
   }
 
   /**
@@ -3521,8 +3412,8 @@ export class ApiService {
 
     // Hard rule 5 over the hosts the RESUME will fetch, not the ones the first
     // run did: discovery and the host probe both run again.
-    await this.checkLegacyHosts(siteUrl, config.legacyHosts, allowPrivate);
-    await this.checkSitemapUrls(siteUrl, config.sitemapUrls, allowPrivate);
+    throwIfRefused(await this.checkLegacyHosts(siteUrl, config.legacyHosts, allowPrivate));
+    throwIfRefused(await this.checkSitemapUrls(siteUrl, config.sitemapUrls, allowPrivate));
 
     const live = await this.liveLeaseCount(crawlId);
     if (live > 0) {
@@ -3722,7 +3613,7 @@ export class ApiService {
    * The list is validated BEFORE the driver's own three refusals are reached. A
    * malformed request is refused as a malformed request; whether the crawl is
    * live is a fact about the world and is the driver's to state, in the same
-   * order `parseStartCrawlInput` puts a bad body ahead of a busy queue.
+   * order `parseStartBody` puts a bad body ahead of a busy queue.
    */
   async renderCrawl(crawlId: string, input: RenderCrawlInput = {}): Promise<RenderSummaryOut> {
     const row = await this.crawlRow(crawlId);
@@ -5841,13 +5732,16 @@ export class ApiService {
    * A malformed entry is a 400 here — `hostProbeStarts` throws on one — rather
    * than an error the crawl discovers after it has been accepted, queued and
    * started.
+   *
+   * ANSWERS the refusal rather than throwing it, so `checkStartBody` can list
+   * it beside the others; `resumeCrawl` throws it (`throwIfRefused`).
    */
   private async checkLegacyHosts(
     siteUrl: string,
     legacyHosts: readonly string[] | undefined,
     allowPrivate: boolean,
-  ): Promise<void> {
-    if (legacyHosts === undefined || legacyHosts.length === 0) return;
+  ): Promise<ConfigError | null> {
+    if (legacyHosts === undefined || legacyHosts.length === 0) return null;
 
     let ownSpellings: string[];
     let everyStart: string[];
@@ -5855,10 +5749,10 @@ export class ApiService {
       ownSpellings = hostProbeStarts(siteUrl);
       everyStart = hostProbeStarts(siteUrl, legacyHosts);
     } catch (error) {
-      throw new ServiceError("VALIDATION", messageOf(error));
+      return { path: "legacyHosts", code: "invalid", message: messageOf(error) };
     }
 
-    await this.checkAddedHosts(everyStart, ownSpellings, allowPrivate, {
+    return await this.checkAddedHosts("legacyHosts", everyStart, ownSpellings, allowPrivate, {
       allowlist: (host) =>
         `legacyHosts names '${host}', which is not in this server's crawl allowlist: ` +
         `the host probe fetches every legacy host, and those fetches are the only ` +
@@ -5892,22 +5786,21 @@ export class ApiService {
    *
    * The order matters: unreadable URLs are named first (a 400 the caller can
    * fix from the message), then the allowlist, then the URL policy — the same
-   * order and the same authority as `startCrawl`'s own checks.
+   * order and the same authority as `checkStartBody`'s own checks. Answered,
+   * not thrown, as `checkLegacyHosts` is.
+   *
+   * The count is the start-body schema's bound; it is checked here too because
+   * a RESUME reads the list back from a row, which no schema parsed.
    */
   private async checkSitemapUrls(
     siteUrl: string,
     sitemapUrls: readonly string[] | undefined,
     allowPrivate: boolean,
-  ): Promise<void> {
-    if (sitemapUrls === undefined || sitemapUrls.length === 0) return;
+  ): Promise<ConfigError | null> {
+    if (sitemapUrls === undefined || sitemapUrls.length === 0) return null;
 
     if (sitemapUrls.length > MAX_SUPPLIED_SITEMAPS) {
-      throw new ServiceError(
-        "VALIDATION",
-        `sitemapUrls names ${sitemapUrls.length} documents, above this server's limit of ` +
-          `${MAX_SUPPLIED_SITEMAPS}. A site with more sitemap documents than that has a ` +
-          `sitemap INDEX — supply the index and the walk follows it, three levels deep`,
-      );
+      return { path: "sitemapUrls", code: "out_of_range", message: tooManySitemaps(sitemapUrls.length) };
     }
 
     const targets: string[] = [];
@@ -5917,12 +5810,14 @@ export class ApiService {
       // the caller wrote it; the crawl fetches that spelling too (discovery
       // normalises only to compare documents, never to rewrite one).
       if (normalizeUrl(entry) === null) {
-        throw new ServiceError(
-          "VALIDATION",
-          `sitemapUrls entry '${clip(entry)}' is not an absolute http(s) URL. A sitemap ` +
+        return {
+          path: "sitemapUrls",
+          code: "invalid",
+          message:
+            `sitemapUrls entry '${clip(entry)}' is not an absolute http(s) URL. A sitemap ` +
             `document is named in full ('https://site.example/sitemap.xml'); the walk ` +
             `resolves nothing relative`,
-        );
+        };
       }
       targets.push(entry);
     }
@@ -5931,10 +5826,10 @@ export class ApiService {
     try {
       ownSpellings = hostProbeStarts(siteUrl);
     } catch (error) {
-      throw new ServiceError("VALIDATION", messageOf(error));
+      return { path: "sitemapUrls", code: "invalid", message: messageOf(error) };
     }
 
-    await this.checkAddedHosts(targets, ownSpellings, allowPrivate, {
+    return await this.checkAddedHosts("sitemapUrls", targets, ownSpellings, allowPrivate, {
       allowlist: (host) =>
         `sitemapUrls names a document on '${host}', which is neither a spelling of this ` +
         `crawl's own site nor in this server's crawl allowlist: the walk fetches every ` +
@@ -5959,8 +5854,10 @@ export class ApiService {
    * `own` is the site's own start URLs (`hostProbeStarts(siteUrl)`), compared
    * by hostname; `targets` are absolute URLs. One check per distinct added
    * host — the policy's verdict is about the host and the scheme, not the path.
+   * The first refusal is answered, under the field's `path`.
    */
   private async checkAddedHosts(
+    path: string,
     targets: readonly string[],
     own: readonly string[],
     allowPrivate: boolean,
@@ -5968,7 +5865,7 @@ export class ApiService {
       allowlist: (host: string) => string;
       policy: (host: string, reason: string) => string;
     },
-  ): Promise<void> {
+  ): Promise<ConfigError | null> {
     const ownHosts = new Set(own.map((start) => new URL(start).hostname));
     const checked = new Set<string>();
     for (const target of targets) {
@@ -5978,16 +5875,18 @@ export class ApiService {
       checked.add(host);
 
       if (!this.crawlHostAllowed(host)) {
-        throw new ServiceError("FORBIDDEN", refusal.allowlist(host));
+        return { path, code: "not_allowed", message: refusal.allowlist(host) };
       }
       const verdict = await isUrlAllowed(target, { allowPrivate });
       if (!verdict.allowed) {
-        throw new ServiceError(
-          "FORBIDDEN",
-          refusal.policy(host, verdict.reason ?? "no reason given"),
-        );
+        return {
+          path,
+          code: "url_policy",
+          message: refusal.policy(host, verdict.reason ?? "no reason given"),
+        };
       }
     }
+    return null;
   }
 
   /**
@@ -7710,6 +7609,21 @@ function parseLimit(limit: number | undefined): number {
     );
   }
   return limit;
+}
+
+/** A refusal a check answered, thrown as the `ServiceError` its code maps to. */
+function throwIfRefused(refusal: ConfigError | null): void {
+  if (refusal !== null) throw new ServiceError(serviceCodeOf(refusal.code), refusal.message);
+}
+
+/**
+ * The field a crawl-loop range check is about, read off the start of its
+ * message (`CrawlConfig.maxPages must be …`, `renderBudgetPct must be …`), or
+ * "" — the effective config as a whole — when the message names no field.
+ */
+function loopCheckPath(message: string): string {
+  const named = /^(?:CrawlConfig\.)?([A-Za-z]+)\b/.exec(message)?.[1];
+  return named !== undefined && Object.hasOwn(CRAWL_FIELDS, named) ? named : "";
 }
 
 function stripUndefined<T extends object>(value: T): Partial<T> {

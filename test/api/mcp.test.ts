@@ -48,8 +48,6 @@ import {
   COMPARE_SETS,
   EXPORT_DATASETS,
   MARKED_FAILED_REASON,
-  MIN_PER_HOST_DELAY_MS,
-  START_CRAWL_FIELDS,
 } from "../../src/api/service.js";
 import { FETCH_CLASSES } from "../../src/crawl/fetch-page.js";
 import { UrlPolicyError, type AddressResolver } from "../../src/crawl/url-policy.js";
@@ -667,11 +665,11 @@ afterAll(async () => {
 });
 
 describe("the tool surface", () => {
-  it("advertises exactly the twenty-five tools of the agent surface, each described", async () => {
+  it("advertises exactly the twenty-seven tools of the agent surface, each described", async () => {
     const listed = await client.listTools();
     expect(listed.tools.map((t) => t.name).sort()).toEqual(
       [
-        "compare_urls", "crawl_compare", "crawl_config_get", "crawl_config_set", "crawl_list",
+        "compare_urls", "config_schema", "config_validate", "crawl_compare", "crawl_config_get", "crawl_config_set", "crawl_list",
         "crawl_mark_failed", "crawl_overview", "crawl_render", "crawl_resume", "crawl_rules", "crawl_start", "crawl_pause", "crawl_cancel", "crawl_delete",
         "crawl_status", "export_crawl", "issue_inlinks", "issue_urls", "issues_list",
         "issues_overview", "metric_table", "metrics_get", "pages_query", "robots_get", "rules_catalog",
@@ -703,7 +701,7 @@ describe("the tool surface", () => {
         properties?: Record<string, { description?: string }>;
       };
       expect(schema.type).toBe("object");
-      // The `checkQuery` / `parseStartCrawlInput` discipline, in schema form: a
+      // The `checkQuery` / crawl-start schema discipline, in schema form: a
       // filter nobody knows is refused rather than dropped, so an agent that
       // misspells one is told instead of being handed the unfiltered answer.
       expect(schema.additionalProperties, `${tool.name} accepts unknown arguments`).toBe(false);
@@ -753,19 +751,6 @@ describe("the tool surface", () => {
         expect(text, `${tool}.${field} does not name '${value}'`).toContain(value);
       }
     }
-  });
-
-  it("advertises exactly the crawl-start fields the service accepts", async () => {
-    // The drift guard. `START_CRAWL_FIELDS` is the wire's vocabulary; a field
-    // added there and forgotten here would be one the HTTP surface accepts and
-    // the agent surface cannot see.
-    const listed = await client.listTools();
-    const schema = listed.tools.find((t) => t.name === "crawl_start")?.inputSchema as {
-      properties?: Record<string, unknown>;
-      required?: string[];
-    };
-    expect(Object.keys(schema.properties ?? {}).sort()).toEqual(Object.keys(START_CRAWL_FIELDS).sort());
-    expect(schema.required).toEqual(["siteUrl"]);
   });
 
   it("tells the reader that an empty answer may mean 'not measured yet'", async () => {
@@ -897,18 +882,11 @@ describe("crawl_start", () => {
     expect(String(answer.body["error"])).toContain("sitemap.xml");
   });
 
-  // The agent-facing half of `findingCap`. The schema accepts a number OR null,
-  // and null is the billed-audit setting rather than an omission — an agent that
-  // sends it must get the whole picture, and an agent that sends nonsense must
-  // be told at accept time rather than by a rules run hours later.
-  it("refuses a findingCap that is neither a positive integer nor null", async () => {
-    for (const bad of [0, -1, 1.5]) {
-      const answer = await call("crawl_start", { siteUrl: `${site}/`, findingCap: bad });
-      expect(answer.isError, JSON.stringify(bad)).toBe(true);
-      expect(String(answer.body["error"] ?? answer.text)).toContain("findingCap");
-    }
-  });
-
+  // The agent-facing half of `findingCap`: null is the billed-audit setting
+  // rather than an omission, and an agent that sends it must get the whole
+  // picture. The refusals of everything else are the schema's
+  // (test/api/config-schema.test.ts), held to this transport by
+  // test/api/transport-parity.test.ts.
   it("accepts findingCap: null over the agent surface, and crawl_status confirms it", async () => {
     const answer = await call("crawl_start", {
       siteUrl: `${site}/`,
@@ -961,32 +939,6 @@ describe("crawl_start", () => {
     const rows = await db.select().from(crawls).where(eq(crawls.id, crawlId));
     expect((rows[0]!.config as Record<string, unknown>)["fetchResources"]).toBeUndefined();
     expect(detail["fetchResources"]).toBe(true);
-  });
-
-  it("refuses a fetchResources that is not a boolean", async () => {
-    // Refused by the SDK's schema validator before the handler runs, which is
-    // the same wall an argument typo meets — the field is declared `boolean`.
-    for (const bad of ["false", 0]) {
-      const answer = await call("crawl_start", { siteUrl: `${site}/`, fetchResources: bad });
-      expect(answer.isError, JSON.stringify(bad)).toBe(true);
-      expect(answer.text).toContain("fetchResources");
-    }
-  });
-
-  // The floor `crawl_start`'s description promises, on the transport it
-  // promises it to. Both transports share `parseStartCrawlInput`, so this is
-  // the same guard the HTTP suite asserts — checked here because a claim in a
-  // tool description is a claim to the agent reading it.
-  it("refuses a perHostDelayMs under the politeness floor, naming the floor", async () => {
-    const answer = await call("crawl_start", { siteUrl: `${site}/`, perHostDelayMs: 0 });
-    expect(answer.isError).toBe(true);
-    expect(String(answer.body["error"])).toContain(`${MIN_PER_HOST_DELAY_MS}ms`);
-  });
-
-  it("refuses allowPrivate as an argument at any value", async () => {
-    const answer = await call("crawl_start", { siteUrl: `${site}/`, allowPrivate: true });
-    expect(answer.isError).toBe(true);
-    expect(answer.text).toContain("allowPrivate");
   });
 
   it("refuses every crawl when the allowlist is empty, and still answers queries", async () => {
