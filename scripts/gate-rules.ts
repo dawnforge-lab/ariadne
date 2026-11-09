@@ -200,7 +200,7 @@ async function requestPauseAtFraction(
   fraction: number,
   pages: number,
   ended: { value: boolean },
-): Promise<{ requestedAt: number; done: number } | null> {
+): Promise<PauseWatch | null> {
   const threshold = Math.ceil(fraction * pages);
   for (;;) {
     await new Promise((r) => setTimeout(r, SAMPLE_MS));
@@ -223,8 +223,43 @@ async function requestPauseAtFraction(
     if (!requested) {
       throw new Error(`gate: crawl ${id} was not running when the pause was requested at ${n} done`);
     }
-    return { requestedAt: Date.now(), done: n };
+    const requestedAt = Date.now();
+    // The spec's bound is on the STATUS CHANGE, so sample `crawls.status` every
+    // 100 ms from the request until it is no longer `running`. The run's own
+    // summary arrives later: the loop infers page templates and writes the close
+    // before it returns, so request-to-summary is a different, longer interval.
+    // `template_inference_jsonb` is written by `inferPageTemplates`, which the
+    // loop runs BEFORE the close, so its first non-null read splits the interval.
+    let flippedAt: number | null = null;
+    let inferredAt: number | null = null;
+    let flippedTo = "running";
+    for (;;) {
+      const status = await db
+        .select({ status: crawls.status, inferred: sql<boolean>`${crawls.templateInferenceJsonb} is not null` })
+        .from(crawls)
+        .where(eq(crawls.id, id));
+      const current = status[0]?.status;
+      if (current === undefined) throw new Error(`gate: crawl ${id} vanished while pausing`);
+      if (inferredAt === null && status[0]?.inferred === true) inferredAt = Date.now();
+      if (current !== "running") {
+        flippedAt = Date.now();
+        flippedTo = current;
+        break;
+      }
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    return { requestedAt, inferredAt, flippedAt, flippedTo, done: n };
   }
+}
+
+interface PauseWatch {
+  requestedAt: number;
+  /** When `template_inference_jsonb` was first read non-null; null if never seen. */
+  inferredAt: number | null;
+  /** When `crawls.status` was first read as something other than `running`. */
+  flippedAt: number | null;
+  flippedTo: string;
+  done: number;
 }
 
 interface PhaseRss {
@@ -652,19 +687,30 @@ async function main(): Promise<number> {
         summary = await runCrawl(db, config);
       } else {
         const ended = { value: false };
-        const watcher = requestPauseAtFraction(db, config.siteUrl, pauseFraction, pages, ended);
+        // The watcher's failure is held, not left to reject unhandled while the
+        // run is still going: it is rethrown below as the script's own error.
+        const watcher = requestPauseAtFraction(db, config.siteUrl, pauseFraction, pages, ended).then(
+          (value) => ({ value }),
+          (error: unknown) => ({ error }),
+        );
         let first: CrawlSummary;
         try {
           first = await runCrawl(db, config);
         } finally {
           ended.value = true;
         }
-        const requested = await watcher;
+        const watched = await watcher;
+        if ("error" in watched) throw watched.error;
+        const requested = watched.value;
         if (requested === null) {
           console.error(`FAIL: the crawl ended '${first.status}' before the pause was requested`);
           return 1;
         }
-        const latencyMs = Date.now() - requested.requestedAt;
+        const summaryMs = Date.now() - requested.requestedAt;
+        if (requested.flippedAt === null) {
+          throw new Error("gate: the status was never sampled after the pause request");
+        }
+        const flipMs = requested.flippedAt - requested.requestedAt;
         if (first.status !== "paused" || first.pauseReason !== "request") {
           console.error(
             `FAIL: the pause at ${requested.done} done ended the run '${first.status}' ` +
@@ -679,7 +725,18 @@ async function main(): Promise<number> {
               `${first.pagesCrawled.toLocaleString()} pages written`,
           ),
         );
-        console.log(line("pause→paused", `${latencyMs} ms`));
+        console.log(line("pause→paused", `${flipMs} ms (crawls.status read '${requested.flippedTo}', 100 ms sampling)`));
+        console.log(line("pause→summary", `${summaryMs} ms (the run returned; the difference is template inference, close and summary)`));
+        console.log(line("close wind-down", `${summaryMs - flipMs} ms (status flip to summary)`));
+        console.log(
+          line(
+            "template infer",
+            requested.inferredAt === null
+              ? "not observed before the status flip"
+              : `written ${requested.inferredAt - requested.requestedAt} ms after the request ` +
+                  `(abort and drain), ${requested.flippedAt - requested.inferredAt} ms before the flip`,
+          ),
+        );
         // Same config object, exactly as before: allowPrivate is never stored, so
         // the resume re-states it (ResumeOpts.config).
         summary = await resumeCrawl(db, first.crawlId, { config });

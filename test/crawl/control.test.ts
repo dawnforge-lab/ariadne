@@ -657,15 +657,5 @@ describe("pause/resume equivalence on the fixture site (gate 27b clause 1)", () 
     const setB = await pageSet(bId);
     expect(setA.length).toBeGreaterThan(10);
     expect(setB).toEqual(setA);
-
-    const classes = new Map<string, number>();
-    for (const entry of setA) {
-      const fetchClass = entry.slice(entry.lastIndexOf(" ") + 1);
-      classes.set(fetchClass, (classes.get(fetchClass) ?? 0) + 1);
-    }
-    console.log(
-      `pause/resume equivalence: ${setA.length} URLs in each crawl, paused with ` +
-        `${paused.pagesCrawled} pages written; classes ${JSON.stringify(Object.fromEntries([...classes].sort()))}`,
-    );
   }, 240_000);
 });
