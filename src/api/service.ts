@@ -497,6 +497,12 @@ export interface CrawlDetail extends CrawlListItem {
     dropped: number | null;
   };
   /**
+   * `crawls.excluded_dropped` (migration 0036): discoveries the crawl's scope
+   * patterns turned away past the excluded-row budget. Null = nobody counted
+   * (a crawl written before 0036); zero is a measurement.
+   */
+  excludedDropped: number | null;
+  /**
    * The widest per-host spacing the crawl's politeness gate has escalated to,
    * in milliseconds, or null when no crawl loop ever reported one (a row that
    * predates the field, or a crawl that failed before it started fetching).
@@ -2626,6 +2632,7 @@ export class ApiService {
       // The overflow is STAMPED on the crawl row (null kept: nobody counted),
       // the recorded rows are counted live, like `blockedPages` beside them.
       robotsBlocked: { recorded: robotsBlockedRows, dropped: row.robotsBlockedDropped },
+      excludedDropped: row.excludedDropped,
       hostSpacingMs: row.hostSpacingMs,
       throttle: throttleRecordOf(row.hostSpacingJsonb),
       // Validated, as the loop validates them before resuming: columns we

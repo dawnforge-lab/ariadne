@@ -134,6 +134,12 @@ export const FETCH_CLASSES = [
    */
   "unsupported_encoding",
   "disallowed",
+  /**
+   * The URL was recorded and never requested because the crawl's own scope
+   * patterns (`exclude` / `include`) refuse it. Our decision, not the site's
+   * answer; see `NEVER_REQUESTED` in src/rules/helpers.ts.
+   */
+  "excluded",
 ] as const;
 
 export type FetchClass = (typeof FETCH_CLASSES)[number];

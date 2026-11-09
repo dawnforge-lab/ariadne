@@ -2387,3 +2387,15 @@ describe("GET /crawls/:id — the lifecycle fields (27b)", () => {
     expect(bad.status).toBe(500);
   });
 });
+
+describe("GET /crawls/:id carries the scope counter (27c T1)", () => {
+  it("answers excludedDropped as null for a crawl nobody counted, and the stored count once set", async () => {
+    const crawlId = await seedCrawl({ status: "finished" });
+    const bare = await fetch(`${base}/crawls/${crawlId}`, { headers: { authorization: `Bearer ${TOKEN}` } });
+    expect(bare.status).toBe(200);
+    expect(((await bare.json()) as Record<string, unknown>)["excludedDropped"]).toBeNull();
+    await db.execute(sql`update crawls set excluded_dropped = 7 where id = ${crawlId}`);
+    const counted = await fetch(`${base}/crawls/${crawlId}`, { headers: { authorization: `Bearer ${TOKEN}` } });
+    expect(((await counted.json()) as Record<string, unknown>)["excludedDropped"]).toBe(7);
+  });
+});

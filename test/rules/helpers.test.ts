@@ -13,7 +13,7 @@ import {
   isJudged,
   JUDGED,
   indexabilityOf,
-  isCanonicalisedElsewhere,
+  isCanonicalisedElsewhere, NEVER_REQUESTED,
   metricRow,
   metricRule,
   present,
@@ -26,7 +26,7 @@ import {
   unavailableAfterSpan,
   type MetricIdentity,
 } from "../../src/rules/helpers.js";
-import { FETCH_CLASSES } from "../../src/crawl/fetch-page.js";
+import { FETCH_CLASSES } from "../../src/crawl/fetch-page.js"; import { ROBOTS_BLOCKED_REASON_PREFIX } from "../../src/crawl/discovery.js";
 import { perScope } from "../../src/rules/registry/metric-table.js";
 import type { PageRecord } from "../../src/rules/registry/types.js";
 import { ISSUE_COPY } from "../../src/rules/registry/copy/index.js";
@@ -1161,5 +1161,40 @@ describe("unavailable_after on a hostile value (PR #22 security review)", () => 
     const span = unavailableAfterSpan(`unavailable_after:${words}`, c.parse);
     expect(span?.date).toBe(words.trim());
     expect(c.stats().calls).toBeLessThanOrEqual(DATE_MAX_WORDS);
+  });
+});
+
+describe("the excluded fetch class (27c T1)", () => {
+  it("reads an excluded row as Non-Indexable, Excluded by crawl settings", () => {
+    const page = mkPage({ fetchClass: "excluded", statusCode: null, isIndexable: false });
+    expect(indexabilityOf(page)).toEqual({
+      indexability: "Non-Indexable",
+      status: "Excluded by crawl settings",
+    });
+  });
+
+  it("NEVER_REQUESTED holds for a robots-blocked row and an excluded row, not for a fetched one", async () => {
+    const url = process.env.DATABASE_URL;
+    if (!url) throw new Error("DATABASE_URL must be set for db tests (no fallback)");
+    const db = createDb(url);
+    try {
+      const result = await db.execute<{ k: string; never: boolean }>(sql`
+        select p.k, ${NEVER_REQUESTED("p")} as never
+        from (values
+          ('robots', 'disallowed', ${ROBOTS_BLOCKED_REASON_PREFIX + " by test"}),
+          ('policy', 'disallowed', 'refused by the URL policy'),
+          ('excluded', 'excluded', 'matched an exclude pattern'),
+          ('ok', 'ok', null),
+          ('missing', 'client_error', null)
+        ) as p(k, fetch_class, fetch_reason)`);
+      const never = new Map(result.rows.map((r) => [r.k, r.never]));
+      expect(never.get("robots")).toBe(true);
+      expect(never.get("excluded")).toBe(true);
+      expect(never.get("policy")).toBe(false);
+      expect(never.get("ok")).toBe(false);
+      expect(never.get("missing")).toBe(false);
+    } finally {
+      await closeDb(db);
+    }
   });
 });

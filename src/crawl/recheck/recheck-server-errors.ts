@@ -404,6 +404,7 @@ export function serverErrorOutcome(fetchClass: FetchClass): "confirmed" | "clear
     case "timeout":
     case "network_error":
     case "disallowed":
+    case "excluded":
       return "inconclusive";
   }
 }
@@ -433,6 +434,7 @@ export function noResponseOutcome(fetchClass: FetchClass): "confirmed" | "cleare
     case "blocked":
       return "cleared";
     case "disallowed":
+    case "excluded":
       return "inconclusive";
   }
 }

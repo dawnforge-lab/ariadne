@@ -238,7 +238,7 @@ target is not something this skill can crawl.
  frontier: {pending, leased, done, failed, renderPending},
  queuePosition, liveLeases, blockedPages, hostSpacingMs, throttle,
  platform, platformProfile,
- robotsBlocked: {recorded, dropped},
+ robotsBlocked: {recorded, dropped}, excludedDropped,
  rulesRunAt, judgementStale, findingsCount, pagesScanned, fetchResources,
  resourceRefsCappedPages,
  resources: {seen, fetched, failed, skipped, robotsDenied, robotsUnreachable,
@@ -315,6 +315,10 @@ What the fields mean when you are waiting:
   config's `maxBlockedUrls`; `crawl_start` does not accept it, so every crawl you
   start gets the default, and a site whose robots.txt blocks more internal URLs than
   `maxPages` will report `dropped > 0`.
+- **`excludedDropped`** — discoveries the crawl's own URL scope patterns (`exclude` /
+  `include`) turned away once the excluded-row budget was full; a count of
+  discoveries, not distinct URLs. `null` is a crawl from before this was counted,
+  not zero. Our decision, not the site's: it is not a block.
 - **`hostSpacingMs`** — how far the engine has already backed off: the widest gap it
   is enforcing between two requests to one host, in milliseconds. It starts at the
   crawl's `perHostDelayMs` and rises when a host pushes back; since Phase 24a it can

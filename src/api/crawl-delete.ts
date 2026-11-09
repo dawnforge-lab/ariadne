@@ -26,6 +26,7 @@ import {
   hreflang,
   issues,
   links,
+  listUrls,
   metrics,
   pageResources,
   pages,
@@ -40,7 +41,7 @@ import {
 type CrawlChildTable = PgTable & { crawlId: PgColumn };
 
 /**
- * The 13 tables with a `crawl_id`, in deletion order: what points at `pages`
+ * The 14 tables with a `crawl_id`, in deletion order: what points at `pages`
  * and `resources` goes before them, `frontier` last.
  */
 export const CRAWL_CHILD_TABLES: readonly CrawlChildTable[] = [
@@ -57,6 +58,7 @@ export const CRAWL_CHILD_TABLES: readonly CrawlChildTable[] = [
   resources,
   pages,
   frontier,
+  listUrls,
 ];
 
 type Tx = Parameters<Parameters<Db["transaction"]>[0]>[0];
