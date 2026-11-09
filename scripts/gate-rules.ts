@@ -70,7 +70,7 @@
  */
 import { readdirSync, readFileSync } from "node:fs";
 
-import { desc, eq, sql } from "drizzle-orm";
+import { desc, eq, sql, type SQL } from "drizzle-orm";
 import { closeDb, createDb, type Db } from "../src/db/client.js";
 import { CRAWL_DEFAULTS, resumeCrawl, runCrawl, type CrawlSummary } from "../src/crawl/loop.js";
 import { setControlRequest } from "../src/crawl/control.js";
@@ -90,7 +90,8 @@ import {
 } from "../src/rules/registry/registry.js";
 import type { JudgementContext, RuleCaps } from "../src/rules/registry/types.js";
 import { runRules } from "../src/rules/run.js";
-import { startSiteServer } from "../test/gate/site-server.js";
+import { scopeRefusesSql, scopeVerdict, type CrawlScope } from "../src/crawl/url-scope.js";
+import { siteFixture, startSiteServer } from "../test/gate/site-server.js";
 
 /** The gate's three numbers. All are the build plan's, not this script's. */
 const GATE_PAGES = 50_000;
@@ -183,6 +184,98 @@ function pauseAtFraction(): number | null {
     throw new RangeError(`--pause-at-fraction needs a number strictly between 0 and 1, got ${raw}`);
   }
   return value;
+}
+
+/**
+ * `--exclude <pattern>` (Phase 27c), repeatable: crawl with `exclude` set to
+ * these patterns, so scope admission runs on every discovered URL (the hot
+ * path) and the URLs they match become `excluded` rows instead of fetches.
+ * Empty when the flag is absent. A flag with no pattern after it throws (no
+ * fallback to "no exclude"); so does combining it with `GATE_CRAWL_ID`, where
+ * no crawl runs for the patterns to apply to.
+ */
+function excludePatterns(): string[] {
+  const args = process.argv.slice(2);
+  const patterns: string[] = [];
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] !== "--exclude") continue;
+    const raw = args[i + 1];
+    if (raw === undefined || raw === "" || raw.startsWith("--")) {
+      throw new RangeError(
+        `--exclude needs a pattern after it, got ${raw === undefined ? "nothing" : JSON.stringify(raw)}`,
+      );
+    }
+    patterns.push(raw);
+    i += 1;
+  }
+  return patterns;
+}
+
+/** What the exclude patterns do to the fixture, worked out before the crawl. */
+interface ScopeCensus {
+  /** Fixture pages whose URL the patterns refuse: never fetched. */
+  matched: number;
+  /**
+   * Of those, the ones some fetched page links to: the URLs that can become
+   * `excluded` rows. A refused URL whose every linker is refused too is met
+   * only in the sitemap, and a refused sitemap entry is skipped, not written
+   * (27c Deviation 8), so it has no row and is not a drop either.
+   */
+  linked: number;
+}
+
+/** `a⁻¹ mod n`, or a throw when `gcd(a, n) ≠ 1` (there is none). */
+function modularInverse(a: number, n: number): number {
+  let [oldR, r] = [a % n, n];
+  let [oldS, s] = [1, 0];
+  while (r !== 0) {
+    const q = Math.floor(oldR / r);
+    [oldR, r] = [r, oldR - q * r];
+    [oldS, s] = [s, oldS - q * s];
+  }
+  if (oldR !== 1) {
+    throw new RangeError(
+      `gate: the exclude census inverts the fixture's link stride ${a}, which shares a factor ` +
+        `with the page count ${n}; pick a page count coprime with it`,
+    );
+  }
+  return ((oldS % n) + n) % n;
+}
+
+/**
+ * The exclude census, from the fixture's pure functions and the crawler's own
+ * matcher (`scopeVerdict`). O(1) memory: each refused page's linkers are
+ * computed by inverting the link map `i -> (stride·i + k) mod n`, never held
+ * as a set of URLs, so the census adds nothing to the peak it is measured
+ * beside. Every linker found this way is cross-checked against `linkTargets`,
+ * so a fixture whose link map changed fails here instead of mis-counting.
+ */
+function fixtureScopeCensus(base: string, pages: number, scope: CrawlScope): ScopeCensus {
+  const site = siteFixture.layout(pages);
+  const refused = (index: number): boolean =>
+    !scopeVerdict(`${base}${siteFixture.pathOfIndex(index, site)}`, scope).admitted;
+  if (refused(0)) {
+    throw new RangeError(`gate: the exclude patterns refuse the seed ${base}/, so the crawl cannot start`);
+  }
+  // Every page's nav links to these three; the seed is fetched, so each is linked.
+  const nav = ["/", "/products/p0", "/blog/0"].map((path) => siteFixture.indexOfPath(path, site));
+  const inverse = modularInverse(siteFixture.linkStride, pages);
+  let matched = 0;
+  let linked = 0;
+  for (let j = 0; j < pages; j++) {
+    if (!refused(j)) continue;
+    matched += 1;
+    let isLinked = nav.includes(j);
+    for (let k = 1; k <= siteFixture.linksPerPage && !isLinked; k++) {
+      const linker = (((((j - k) % pages) + pages) % pages) * inverse) % pages;
+      if (!siteFixture.linkTargets(linker, site).includes(j)) {
+        throw new Error(`gate: the census's inverse link map is wrong at page ${j} (linker ${linker})`);
+      }
+      if (!refused(linker)) isLinked = true;
+    }
+    if (isLinked) linked += 1;
+  }
+  return { matched, linked };
 }
 
 /**
@@ -582,6 +675,14 @@ async function countRows(db: Db, table: string, crawlId: string): Promise<number
   return Number(row["n"]);
 }
 
+/** One `count(*)::int as n` query's answer; a missing row throws (no zero fallback). */
+async function countWhere(db: Db, query: SQL): Promise<number> {
+  const result = await db.execute<{ n: number }>(query);
+  const n = result.rows[0]?.n;
+  if (n === undefined) throw new Error("gate: a count query returned no row");
+  return n;
+}
+
 function seconds(ms: number): string {
   return `${(ms / 1000).toFixed(1)}s`;
 }
@@ -599,6 +700,11 @@ async function main(): Promise<number> {
   const pages = pageTarget();
   const reuse = reusedCrawlId();
   const isGate = pages === GATE_PAGES && reuse === null;
+  const exclude = excludePatterns();
+  if (exclude.length > 0 && reuse !== null) {
+    throw new RangeError("gate: --exclude needs a crawl in this process; GATE_CRAWL_ID runs none");
+  }
+  const scope: CrawlScope = { exclude, include: [] };
 
   if (reuse !== null) {
     console.log(`RULES-ONLY RUN over crawl ${reuse} — NOT the gate (no crawl in this process).`);
@@ -640,6 +746,8 @@ async function main(): Promise<number> {
   let renderReport: { summary: RenderPassSummary; ms: number; rss: PhaseRss } | null = null;
   /** The crawl phase's own peak, kept for the three-phase summary at the end. */
   let crawlPeakBytes = 0;
+  /** The exclude census, or null when no `--exclude` was given. */
+  let census: ScopeCensus | null = null;
 
   try {
     let crawlId: string;
@@ -658,6 +766,27 @@ async function main(): Promise<number> {
       console.log(
         line("sitemap hreflang", site.sitemapHreflang ? "on (xhtml:link alternates)" : "off"),
       );
+      if (exclude.length > 0) {
+        const censusStartedAt = Date.now();
+        census = fixtureScopeCensus(site.base, pages, scope);
+        console.log(line("exclude", exclude.map((p) => `'${p}'`).join(", ")));
+        console.log(
+          line(
+            "exclude census",
+            `${census.matched.toLocaleString()} fixture URLs refused (never fetched), ` +
+              `${census.linked.toLocaleString()} of them linked from a fetched page ` +
+              `(${Date.now() - censusStartedAt} ms to count)`,
+          ),
+        );
+        if (census.matched === 0) {
+          // A scope gate whose patterns refuse nothing writes no `excluded` row,
+          // and its census would pass by being empty (rule 1).
+          throw new RangeError(
+            `gate: the exclude patterns match none of the fixture's ${pages.toLocaleString()} URLs ` +
+              `(/, /products/pN, /blog/N), so the excluded census would be vacuous`,
+          );
+        }
+      }
       console.log("");
       console.log("— crawl phase —");
 
@@ -687,6 +816,9 @@ async function main(): Promise<number> {
         allowPrivate: true,
         // Left at its default (on) deliberately: the host rules read the probe,
         // and Phase 1's gate crawl ran with it on too.
+        // Phase 27c: set only with `--exclude`, so an unflagged run is the config
+        // every earlier gate ran.
+        ...(exclude.length > 0 ? { exclude } : {}),
       };
 
       sampler.startPhase();
@@ -782,9 +914,82 @@ async function main(): Promise<number> {
         line("peak RSS", `${megabytes(crawlRss.peakBytes)} (at +${(crawlRss.peakAtMs / 1000).toFixed(0)}s)`),
       );
 
-      if (summary.pagesCrawled !== pages) {
-        console.error(`FAIL: crawled ${summary.pagesCrawled} pages, expected exactly ${pages}`);
+      // With `--exclude`, the refused URLs are never fetched: the crawl must
+      // reach exactly the rest.
+      const expectedFetched = pages - (census?.matched ?? 0);
+      if (summary.pagesCrawled !== expectedFetched) {
+        console.error(
+          `FAIL: crawled ${summary.pagesCrawled} pages, expected exactly ${expectedFetched}` +
+            (census === null ? "" : ` (${pages} less the ${census.matched} the exclude patterns refuse)`),
+        );
         return 1;
+      }
+
+      if (census !== null) {
+        // THE EXCLUDED CENSUS, read off the rows. The budget is the crawl's
+        // never-requested budget (`maxBlockedUrls`, default `maxPages`), shared
+        // with robots-blocked rows, of which this fixture has none.
+        const blockedBudget = config.maxPages;
+        const excludedRows = await db.execute<{ fetch_reason: string | null; n: number }>(sql`
+          select fetch_reason, count(*)::int as n from pages
+          where crawl_id = ${summary.crawlId} and fetch_class = 'excluded'
+          group by fetch_reason order by fetch_reason`);
+        const disallowed = await countWhere(
+          db,
+          sql`select count(*)::int as n from pages
+              where crawl_id = ${summary.crawlId} and fetch_class = 'disallowed'`,
+        );
+        const dropped = await db
+          .select({ excludedDropped: crawls.excludedDropped })
+          .from(crawls)
+          .where(eq(crawls.id, summary.crawlId));
+        const excludedDropped = dropped[0]?.excludedDropped;
+        if (excludedDropped === undefined || excludedDropped === null) {
+          throw new Error(`gate: crawl ${summary.crawlId} has no excluded_dropped count to read`);
+        }
+        // A fetched row the patterns refuse would be admission letting one through.
+        const fetchedRefused = await countWhere(
+          db,
+          sql`select count(*)::int as n from pages
+              where crawl_id = ${summary.crawlId} and fetch_class <> 'excluded'
+                and ${scopeRefusesSql(sql`url`, scope)}`,
+        );
+        const excludedTotal = excludedRows.rows.reduce((total, row) => total + row.n, 0);
+        const reasons = new Set(exclude.map((p) => `crawl scope: matches exclude pattern '${p}'`));
+        console.log(line("excluded rows", excludedTotal.toLocaleString()));
+        for (const row of excludedRows.rows) {
+          console.log(line(`  ${row.n.toLocaleString()}`, String(row.fetch_reason)));
+        }
+        console.log(line("excl. dropped", excludedDropped.toLocaleString()));
+        console.log(line("disallowed rows", disallowed.toLocaleString()));
+        console.log(line("blocked budget", blockedBudget.toLocaleString()));
+        console.log(line("refused fetched", `${fetchedRefused} (fetched rows the patterns refuse)`));
+
+        const expectedRows = Math.min(census.linked, blockedBudget - disallowed);
+        const censusFailures: string[] = [];
+        for (const row of excludedRows.rows) {
+          if (row.fetch_reason === null || !reasons.has(row.fetch_reason)) {
+            censusFailures.push(`${row.n} excluded rows carry the reason ${JSON.stringify(row.fetch_reason)}`);
+          }
+        }
+        if (excludedTotal !== expectedRows) {
+          censusFailures.push(
+            `${excludedTotal} excluded rows, expected ${expectedRows} ` +
+              `(${census.linked} linked refused URLs, budget ${blockedBudget} less ${disallowed} disallowed)`,
+          );
+        }
+        // Under the budget nothing is turned away; over it, every linked URL
+        // without a row was turned away at least once (the column counts
+        // discoveries, so it may exceed the URL count: src/db/schema.ts).
+        const overflow = census.linked - expectedRows;
+        if (overflow === 0 ? excludedDropped !== 0 : excludedDropped < overflow) {
+          censusFailures.push(`excluded_dropped is ${excludedDropped} with ${overflow} linked URLs over the budget`);
+        }
+        if (fetchedRefused !== 0) censusFailures.push(`${fetchedRefused} fetched rows match the exclude patterns`);
+        if (censusFailures.length > 0) {
+          for (const failure of censusFailures) console.error(`FAIL: ${failure}`);
+          return 1;
+        }
       }
 
       // ——— render phase ———
