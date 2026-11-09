@@ -228,19 +228,15 @@ async function requestPauseAtFraction(
     // 100 ms from the request until it is no longer `running`. The run's own
     // summary arrives later: the loop infers page templates and writes the close
     // before it returns, so request-to-summary is a different, longer interval.
-    // `template_inference_jsonb` is written by `inferPageTemplates`, which the
-    // loop runs BEFORE the close, so its first non-null read splits the interval.
+    // The status flips in `closeCrawl`, which runs AFTER the loop's whole-crawl
+    // template inference; the inference result is written in that same closing
+    // UPDATE, so this sampler cannot split abort/drain from inference.
     let flippedAt: number | null = null;
-    let inferredAt: number | null = null;
     let flippedTo = "running";
     for (;;) {
-      const status = await db
-        .select({ status: crawls.status, inferred: sql<boolean>`${crawls.templateInferenceJsonb} is not null` })
-        .from(crawls)
-        .where(eq(crawls.id, id));
+      const status = await db.select({ status: crawls.status }).from(crawls).where(eq(crawls.id, id));
       const current = status[0]?.status;
       if (current === undefined) throw new Error(`gate: crawl ${id} vanished while pausing`);
-      if (inferredAt === null && status[0]?.inferred === true) inferredAt = Date.now();
       if (current !== "running") {
         flippedAt = Date.now();
         flippedTo = current;
@@ -248,14 +244,12 @@ async function requestPauseAtFraction(
       }
       await new Promise((r) => setTimeout(r, 100));
     }
-    return { requestedAt, inferredAt, flippedAt, flippedTo, done: n };
+    return { requestedAt, flippedAt, flippedTo, done: n };
   }
 }
 
 interface PauseWatch {
   requestedAt: number;
-  /** When `template_inference_jsonb` was first read non-null; null if never seen. */
-  inferredAt: number | null;
   /** When `crawls.status` was first read as something other than `running`. */
   flippedAt: number | null;
   flippedTo: string;
@@ -726,17 +720,8 @@ async function main(): Promise<number> {
           ),
         );
         console.log(line("pause→paused", `${flipMs} ms (crawls.status read '${requested.flippedTo}', 100 ms sampling)`));
-        console.log(line("pause→summary", `${summaryMs} ms (the run returned; the difference is template inference, close and summary)`));
+        console.log(line("pause→summary", `${summaryMs} ms (the run returned)`));
         console.log(line("close wind-down", `${summaryMs - flipMs} ms (status flip to summary)`));
-        console.log(
-          line(
-            "template infer",
-            requested.inferredAt === null
-              ? "not observed before the status flip"
-              : `written ${requested.inferredAt - requested.requestedAt} ms after the request ` +
-                  `(abort and drain), ${requested.flippedAt - requested.inferredAt} ms before the flip`,
-          ),
-        );
         // Same config object, exactly as before: allowPrivate is never stored, so
         // the resume re-states it (ResumeOpts.config).
         summary = await resumeCrawl(db, first.crawlId, { config });

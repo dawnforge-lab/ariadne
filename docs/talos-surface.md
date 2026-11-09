@@ -1153,8 +1153,11 @@ cannot meet one, because those runs never start on a `queued` or `running` crawl
 **How fast a stop lands.** The loop reads the request once a second
 (`CONTROL_POLL_MS`) and aborts in-flight page fetches, which go back to the
 frontier and are never written as failures (an aborted fetch refunds its attempt).
-So a stop during the page crawl lands in about a second, and the gate measured it
-(`docs/gates/phase-27b.md`). Two things take longer, both disclosed: the **sitemap
+A stop during the page crawl of a small site flips the status in about a second
+(806 to 932 ms measured); on a deep crawl it takes longer, and the 50k-page gate crawl
+(16 workers, 20,000 pages done) flipped `paused` **5.3 s** after the request
+(`docs/gates/phase-27b.md` §7). Poll `crawl_status`; do not assume one second. Two things
+take longer still, both disclosed: the **sitemap
 walk and the host probe are not interrupted** (the stop lands when they return, since a
 walk cut part-way would leave a sitemap the rules judge as whole), and **the recheck
 and resource passes keep their contract** (no new request after a stop, the one

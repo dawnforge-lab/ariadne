@@ -599,11 +599,15 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "A QUEUED crawl is paused at once: immediate true, status 'paused', and it " +
         "is taken out of this server's queue, so it will not start until you " +
         "resume it. A RUNNING crawl is asked to pause: immediate false, status " +
-        "'running', controlRequested 'pause'. That is a REQUEST, not an outcome — " +
-        "the crawl stops within about a second (in-flight fetches are aborted and " +
-        "go back to the frontier, never recorded as failures), but a crawl that " +
-        "finishes before then closes 'finished' instead. Then poll crawl_status " +
-        "until status is 'paused' (pauseReason 'request').\n\n" +
+        "'running', controlRequested 'pause'. That is a REQUEST, not an outcome. " +
+        "In-flight page fetches are aborted and go back to the frontier, never " +
+        "recorded as failures. The status usually flips within about a second on a " +
+        "small crawl; on a deep crawl it takes longer (the 50k-page gate crawl " +
+        "flipped 5.3 s after the request). A stop during the sitemap walk waits for " +
+        "the walk to finish, and one during the recheck or resource passes lets " +
+        "the request in flight settle (up to 20 s). A crawl that finishes first " +
+        "closes 'finished' instead. Poll crawl_status until status is 'paused' " +
+        "(pauseReason 'request').\n\n" +
         "A pause keeps everything a resume needs: the frontier, the per-host " +
         "spacing the crawl earned and its throttle record. A paused crawl stays " +
         "paused across a server restart, and nothing starts it but crawl_resume. " +
