@@ -255,8 +255,13 @@ What the fields mean when you are waiting:
   `paused` crawl, `cancelledAt` and `neverFetched` (the frontier's `pending`)
   are set only on a `cancelled` crawl; each is null otherwise.
 
-- **`status`** — `queued`, `running`, `finished`, `cancelled`, `failed`. The last
-  three are terminal.
+- **`status`** — `queued`, `running`, `paused`, `finished`, `cancelled`, `failed`.
+  `finished`, `failed` and `cancelled` are closed; `cancelled` is **final** (it
+  cannot be resumed), `paused` is resumable. A server shutdown leaves a crawl
+  `paused` with `pauseReason: "shutdown"`, never `cancelled`. While
+  `controlRequested` is non-null on a `running` crawl the stop has been asked for
+  but not yet delivered: poll again, and do not call `crawl_resume` (it refuses
+  with 409 while a request is pending).
 - **`failureReason`** — why a `failed` crawl failed: one sentence, and `null` on
   every crawl that is not `failed`. **Read it before you re-run anything.** A
   crawl refused before it began carries the classified sentence — `robots.txt
@@ -750,10 +755,35 @@ what to do: a crawl that failed at page 4,000 of 5,000 is usually worth **resumi
 (`crawl_resume` — see below), and is worth auditing with the gap stated if the
 failure will just recur.
 
-**`status: "cancelled"`** — the server was shut down while this crawl was running,
-and it recorded itself on the way out rather than being killed. This is the most
-resumable state there is: an abort decides nothing about the work it did not reach,
-so `crawl_resume` picks up exactly the URLs and files nobody has asked about yet.
+**`status: "paused"`** — the crawl stopped with its frontier intact: an agent's
+`crawl_pause` (`pauseReason: "request"`) or the server shutting down
+(`pauseReason: "shutdown"`). It is the most resumable state there is: a stop decides
+nothing about the work it did not reach, so `crawl_resume` picks up exactly the URLs
+and files nobody has asked about yet.
+
+**`status: "cancelled"`** — an agent's `crawl_cancel`. It is **final**:
+`crawl_resume` refuses it (409). What was crawled stays judgeable and exportable,
+and `neverFetched` says how many URLs were never fetched. A cancel is a decision to
+stop for good; use `crawl_start` for a fresh crawl.
+
+**Pause or cancel?** Pause when you may want the crawl back: to change pacing
+(`crawl_config_set` accepts pacing only while the crawl is queued or paused), to wait out a
+block, or to look at the partial data first. Cancel when the crawl is wrong or no
+longer wanted. `crawl_pause` and `crawl_cancel` answer 200 when the change happened
+now (a `queued` or `paused` crawl) and 202 when it was requested of a `running`
+crawl; read `controlRequested` in `crawl_status` until the status changes (about a
+second, longer during discovery, and up to one fetch deadline of 20 s if the crawl
+is already in its recheck or resource pass). A cancel outranks a pause. `crawl_delete`
+(with `confirm` echoing the crawl id) removes a closed or paused crawl's rows and
+files for good.
+
+**`config_validate` before `crawl_start`.** `config_schema` publishes what a crawl
+accepts, field by field, with defaults, bounds and when each field can change
+(never, only while queued or paused, or always). `config_validate` takes `{config: <the crawl_start
+body>}` and answers `{valid, errors, effective}` without starting anything. Run it
+first and fix every error it names. Pacing (`maxConcurrency`, `perHostDelayMs`) can be
+changed on a paused crawl through `crawl_config_set` with `{crawl, judgement}`; a
+resumed crawl is never faster than the spacing it already earned on the host.
 
 **`crawl_resume` — finish a crawl instead of re-running it.** It takes a crawlId and
 answers `{crawlId, status, queuePosition}` just as `crawl_start` does, because it IS

@@ -272,8 +272,8 @@ answered from, and its verdict is the confidence interval around all of them.
 - **Priority**: Critical | **Requires**: Engine
 - **Engine**: `crawl_status` for the crawl you are auditing, read in full, plus
   `issues_list` for the NOT MEASURED markers. Six questions, in this order:
-  1. **Did the crawl finish, or stop?** `status` is `finished`, `cancelled` or
-     `failed`; `frontier.pending` and `frontier.leased` above zero on a closed crawl
+  1. **Did the crawl finish, or stop?** `status` is `finished`, `paused`, `cancelled` or
+     `failed` (a cancel is an agent's, final, and `neverFetched` says how much it left); `frontier.pending` and `frontier.leased` above zero on a closed crawl
      mean URLs were left unfetched. A crawl that hit `maxPages` finishes with a
      drained budget rather than a drained frontier, and `links.orphan-skipped`
      (CHECK-32) is the finding that fires when it did. `blockedPages` beside

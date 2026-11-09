@@ -1,11 +1,30 @@
 # The Ariadne surface Talos codes against
 
-**Status:** the contract as of Phase 27a (ruleset 0.23.0, migrations 0000–0032,
-22 MCP tools / 22 HTTP routes; every column label in this document is served
+**Status:** the contract as of Phase 27b (ruleset 0.23.0, migrations 0000–0035,
+27 MCP tools / 27 HTTP routes; every column label in this document is served
 under the ruleset version the engine reports — `rules_catalog`'s
 `rulesetVersion`, which the metric-table pass moves).
 `docs/talos-integration.md` says *why* the seam exists and what obligations bind
 it; this document says *what the seam is*.
+
+**What Phase 27b changed here: a crawl can be paused, cancelled and deleted, and
+the crawl's own settings have one schema.** Migrations 0034 (`crawls.control_request`,
+`pause_reason`, `cancelled_at`) and 0035 (every crawl a shutdown had closed
+`cancelled` becomes `paused`/`shutdown`). No rule moves. Five tools and five routes
+are new, and the command tools are nine (§10):
+- **`crawl_pause`, `crawl_cancel`, `crawl_delete`** (§4.1c): the control table, the
+  200/202 rule, and the confirm echo on a delete. Two statuses are new, `paused`
+  (resumable) and `cancelled` (final), so a crawl is `queued | running | paused |
+  finished | failed | cancelled`. A server shutdown is a pause (`pauseReason:
+  "shutdown"`), no longer a `cancelled`.
+- **`config_schema` and `config_validate`** (§4.1b): the `crawl_start` body as JSON
+  Schema, and a dry run of it. One zod schema serves both transports, so a body
+  that fits one fits the other.
+- **`crawl_config_get` / `crawl_config_set` cover the crawl's own fields** (§4.9):
+  `{crawl, judgement}`, with a per-field `mutability`; pacing and budgets change
+  only while the crawl is queued or paused.
+- **`crawl_status` gains `controlRequested`, `pauseReason`, `cancelledAt` and
+  `neverFetched`** (§4.2).
 
 **What Phase 27a changed here: every finding rule has a type and a priority, a
 crawl has a judgement an agent can change, and two overviews.** Ruleset 0.23.0,
@@ -866,9 +885,14 @@ nothing else.
 ## 3. The order of operations
 
 ```
-crawl_start ──▶ crawl_status (poll until status ∉ {queued, running})
+config_validate ──▶ crawl_start ──▶ crawl_status (poll until status ∉ {queued, running})
                     │
-                    ├─▶ crawl_resume   (only if it stopped with work owed: the SAME crawl continuing)
+                    ├─▶ crawl_pause · crawl_cancel (a request while running: poll crawl_status
+                    │                     for the status to change; §4.1c)
+                    │
+                    ├─▶ crawl_resume   (only if it stopped with work owed, or paused: the SAME crawl continuing)
+                    │
+                    ├─▶ crawl_delete   (a closed or paused crawl, with the confirm echo; §4.1c)
                     │
                     ├─▶ crawl_render   (optional; before the rules, if rendered evidence should be judged)
                     │
@@ -906,8 +930,8 @@ webhooks**: polling `crawl_status` is the contract until Talos asks otherwise.
 | `crawl_mark_failed` | `POST /crawls/:id/fail` | — |
 | `crawl_render` | `POST /crawls/:id/render` | `urls[]` (optional; replaces the automatic selection) |
 | `crawl_rules` | `POST /crawls/:id/rules` | — |
-| `crawl_config_get` | `GET /crawls/:id/config` | — (the judgement block, every overridable threshold, the last run's stamp and `judgementStale`, §4.9) |
-| `crawl_config_set` | `PATCH /crawls/:id/config` | `judgement` (required; an RFC 7396 merge-patch of the block, except `findingCap: null`, which is uncapped, §4.9) |
+| `crawl_config_get` | `GET /crawls/:id/config` | — (`crawl` and its `mutability`, the judgement block, every overridable threshold, the last run's stamp and `judgementStale`, §4.9) |
+| `crawl_config_set` | `PATCH /crawls/:id/config` | `crawl` and/or `judgement` (at least one; `crawl` is new values for the whenPaused fields, `judgement` an RFC 7396 merge-patch of the block, except `findingCap: null`, which is uncapped, §4.9) |
 | `config_schema` | `GET /config/schema` | — (the `crawl_start` body as JSON Schema draft 2020-12, and the `rulesetVersion` it names rules from, §4.1b) |
 | `config_validate` | `POST /config/validate` | `config` over MCP (the `crawl_start` arguments to check); the body itself over HTTP. Always 200 with `{valid, errors, effective}`, §4.1b |
 | `robots_get` | `GET /crawls/:id/robots` | — |
@@ -942,7 +966,10 @@ against the service's own `RENDER_CRAWL_FIELDS` table.
 (403, naming it), a legacy host or supplied sitemap off the allowlist (403), a
 `siteUrl` that is not http(s) (400), `perHostDelayMs` under the floor (400,
 naming the floor), `allowPrivate` at any value (400 — it is not a wire field),
-an unknown field (400, naming it). The body is parsed by ONE schema for both
+an unknown field (400, naming it). **A body with several faults gets the schema's
+400 before the allowlist's 403** (since 27b the schema runs first, so a body that
+is both off-allowlist and malformed is a 400 naming the malformed field; fix it and
+the 403 follows). The body is parsed by ONE schema for both
 transports (§4.1b): over MCP a body that does not fit it is refused by the SDK
 before the tool runs, in the schema's own words with the path appended, rather
 than as `{error}` JSON. `config_validate` answers every one of these without
@@ -1041,14 +1068,20 @@ crawl with nothing owed (409, naming what was counted — pending frontier rows,
 expired leases, unasked resource rows); the allowlist (403, naming the host); and
 the row changing state under the call (409 — see the race below).
 
-**A `cancelled` crawl WITH work left is resumable, and that is a ruling.** The
-abort path decides nothing on its way out: URLs never leased stay pending,
-resource rows never reached stay null with no reason, and the 404 probe and the
-resource pass are skipped rather than recorded as having found nothing. So what
-an abort leaves is exactly the set of questions nobody has answered, and an
-operator who changes their mind is the ordinary case. `failed` is here on the
-same terms. A caller who wants the crawl dead rather than continued still has
-`crawl_mark_failed`.
+**A `paused` crawl is always resumable, and a `cancelled` one never is** (Phase 27b
+rulings 5 and 6). The stop path decides nothing on its way out: URLs never leased
+stay pending, resource rows never reached stay null with no reason, and the 404
+probe and the resource pass are skipped rather than recorded as having found
+nothing. So what a pause leaves is exactly the set of questions nobody has
+answered, and the owed-work check below applies only to a `finished` or `failed`
+row (a paused crawl always owes the passes its stop skipped). A `cancelled` crawl is
+refused with a 409 naming `cancelled` and `final`: a cancel is a decision, and
+`crawl_start` is how to crawl the site again. A resume is also refused (409) while
+a pause or cancel is still pending on the row, because carrying the request into a
+queued crawl would drop an agent's cancel or stop the resumed run at once; for a
+crawl whose worker is gone, `crawl_mark_failed` clears the request and the resume
+follows. A caller who wants a crawl dead and not continued uses `crawl_cancel`;
+`crawl_mark_failed` is for an orphan whose worker is gone.
 
 **Pages waiting on the render pass are NOT resumable work.** `render_pending`
 rows are already-crawled pages the selection promoted and the crawl loop never
@@ -1093,6 +1126,60 @@ different server, reaches the totals of a control crawl that was never killed �
 totals of a control that was never killed"; the MCP half is
 `test/api/mcp.test.ts:1607` "finishes a crawl a server was killed in the middle
 of, and keeps its earned spacing").
+
+### 4.1c `crawl_pause` / `crawl_cancel` / `crawl_delete` → stopping a crawl
+
+`crawl_pause` and `crawl_cancel` take `{crawlId}` (`POST /crawls/:id/pause`,
+`POST /crawls/:id/cancel`) and answer `{crawlId, status, controlRequested,
+immediate}`. **HTTP 200 when the change happened now (`immediate: true`), 202 when
+it was requested of a running crawl (`immediate: false`, `status: "running"`,
+`controlRequested` the request).** A 202 is a request, not an outcome: poll
+`crawl_status` until `status` changes. A crawl that finishes before its next poll
+closes `finished` and the request is cleared.
+
+| status (pending request) | pause | cancel |
+|---|---|---|
+| queued | paused (`pauseReason` `request`), immediate; removed from this process's queue | cancelled (`cancelledAt` set), immediate; removed from the queue |
+| running (none) | request `pause`, 202 | request `cancel`, 202 |
+| running (pause) | 202, no change | request `cancel` (a cancel outranks a pause), 202 |
+| running (cancel) | 409 "a cancel is already pending" | 202, no change |
+| paused | 409 "already paused" | cancelled, `pauseReason` cleared, immediate |
+| finished / failed / cancelled | 409 naming the status | 409 naming the status |
+
+A cancel is also refused (409) while this server runs a render pass or a rules run
+over the crawl; neither can be interrupted, so wait for it to answer. A pause
+cannot meet one, because those runs never start on a `queued` or `running` crawl.
+
+**How fast a stop lands.** The loop reads the request once a second
+(`CONTROL_POLL_MS`) and aborts in-flight page fetches, which go back to the
+frontier and are never written as failures (an aborted fetch refunds its attempt).
+So a stop during the page crawl lands in about a second, and the gate measured it
+(`docs/gates/phase-27b.md`). Two things take longer, both disclosed: the **sitemap
+walk and the host probe are not interrupted** (the stop lands when they return, since a
+walk cut part-way would leave a sitemap the rules judge as whole), and **the recheck
+and resource passes keep their contract** (no new request after a stop, the one
+in flight settles and is recorded), so a stop during them can take up to one fetch
+deadline, 20 s.
+
+**What a stop keeps.** A pause keeps the frontier, the per-host spacing the crawl
+earned and its throttle record; it survives a server restart, and nothing starts the
+crawl but `crawl_resume`. A paused crawl can be rendered and judged (looking at
+partial results is a reason to pause). A cancel keeps the pages crawled, which stay
+judgeable and exportable; the 404 probe, the resource pass and the recheck do not run,
+and their checks read as not measured, never as a pass. `crawl_status.neverFetched`
+says how many URLs the crawl never asked for.
+
+**`crawl_delete`** takes `{crawlId, confirm}` (`DELETE /crawls/:id?confirm=<crawlId>`;
+the confirm is a query parameter because DELETE bodies are poorly supported) and
+answers `{crawlId, rows, files}`: the rows removed per table (`crawls: 1`
+included) and `{renders, exports}`, the files removed from this server. **There is no
+undo and no soft delete.** `confirm` must repeat `crawlId` exactly (400 otherwise).
+Refused (409), each naming what holds the crawl: a `queued` or `running` crawl (pause or
+cancel it and wait until it stops), a crawl with a pause or cancel pending, a crawl this
+server renders or judges, and a crawl a worker still holds leases on. An unknown crawl is
+404. It removes only this crawl's own files: a sibling crawl's exports and renders
+survive. A file that cannot be removed is thrown with the paths left on disk, not
+swallowed.
 
 ### 4.1b `config_schema` / `config_validate` → what a crawl accepts, and a dry run
 
@@ -1383,6 +1470,19 @@ robots.txt apart from a forbidding one" and
 robots file actually forbade". Shape regenerated live from `crawl_02ff6f7a`
 (2026-09-08, after migration 0016 — the `recheck` block above is that crawl's
 own answer, not an invented example).
+
+**Lifecycle fields (Phase 27b)**, beside `status`, null unless stated:
+- **`controlRequested`** is `pause` or `cancel` while a request waits on a `running`
+  crawl, and null otherwise. Do not call `crawl_resume` while it is set.
+- **`pauseReason`** is `request` (an agent's `crawl_pause`) or `shutdown` (the server
+  stopped mid-run) on a `paused` crawl, and null otherwise.
+- **`cancelledAt`** is the time of the cancel on a `cancelled` crawl.
+- **`neverFetched`** is the frontier's `pending` count on a `cancelled` crawl: the URLs
+  it never asked for. It is computed, not stored (a cancel is final, so the frontier no
+  longer moves); null on every other status, so "0 never fetched" and "not cancelled" are
+  different answers.
+- **`status`** is one of `queued | running | paused | finished | failed | cancelled`.
+  `finished`, `failed` and `cancelled` are closed; only `cancelled` is final.
 
 ### 4.3 `issues_list` → `{items: IssueGroup[], nextCursor, disabledRules, judgementStale}`
 
@@ -1974,12 +2074,13 @@ siteUrl that is not an http(s) URL rather than dropping the filter";
 listing returns every crawl the engine holds, including other tenants'
 `siteUrl`s, to any caller holding the token.
 
-### 4.9 `crawl_config_get` / `crawl_config_set` → the crawl's judgement
+### 4.9 `crawl_config_get` / `crawl_config_set` → the crawl's settings and judgement
 
-`GET /crawls/:id/config` and `PATCH /crawls/:id/config` (Phase 27a; Deviation 4:
-they arrive in 27a, limited to the `judgement` part, and 27b widens them to the
-crawl's other fields under the same names and routes). Both answer
-`{crawlId, judgement, thresholds, judgedWith, judgementStale}`. The gate crawl,
+`GET /crawls/:id/config` and `PATCH /crawls/:id/config` (Phase 27a, widened in 27b
+from the `judgement` part to the crawl's own fields under the same names and routes).
+Both answer `{crawlId, crawl, mutability, judgement, thresholds, judgedWith,
+judgementStale}`; the paragraphs below describe the judgement half, and the **crawl
+half** follows them. The gate crawl,
 as it came back after its last re-judge (2026-11-08, after migration 0033; 18 of
 the 20 thresholds elided in `thresholds`, every one has the same five keys, and 16
 of the 20 in `judgedWith.thresholds`, which always holds all 20):
@@ -2021,8 +2122,8 @@ of the 20 in `judgedWith.thresholds`, which always holds all 20):
   rendered from these values, and a moved default reads stale `thresholds`. **`judgementStale`** compares it with the
   current block (§4.2).
 
-**`crawl_config_set` takes `{judgement: <merge-patch>}`, an RFC 7396
-merge-patch of the stored block,** and answers what `crawl_config_get` would
+**`crawl_config_set` takes `{crawl?, judgement?: <merge-patch>}` (at least one); its
+`judgement` is an RFC 7396 merge-patch of the stored block,** and answers what `crawl_config_get` would
 answer next. Objects merge key by key and `null` REMOVES a key:
 `{rules: {"title.too-long": null}}` drops that rule's override,
 `{thresholds: {SLOW_MS: null}}` returns `SLOW_MS` to its default, and
@@ -2076,12 +2177,31 @@ the gate crawl answered them, 2026-11-08):
   (400);
 - a rule id the ruleset does not define: `rules.no.such-rule: no rule
   'no.such-rule' in ruleset` (400: the REQUEST is wrong, so it is not a 409);
-- any key beside `judgement` (400; the crawl fields arrive in 27b), and a
-  missing, null or non-object `judgement` (400);
+- a body with neither `crawl` nor `judgement`, a key beside those two, and a null or
+  non-object `judgement` or `crawl` (400);
 - an override emptied by the merge, such as `{rules: {x: {disabled: null}}}` on
   `{x: {disabled: true}}` (400: send `{x: null}` to remove it);
 - **any change while `crawl_rules` is running over the crawl: 409**, `rules are
   running for crawl <id>: …`. Wait for the run to answer, then set it again.
+
+**The crawl half (Phase 27b).** `crawl_config_get.crawl` is every setting the crawl
+was stored with, at its effective value (`findingCap` lives in `judgement`, not here),
+and equals what `config_validate` answered as `effective` for the body that started it.
+`mutability` says, per `crawl` key, when it can change: **`never`** (`siteUrl`,
+`userAgent`, `probeHosts`, `legacyHosts`, `sitemapUrls`, `fetchResources`, and the
+operator-only stored budgets `maxResources`, `maxResourceHosts`, `maxBlockedUrls` and
+`platformProfiles`, which are reported but not in the published schema), **`whenPaused`**
+(`maxPages`, `maxDepth`, `perHostDelayMs`, `maxConcurrency`, `renderBudgetPct`,
+`renderMaxPages`, `renderSamplePerType`; accepted while the crawl is `queued` or
+`paused`, so pause a running crawl, set, then `crawl_resume`) or **`always`**
+(`judgement`). `crawl_config_set`'s `crawl` is a set of NEW VALUES, each validated as
+`crawl_start` validates it; `null` is refused (a crawl field has no unset). Refused,
+nothing written, `crawl` and `judgement` alike: a `never` field (409, naming it), a
+change while the crawl is `running` or closed (409 naming the status), `maxPages`
+below the pages already crawled, `perHostDelayMs` under the politeness floor (400),
+and any change while a render pass or `crawl_rules` runs over the crawl (409).
+**A resumed crawl never runs faster than the spacing it earned** (hard rule 9): the
+per-host record still wins over a lowered `perHostDelayMs`.
 
 **The repair route.** A crawl whose STORED block overrides a rule this ruleset
 does not define (a rule removed by a later release) is a 409 on every surface
@@ -2919,7 +3039,7 @@ Obligation 6, as a checked property rather than a promise:
 - Rule `evidence` is built from crawled rows by the registry's own discipline;
   the wrapper around it is a closed shape.
 
-Four postures a Talos integrator should know about rather than discover:
+Five postures a Talos integrator should know about rather than discover:
 
 1. **`export_crawl`'s file-writing mode answers with an absolute server path.**
    That is the answer to a tool whose job is to write a file, and the audience
@@ -2955,6 +3075,13 @@ Four postures a Talos integrator should know about rather than discover:
    never forwards an unfiltered listing. A per-caller scope is a real change to
    this surface (a tenant key on the crawl row, and a filter on every listing)
    and it is not in Phase 10.
+5. **`crawl_delete` is hard, and its only guard is the confirm echo.** It removes the
+   crawl's rows and its render and export files with no undo and no soft delete, and
+   it refuses a queued or running crawl, a pending request, a crawl in use in this
+   server, and live leases (§4.1c). **Until Phase 28's tenant key, anyone with the
+   token who knows a crawl id can delete it, as for every per-crawl command.** A
+   tenant-facing Talos surface must not expose it without its own ownership check on
+   the id.
 
 ---
 
@@ -2994,10 +3121,11 @@ Four postures a Talos integrator should know about rather than discover:
   contract.
 - **No tenancy isolation on listing** (§9.3) and no per-tenant credentials: one
   bearer token per server.
-- **No writes from a read surface.** Every query path runs read-only; the six
+- **No writes from a read surface.** Every query path runs read-only; the nine
   command tools (`crawl_start`, `crawl_resume`, `crawl_render`, `crawl_rules`,
-  `crawl_mark_failed`, `crawl_config_set`) are the only things that change
-  anything.
+  `crawl_mark_failed`, `crawl_config_set`, `crawl_pause`, `crawl_cancel`,
+  `crawl_delete`) are the only things that change anything. `config_schema` and
+  `config_validate` read, and a dry run starts nothing.
 
 ---
 
