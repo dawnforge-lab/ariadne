@@ -1378,7 +1378,20 @@ async function runToCompletion(
     // so there is nothing to take a first line of: `note` names the outcome,
     // the attempts and the status the host answered with, and it is what the
     // Phase 17 gate could only read in a log.
-    await settleControl(watcher);
+    //
+    // A control poll that ALSO failed is not allowed to replace that sentence
+    // (27b): `settleControl` would throw the poll failure alone and the robots
+    // note would be lost. Both go up together, as `execute` combines them, and
+    // the aggregate's first line — what `execute` writes to `failure_reason` —
+    // carries the robots note.
+    await watcher.stop();
+    const pollFailure = watcher.failure();
+    if (pollFailure !== null) {
+      throw new AggregateError(
+        [new Error(note), pollFailure],
+        `crawl ${crawlId} failed: ${note}; and its control poll failed too`,
+      );
+    }
     const closed = await closeCrawl(db, crawlId, "failed", crawled, null, note);
     return summarise(
       db,
@@ -2911,7 +2924,15 @@ async function closeCrawl(
   };
 
   if (outcome !== "stopped") {
-    await db
+    // A FAILED CLOSE IS CONDITIONED ON `running` (27b). Every failed close in
+    // the loop happens while the run holds the row — the robots refusal, and
+    // `execute`'s catch for an error on the way out. An error that comes AFTER
+    // a successful close (a `summarise` read that throws once the row says
+    // `cancelled`) must not re-close the row `failed`: that would clear
+    // `cancelled_at` and make a final cancel resumable. Zero rows moved is
+    // thrown, naming what the row already says, so `execute` surfaces it
+    // beside the original error rather than in place of it.
+    const rows = await db
       .update(crawls)
       .set({
         ...common,
@@ -2923,7 +2944,24 @@ async function closeCrawl(
         pauseReason: null,
         cancelledAt: null,
       })
-      .where(eq(crawls.id, crawlId));
+      .where(
+        outcome === "failed"
+          ? and(eq(crawls.id, crawlId), eq(crawls.status, "running"))
+          : eq(crawls.id, crawlId),
+      )
+      .returning({ id: crawls.id });
+    if (outcome === "failed" && rows.length === 0) {
+      const [now] = await db
+        .select({ status: crawls.status })
+        .from(crawls)
+        .where(eq(crawls.id, crawlId));
+      throw new Error(
+        now === undefined
+          ? `closeCrawl: crawl ${crawlId}: the crawls row is gone; cannot close it failed`
+          : `closeCrawl: crawl ${crawlId} is already '${now.status}', not 'running': its row ` +
+              `was closed before this failure could be recorded, and it is not overwritten`,
+      );
+    }
     return { status: outcome, pauseReason: null };
   }
 

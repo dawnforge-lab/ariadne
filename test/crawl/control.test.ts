@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { createServer, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import { and, eq, isNotNull, isNull, sql } from "drizzle-orm";
@@ -658,4 +658,115 @@ describe("pause/resume equivalence on the fixture site (gate 27b clause 1)", () 
     expect(setA.length).toBeGreaterThan(10);
     expect(setB).toEqual(setA);
   }, 240_000);
+});
+
+/**
+ * THE AFTER-CLOSE FAULT (27b final M3). `frontierCounts` is the real function,
+ * unchanged, except that while a test arms it for a crawl id it throws ONCE,
+ * on its first call after that crawl's row has left `running` — which is
+ * `summarise`, the first read after the close. One-shot, so `execute`'s own
+ * failed-close path reads the frontier normally and its UPDATE is what the
+ * test watches. Hoisted, like every `vi.mock`, so it sits at the end of the
+ * file without moving any line above it.
+ */
+const afterClose = vi.hoisted(() => ({ armed: null as string | null, fired: false }));
+
+vi.mock("../../src/crawl/frontier.js", async (importOriginal) => {
+  const real = await importOriginal<typeof import("../../src/crawl/frontier.js")>();
+  const { crawls: crawlsTable } = await import("../../src/db/schema.js");
+  const { eq: eqOp } = await import("drizzle-orm");
+  return {
+    ...real,
+    frontierCounts: async (...args: Parameters<typeof real.frontierCounts>) => {
+      const [database, crawlId] = args;
+      if (afterClose.armed === crawlId && !afterClose.fired) {
+        const [row] = await database
+          .select({ status: crawlsTable.status })
+          .from(crawlsTable)
+          .where(eqOp(crawlsTable.id, crawlId));
+        if (row !== undefined && row.status !== "running") {
+          afterClose.fired = true;
+          throw new Error(`injected fault: frontierCounts after crawl ${crawlId} closed '${row.status}'`);
+        }
+      }
+      return await real.frontierCounts(...args);
+    },
+  };
+});
+
+describe("a failure after a stopped close (27b final M3)", () => {
+  it("does not re-close a cancelled crawl failed: the row stays cancelled, and the original error still surfaces", async () => {
+    const { id, run } = await startStalled();
+    afterClose.armed = id;
+    afterClose.fired = false;
+    try {
+      expect(await setControlRequest(db, id, "cancel")).toBe(true);
+      const error = await run.then(
+        () => {
+          throw new Error("the run resolved; the injected fault never fired");
+        },
+        (e: unknown) => e,
+      );
+      expect(afterClose.fired).toBe(true);
+      expect(error).toBeInstanceOf(AggregateError);
+      const message = String((error as Error).message);
+      expect(message).toContain(id);
+      const inner = (error as AggregateError).errors.map((e: unknown) => String((e as Error).message));
+      expect(inner.some((m) => m.includes("injected fault"))).toBe(true);
+      expect(inner.some((m) => m.includes("already") && m.includes("cancelled"))).toBe(true);
+
+      const row = await crawlRow(id);
+      expect(row.status).toBe("cancelled");
+      expect(row.cancelledAt).not.toBeNull();
+      expect(row.failureReason).toBeNull();
+    } finally {
+      afterClose.armed = null;
+    }
+  }, 60_000);
+});
+
+describe("a robots-unreachable close while the control poll has failed (27b final M7)", () => {
+  let robotsDown: Server;
+  let robotsDownBase: string;
+
+  beforeAll(async () => {
+    // robots.txt answers 503 after 800 ms, every try: three tries put the
+    // unreachable verdict well after the watcher's first failed poll.
+    robotsDown = createServer((_req, res) => {
+      setTimeout(() => {
+        res.writeHead(503, { "content-type": "text/plain" });
+        res.end("down");
+      }, 800);
+    });
+    robotsDownBase = await listen(robotsDown);
+  });
+
+  afterAll(async () => {
+    robotsDown.closeAllConnections();
+    await new Promise<void>((r) => robotsDown.close(() => r()));
+  });
+
+  it("keeps the robots note in the failure reason beside the poll failure", async () => {
+    const run = runCrawl(db, stallConfig({ siteUrl: `${robotsDownBase}/` }));
+    run.catch(() => undefined); // asserted below; never left unhandled
+    const id = await newCrawlOf(`${robotsDownBase}/`);
+    // A value this engine never writes: the watcher's next poll fails on it.
+    await db.update(crawls).set({ controlRequest: "stop" }).where(eq(crawls.id, id));
+
+    const error = await run.then(
+      () => {
+        throw new Error("the run resolved");
+      },
+      (e: unknown) => e,
+    );
+    const message = String((error as Error).message);
+    expect(message).toContain("robots.txt unreachable");
+    const row = await crawlRow(id);
+    expect(row.status).toBe("failed");
+    expect(row.failureReason).toContain("robots.txt unreachable");
+    expect(row.failureReason).toContain("control poll");
+    expect(error).toBeInstanceOf(AggregateError);
+    const inner = (error as AggregateError).errors.map((e: unknown) => String((e as Error).message));
+    expect(inner.some((m) => m.includes('"stop"'))).toBe(true);
+  }, 60_000);
 });
