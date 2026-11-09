@@ -606,7 +606,7 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "flipped 5.3 s after the request). A stop during the sitemap walk waits for " +
         "the walk to finish, and one during the recheck or resource passes lets " +
         "the request in flight settle (up to 20 s). A crawl that finishes first " +
-        "closes 'finished' instead. Poll crawl_status until status is 'paused' " +
+        "closes 'finished' instead. Then poll crawl_status until status is 'paused' " +
         "(pauseReason 'request').\n\n" +
         "A pause keeps everything a resume needs: the frontier, the per-host " +
         "spacing the crawl earned and its throttle record. A paused crawl stays " +
