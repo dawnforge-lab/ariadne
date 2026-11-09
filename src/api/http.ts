@@ -457,11 +457,11 @@ function buildRoutes(): Route[] {
       pattern: ["crawls", id, "config"],
       query: [],
       // The body is the patch, validated whole by the service: a missing body,
-      // a key other than `judgement`, or a block the ruleset cannot apply is a
+      // a key other than `crawl` and `judgement`, or a block the ruleset cannot apply is a
       // 400 naming what was wrong, and nothing is written.
       handler: async (service, ctx) => ({
         status: 200,
-        body: await service.setCrawlJudgement(param(ctx, "id"), ctx.body),
+        body: await service.setCrawlConfig(param(ctx, "id"), ctx.body),
       }),
     },
     // THE QUERY SURFACE. Every one of these is a GET whose whole body is

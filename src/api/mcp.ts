@@ -792,11 +792,19 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
   server.registerTool(
     named("crawl_config_get"),
     {
-      title: "How a crawl is judged",
+      title: "A crawl's settings and how it is judged",
       description:
-        "A crawl's JUDGEMENT — what you have changed about how its findings are " +
-        "judged — and what its last rules run used. Answers {crawlId, judgement, " +
-        "thresholds, judgedWith, judgementStale}.\n\n" +
+        "A crawl's stored settings and its JUDGEMENT — what you have changed about " +
+        "how its findings are judged — and what its last rules run used. Answers " +
+        "{crawlId, crawl, mutability, judgement, thresholds, judgedWith, " +
+        "judgementStale}.\n\n" +
+        "crawl is every setting the crawl was stored with, at its effective value " +
+        "(findingCap is in judgement, not here); it is what config_validate " +
+        "answered as effective for the body that started it. mutability says, per " +
+        "crawl key, whether it can change after the crawl starts: never, " +
+        "whenPaused (only while the crawl is queued or paused) or always; the " +
+        "operator's own budgets (maxResources, maxResourceHosts, maxBlockedUrls, " +
+        "platformProfiles) are never, and judgement is always.\n\n" +
         "judgement is the crawl's block, {} when nothing is set: " +
         "{rules?: {[ruleId]: {disabled?: true, type?, priority?}}, " +
         "thresholds?: {[name]: number}, findingCap?: number | null}. findingCap " +
@@ -818,10 +826,23 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
   server.registerTool(
     named("crawl_config_set"),
     {
-      title: "Change how a crawl is judged",
+      title: "Change a crawl's settings or how it is judged",
       description:
-        "Change a crawl's judgement block and answer the result, exactly as " +
-        "crawl_config_get does. judgement is a MERGE-PATCH (RFC 7396) of the " +
+        "Change a crawl's settings (crawl) and/or its judgement block, and answer " +
+        "the result exactly as crawl_config_get does. Send at least one.\n\n" +
+        "crawl is a set of NEW VALUES, {maxPages: 900}: each key is validated as " +
+        "crawl_start validates it, and null is refused — a crawl field has no " +
+        "unset. Only the fields crawl_config_get marks whenPaused can be changed " +
+        "(maxPages, maxDepth, perHostDelayMs, maxConcurrency, renderBudgetPct, " +
+        "renderMaxPages, renderSamplePerType), and only while the crawl is queued " +
+        "or paused: pause a running crawl with crawl_pause, set, then " +
+        "crawl_resume. A never field (siteUrl, userAgent, the host lists, " +
+        "fetchResources) is refused 409; maxPages cannot go below the pages " +
+        "already crawled; perHostDelayMs keeps its floor, and a resumed crawl " +
+        "never runs faster than the spacing it earned. A crawl change is also " +
+        "refused while a render pass or crawl_rules is running over the crawl. " +
+        "A refused request writes nothing, crawl and judgement alike.\n\n" +
+        "judgement is a MERGE-PATCH (RFC 7396) of the " +
         "stored block: objects merge key by key, and null REMOVES a key — " +
         "{rules: {'title.too-long': null}} drops that rule's override, " +
         "{thresholds: {SLOW_MS: null}} returns SLOW_MS to its default, " +
@@ -846,8 +867,16 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "Nothing is written when a change is refused.",
       inputSchema: z.strictObject({
         crawlId: crawlIdField(),
+        crawl: z
+          .record(z.string(), z.unknown())
+          .optional()
+          .describe(
+            "New values for whenPaused crawl settings, e.g. {maxPages: 900, " +
+              "perHostDelayMs: 500}. Only while the crawl is queued or paused.",
+          ),
         judgement: z
           .record(z.string(), z.unknown())
+          .optional()
           .describe(
             "The merge-patch to apply to the crawl's judgement block: {rules?, " +
               "thresholds?, findingCap?}. Validated against the ruleset after merging; " +
@@ -855,8 +884,13 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
           ),
       }),
     },
-    async ({ crawlId, judgement }) =>
-      run("crawl_config_set", () => service.setCrawlJudgement(crawlId, { judgement })),
+    async ({ crawlId, crawl, judgement }) =>
+      run("crawl_config_set", () =>
+        service.setCrawlConfig(crawlId, {
+          ...(crawl === undefined ? {} : { crawl }),
+          ...(judgement === undefined ? {} : { judgement }),
+        }),
+      ),
   );
 
   server.registerTool(

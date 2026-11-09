@@ -191,7 +191,7 @@ beforeAll(async () => {
     config: {
       token: TOKEN,
       allowedDomains: ["127.0.0.1"],
-      crawlDefaults: { allowPrivate: true, probeHosts: false, perHostDelayMs: 0 },
+      crawlDefaults: { allowPrivate: true, probeHosts: false, perHostDelayMs: 0, maxResources: 1000 },
       exportDir,
       log: () => {},
     },
@@ -430,7 +430,7 @@ describe("crawl_config_set — PATCH /crawls/:id/config", () => {
   it("refuses every key other than judgement", async () => {
     const res = await patch(judgedId, { maxPages: 10 });
     expect(res.status).toBe(400);
-    expect(String(res.body["error"])).toContain("only `judgement` can be set");
+    expect(String(res.body["error"])).toContain("only `crawl` and `judgement` can be set");
     expect(String(res.body["error"])).toContain("maxPages");
     // Beside a judgement too: nothing is half-applied.
     const both = await patch(judgedId, {
@@ -754,5 +754,197 @@ describe("disable, judge, re-enable", () => {
 
     // The stored aggregate is the run's, not the reader's.
     expect(await siteHealth(walkId)).toEqual(disabledHealth);
+  });
+});
+
+/**
+ * Phase 27b T7: `crawl_config_get` shows the crawl part and `crawl_config_set`
+ * changes it while the crawl is queued or paused. The queue and pacing cases
+ * (a queued crawl's change applying, a resume never beating earned spacing, a
+ * render pass in flight) are in lifecycle.test.ts, which has the running site.
+ */
+describe("the crawl part of crawl_config_get / crawl_config_set (27b T7)", () => {
+  const seedStatus = async (
+    status: string,
+    config: Record<string, unknown> = {},
+    extra: Partial<typeof crawls.$inferInsert> = {},
+  ): Promise<string> => {
+    const id = `crawl_config_part_${randomUUID()}`;
+    await db.insert(crawls).values({
+      id,
+      siteUrl: `${SITE}/`,
+      config: {
+        siteUrl: `${SITE}/`,
+        maxPages: 100,
+        maxDepth: 5,
+        userAgent: "AriadneBot-test",
+        perHostDelayMs: 1000,
+        maxConcurrency: 4,
+        probeHosts: false,
+        ...config,
+      },
+      discovery: mkDiscovery(),
+      rulesetVersion: "test",
+      status,
+      ...(status === "paused" ? { pauseReason: "request" } : {}),
+      pagesCrawled: 5,
+      ...extra,
+    });
+    createdCrawls.push(id);
+    return id;
+  };
+
+  const storedConfig = async (id: string): Promise<Record<string, unknown>> =>
+    (await storedRow(id)).config as Record<string, unknown>;
+
+  it("shows every stored key with its mutability, and equals what config_validate promised", async () => {
+    const body = { siteUrl: `${site}/`, maxPages: 3, findingCap: 50 };
+    const checked = await call("POST", "/config/validate", body);
+    expect(checked.status).toBe(200);
+    const { judgement: _judgement, ...effective } = checked.body["effective"] as Record<string, unknown>;
+
+    const started = await call("POST", "/crawls", body);
+    expect(started.status).toBe(202);
+    const id = String(started.body["crawlId"]);
+    createdCrawls.push(id);
+
+    const got = await call("GET", `/crawls/${id}/config`);
+    expect(got.status).toBe(200);
+    const { findingCap, ...storedLess } = await storedConfig(id);
+    expect(findingCap).toBe(50);
+    // The equality chain (Ruling 1): validate's effective, the stored row and
+    // the read all say the same thing.
+    expect(got.body["crawl"]).toEqual(storedLess);
+    const { findingCap: _cap, ...effectiveLess } = effective;
+    expect(got.body["crawl"]).toEqual(effectiveLess);
+    expect(got.body["crawl"]).not.toHaveProperty("findingCap");
+    expect((got.body["judgement"] as Record<string, unknown>)["findingCap"]).toBe(50);
+
+    const crawl = got.body["crawl"] as Record<string, unknown>;
+    expect(crawl["maxPages"]).toBe(3);
+    expect(crawl["maxResources"]).toBe(1000);
+    const mutability = got.body["mutability"] as Record<string, string>;
+    expect(mutability["siteUrl"]).toBe("never");
+    expect(mutability["maxPages"]).toBe("whenPaused");
+    expect(mutability["perHostDelayMs"]).toBe("whenPaused");
+    expect(mutability["judgement"]).toBe("always");
+    expect(mutability["maxResources"]).toBe("never");
+    for (const key of Object.keys(crawl)) expect(mutability, key).toHaveProperty(key);
+    expect(mutability).not.toHaveProperty("findingCap");
+
+    // Let the run close before the suite deletes its row.
+    for (let i = 0; i < 600; i += 1) {
+      const status = (await call("GET", `/crawls/${id}`)).body["status"];
+      if (status !== "queued" && status !== "running") break;
+      await new Promise((r) => setTimeout(r, 50));
+    }
+  }, 60_000);
+
+  it("changes maxPages on a paused crawl, stores it and reports it", async () => {
+    const id = await seedStatus("paused");
+    const res = await patch(id, { crawl: { maxPages: 900 } });
+    expect(res.status).toBe(200);
+    expect((res.body["crawl"] as Record<string, unknown>)["maxPages"]).toBe(900);
+    expect((await storedConfig(id))["maxPages"]).toBe(900);
+    expect((await storedConfig(id))["maxDepth"]).toBe(5);
+    const viaMcp = await tool("crawl_config_set", { crawlId: id, crawl: { maxDepth: 7 } });
+    expect(viaMcp.isError).toBe(false);
+    expect((viaMcp.body["crawl"] as Record<string, unknown>)["maxDepth"]).toBe(7);
+    expect((await call("GET", `/crawls/${id}/config`)).body["crawl"]).toEqual(viaMcp.body["crawl"]);
+  });
+
+  it("changes a queued crawl's settings too", async () => {
+    const id = await seedStatus("queued");
+    const res = await patch(id, { crawl: { perHostDelayMs: 500, maxConcurrency: 2 } });
+    expect(res.status).toBe(200);
+    expect(await storedConfig(id)).toMatchObject({ perHostDelayMs: 500, maxConcurrency: 2 });
+  });
+
+  it("refuses a whenPaused field on a running, finished or failed crawl, naming status and mutability", async () => {
+    for (const status of ["running", "finished", "failed"]) {
+      const id = await seedStatus(status);
+      const res = await patch(id, { crawl: { maxPages: 900 } });
+      expect(res.status, status).toBe(409);
+      expect(String(res.body["error"]), status).toContain(status);
+      expect(String(res.body["error"]), status).toContain("whenPaused");
+      expect((await storedConfig(id))["maxPages"], status).toBe(100);
+    }
+  });
+
+  it("refuses a never field with 409", async () => {
+    const id = await seedStatus("paused");
+    const res = await patch(id, { crawl: { siteUrl: "https://elsewhere.example/" } });
+    expect(res.status).toBe(409);
+    expect(String(res.body["error"])).toContain("never mutable");
+    expect(String(res.body["error"])).toContain("(mutability: never)");
+    expect((await storedConfig(id))["siteUrl"]).toBe(`${SITE}/`);
+  });
+
+  it("refuses maxPages below the pages already crawled, naming both numbers", async () => {
+    const id = await seedStatus("paused");
+    const res = await patch(id, { crawl: { maxPages: 4 } });
+    expect(res.status).toBe(400);
+    expect(String(res.body["error"])).toContain("4");
+    expect(String(res.body["error"])).toContain("5 pages");
+    expect((await patch(id, { crawl: { maxPages: 5 } })).status).toBe(200);
+  });
+
+  it("refuses a bad value with start's own message, a null, an operator-only key and an unknown one", async () => {
+    const id = await seedStatus("paused");
+    const floor = await patch(id, { crawl: { perHostDelayMs: 100 } });
+    expect(floor.status).toBe(400);
+    expect(String(floor.body["error"])).toContain("politeness floor of 250ms");
+    const asStart = await call("POST", "/config/validate", { siteUrl: `${site}/`, perHostDelayMs: 100 });
+    expect(floor.body["error"]).toBe(
+      ((asStart.body["errors"] as { message: string }[])[0] as { message: string }).message,
+    );
+
+    const nulled = await patch(id, { crawl: { maxPages: null } });
+    expect(nulled.status).toBe(400);
+    expect(String(nulled.body["error"])).toContain("no unset");
+
+    const operator = await patch(id, { crawl: { maxResources: 5 } });
+    expect(operator.status).toBe(400);
+    expect(String(operator.body["error"])).toContain("set by the operator, not over the API");
+
+    expect((await patch(id, { crawl: { nope: 1 } })).status).toBe(400);
+    expect((await patch(id, { crawl: { allowPrivate: true } })).status).toBe(400);
+    expect((await patch(id, { crawl: { findingCap: 5 } })).status).toBe(400);
+    expect((await patch(id, { crawl: { maxPages: "9" } })).status).toBe(400);
+    expect((await patch(id, { crawl: { renderMaxPages: -1 } })).status).toBe(400);
+    expect((await patch(id, { crawl: "maxPages" })).status).toBe(400);
+    expect((await patch(id, { other: {} })).status).toBe(400);
+    expect((await patch(id, {})).status).toBe(400);
+    expect((await storedConfig(id))["maxPages"]).toBe(100);
+  });
+
+  it("writes nothing when the judgement half is refused: crawl and judgement are one transaction", async () => {
+    const id = await seedStatus("paused");
+    const before = await storedRow(id);
+    const res = await patch(id, {
+      crawl: { maxPages: 900 },
+      judgement: { rules: { "no.such": { disabled: true } } },
+    });
+    expect(res.status).toBe(400);
+    expect(await storedRow(id)).toEqual(before);
+  });
+
+  it("applies the crawl and judgement halves together", async () => {
+    const id = await seedStatus("paused");
+    const res = await patch(id, {
+      crawl: { maxPages: 900 },
+      judgement: { rules: { "title.too-long": { disabled: true } }, findingCap: 25 },
+    });
+    expect(res.status).toBe(200);
+    expect(await storedConfig(id)).toMatchObject({ maxPages: 900, findingCap: 25 });
+    expect((await storedRow(id)).judgement).toEqual({
+      rules: { "title.too-long": { disabled: true } },
+    });
+  });
+
+  it("still changes a running crawl's judgement alone", async () => {
+    const id = await seedStatus("running");
+    const res = await patch(id, { judgement: { thresholds: { SLOW_MS: 900 } } });
+    expect(res.status).toBe(200);
   });
 });

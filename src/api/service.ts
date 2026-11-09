@@ -170,12 +170,16 @@ import {
   API_CRAWL_DEFAULTS,
   CRAWL_FIELDS,
   MAX_SUPPLIED_SITEMAPS,
+  OPERATOR_ONLY_FIELDS,
   parseStartBody,
   publishedSchema,
   serviceCodeOf,
   startBodySchema,
   tooManySitemaps,
+  unknownField,
   type ConfigError,
+  type CrawlField,
+  type Mutability,
 } from "./config-schema.js";
 import {
   CSV_VIEWS,
@@ -973,6 +977,20 @@ export interface ThresholdSetting {
  */
 export interface CrawlConfigOut {
   crawlId: string;
+  /**
+   * The crawl's stored settings, less `findingCap` (which is the judgement's and
+   * appears there): every key of `config_jsonb` at its effective value, the
+   * operator-only ones included. The same object `config_validate` answers as
+   * `effective` for the body that started the crawl.
+   */
+  crawl: Record<string, unknown>;
+  /**
+   * Whether each `crawl` key can change after the crawl starts, and
+   * `judgement: "always"`. A key the wire does not know (the operator-only
+   * `maxResources`, `maxResourceHosts`, `maxBlockedUrls`, `platformProfiles`) is
+   * `never`.
+   */
+  mutability: Record<string, Mutability>;
   /**
    * The crawl's current block, `{}` when nothing is set. `findingCap` appears
    * when the crawl's config carries one — null is uncapped — and is absent when
@@ -3813,15 +3831,26 @@ export class ApiService {
    * One read of the crawl row (`loadJudgementView`), so the block, the stamp
    * and the staleness describe one instant. Refuses as the read surfaces do: a
    * stored override of a rule this ruleset lacks is a 409 naming it, which
-   * `setCrawlJudgement` is the way out of.
+   * `setCrawlConfig` is the way out of.
    */
   async getCrawlConfig(crawlId: string): Promise<CrawlConfigOut> {
     return crawlConfigOf(crawlId, await this.judgementView(crawlId));
   }
 
   /**
-   * Change a crawl's judgement: `crawl_config_set` and
-   * `PATCH /crawls/:id/config`, body `{judgement: {...}}`.
+   * Change a crawl's config: `crawl_config_set` and `PATCH /crawls/:id/config`,
+   * body `{crawl?: {...}, judgement?: {...}}`, at least one, applied in ONE
+   * transaction — a refusal in either half writes nothing.
+   *
+   * `crawl` is a shallow set of new values, each checked with its field's own
+   * schema from `CRAWL_FIELDS` (start's messages), and only a `whenPaused`
+   * field on a queued or paused crawl may change (`never` is a CONFLICT, as is
+   * the wrong status; `maxPages` may not drop below `pages_crawled`). A `crawl`
+   * change is refused while a render pass or rules run holds the crawl
+   * (`refuseWhileBusy`); the merged config must pass `validateCrawlConfig`.
+   * The queue runner re-reads the stored config when it dequeues, and a resume
+   * reads it again, so a change here is what the next run uses (the earned
+   * spacing in `host_spacing_jsonb` still wins, rule 9).
    *
    * `judgement` is an RFC 7396 merge-patch (`mergePatch`) of the stored block:
    * objects merge key by key, and a `null` removes a key, so
@@ -3845,8 +3874,10 @@ export class ApiService {
    *
    * ## Refusals
    *
-   *  - any key other than `judgement`: VALIDATION (crawl fields are Phase 27b);
-   *  - a `judgement` that is absent, null or not an object: VALIDATION — a null
+   *  - any key other than `crawl` and `judgement`: VALIDATION;
+   *  - a body with neither `crawl` nor `judgement`, or a `crawl` null, a field with
+   *    a null value, an unknown or operator-only field: VALIDATION;
+   *  - a `judgement` that is null or not an object: VALIDATION — a null
    *    here would mean "delete the whole block", including a cap whose null is
    *    a value, so clearing is spelled per section instead;
    *  - a merged block `parseJudgement` refuses: VALIDATION, naming the path;
@@ -3862,38 +3893,45 @@ export class ApiService {
    * crawl between that check and this write reads either block, and stamps the
    * one it read, so `judgementStale` reports the outcome truthfully either way.
    */
-  async setCrawlJudgement(crawlId: string, patch: unknown): Promise<CrawlConfigOut> {
+  async setCrawlConfig(crawlId: string, patch: unknown): Promise<CrawlConfigOut> {
     if (!isPlainObject(patch)) {
       throw new ServiceError("VALIDATION", "request body must be a JSON object");
     }
-    const others = Object.keys(patch).filter((key) => key !== "judgement");
+    const others = Object.keys(patch).filter((key) => key !== "crawl" && key !== "judgement");
     if (others.length > 0) {
       throw new ServiceError(
         "VALIDATION",
-        "only `judgement` can be set; crawl fields arrive in Phase 27b " +
-          `(refused: ${others.map(clip).join(", ")})`,
+        `only \`crawl\` and \`judgement\` can be set (refused: ${others.map(clip).join(", ")})`,
       );
     }
+    const crawlPatch = patch["crawl"];
     const judgementPatch = patch["judgement"];
-    if (judgementPatch === undefined) {
+    if (crawlPatch === undefined && judgementPatch === undefined) {
       throw new ServiceError(
         "VALIDATION",
-        "the body must carry `judgement`: the merge-patch to apply to the crawl's judgement block",
+        "the body must carry `crawl` (new values for crawl settings) or `judgement` (the " +
+          "merge-patch to apply to the crawl's judgement block), or both",
       );
     }
-    if (!isPlainObject(judgementPatch)) {
+    if (judgementPatch !== undefined && !isPlainObject(judgementPatch)) {
       throw new ServiceError(
         "VALIDATION",
         "judgement must be a JSON object (a merge-patch of the block); to clear every " +
           'override send {"rules": null, "thresholds": null}',
       );
     }
-    this.refuseWhileJudging(crawlId);
+    const crawlSet = crawlPatch === undefined ? null : this.parseCrawlPatch(crawlPatch);
+    this.refuseWhileConfigBusy(crawlId, crawlSet !== null);
 
-    const { findingCap: capPatch, ...blockPatch } = judgementPatch;
+    const { findingCap: capPatch, ...blockPatch } = judgementPatch ?? {};
     await this.db.transaction(async (tx) => {
       const rows = await tx
-        .select({ config: crawls.config, judgement: crawls.judgement })
+        .select({
+          config: crawls.config,
+          judgement: crawls.judgement,
+          status: crawls.status,
+          pagesCrawled: crawls.pagesCrawled,
+        })
         .from(crawls)
         .where(eq(crawls.id, crawlId))
         .limit(1)
@@ -3901,43 +3939,165 @@ export class ApiService {
       const row = rows[0];
       if (row === undefined) throw new ServiceError("NOT_FOUND", `no such crawl '${clip(crawlId)}'`);
 
-      // The stored block is what the patch merges onto, so it must be one.
-      // The ONE refusal let through is an override of a rule this ruleset no
-      // longer defines: removing it is the repair the read surfaces point
-      // here for, and the merged block is parsed below either way — an
-      // override the patch leaves in place is refused there, naming it.
-      try {
-        readStoredJudgement(row.judgement, crawlId, this.registry);
-      } catch (error) {
-        if (!(error instanceof JudgementError && error.reason === "unknown-rule")) throw error;
-      }
+      let config: Record<string, unknown> | undefined = undefined;
 
-      const merged = mergePatch(row.judgement ?? {}, blockPatch) as Record<string, unknown>;
-      const block = this.parseJudgementInput(
-        capPatch === undefined ? merged : { ...merged, findingCap: capPatch },
-      );
-
-      let config: unknown = undefined;
-      if (block.findingCap !== undefined) {
-        // Read through the same validation every reader of the key uses, so a
-        // config this cannot read is refused rather than overwritten.
+      if (crawlSet !== null) {
+        const wire: Record<string, { mutable: Mutability } | undefined> = CRAWL_FIELDS;
+        for (const key of Object.keys(crawlSet)) {
+          const mutable = wire[key]?.mutable;
+          if (mutable === "never") {
+            throw new ServiceError(
+              "CONFLICT",
+              `field '${key}' is never mutable after a crawl starts (mutability: never)`,
+            );
+          }
+          if (mutable !== "whenPaused") {
+            throw new Error(`crawl_config_set: field '${key}' has mutability ${String(mutable)}`);
+          }
+          if (row.status !== "queued" && row.status !== "paused") {
+            throw new ServiceError(
+              "CONFLICT",
+              `field '${key}' can change only while the crawl is queued or paused ` +
+                `(mutability: whenPaused); crawl ${crawlId} is ${row.status}. ` +
+                "Pause it with crawl_pause, set the field, then crawl_resume",
+            );
+          }
+        }
+        if (!isPlainObject(row.config)) {
+          throw new ServiceError("CONFLICT", `crawl ${crawlId}: stored config is not readable`);
+        }
+        const maxPages = crawlSet["maxPages"];
+        if (typeof maxPages === "number" && maxPages < row.pagesCrawled) {
+          throw new ServiceError(
+            "VALIDATION",
+            `field 'maxPages' is ${maxPages}, below the ${row.pagesCrawled} pages this crawl ` +
+              "has already crawled; a budget cannot be lowered past what was spent",
+          );
+        }
+        const merged = { ...row.config, ...crawlSet };
+        // The merged config is validated as a stored one is read — with the
+        // operator's `allowPrivate`, which is never stored — and written back
+        // through the same strip a start applies.
+        let readable: CrawlConfig;
         try {
-          storedFindingCap(row.config, crawlId);
+          readable = parseStoredConfig(merged, crawlId);
         } catch (error) {
           throw new ServiceError("CONFLICT", messageOf(error));
         }
-        config = { ...(row.config as Record<string, unknown>), findingCap: block.findingCap };
+        try {
+          validateCrawlConfig({
+            ...readable,
+            allowPrivate: this.config.crawlDefaults?.allowPrivate === true,
+          });
+        } catch (error) {
+          throw new ServiceError("VALIDATION", messageOf(error));
+        }
+        config = merged;
+      }
+
+      let judgementWrite: { judgement: ReturnType<typeof storableBlock> } | null = null;
+      if (judgementPatch !== undefined) {
+        // The stored block is what the patch merges onto, so it must be one.
+        // The ONE refusal let through is an override of a rule this ruleset no
+        // longer defines: removing it is the repair the read surfaces point
+        // here for, and the merged block is parsed below either way — an
+        // override the patch leaves in place is refused there, naming it.
+        try {
+          readStoredJudgement(row.judgement, crawlId, this.registry);
+        } catch (error) {
+          if (!(error instanceof JudgementError && error.reason === "unknown-rule")) throw error;
+        }
+
+        const merged = mergePatch(row.judgement ?? {}, blockPatch) as Record<string, unknown>;
+        const block = this.parseJudgementInput(
+          capPatch === undefined ? merged : { ...merged, findingCap: capPatch },
+        );
+
+        if (block.findingCap !== undefined) {
+          // Read through the same validation every reader of the key uses, so a
+          // config this cannot read is refused rather than overwritten.
+          try {
+            storedFindingCap(row.config, crawlId);
+          } catch (error) {
+            throw new ServiceError("CONFLICT", messageOf(error));
+          }
+          config = {
+            ...(config ?? (row.config as Record<string, unknown>)),
+            findingCap: block.findingCap,
+          };
+        }
+        judgementWrite = { judgement: storableBlock(block) };
       }
 
       // Again, synchronously before the write: the check above was before an
-      // `await`, and a run may have claimed the crawl since.
-      this.refuseWhileJudging(crawlId);
+      // `await`, and a pass may have claimed the crawl since.
+      this.refuseWhileConfigBusy(crawlId, crawlSet !== null);
       await tx
         .update(crawls)
-        .set({ judgement: storableBlock(block), ...(config === undefined ? {} : { config }) })
+        .set({
+          ...(judgementWrite ?? {}),
+          ...(config === undefined ? {} : { config: storableConfig(config as unknown as CrawlConfig) }),
+        })
         .where(eq(crawls.id, crawlId));
     });
     return await this.getCrawlConfig(crawlId);
+  }
+
+  /**
+   * The `crawl` half of a config patch, parsed: every key a field the wire
+   * knows, every value that field's own schema accepts (the messages are
+   * start's), no null. The lifecycle and budget checks need the crawl row and
+   * are made in the transaction.
+   */
+  private parseCrawlPatch(raw: unknown): Record<string, unknown> {
+    if (!isPlainObject(raw)) {
+      throw new ServiceError("VALIDATION", "crawl must be a JSON object of new setting values");
+    }
+    const wire: Record<string, CrawlField | undefined> = CRAWL_FIELDS;
+    const out: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(raw)) {
+      if (OPERATOR_ONLY_FIELDS.includes(key)) {
+        throw new ServiceError(
+          "VALIDATION",
+          `field '${clip(key)}' is set by the operator, not over the API`,
+        );
+      }
+      if (key === "findingCap") {
+        throw new ServiceError(
+          "VALIDATION",
+          "findingCap belongs to the judgement: set it as judgement.findingCap",
+        );
+      }
+      const field = wire[key];
+      if (field === undefined) {
+        throw new ServiceError("VALIDATION", unknownField(key));
+      }
+      if (value === null) {
+        throw new ServiceError(
+          "VALIDATION",
+          `field '${key}' is null: name the value you want; a crawl field has no unset`,
+        );
+      }
+      const parsed = field.schema.safeParse(value);
+      if (!parsed.success) {
+        throw new ServiceError(
+          "VALIDATION",
+          parsed.error.issues[0]?.message ?? `field '${key}' is invalid`,
+        );
+      }
+      out[key] = parsed.data;
+    }
+    return out;
+  }
+
+  /**
+   * The refusal `setCrawlConfig` gives while this process works on the crawl:
+   * either pass for a `crawl` change (`refuseWhileBusy`), a rules run alone for
+   * a judgement-only one, which a render pass does not read.
+   */
+  private refuseWhileConfigBusy(crawlId: string, touchesCrawl: boolean): void {
+    if (touchesCrawl) this.refuseWhileBusy(crawlId, "crawl_config_set");
+    else this.refuseWhileJudging(crawlId);
   }
 
   /**
@@ -3960,7 +4120,7 @@ export class ApiService {
     );
   }
 
-  /** The refusal `setCrawlJudgement` gives while this process is judging the crawl. */
+  /** The refusal `setCrawlConfig` gives while this process is judging the crawl. */
   private refuseWhileJudging(crawlId: string): void {
     if (this.judging.has(crawlId)) {
       throw new ServiceError(
@@ -6670,8 +6830,18 @@ function crawlConfigOf(crawlId: string, view: JudgementView): CrawlConfigOut {
       ],
     ),
   ) as Record<ThresholdName, ThresholdSetting>;
+  if (!isPlainObject(view.config)) {
+    throw new ServiceError("CONFLICT", `crawl ${crawlId}: stored config is not readable`);
+  }
+  const { findingCap: _findingCap, ...crawl } = view.config;
+  const wire: Record<string, { mutable: Mutability } | undefined> = CRAWL_FIELDS;
+  const mutability: Record<string, Mutability> = {};
+  for (const key of Object.keys(crawl)) mutability[key] = wire[key]?.mutable ?? "never";
+  mutability["judgement"] = "always";
   return {
     crawlId,
+    crawl,
+    mutability,
     judgement: {
       ...block,
       ...(view.findingCap === undefined ? {} : { findingCap: view.findingCap }),

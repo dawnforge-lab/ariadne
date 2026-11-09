@@ -373,7 +373,20 @@ const FORBIDDEN_FIELDS: Readonly<Record<string, string>> = {
 
 const ACCEPTED_FIELDS = [...Object.keys(CRAWL_FIELDS), "judgement"].join(", ");
 
-function unknownField(key: string): string {
+/**
+ * The crawl-config keys the stored row carries that no request can name: the
+ * operator's budgets and profile switch, set through `crawlDefaults` by the
+ * process that constructs the server. `never` in `crawl_config_get`'s
+ * `mutability`, and refused by name when a patch sends one.
+ */
+export const OPERATOR_ONLY_FIELDS: readonly string[] = [
+  "maxResources",
+  "maxResourceHosts",
+  "maxBlockedUrls",
+  "platformProfiles",
+];
+
+export function unknownField(key: string): string {
   return FORBIDDEN_FIELDS[key] ?? `unknown field '${clip(key)}' (accepted: ${ACCEPTED_FIELDS})`;
 }
 

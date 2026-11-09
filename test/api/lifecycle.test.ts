@@ -722,3 +722,150 @@ describe("crawl_resume: pending requests and paused epilogues (Rulings 5, 6)", (
     expect(probe?.["statusCode"]).toBe(404);
   }, 60_000);
 });
+
+/** 27b T7: `crawl_config_set` around the queue, a pass in flight, and earned spacing. */
+describe("crawl_config_set: the crawl part against a live server (27b T7)", () => {
+  const setConfig = (id: string, body: unknown): Promise<Res> =>
+    call("PATCH", `/crawls/${id}/config`, { body });
+
+  it("409s on a running crawl, naming the status and whenPaused", async () => {
+    const a = await start();
+    await until("running", a.id, (b) => b["status"] === "running");
+    const res = await setConfig(a.id, { crawl: { maxPages: 900 } });
+    expect(res.status).toBe(409);
+    expect(String(res.body["error"])).toContain("running");
+    expect(String(res.body["error"])).toContain("whenPaused");
+    await stopRunning(a.id);
+  }, 60_000);
+
+  it("a change made to a queued crawl applies when it starts", async () => {
+    const { running, waiting } = await runningAndWaiting();
+    const res = await setConfig(waiting, { crawl: { maxPages: 3 } });
+    expect(res.status).toBe(200);
+    expect((res.body["crawl"] as Record<string, unknown>)["maxPages"]).toBe(3);
+
+    await stopRunning(running);
+    const final = await until("the waiting crawl closed", waiting, (b) => b["status"] === "finished", 60_000);
+    expect(Number(final["pagesCrawled"])).toBeLessThanOrEqual(3);
+    expect(Number(final["pagesCrawled"])).toBeGreaterThan(0);
+  }, 90_000);
+
+  it("is refused while a render pass runs on the crawl, and writes nothing", async () => {
+    const id = await seedPausedJudgeable();
+    let release!: () => void;
+    let entered!: () => void;
+    const inFlight = new Promise<void>((r) => {
+      entered = r;
+    });
+    gates.render.hold = new Promise<void>((r) => {
+      release = r;
+    });
+    gates.render.entered = entered;
+    const first = call("POST", `/crawls/${id}/render`);
+    try {
+      await inFlight;
+      const res = await setConfig(id, { crawl: { maxPages: 900 } });
+      expect(res.status).toBe(409);
+      expect(String(res.body["error"])).toContain("crawl_config_set");
+      expect(String(res.body["error"])).toContain("a render pass is running");
+      const [row] = await db.select({ config: crawls.config }).from(crawls).where(eq(crawls.id, id));
+      expect((row?.config as Record<string, unknown>)["maxPages"]).toBe(3);
+      // A judgement-only patch is not a render pass's business.
+      const judged = await setConfig(id, { judgement: { thresholds: { SLOW_MS: 900 } } });
+      expect(judged.status).toBe(200);
+    } finally {
+      gates.render.hold = null;
+      gates.render.entered = null;
+      release();
+    }
+    expect((await first).status).toBe(200);
+  }, 60_000);
+
+  // REVIEW FOCUS 2 (rule 9). A pause and a config change never make the resumed
+  // crawl faster than the spacing it earned: a site that answers 429 twice
+  // earns 2000ms from a 500ms base, and lowering perHostDelayMs to the 250ms
+  // floor afterwards must not undo it. The base is 500, not 0, because a base
+  // below the floor cannot come over the wire (see the task report on
+  // HostGate.restore and a zero base).
+  describe("a resumed crawl keeps the spacing it earned", () => {
+    let throttled: Server;
+    let throttledSite: string;
+    let hits429 = 0;
+    const pageHits: number[] = [];
+
+    beforeAll(async () => {
+      throttled = createServer((req, res) => {
+        const path = (req.url ?? "/").split("?")[0] ?? "/";
+        if (path === "/robots.txt") {
+          res.writeHead(200, { "content-type": "text/plain" });
+          res.end("User-agent: *\nAllow: /\n");
+          return;
+        }
+        if (hits429 < 2) {
+          hits429 += 1;
+          res.writeHead(429, { "content-type": "text/html", "retry-after": "0" });
+          res.end("slow down");
+          return;
+        }
+        pageHits.push(Date.now());
+        const n = Number(/^\/p\/(\d+)$/.exec(path)?.[1] ?? 0);
+        const links = Array.from({ length: 10 }, (_, i) => `<a href="/p/${n * 10 + i + 1}">x</a>`).join("");
+        res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+        res.end(
+          `<!doctype html><html lang="en"><head><title>Throttled ${n}</title></head>` +
+            `<body><h1>Throttled ${n}</h1>${links}</body></html>`,
+        );
+      });
+      await new Promise<void>((r) => throttled.listen(0, "127.0.0.1", () => r()));
+      const address = throttled.address();
+      if (address === null || typeof address === "string") throw new Error("throttled site bound oddly");
+      throttledSite = `http://127.0.0.1:${address.port}`;
+    });
+
+    afterAll(async () => {
+      await new Promise<void>((r) => throttled.close(() => r()));
+    });
+
+    it("the first request gap after a resume is the earned spacing, not the new perHostDelayMs", async () => {
+      const started = await call("POST", "/crawls", {
+        body: { siteUrl: `${throttledSite}/`, maxPages: 400, maxConcurrency: 1, perHostDelayMs: 500 },
+      });
+      expect(started.status).toBe(202);
+      const id = String(started.body["crawlId"]);
+      createdCrawls.push(id);
+
+      await until("two pages served", id, () => pageHits.length >= 2, 60_000);
+      const paused = await pause(id);
+      expect([200, 202]).toContain(paused.status);
+      await until("paused", id, (b) => b["status"] === "paused", 60_000);
+
+      const rows = await db
+        .select({ spacing: crawls.hostSpacingMs, perHost: crawls.hostSpacingJsonb })
+        .from(crawls)
+        .where(eq(crawls.id, id));
+      const earned = rows[0]?.spacing ?? 0;
+      expect(earned).toBeGreaterThanOrEqual(1000);
+      expect(rows[0]?.perHost).not.toBeNull();
+
+      const set = await call("PATCH", `/crawls/${id}/config`, {
+        body: { crawl: { perHostDelayMs: 250, maxConcurrency: 8 } },
+      });
+      expect(set.status).toBe(200);
+      const [row] = await db.select({ config: crawls.config }).from(crawls).where(eq(crawls.id, id));
+      expect(row?.config).toMatchObject({ perHostDelayMs: 250, maxConcurrency: 8 });
+
+      const mark = pageHits.length;
+      const resumed = await resume(id);
+      expect(resumed.status).toBe(202);
+      await until("three more pages served", id, () => pageHits.length >= mark + 3, 90_000);
+      await stopRunning(id);
+
+      const after = pageHits.slice(mark);
+      expect(after.length).toBeGreaterThanOrEqual(2);
+      const first = after[0] as number;
+      const second = after[1] as number;
+      // Timers wake a hair early; 50ms of slack, against a 250ms alternative.
+      expect(second - first).toBeGreaterThanOrEqual(earned - 50);
+    }, 120_000);
+  });
+});
