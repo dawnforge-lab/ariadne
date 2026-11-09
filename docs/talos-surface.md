@@ -1070,11 +1070,13 @@ the row changing state under the call (409 — see the race below).
 
 **A `paused` crawl is always resumable, and a `cancelled` one never is** (Phase 27b
 rulings 5 and 6). The stop path decides nothing on its way out: URLs never leased
-stay pending, resource rows never reached stay null with no reason, and the 404
-probe and the resource pass are skipped rather than recorded as having found
-nothing. So what a pause leaves is exactly the set of questions nobody has
-answered, and the owed-work check below applies only to a `finished` or `failed`
-row (a paused crawl always owes the passes its stop skipped). A `cancelled` crawl is
+stay pending, resource rows never reached stay null with no reason, and a stop
+skips whatever epilogue work had not started (the order is probe → recheck →
+resources): the 404 probe if the stop came during the page crawl; otherwise the
+rest of the 5xx recheck and the resource pass. Skipped work is never recorded as
+having found nothing. So what a pause leaves is exactly the set of questions nobody
+has answered, and the owed-work check below applies only to a `finished` or `failed`
+row (a paused crawl may owe work its stop skipped that no row counts). A `cancelled` crawl is
 refused with a 409 naming `cancelled` and `final`: a cancel is a decision, and
 `crawl_start` is how to crawl the site again. A resume is also refused (409) while
 a pause or cancel is still pending on the row, because carrying the request into a
@@ -1166,11 +1168,18 @@ deadline, 20 s.
 
 **What a stop keeps.** A pause keeps the frontier, the per-host spacing the crawl
 earned and its throttle record; it survives a server restart, and nothing starts the
-crawl but `crawl_resume`. A paused crawl can be rendered and judged (looking at
-partial results is a reason to pause). A cancel keeps the pages crawled, which stay
-judgeable and exportable; the 404 probe, the resource pass and the recheck do not run,
-and their checks read as not measured, never as a pass. `crawl_status.neverFetched`
-says how many URLs the crawl never asked for.
+crawl but `crawl_resume`. A paused crawl that has run can be rendered and judged
+(looking at partial results is a reason to pause). A cancel keeps the pages crawled,
+which stay judgeable and exportable. A stop skips whatever epilogue work had not
+started: the 404 probe if it came during the page crawl; otherwise the rest of the
+5xx recheck and the resource pass. The skipped checks read as not measured, never as
+a pass. `crawl_status.neverFetched` says how many URLs the crawl never asked for.
+
+**A crawl paused or cancelled while still queued never ran** (Phase 27b ruling 11).
+It has no discovery evidence and nothing to judge: `crawl_rules` refuses it (409,
+naming the crawl and saying it never ran), as `crawl_render` refuses a crawl that
+never completed discovery. Its `neverFetched` is null, not 0: nothing was seen, so
+the count is unknown.
 
 **`crawl_delete`** takes `{crawlId, confirm}` (`DELETE /crawls/:id?confirm=<crawlId>`;
 the confirm is a query parameter because DELETE bodies are poorly supported) and
@@ -1483,7 +1492,8 @@ own answer, not an invented example).
 - **`neverFetched`** is the frontier's `pending` count on a `cancelled` crawl: the URLs
   it never asked for. It is computed, not stored (a cancel is final, so the frontier no
   longer moves); null on every other status, so "0 never fetched" and "not cancelled" are
-  different answers.
+  different answers. Null too on a crawl cancelled before it ran (cancelled while
+  queued: no discovery evidence): nothing was seen, so the count is unknown, not 0.
 - **`status`** is one of `queued | running | paused | finished | failed | cancelled`.
   `finished`, `failed` and `cancelled` are closed; only `cancelled` is final.
 

@@ -250,10 +250,12 @@ target is not something this skill can crawl.
 
 What the fields mean when you are waiting:
 - **`controlRequested`, `pauseReason`, `cancelledAt`, `neverFetched`** (lifecycle,
-  read-only until pause/cancel land): `controlRequested` is a pause or cancel
-  asked of a running crawl, `pauseReason` is `request` or `shutdown` on a
-  `paused` crawl, `cancelledAt` and `neverFetched` (the frontier's `pending`)
-  are set only on a `cancelled` crawl; each is null otherwise.
+  written by `crawl_pause`, `crawl_cancel` and the loop that acts on them):
+  `controlRequested` is a pause or cancel asked of a running crawl, `pauseReason`
+  is `request` or `shutdown` on a `paused` crawl, `cancelledAt` and `neverFetched`
+  (the frontier's `pending`) are set only on a `cancelled` crawl; each is null
+  otherwise. `neverFetched` is null too on a crawl cancelled while still queued:
+  it never ran, nothing was seen, and the count is unknown, not 0.
 
 - **`status`** — `queued`, `running`, `paused`, `finished`, `cancelled`, `failed`.
   `finished`, `failed` and `cancelled` are closed; `cancelled` is **final** (it
@@ -763,7 +765,9 @@ and files nobody has asked about yet.
 
 **`status: "cancelled"`** — an agent's `crawl_cancel`. It is **final**:
 `crawl_resume` refuses it (409). What was crawled stays judgeable and exportable,
-and `neverFetched` says how many URLs were never fetched. A cancel is a decision to
+and `neverFetched` says how many URLs were never fetched. A crawl paused or
+cancelled while still queued never ran: `crawl_rules` refuses it (409, "never
+ran") and a cancelled one's `neverFetched` is null. A cancel is a decision to
 stop for good; use `crawl_start` for a fresh crawl.
 
 **Pause or cancel?** Pause when you may want the crawl back: to change pacing
@@ -772,8 +776,11 @@ block, or to look at the partial data first. Cancel when the crawl is wrong or n
 longer wanted. `crawl_pause` and `crawl_cancel` answer 200 when the change happened
 now (a `queued` or `paused` crawl) and 202 when it was requested of a `running`
 crawl; read `controlRequested` in `crawl_status` until the status changes (about a
-second, longer during discovery, and up to one fetch deadline of 20 s if the crawl
-is already in its recheck or resource pass). A cancel outranks a pause. `crawl_delete`
+second on a small crawl; longer on a deep one, because the close runs template
+inference over every page before the status flips — the 50k-page gate crawl,
+paused with 20,000 pages done, flipped 5.3 s after the request; longer during
+discovery, and up to one fetch deadline of 20 s if the crawl is already in its
+recheck or resource pass). A cancel outranks a pause. `crawl_delete`
 (with `confirm` echoing the crawl id) removes a closed or paused crawl's rows and
 files for good.
 

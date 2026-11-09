@@ -12,13 +12,19 @@ sampler line that could not measure what it claimed (§7). The full suite ran on
 commit named in §1.
 
 **Verdict: clauses 1 to 6 and the memory limit of clause 7 pass. One spec sentence was
-NOT demonstrated at 50k scale and is a finding for the owner to rule on (§7):** the
-spec says the status change happens within one poll interval plus the abort settle time.
-On the fixture crawls it does (806 to 932 ms). On the 50k gate crawl the status flipped
-`paused` **5.3 s** after the request, against a 1 s poll. Ruleset 0.23.0, 188 rules (72 page / 102 query / 14
-metric), no rule, ruleset or `EXTRACTION_VERSION` change; migrations 0034 (columns) and
-0035 (the `cancelled` to `paused` relabel). The 50k crawl, paused at 40% and resumed,
-peaked at **285.2 MB** (limit 512 MB; within 5% of 26c's 293.7 MB means at most 308.4 MB).
+NOT demonstrated at 50k scale (§7), and Ruling 10 settles it.**
+
+The spec says the status change happens within one poll interval plus the abort settle
+time. On the fixture crawls it does (806 to 932 ms). On the 50k gate crawl the status
+flipped `paused` **5.3 s** after the request, against a 1 s poll. Ruling 10 restates the
+bound at scale as one poll interval plus wind-down plus the close the spec mandates
+(template inference, then `closeCrawl`), recorded as Deviation 17.
+
+Ruleset 0.23.0, 188 rules (72 page / 102 query / 14 metric), no rule, ruleset or
+`EXTRACTION_VERSION` change; migrations 0034 (columns) and 0035 (the `cancelled` to
+`paused` relabel). The 50k crawl, paused at 40% and resumed, peaked at **276.4 MB** in
+run 2 and **285.2 MB** in run 1 (limit 512 MB; within 5% of 26c's 293.7 MB means at most
+308.4 MB). Both runs pass.
 
 ## Gate clauses
 
@@ -136,8 +142,11 @@ unflagged gate does.
 
 **Which interval is the spec's.** The spec's bound is on the status change, "within one poll
 interval plus the abort settle time". That is request to status flip: **5,294 ms** at 50k.
-The run's summary arrives in the same millisecond as the flip (flip to summary 0 ms), so
-`summarise` adds nothing, and run 1's 5,550 ms to the summary differs from run 2 by run-to-run spread.
+The sampler read the flip and the run's summary in the same 100 ms sample (flip to summary
+0 ms). `summaryMs` is taken after the watcher is awaited, so that shows only that flip to
+summary is under about 100 ms, the sampler's resolution; it does not show that `summarise`
+costs nothing. Run 1's 5,550 ms to the summary (no flip sampled) is within run-to-run
+spread of run 2's 5,294 ms.
 
 **The finding.** 5.3 s is materially above the poll interval (1 s) plus a few seconds of
 settle, and this gate cannot say where the other 4.3 s go. What is known from the code:
@@ -150,13 +159,11 @@ sample as the status flip, which is what a column written in the closing UPDATE 
 that sampler was dropped (`80025f8`) and no split is claimed. To decompose it, time
 `inferPageTemplates` over a stored 20k-page crawl, or instrument the loop's close path;
 neither was done here. The fixture crawls (28 pages) cannot show it: inference over 28
-pages is negligible. Whether a pause that takes 5 s at 20k pages and possibly more at 50k
-meets the spec's bound is for the owner to rule on; either the bound is restated as
-"one poll plus abort settle plus close work that grows with the crawl", or the close path
-is made cheaper for a pause (for example, skipping template inference when the stop is a
-pause, since a resume runs it at the real end). The stop-latency text in the `crawl_pause`
-description and in `docs/talos-surface.md` §4.1c now states this instead of promising a
-second.
+pages is negligible. Ruling 10 settles it: the bound at scale is one poll interval plus
+wind-down plus the close the spec itself mandates (template inference, then `closeCrawl`),
+and inference stays on a pause and before the flip. The stop-latency text in the
+`crawl_pause` description, in `docs/talos-surface.md` §4.1c and in the `ariadne-crawl`
+skill states the measured figure instead of promising a second.
 
 ## Rulings
 
@@ -180,8 +187,10 @@ second.
    with a pending request needs two calls (mark failed, then resume), where the alternative
    would carry a request into a queued row or drop an agent's cancel.
 6. **A `paused` crawl is always resumable**: the owed-work check applies only to `finished`
-   and `failed` rows, because every pause skips the 404 probe (and perhaps the recheck or
-   resource passes). If wrong, a resume of a paused crawl whose only owed work is the probe
+   and `failed` rows, because a paused crawl may owe work no row counts. A stop skips
+   whatever epilogue work had not started (the order is probe → recheck → resources): the
+   404 probe if the stop came during the page crawl; otherwise the rest of the recheck and
+   the resource pass. If wrong, a resume of a paused crawl whose only owed work is the probe
    re-runs discovery and the host probe (a few requests, rule-9-paced).
 7. **MCP `config_validate` takes `{config: <start body>}`** while `POST /config/validate`
    takes the body itself. With the start schema as the tool's input schema the SDK would
@@ -198,6 +207,27 @@ second.
    If wrong, an operator-configured 0 ms crawl resumed after earning spacing is briefly
    faster than it earned (rule 9). The gate script's crawl is exactly such a crawl (base 0
    on the loopback fixture) and is unaffected, because the fixture never escalates.
+10. **The stop bound at scale is one poll interval plus wind-down plus the close the spec
+    itself mandates** (template inference, then `closeCrawl`, which flips the status).
+    Inference stays on pause and cancel, and stays before the flip: the spec says a
+    stopped crawl "closes the same way an interrupted crawl does today: template
+    inference and closeCrawl run", paused crawls are judged and rendered (they need
+    collapsed page types), and a reader who sees the status must see the inference marker
+    (the loop's own contract). Recorded as Deviation 17 with the measured 5.3 s at 20k
+    pages. If wrong, an agent polling a deep crawl sees the status change about 5 s after
+    its request instead of about 1 s.
+11. **`crawl_rules` refuses (409) a crawl with no discovery evidence** (`crawls.discovery`
+    null: it never ran, because it was paused or cancelled while still queued), naming the
+    crawl and saying it never ran, as the render driver refuses a crawl that "never
+    completed discovery". On such a crawl cancelled, `neverFetched` is null, not 0: the
+    count is unknown. Before this ruling a never-ran crawl's `crawl_rules` answered 500 (a
+    rule threw on the missing robots evidence) and its `neverFetched` said 0. If wrong, an
+    agent cannot judge an empty never-ran crawl, which has nothing to judge anyway.
+12. **`crawl_config_set` accepts a `never` or operator-only key whose value deep-equals the
+    stored value as "no change"** (not written, not refused), and every `never` check runs
+    before the status checks, so the refusal does not depend on key order. Get, edit, set
+    with the whole `crawl` object is what a reasonable agent does. If wrong, a no-op key is
+    silently accepted rather than refused.
 
 ## Deviations
 
@@ -247,8 +277,8 @@ Added by the gate run:
     crawls and a 1 s poll. The flip happens in `closeCrawl`, after the loop's whole-crawl
     template inference, so the interval includes that inference, whose share is not
     measured. `crawl_pause`'s description and `docs/talos-surface.md` §4.1c state the
-    measured figure and no longer promise "about a second". Owner to rule (§7, last
-    paragraph of "The finding").
+    measured figure and no longer promise "about a second". Ruled by Ruling 10: the bound
+    at scale is one poll interval plus wind-down plus the close the spec mandates.
 
 ## Carried to Phase 28
 
