@@ -50,9 +50,9 @@
  * done and the row was still in a buffer (build plan §7).
  */
 import { randomUUID } from "node:crypto";
-import { and, eq, ne, sql } from "drizzle-orm";
+import { and, asc, eq, gt, ne, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
-import { crawls, frontier, sitemapHreflang, sitemapMemberships, sitemapUrls } from "../db/schema.js";
+import { crawls, frontier, listUrls, sitemapHreflang, sitemapMemberships, sitemapUrls } from "../db/schema.js";
 // Ruleset provenance for the `crawls` row: the registry owns the number, the
 // loop only stamps it.
 import { RULESET_VERSION } from "../rules/registry/registry.js";
@@ -241,6 +241,17 @@ export interface CrawlConfig extends RenderSelectionConfig {
    */
   sitemapUrls?: string[];
   /**
+   * `list` (Phase 27c): fetch the URLs stored in `list_urls` at depth 0,
+   * follow redirects but no link, and read no sitemap unless `sitemapUrls` is
+   * given. Absent is `spider`. Stored, so a resume stays in the same mode.
+   */
+  mode?: CrawlMode;
+  /**
+   * The distinct URLs in `list_urls`. Required when `mode` is `list`; stored
+   * (the count, never the URLs: Deviation 2).
+   */
+  listUrlCount?: number;
+  /**
    * How many findings each listing rule may report when this crawl is judged.
    * A positive integer, or `null` for UNCAPPED — every orphan, every duplicate
    * group, every blocked sitemap entry. Absent is the engine's default (200 URL
@@ -404,6 +415,9 @@ export interface CrawlConfig extends RenderSelectionConfig {
   credentialShape?: CredentialShape;
 }
 
+/** How a crawl finds its URLs: by following links (`spider`) or from a stored list. */
+export type CrawlMode = "spider" | "list";
+
 /**
  * `crawls.discovery_jsonb`: what the crawl learned before it fetched a page.
  *
@@ -459,6 +473,11 @@ export interface DiscoveryEvidence {
    * "no memberships" from "never recorded" (`sitemapFactsRecorded`).
    */
   sitemapFacts?: DiscoverySitemapFacts;
+  /**
+   * False when the crawl read no sitemap document (a list crawl without
+   * `sitemapUrls`). ABSENT on an older row, which read them: absent is true.
+   */
+  sitemapsRead?: boolean;
 }
 
 /** `crawls.notfound_probe_jsonb` when the probe ran: the site's 404 template. */
@@ -534,6 +553,11 @@ export interface CrawlSummary {
   writer: PageWriterStats;
   robots: { outcome: RobotsInfo["outcome"]; note: string | null };
   discovery: { sitemapEntries: number; truncation: DiscoveryTruncation };
+  /**
+   * False when no sitemap document was requested (list mode without
+   * `sitemapUrls`): zero entries then means "not read", not "none declared".
+   */
+  sitemapsRead: boolean;
   /**
    * What the crawl-end template inference did (`inferPageTemplates`), or null
    * when it did not run — which today means a crawl that failed before it could
@@ -997,6 +1021,8 @@ export function parseStoredConfig(value: unknown, crawlId: string): CrawlConfig 
     probeHosts: raw["probeHosts"],
     legacyHosts: raw["legacyHosts"],
     sitemapUrls: raw["sitemapUrls"],
+    mode: raw["mode"],
+    listUrlCount: raw["listUrlCount"],
     renderBudgetPct: raw["renderBudgetPct"],
     renderMaxPages: raw["renderMaxPages"],
     renderSamplePerType: raw["renderSamplePerType"],
@@ -1061,10 +1087,16 @@ export function parseStoredConfig(value: unknown, crawlId: string): CrawlConfig 
     // Phase 27c's two limits, on the same terms.
     "maxRedirectHops",
     "maxUrlLength",
+    "listUrlCount",
   ] as const) {
     if (config[field] !== undefined && typeof config[field] !== "number") {
       throw new Error(`crawl ${crawlId}: stored config.${field} is not a number`);
     }
+  }
+  // A stored mode we cannot read must stop: read as `spider`, a list crawl
+  // would resume by following links across a site it was told to sample.
+  if (config.mode !== undefined && config.mode !== "spider" && config.mode !== "list") {
+    throw new Error(`crawl ${crawlId}: stored config.mode is not "spider" or "list"`);
   }
   // `findingCap` is the one field where NULL IS A VALUE rather than an absence,
   // so it cannot join the loop above: null means "uncapped, list everything",
@@ -1158,6 +1190,20 @@ export function validateCrawlConfig(config: CrawlConfig): void {
   }
   if (normalizeUrl(config.siteUrl) === null) {
     throw new Error(`CrawlConfig.siteUrl is not an http(s) URL: ${config.siteUrl}`);
+  }
+  if (config.mode !== undefined && config.mode !== "spider" && config.mode !== "list") {
+    throw new Error(`CrawlConfig.mode must be "spider" or "list", got ${String(config.mode)}`);
+  }
+  if (config.mode === "list") {
+    if (
+      config.listUrlCount === undefined ||
+      !Number.isInteger(config.listUrlCount) ||
+      config.listUrlCount < 1
+    ) {
+      throw new RangeError(
+        `CrawlConfig.listUrlCount must be an integer ≥ 1 when mode is "list", got ${config.listUrlCount}`,
+      );
+    }
   }
   if (config.probeHosts !== false) {
     // Throws on a legacyHosts entry that names no host — here, before the
@@ -1505,6 +1551,7 @@ async function runToCompletion(
   watcher: ControlWatcher,
 ): Promise<CrawlSummary> {
   const allowPrivate = config.allowPrivate === true;
+  const listMode = config.mode === "list";
   // Everything below stops on the watcher's signal, never on the caller's
   // directly: the caller's is one of the watcher's inputs (a shutdown).
   const signal = watcher.signal;
@@ -1599,6 +1646,10 @@ async function runToCompletion(
     // The documents the client named, walked beside the declared ones. The
     // engine still probes nothing on its own (see discover's header).
     extraSitemaps: config.sitemapUrls,
+    // List mode reads no sitemap unless the client named one; then the walk is
+    // the spider's (declared and supplied), and only the entries' enqueue is
+    // skipped below.
+    walkSitemaps: config.mode !== "list" || config.sitemapUrls !== undefined,
     sink: new SitemapRowSink(db, crawlId),
   });
 
@@ -2329,7 +2380,8 @@ async function runToCompletion(
         { complete: !RETRYABLE.has(result.fetchClass) },
       );
 
-      if (analysis !== null && item.depth < config.maxDepth) {
+      // List mode records a page's links (the writer above) and follows none.
+      if (analysis !== null && !listMode && item.depth < config.maxDepth) {
         await enqueue(
           analysis.links.map((link) => link.href),
           item.depth + 1,
@@ -2376,21 +2428,44 @@ async function runToCompletion(
   const failures: unknown[] = [];
 
   try {
-    await enqueue([config.siteUrl], 0, "seed");
-    await enqueue(
-      discovery.sitemapEntries.map((entry) => entry.url),
-      0,
-      "sitemap",
-    );
+    if (listMode) {
+      // The listed URLs, in position order, a chunk at a time (rule 6). A
+      // resume reads them again: enqueue is idempotent on the frontier and the
+      // pages table, so a URL already fetched is not queued twice.
+      for (let after = -1; ; ) {
+        const chunk = await db
+          .select({ position: listUrls.position, url: listUrls.url })
+          .from(listUrls)
+          .where(and(eq(listUrls.crawlId, crawlId), gt(listUrls.position, after)))
+          .orderBy(asc(listUrls.position))
+          .limit(ENQUEUE_LOOKUP_CHUNK);
+        if (chunk.length === 0) break;
+        await enqueue(
+          chunk.map((row) => row.url),
+          0,
+          "list",
+        );
+        after = chunk[chunk.length - 1]!.position;
+      }
+    } else {
+      await enqueue([config.siteUrl], 0, "seed");
+      await enqueue(
+        discovery.sitemapEntries.map((entry) => entry.url),
+        0,
+        "sitemap",
+      );
+    }
     await persistSitemap(db, crawlId, discovery);
 
     if (frontierRows === 0) {
       // A crawl with nothing in its frontier is about to report zero pages.
       // Say why, so "the site is empty" and "robots or the URL policy
       // refused the only URLs we had" do not look identical (rule 7).
-      seedNote =
-        "nothing to crawl: the seed URL and every sitemap entry were refused " +
-        "by robots.txt, the URL policy, or the same-origin boundary";
+      seedNote = listMode
+        ? "nothing to crawl: every listed URL was refused by robots.txt, the URL policy, " +
+          "the crawl scope, or the same-origin boundary"
+        : "nothing to crawl: the seed URL and every sitemap entry were refused " +
+          "by robots.txt, the URL policy, or the same-origin boundary";
     }
 
     while (pagesCrawled < config.maxPages) {
@@ -2878,6 +2953,7 @@ function discoveryEvidence(
     truncation: discovery.truncation,
     docsFetched: discovery.truncation.docsFetched,
     sitemapFacts: discovery.sitemapFacts,
+    sitemapsRead: discovery.sitemapsRead,
   };
 }
 
@@ -3694,6 +3770,7 @@ async function summarise(
       sitemapEntries: discovery.sitemapEntries.length,
       truncation: discovery.truncation,
     },
+    sitemapsRead: discovery.sitemapsRead,
     pageTemplates,
     resources,
     recheck,
