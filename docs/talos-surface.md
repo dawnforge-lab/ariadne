@@ -693,8 +693,8 @@ Two properties make the double-transport claim below cheap to trust:
   (tool, route) pairs over the wire against one database and asserts the two
   answers are `toEqual`. `test/api/mcp.test.ts:2770` ("refuses in the same
   words, whichever transport asked") does the same for five refusals — the same
-  sentence and the mapped status. `test/api/mcp.test.ts:2827` ("streams the
-  bytes the other transport writes to a file") and `test/api/mcp.test.ts:2853`
+  sentence and the mapped status. `test/api/mcp.test.ts:2828` ("streams the
+  bytes the other transport writes to a file") and `test/api/mcp.test.ts:2854`
   ("streams the resources view byte for byte") assert the CSV a route streams is
   byte-identical to the file the tool writes, for the `issues` and `resources`
   views.
@@ -740,7 +740,7 @@ Two properties make the double-transport claim below cheap to trust:
   names *which* thing was wrong — missing header, wrong scheme, wrong token.
 - **MCP asks for no credential** and that is a posture, not an omission: an
   stdio client either started this process or was handed its pipes
-  (`test/api/mcp.test.ts:2957` "asks for no bearer token: an stdio client is the
+  (`test/api/mcp.test.ts:2958` "asks for no bearer token: an stdio client is the
   process that started this one"). If Ariadne's MCP server is ever mounted on a
   network transport, that argument dies with the change and a credential has to
   arrive with it.
@@ -782,7 +782,7 @@ Two properties make the double-transport claim below cheap to trust:
 | A defect of ours | 500 `{error: "internal error", correlationId}` | `{error: "internal error", correlationId}` |
 
 `correlationId` is a UUID; the stack goes to the server log under that id and
-nowhere else (`test/api/mcp.test.ts:2880` "turns an unexpected throw into a tool
+nowhere else (`test/api/mcp.test.ts:2881` "turns an unexpected throw into a tool
 error with a correlation id", `test/api/http.test.ts:2089` "turns an unexpected
 throw into a 500 with a correlation id").
 
@@ -956,7 +956,7 @@ vocabulary each field enumerates"). `crawl_start`'s field set is not a second
 declaration to keep in step: its input schema IS the crawl-start body schema
 (`src/api/config-schema.ts`), and a test walks that schema's published form and
 drives every field through both transports
-(`test/api/transport-parity.test.ts:338` "walks the published schema and drives
+(`test/api/transport-parity.test.ts:350` "walks the published schema and drives
 every body through POST /crawls and crawl_start"). `crawl_render`'s is asserted
 against the service's own `RENDER_CRAWL_FIELDS` table.
 
@@ -974,9 +974,9 @@ transports (§4.1b): over MCP a body that does not fit it is refused by the SDK
 before the tool runs, in the schema's own words with the path appended, rather
 than as `{error}` JSON. `config_validate` answers every one of these without
 starting anything, with the same first message
-(`test/api/transport-parity.test.ts:367` "answers valid: false exactly when POST
+(`test/api/transport-parity.test.ts:379` "answers valid: false exactly when POST
 /crawls refuses"). The body refusals themselves are pinned in
-`test/api/config-schema.test.ts:230` ("refuses a perHostDelayMs under the
+`test/api/config-schema.test.ts:241` ("refuses a perHostDelayMs under the
 politeness floor rather than raising it").
 
 **`judgement`** (Phase 27a) sets how the crawl is judged from its first rules
@@ -1205,7 +1205,7 @@ budgets) or `always` (`findingCap` and `judgement`). `judgement.rules` lists
 every page and query rule id as `propertyNames.enum` (zod's spelling of a
 partial record over an enum; no metric id), and `judgement.thresholds` has one
 property per overridable threshold with its `minimum`, `maximum` and `default`
-(`test/api/config-schema.test.ts:105` "publishes every overridable threshold with
+(`test/api/config-schema.test.ts:116` "publishes every overridable threshold with
 its bounds and default"). A `default` is the ENGINE's: the operator's
 `crawlDefaults` sit over it, so `config_validate`'s `effective` is the answer
 to "what would this crawl run with".
@@ -1220,7 +1220,7 @@ same checks `crawl_start` does, allowlist and URL policy on `siteUrl`, every
 lookup**. `errors[0]` is the refusal `crawl_start` would answer with, in the
 same words; `effective`, on a valid body, is exactly what the crawl would store
 in `config_jsonb` plus the parsed `judgement` (null when none was given), and
-is null on an invalid one (`test/api/transport-parity.test.ts:367` "answers
+is null on an invalid one (`test/api/transport-parity.test.ts:379` "answers
 valid: false exactly when POST /crawls refuses").
 
 ### 4.2 `crawl_status` → the crawl in full
@@ -2633,7 +2633,7 @@ robots.txt answers 502); `test/db/migration-0017.test.ts:258` "clears the
 sentence when the failed crawl is resumed" (the implication over a RESUME, which
 is the one move that changes the status without closing the crawl — the fixture
 holds the robots request so the row is read mid-run);
-`test/api/mcp.test.ts:3108` "clears the failure sentence of the crawl a resume
+`test/api/mcp.test.ts:3109` "clears the failure sentence of the crawl a resume
 accepts" (the same, over the queue's own writer and on the wire);
 `test/api/query.test.ts:4210` "tells a pre-0017 failed
 crawl apart from a crawl that did not fail" (the two nulls, on the wire).
@@ -3589,7 +3589,7 @@ answer", `test/api/query.test.ts:3378` "refuses a crawl holding a retired rule's
 findings BEFORE the header", `test/api/http.test.ts:1965` "tears the response
 when a CSV export fails mid-stream, rather than truncating the file";
 `test/api/mcp.test.ts:797` "describes the shape of the CSV it writes, not just
-that it writes one" and `test/api/mcp.test.ts:2853` "streams the resources view
+that it writes one" and `test/api/mcp.test.ts:2854` "streams the resources view
 byte for byte, as it writes it".
 
 ---

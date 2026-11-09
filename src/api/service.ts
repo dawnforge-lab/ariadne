@@ -69,7 +69,7 @@ import { createGzip } from "node:zlib";
 import { and, asc, desc, eq, getTableColumns, gt, inArray, isNotNull, isNull, sql, type SQL } from "drizzle-orm";
 
 import type { Db } from "../db/client.js";
-import { crawls, frontier, issues, pages } from "../db/schema.js";
+import { crawls, frontier, issues, listUrls, pages } from "../db/schema.js";
 import { deleteCrawlFiles, deleteCrawlRows } from "./crawl-delete.js";
 import {
   ClaimLostError,
@@ -80,7 +80,15 @@ import {
   storableConfig,
   validateCrawlConfig,
   type CrawlConfig,
+  type CrawlMode,
 } from "../crawl/loop.js";
+import { shapeOf, type CrawlCredentials } from "../crawl/credentials.js";
+import {
+  matchesPattern,
+  patternFamilyError,
+  scopeVerdict,
+  type CrawlScope,
+} from "../crawl/url-scope.js";
 import { DISCOVERED_VIA, frontierCounts, type FrontierCounts } from "../crawl/frontier.js";
 import { FETCH_CLASSES, type FetchClass } from "../crawl/fetch-page.js";
 import {
@@ -124,7 +132,12 @@ import {
   type RenderPassSummary,
 } from "../crawl/render/run-render.js";
 import { resolveRenderConfig } from "../crawl/render/select.js";
-import { hostProbeStarts, hostnameSpellings, normalizeUrl } from "../crawl/parse/url-utils.js";
+import {
+  hostProbeStarts,
+  hostnameSpellings,
+  isSameOrigin,
+  normalizeUrl,
+} from "../crawl/parse/url-utils.js";
 import { isUrlAllowed, UrlPolicyError } from "../crawl/url-policy.js";
 import { buildRegistry } from "../rules/index.js";
 import { RULESET_VERSION, type Registry } from "../rules/registry/registry.js";
@@ -261,6 +274,22 @@ export interface StartCrawlInput {
   renderSamplePerType?: number;
   findingCap?: number | null;
   fetchResources?: boolean;
+  /** Phase 27c: list mode. `urls` is stored in `list_urls`, never in `config_jsonb`. */
+  mode?: CrawlMode;
+  urls?: string[];
+  /** Phase 27c: the crawl's scope patterns. */
+  exclude?: string[];
+  include?: string[];
+  /**
+   * Phase 27c: the three credential fields (`x-ariadne-secret`). Their values
+   * go to `ApiService.credentials` and nowhere else; the row keeps the shape.
+   */
+  requestHeaders?: Record<string, string>;
+  httpAuth?: { username: string; password: string };
+  cookies?: Array<{ name: string; value: string }>;
+  /** Phase 27c: the two limits. */
+  maxRedirectHops?: number;
+  maxUrlLength?: number;
   /**
    * The crawl's judgement block (Phase 27a), parsed against the ruleset by the
    * schema (`parseJudgement` is its semantic check). Its `findingCap` is stored
@@ -269,15 +298,56 @@ export interface StartCrawlInput {
   judgement?: JudgementBlock;
 }
 
-/** What a started crawl stores in `config_jsonb`: its effective config, less the test-only fields. */
-export type StoredConfig = ReturnType<typeof storableConfig>;
+/**
+ * What a started crawl stores in `config_jsonb`: its effective config, less
+ * the test-only fields and the credentials (`storableConfig`), plus — on a
+ * list crawl — how many listed URLs were collapsed as duplicates (27c
+ * Deviation 3), which the loop never reads.
+ */
+export type StoredConfig = ReturnType<typeof storableConfig> & { listDuplicates?: number };
 
 /** `config_validate`'s answer, and what `startCrawl` acts on. */
 export interface StartBodyCheck {
   valid: boolean;
   errors: ConfigError[];
-  /** The config the crawl would be stored with, and its judgement; null when invalid. */
+  /**
+   * The config the crawl would be stored with, and its judgement; null when
+   * invalid. Never the listed URLs (`listUrlCount` and `listDuplicates` stand
+   * for them) and never a credential value (`credentialShape` stands for them).
+   */
   effective: (StoredConfig & { judgement: JudgementBlock | null }) | null;
+}
+
+/**
+ * `checkStartBody`'s answer plus what `startCrawl` needs and no answer may
+ * carry: the distinct listed URLs in list order (null on a spider crawl), and
+ * the credential values (undefined when none were supplied).
+ */
+interface StartPlan {
+  check: StartBodyCheck;
+  listed: { urls: string[]; duplicates: number } | null;
+  credentials: CrawlCredentials | undefined;
+}
+
+/** `list_urls` rows per INSERT: three parameters a row, well under Postgres' 65,535. */
+const LIST_INSERT_CHUNK = 1000;
+
+/** `CrawlConfig` keys only a crawl's request sets; refused in `crawlDefaults`. */
+const REQUEST_ONLY_CRAWL_KEYS = ["mode", "listUrlCount", "credentials", "credentialShape"] as const;
+
+/** The request's crawl fields that become `CrawlConfig` keys as they are. */
+type CrawlRequestFields = Omit<
+  StartCrawlInput,
+  "judgement" | "urls" | "requestHeaders" | "httpAuth" | "cookies"
+>;
+
+/**
+ * Which scope list refused `url`: `exclude` when one of its patterns matches
+ * (exclude wins, as in `scopeVerdict`), else `include`. Asked of the patterns,
+ * never read off the verdict's sentence.
+ */
+function scopePathOf(url: string, scope: CrawlScope): "exclude" | "include" {
+  return scope.exclude.some((pattern) => matchesPattern(pattern, url)) ? "exclude" : "include";
 }
 
 type FieldKind = "string[]";
@@ -351,6 +421,10 @@ export interface CrawlAccepted {
   status: string;
   /** Crawls this process must finish first. 0 = it is starting now. */
   queuePosition: number;
+  /** A list crawl's distinct listed URLs (27c). Absent on a spider crawl. */
+  listUrlCount?: number;
+  /** How many listed URLs were collapsed as another's duplicate (27c Deviation 3). */
+  listDuplicates?: number;
 }
 
 /**
@@ -2211,6 +2285,19 @@ export class ApiService {
    */
   private readonly rendering = new Set<string>();
 
+  /**
+   * The credential VALUES of the crawls this process accepted (27c), by crawl
+   * id — the only place they are held. Never stored (the row keeps
+   * `credentialShape`, names only), never logged, never answered.
+   *
+   * An entry stays until the crawl is deleted or cancelled, not until it
+   * finishes (Deviation 9): a render pass on a finished crawl needs them. After
+   * a restart the map is empty, and a crawl whose row has a shape is refused
+   * rather than run without them (`requireCredentials`, the crawl loop).
+   * Bounded by the crawls this process accepted with credentials.
+   */
+  private readonly credentials = new Map<string, CrawlCredentials>();
+
   /** Crawls accepted by this process and not yet started, in FIFO order. */
   private readonly waiting: QueueEntry[] = [];
   private running: RunningCrawl | null = null;
@@ -2240,6 +2327,18 @@ export class ApiService {
       if (rule.kind === "metric") continue;
       for (const check of rule.checkIds) push(this.findingRulesByCheck, check, rule.id);
       push(this.findingRulesByCategory, rule.category, rule.id);
+    }
+    // The keys a crawl's REQUEST decides (27c): what is listed, and which
+    // credentials it carries. An operator default for any of them would be
+    // overwritten by every start, or worse, carried into a crawl that never
+    // asked for it — refused at construction, where the operator reads it.
+    for (const key of REQUEST_ONLY_CRAWL_KEYS) {
+      if (config.crawlDefaults !== undefined && Object.hasOwn(config.crawlDefaults, key)) {
+        throw new Error(
+          `ServiceConfig.crawlDefaults.${key} is not an operator default: a crawl's ` +
+            `request decides it (Phase 27c)`,
+        );
+      }
     }
     this.log = config.log ?? ((line) => console.error(line));
     this.exportDir = resolvePath(config.exportDir ?? joinPath(process.cwd(), "exports"));
@@ -2271,28 +2370,56 @@ export class ApiService {
    *     robots.txt pointed at, so both go through the same two checks
    *     (`checkLegacyHosts`, `checkSitemapUrls`) — which is where the allowlist
    *     would otherwise have had a hole big enough to drive a crawler through;
-   *  5. the judgement's `findingCap` against the top-level one, then the crawl
+   *  5. Phase 27c, list mode: `mode: "list"` and `urls` come together or not
+   *     at all, and an empty `sitemapUrls` on a list crawl is refused as
+   *     ambiguous (see there). Each listed URL is normalised, passes the URL
+   *     policy at the crawl's own `maxUrlLength` (`url_policy`, hard rule 5),
+   *     is on the seed's site (`isSameOrigin`, the boundary a spider crawl has;
+   *     a list spanning sites is refused, not split) and is admitted by the
+   *     scope (Deviation 5). Two spellings of one URL are collapsed and counted
+   *     (Deviation 3) — `checkListUrls`;
+   *  6. Phase 27c, scope: a pattern whose host is not this site's can never
+   *     match and is refused (`patternFamilyError`); a spider crawl's seed the
+   *     scope refuses is refused (an empty crawl is not an answer);
+   *  7. the judgement's `findingCap` against the top-level one, then the crawl
    *     loop's own ranges over the EFFECTIVE config — the engine's defaults,
-   *     the API's maxPages, the operator's `crawlDefaults`, the request — which
-   *     is where the render budgets are checked (`invalid`).
+   *     the API's maxPages (a list crawl's is twice its distinct URLs,
+   *     Deviation 4), the operator's `crawlDefaults`, the request — which is
+   *     where the render budgets are checked (`invalid`). A list crawl's
+   *     `maxPages` below its distinct URLs is refused (`out_of_range`).
+   *
+   * The credential fields were checked by the schema (`credentialFieldError`,
+   * whose messages never carry a value); here they are split off the request
+   * into `StartPlan.credentials`, and only their shape reaches the config.
    *
    * Every refusal found is returned, and `startCrawl` answers with the first.
    * There is no DNS lookup: `isUrlAllowed` checks the URL as written, and the
    * seed's resolution happens when the crawl runs, as it always has.
    *
    * `effective` is the config the crawl would be stored with
-   * (`storableConfig`, so the two test-only fields are never in it) and the
-   * parsed judgement block, or null when anything was refused.
+   * (`storableConfig`, so the two test-only fields and the credential values
+   * are never in it, and never the listed URLs) and the parsed judgement
+   * block, or null when anything was refused.
    */
   async checkStartBody(raw: unknown): Promise<StartBodyCheck> {
+    return (await this.planStart(raw)).check;
+  }
+
+  /** `checkStartBody`, plus the listed URLs and the credential values `startCrawl` acts on. */
+  private async planStart(raw: unknown): Promise<StartPlan> {
+    const refused = (errors: ConfigError[]): StartPlan => ({
+      check: { valid: false, errors, effective: null },
+      listed: null,
+      credentials: undefined,
+    });
     const parsed = parseStartBody(raw, this.registry);
-    if (!parsed.ok) return { valid: false, errors: parsed.errors, effective: null };
+    if (!parsed.ok) return refused(parsed.errors);
     const input = parsed.value;
 
     const siteUrl = normalizeUrl(input.siteUrl.trim());
     if (siteUrl === null) {
       const message = `siteUrl is not an http(s) URL: ${clip(input.siteUrl)}`;
-      return { valid: false, errors: [{ path: "siteUrl", code: "invalid", message }], effective: null };
+      return refused([{ path: "siteUrl", code: "invalid", message }]);
     }
     const host = new URL(siteUrl).hostname;
     const allowPrivate = this.config.crawlDefaults?.allowPrivate === true;
@@ -2332,8 +2459,10 @@ export class ApiService {
 
     // The judgement block is not crawl config: it is split off here, and its
     // `findingCap` — the one key whose bytes live in `config_jsonb` (plan
-    // Deviation 1) — joins the crawl config.
-    const { judgement, ...crawlInput } = input;
+    // Deviation 1) — joins the crawl config. The listed URLs and the three
+    // credential fields never reach `config_jsonb` either (27c): the list goes
+    // to `list_urls`, the values to `ApiService.credentials`.
+    const { judgement, urls, requestHeaders, httpAuth, cookies, ...crawlInput } = input;
     const block = judgement ?? null;
     if (block?.findingCap !== undefined) {
       if (crawlInput.findingCap !== undefined && crawlInput.findingCap !== block.findingCap) {
@@ -2350,34 +2479,221 @@ export class ApiService {
       }
     }
 
-    const crawlConfig = this.effectiveConfig(siteUrl, crawlInput);
+    const listMode = crawlInput.mode === "list";
+    if (listMode && urls === undefined) {
+      errors.push({
+        path: "urls",
+        code: "invalid",
+        message:
+          'mode "list" needs urls: a list crawl fetches exactly the URLs it is given, ' +
+          "and this body gives none",
+      });
+    }
+    if (!listMode && urls !== undefined) {
+      errors.push({
+        path: "urls",
+        code: "invalid",
+        message:
+          `urls is a list crawl's: send mode "list" with it, or omit urls for a crawl ` +
+          "that follows links from siteUrl",
+      });
+    }
+    // A list crawl reads no sitemap unless `sitemapUrls` is given, and with it
+    // walks the site's declared sitemaps as well as the named ones. `[]` says
+    // both "given" and "nothing to walk": refused rather than read either way.
+    if (listMode && input.sitemapUrls !== undefined && input.sitemapUrls.length === 0) {
+      errors.push({
+        path: "sitemapUrls",
+        code: "invalid",
+        message:
+          "sitemapUrls is an empty list on a list crawl, which says two things: a list " +
+          "crawl reads no sitemap unless sitemapUrls is given, and given, it walks the " +
+          "sitemaps robots.txt declares as well as the ones named. Omit sitemapUrls to " +
+          "read none, or name at least one document",
+      });
+    }
+
+    // The scope and the URL limit as the crawl will run with them — the
+    // request over the operator's defaults over the engine's.
+    const preliminary = this.effectiveConfig(siteUrl, crawlInput, null, undefined);
+    const scope: CrawlScope = {
+      exclude: preliminary.exclude ?? [],
+      include: preliminary.include ?? [],
+    };
+    for (const key of ["exclude", "include"] as const) {
+      for (const pattern of scope[key]) {
+        const why = patternFamilyError(pattern, siteUrl);
+        if (why !== null) {
+          errors.push({ path: key, code: "invalid", message: `${key} ${why}` });
+          break;
+        }
+      }
+    }
+    if (!listMode) {
+      // A list crawl does not fetch its seed, so only a spider crawl's is asked.
+      const seed = scopeVerdict(siteUrl, scope);
+      if (!seed.admitted) {
+        errors.push({
+          path: scopePathOf(siteUrl, scope),
+          code: "invalid",
+          message:
+            `the seed ${siteUrl} is refused by this crawl's own scope (${seed.reason}): ` +
+            "a crawl that may not fetch its seed is an empty crawl. Change the pattern, " +
+            "or start from a URL the scope admits",
+        });
+      }
+    }
+
+    let listed: { urls: string[]; duplicates: number } | null = null;
+    if (listMode && urls !== undefined) {
+      const list = await this.checkListUrls(
+        siteUrl,
+        urls,
+        scope,
+        preliminary.maxUrlLength,
+        allowPrivate,
+      );
+      if ("code" in list) errors.push(list);
+      else listed = list;
+    }
+    // A list crawl whose list was refused has no count to size anything by;
+    // the refusals above are the answer.
+    if (listMode && listed === null) return refused(errors);
+
+    const supplied: CrawlCredentials = {
+      ...(requestHeaders === undefined ? {} : { requestHeaders }),
+      ...(httpAuth === undefined ? {} : { httpAuth }),
+      ...(cookies === undefined ? {} : { cookies }),
+    };
+    // Nothing supplied (or only empty lists) is no credentials at all: a shape
+    // naming nothing would demand credentials it cannot describe.
+    const credentials = shapeOf(supplied) === null ? undefined : supplied;
+
+    const listCount = listed === null ? null : listed.urls.length;
+    const crawlConfig = this.effectiveConfig(siteUrl, crawlInput, listCount, credentials);
+    if (listCount !== null && crawlConfig.maxPages < listCount) {
+      errors.push({
+        path: "maxPages",
+        code: "out_of_range",
+        message:
+          `maxPages ${crawlConfig.maxPages} is below the ${listCount} distinct URLs this ` +
+          "list crawl names, so some would never be fetched, and every listed URL must " +
+          `end in a classified row. Raise maxPages to at least ${listCount}, or omit it: ` +
+          "a list crawl's default is twice its distinct URLs",
+      });
+    }
     try {
       validateCrawlConfig(crawlConfig);
     } catch (error) {
       // The loop's own range checks, surfaced where the caller can fix them.
-      // Its messages name the field and the value and nothing else.
+      // Its messages name the field and the value and nothing else — and for
+      // the credentials, the field and the header or cookie NAME only.
       const message = messageOf(error);
       errors.push({ path: loopCheckPath(message), code: "invalid", message });
     }
 
-    if (errors.length > 0) return { valid: false, errors, effective: null };
+    if (errors.length > 0) return refused(errors);
     // The same strip `runCrawl` applies, by the same function: `allowPrivate`
     // never reaches a row, so a resume of this crawl months from now cannot
-    // inherit it (build-plan §7 item 3).
-    return { valid: true, errors: [], effective: { ...storableConfig(crawlConfig), judgement: block } };
+    // inherit it (build-plan §7 item 3), and a credential value never does.
+    const stored: StoredConfig = {
+      ...storableConfig(crawlConfig),
+      ...(listed === null ? {} : { listDuplicates: listed.duplicates }),
+    };
+    return {
+      check: { valid: true, errors: [], effective: { ...stored, judgement: block } },
+      listed,
+      credentials,
+    };
   }
 
   /**
-   * Accept a crawl: check the body (`checkStartBody`), create its row, and put
-   * it in this process's queue. Takes the body as it arrived — both transports
-   * hand it over unparsed, so both are refused by the one parser.
+   * A list crawl's URLs, checked in list order, or the first refusal (27c).
+   *
+   * Each entry is normalised (`normalizeUrl`, the frontier's key), then: the
+   * URL policy at the crawl's own `maxUrlLength` (`url_policy`, hard rule 5);
+   * the seed's site (`isSameOrigin` — the boundary the crawl loop admits by,
+   * so a URL outside it would otherwise be dropped with no row); the scope
+   * (Deviation 5: listing a URL and fencing it off is a contradiction to fix).
+   * A URL whose normalised spelling was already listed is collapsed and
+   * counted (Deviation 3). The first refusal is answered, naming the entry's
+   * index and the URL — never a ten-thousand-line answer.
+   */
+  private async checkListUrls(
+    siteUrl: string,
+    urls: readonly string[],
+    scope: CrawlScope,
+    maxUrlLength: number | undefined,
+    allowPrivate: boolean,
+  ): Promise<{ urls: string[]; duplicates: number } | ConfigError> {
+    const distinct: string[] = [];
+    // Bounded by LIST_MAX_URLS, which the schema enforced.
+    const seen = new Set<string>();
+    for (const [index, entry] of urls.entries()) {
+      const url = normalizeUrl(entry);
+      if (url === null) {
+        return {
+          path: "urls",
+          code: "invalid",
+          message: `urls[${index}] '${clip(entry)}' is not an absolute http(s) URL`,
+        };
+      }
+      if (seen.has(url)) continue;
+      seen.add(url);
+      const verdict = await isUrlAllowed(url, {
+        allowPrivate,
+        ...(maxUrlLength === undefined ? {} : { maxUrlLength }),
+      });
+      if (!verdict.allowed) {
+        return {
+          path: "urls",
+          code: "url_policy",
+          message:
+            `urls[${index}] '${clip(url)}' refused by the URL policy: ` +
+            `${verdict.reason ?? "no reason given"}`,
+        };
+      }
+      if (!isSameOrigin(url, siteUrl)) {
+        return {
+          path: "urls",
+          code: "invalid",
+          message:
+            `urls[${index}] '${clip(url)}' is not on this crawl's site (${siteUrl}: its ` +
+            "host or the www/apex twin, the same scheme or the http→https upgrade). Lists " +
+            "that span sites are refused, not split: start one list crawl per site",
+        };
+      }
+      const inScope = scopeVerdict(url, scope);
+      if (!inScope.admitted) {
+        return {
+          path: "urls",
+          code: "invalid",
+          message:
+            `urls[${index}] '${clip(url)}' is refused by this crawl's own scope ` +
+            `(${inScope.reason}): listing a URL and fencing it off is a contradiction to ` +
+            "fix. Drop it from the list or change the pattern",
+        };
+      }
+      distinct.push(url);
+    }
+    return { urls: distinct, duplicates: urls.length - distinct.length };
+  }
+
+  /**
+   * Accept a crawl: check the body (`checkStartBody`), create its row — and a
+   * list crawl's `list_urls` rows, in the same transaction — and put it in
+   * this process's queue. Takes the body as it arrived — both transports hand
+   * it over unparsed, so both are refused by the one parser.
+   *
+   * Credential values go to `this.credentials` and nowhere else; the row
+   * carries their shape (27c).
    */
   async startCrawl(raw: unknown): Promise<CrawlAccepted> {
     if (this.closed) {
       throw new ServiceError("CONFLICT", "the server is shutting down and is not accepting crawls");
     }
 
-    const check = await this.checkStartBody(raw);
+    const { check, listed, credentials } = await this.planStart(raw);
     const refusal = check.errors[0];
     if (refusal !== undefined) throw new ServiceError(serviceCodeOf(refusal.code), refusal.message);
     if (check.effective === null) {
@@ -2386,21 +2702,41 @@ export class ApiService {
     const { judgement, ...config } = check.effective;
 
     const crawlId = `crawl_${randomUUID()}`;
-    await this.db.insert(crawls).values({
-      id: crawlId,
-      siteUrl: config.siteUrl,
-      config,
-      // Null when the request named no judgement — "no overrides", the state
-      // every crawl before 27a is in.
-      judgement: judgement === null ? null : storableBlock(judgement),
-      rulesetVersion: RULESET_VERSION,
-      status: "queued",
+    await this.db.transaction(async (tx) => {
+      await tx.insert(crawls).values({
+        id: crawlId,
+        siteUrl: config.siteUrl,
+        config,
+        // Null when the request named no judgement — "no overrides", the state
+        // every crawl before 27a is in.
+        judgement: judgement === null ? null : storableBlock(judgement),
+        rulesetVersion: RULESET_VERSION,
+        status: "queued",
+      });
+      // The distinct listed URLs, `position` from 0 in list order (Deviation 2).
+      if (listed === null) return;
+      for (let start = 0; start < listed.urls.length; start += LIST_INSERT_CHUNK) {
+        await tx.insert(listUrls).values(
+          listed.urls
+            .slice(start, start + LIST_INSERT_CHUNK)
+            .map((url, offset) => ({ crawlId, position: start + offset, url })),
+        );
+      }
     });
+    // Before the queue can run it: the runner reads this map at dequeue.
+    if (credentials !== undefined) this.credentials.set(crawlId, credentials);
 
     const entry: QueueEntry = { crawlId, resuming: false };
     this.waiting.push(entry);
     this.pump();
-    return { crawlId, status: "queued", queuePosition: this.queuePosition(crawlId) ?? 0 };
+    return {
+      crawlId,
+      status: "queued",
+      queuePosition: this.queuePosition(crawlId) ?? 0,
+      ...(listed === null
+        ? {}
+        : { listUrlCount: listed.urls.length, listDuplicates: listed.duplicates }),
+    };
   }
 
   /**
@@ -3151,6 +3487,8 @@ export class ApiService {
           })
           .where(and(eq(crawls.id, crawlId), eq(crawls.status, row.status)));
         requireMoved(moved, crawlId, row.status, "cancel");
+        // A cancelled crawl never runs again: its credentials go (Deviation 9).
+        this.credentials.delete(crawlId);
         return { crawlId, status: "cancelled", controlRequested: null, immediate: true };
       }
       case "running": {
@@ -3212,6 +3550,8 @@ export class ApiService {
       refuseDeleteWhile(crawlId, current.status, readControlRequest(current.controlRequest, crawlId));
       return await deleteCrawlRows(tx, crawlId);
     });
+    // The rows are gone, so are the credentials (Deviation 9).
+    this.credentials.delete(crawlId);
 
     const files = await deleteCrawlFiles(crawlId, slug(crawlId), this.renderDir, this.exportDir);
     return { crawlId, rows, files };
@@ -4170,6 +4510,17 @@ export class ApiService {
       const field = wire[key];
       if (field === undefined) {
         throw new ServiceError("VALIDATION", unknownField(key));
+      }
+      // A credential is never merged into the stored config: its value would
+      // land in `config_jsonb` (27c). Refused before its value is looked at,
+      // and the refusal names the field only.
+      if (field.secret === true) {
+        throw new ServiceError(
+          "VALIDATION",
+          `field '${key}' is a credential (x-ariadne-secret): crawl_config_set does not ` +
+            "take credentials on this server, and a credential is never written to a crawl's " +
+            "stored config",
+        );
       }
       if (value === null) {
         throw new ServiceError(
@@ -5893,9 +6244,16 @@ export class ApiService {
         .where(eq(crawls.id, entry.crawlId));
       if (row === undefined) throw new Error(`queue runner: no crawl ${entry.crawlId}`);
       if (row.status !== "queued") throw new ClaimLostError(entry.crawlId, row.status, "queued");
+      // The credential values, from this process's memory (27c), beside the
+      // test-only fields and on their precedent: the row never holds them.
+      // Nothing is set when the map has no entry; a crawl whose row has a
+      // shape is then refused by the loop (`requireCredentials`), never run
+      // without them.
+      const credentials = this.credentials.get(entry.crawlId);
       const config: CrawlConfig = {
         ...parseStoredConfig(row.config, entry.crawlId),
         ...this.processTrustConfig(),
+        ...(credentials === undefined ? {} : { credentials }),
       };
       this.log(
         `api: crawl ${entry.crawlId} ${entry.resuming ? "resuming" : "starting"} ` +
@@ -5906,6 +6264,10 @@ export class ApiService {
         signal,
         expectStatus: "queued",
       });
+      // A run that ended cancelled (an agent's cancel of a running crawl)
+      // releases its credentials, as a cancel of a queued or paused one does
+      // (Deviation 9). A finished crawl keeps them: a render pass needs them.
+      if (summary.status === "cancelled") this.credentials.delete(entry.crawlId);
       // The template inference beside the page count, because the pair is the
       // whole of "what shape is this site" and the alternative is a second
       // census over `pages` to find out. `pageTemplates` is null only when the
@@ -6334,16 +6696,37 @@ export class ApiService {
     }
   }
 
-  private effectiveConfig(siteUrl: string, input: Omit<StartCrawlInput, "judgement">): CrawlConfig {
-    // Precedence, low to high: the engine's defaults, the API's own maxPages,
-    // the process-trust overrides, then the request. `stripUndefined` on the
-    // request half because an absent optional field must not overwrite a
-    // default with `undefined`.
+  /**
+   * The crawl config a request runs with. `listCount` is a list crawl's
+   * distinct URLs (null for a spider crawl, or before the list is checked);
+   * `credentials` the values, whose shape joins the config beside them (the
+   * shape is stored, the values are stripped by `storableConfig`).
+   */
+  private effectiveConfig(
+    siteUrl: string,
+    input: CrawlRequestFields,
+    listCount: number | null,
+    credentials: CrawlCredentials | undefined,
+  ): CrawlConfig {
+    const shape = credentials === undefined ? null : shapeOf(credentials);
+    // Precedence, low to high: the engine's defaults (with the 27c fields
+    // spelled out, so `effective` shows a spider crawl's mode and empty scope
+    // rather than leaving them to be inferred), the API's own maxPages — a list
+    // crawl's is twice its distinct URLs (Deviation 4) — the process-trust
+    // overrides, then the request. `stripUndefined` on the request half
+    // because an absent optional field must not overwrite a default with
+    // `undefined`. The list count and the credentials come from the request
+    // alone (`REQUEST_ONLY_CRAWL_KEYS`).
     return {
       ...CRAWL_DEFAULTS,
-      ...API_CRAWL_DEFAULTS,
+      mode: "spider",
+      exclude: [],
+      include: [],
+      ...(listCount === null ? API_CRAWL_DEFAULTS : { maxPages: 2 * listCount }),
       ...stripUndefined(this.config.crawlDefaults ?? {}),
       ...stripUndefined({ ...input, siteUrl }),
+      ...(listCount === null ? {} : { listUrlCount: listCount }),
+      ...(credentials === undefined || shape === null ? {} : { credentials, credentialShape: shape }),
     } as CrawlConfig;
   }
 

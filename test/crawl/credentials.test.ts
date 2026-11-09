@@ -507,3 +507,25 @@ describe("a crawl that needs credentials and has none", () => {
     expect(recorded).toEqual([]);
   });
 });
+
+// undici refuses both names at send time, so a crawl that carried one would
+// fail on its first request; refused at validation instead (27c T8 ruling).
+describe("the header names undici refuses to send", () => {
+  it("refuses the header name 'expect', whatever its case, without quoting the value", () => {
+    for (const name of ["expect", "Expect"]) {
+      const error = credentialError({ requestHeaders: { [name]: "100-v-s3cret" } }, "crawl");
+      expect(error, name).toContain(name);
+      expect(error, name).toContain("refused");
+      expect(error, name).not.toContain("v-s3cret");
+    }
+  });
+
+  it("refuses the header name 'keep-alive', whatever its case, without quoting the value", () => {
+    for (const name of ["keep-alive", "Keep-Alive"]) {
+      const error = credentialError({ requestHeaders: { [name]: "timeout=5-v-s3cret" } }, "crawl");
+      expect(error, name).toContain(name);
+      expect(error, name).toContain("refused");
+      expect(error, name).not.toContain("v-s3cret");
+    }
+  });
+});

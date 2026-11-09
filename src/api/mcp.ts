@@ -78,6 +78,7 @@ import {
   PAGE_SIZE_DEFAULT,
   PAGE_SIZE_MAX,
   ServiceError,
+  type ServiceErrorCode,
 } from "./service.js";
 
 /** The metric scopes, as a tool description says them. */
@@ -223,7 +224,9 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
     try {
       return json(await fn());
     } catch (error) {
-      if (error instanceof ServiceError) return jsonError({ error: error.message });
+      if (error instanceof ServiceError) {
+        return jsonError({ error: error.message, code: error.code });
+      }
       const correlationId = randomUUID();
       log(`mcp: internal error ${correlationId} ${tool} — ${stackOf(error)}`);
       return jsonError({ error: "internal error", correlationId });
@@ -1985,8 +1988,15 @@ function json(value: unknown): CallToolResult {
   return { content: [{ type: "text", text: JSON.stringify(value) }] };
 }
 
-/** The refusal shape: the same `{error}` body the HTTP transport sends. */
-function jsonError(body: { error: string; correlationId?: string }): CallToolResult {
+/**
+ * The refusal shape: the same body the HTTP transport sends — `{error, code}`
+ * for a `ServiceError` (27c Deviation 10), `{error, correlationId}` for a defect.
+ */
+function jsonError(body: {
+  error: string;
+  code?: ServiceErrorCode;
+  correlationId?: string;
+}): CallToolResult {
   return { content: [{ type: "text", text: JSON.stringify(body) }], isError: true };
 }
 

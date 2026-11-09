@@ -1155,10 +1155,10 @@ export function storedCredentialShape(value: unknown, crawlId: string): Credenti
 }
 
 /** `CrawlConfig.maxRedirectHops`' range (Phase 27c). */
-const MIN_REDIRECT_HOPS = 1;
-const MAX_REDIRECT_HOPS = 20;
+export const MIN_REDIRECT_HOPS = 1;
+export const MAX_REDIRECT_HOPS = 20;
 /** `CrawlConfig.maxUrlLength`'s floor; its ceiling is `INDEXED_URL_MAX`. */
-const MIN_URL_LENGTH = 256;
+export const MIN_URL_LENGTH = 256;
 
 /**
  * Range-check a crawl configuration, throwing on anything a crawl must not be

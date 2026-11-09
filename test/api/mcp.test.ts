@@ -2813,7 +2813,8 @@ describe("the two transports answer with one shape", () => {
       const viaHttp = await get(c.path);
       expect(viaTool.isError, `${c.tool} did not refuse`).toBe(true);
       expect(viaHttp.status, `${c.path} did not answer ${c.status}`).toBe(c.status);
-      expect(viaHttp.body).toEqual({ error: viaTool.body["error"] });
+      expect(typeof viaTool.body["code"], `${c.tool} refused with no code`).toBe("string");
+      expect(viaHttp.body).toEqual({ error: viaTool.body["error"], code: viaTool.body["code"] });
       // And neither spelling of the refusal carries anything from inside the
       // process (obligation 6): no stack frame, no path, no directory.
       for (const text of [viaTool.text, viaHttp.text]) {

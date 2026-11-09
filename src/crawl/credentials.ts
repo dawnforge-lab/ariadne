@@ -37,8 +37,11 @@ export const MAX_COOKIES = 50;
 /**
  * Header names a client may not set, compared lower-case. The engine owns the
  * first nine (identity, content negotiation, framing); `cookie` and
- * `authorization` have their own fields. Any name starting `proxy-` is refused
- * too (`isRefusedHeaderName`).
+ * `authorization` have their own fields. `expect` and `keep-alive` are refused
+ * because undici refuses to send either (it throws at send time), so a crawl
+ * carrying one would fail on its first request — refused at validation
+ * instead (27c T8). Any name starting `proxy-` is refused too
+ * (`isRefusedHeaderName`).
  */
 export const REFUSED_HEADER_NAMES: ReadonlySet<string> = new Set([
   "host",
@@ -52,6 +55,8 @@ export const REFUSED_HEADER_NAMES: ReadonlySet<string> = new Set([
   "upgrade",
   "cookie",
   "authorization",
+  "expect",
+  "keep-alive",
 ]);
 
 export interface CrawlCredentials {
@@ -195,6 +200,28 @@ export function credentialError(c: unknown, path: string): string | null {
   );
 }
 
+/**
+ * `credentialError` for ONE of the three fields, as a request body carries it
+ * at the top level (the API's start body, src/api/config-schema.ts). The
+ * message leads with `path` — the field's own name unless the caller says
+ * otherwise — and, like every message here, never contains a value. Absent
+ * (`undefined`) is valid.
+ */
+export function credentialFieldError(
+  field: keyof CrawlCredentials,
+  value: unknown,
+  path: string = field,
+): string | null {
+  switch (field) {
+    case "requestHeaders":
+      return headersError(value, path);
+    case "httpAuth":
+      return httpAuthError(value, path);
+    case "cookies":
+      return cookiesError(value, path);
+  }
+}
+
 function headersError(value: unknown, path: string): string | null {
   if (value === undefined) return null;
   if (!isPlainObject(value)) return `${path} must be an object of header name to string value`;
@@ -216,7 +243,9 @@ function headersError(value: unknown, path: string): string | null {
             ? "send Basic credentials through the httpAuth field"
             : lower.startsWith("proxy-")
               ? "proxy headers are never sent"
-              : "the engine owns it";
+              : lower === "expect" || lower === "keep-alive"
+                ? "the HTTP client refuses to send it"
+                : "the engine owns it";
       return `${path} header name ${quoted(name)} is refused: ${why}`;
     }
     const lower = name.toLowerCase();
