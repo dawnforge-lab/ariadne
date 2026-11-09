@@ -181,7 +181,7 @@ skill states the measured figure instead of promising a second.
 4. **The recheck and resource passes keep their contract** (see Deviation 16): in-flight
    abort applies to the page crawl only. If wrong, nothing is lost but a stop during those
    passes can take up to one fetch deadline (20 s); the alternative is parked as
-   `task-3-ruling4-inflight.patch` in the SDD workspace.
+   `docs/gates/phase-27b-ruling4-inflight.patch` (committed in 27c).
 5. **`crawl_resume` refuses (409) while `control_request` is non-null**, naming the request
    and pointing at `crawl_mark_failed` for a crawl whose worker is gone. If wrong, an orphan
    with a pending request needs two calls (mark failed, then resume), where the alternative
