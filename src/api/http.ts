@@ -193,10 +193,15 @@ import {
 const MAX_BODY_BYTES = 64 * 1024;
 
 /**
- * The cap on `POST /crawls` and `POST /config/validate` only (Phase 27c): a
- * list crawl carries up to `LIST_MAX_URLS` (10,000) URLs, which is up to about
- * 1 MiB of JSON. A route opts in with `Route.maxBodyBytes`; every other route
- * keeps `MAX_BODY_BYTES`.
+ * The cap on `POST /crawls` and `POST /config/validate` (Phase 27c): a list
+ * crawl carries up to `LIST_MAX_URLS` (10,000) URLs, which is up to about
+ * 1 MiB of JSON. Also on the three routes that re-supply a crawl's
+ * credentials — `POST /crawls/:id/resume`, `POST /crawls/:id/render` and
+ * `PATCH /crawls/:id/config` (27c T9 fix 1): a maximal set (20 headers and 50
+ * cookies of up to 1 KiB each, plus Basic auth) is about 74 KB, past
+ * `MAX_BODY_BYTES`, and a crawl started with one must be resumable over HTTP
+ * after a restart. A route opts in with `Route.maxBodyBytes`; every other
+ * route keeps `MAX_BODY_BYTES`.
  */
 export const LARGE_BODY_BYTES = 1024 * 1024;
 
@@ -409,6 +414,8 @@ function buildRoutes(): Route[] {
       method: "POST",
       pattern: ["crawls", id, "resume"],
       query: [],
+      // The crawl's credentials ride this body (see `LARGE_BODY_BYTES`).
+      maxBodyBytes: LARGE_BODY_BYTES,
       // 202, not 200, and for `POST /crawls`'s reason: the crawl is ACCEPTED
       // here and runs later. A 200 would say the work is done. The body is
       // optional: the crawl's credentials, re-supplied after a restart (27c);
@@ -457,6 +464,8 @@ function buildRoutes(): Route[] {
       method: "POST",
       pattern: ["crawls", id, "render"],
       query: [],
+      // The crawl's credentials ride this body (see `LARGE_BODY_BYTES`).
+      maxBodyBytes: LARGE_BODY_BYTES,
       // The one POST here that takes an OPTIONAL body: no body is the automatic
       // pass this route has always run, `{"urls": [...]}` names the pages
       // instead. `parseRenderCrawlInput` refuses an unknown field rather than
@@ -489,6 +498,8 @@ function buildRoutes(): Route[] {
       method: "PATCH",
       pattern: ["crawls", id, "config"],
       query: [],
+      // The crawl's credentials ride this body (see `LARGE_BODY_BYTES`).
+      maxBodyBytes: LARGE_BODY_BYTES,
       // The body is the patch, validated whole by the service: a missing body,
       // a key other than `crawl` and `judgement`, or a block the ruleset cannot apply is a
       // 400 naming what was wrong, and nothing is written.

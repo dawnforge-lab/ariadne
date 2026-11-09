@@ -211,7 +211,9 @@ beforeAll(async () => {
   exportDir = await mkdtemp(join(tmpdir(), "ariadne-credentials-restart-export-"));
   renderDir = await mkdtemp(join(tmpdir(), "ariadne-credentials-restart-render-"));
 
-  siteServer = createServer((req, res) => {
+  // A large header limit: a maximal credential set (20 headers and a 50-cookie
+  // Cookie header of ~1 KiB each) must reach the site, past Node's 16 KiB default.
+  siteServer = createServer({ maxHeaderSize: 1024 * 1024 }, (req, res) => {
     const path = (req.url ?? "/").split("?")[0] ?? "/";
     if (path === "/robots.txt") {
       res.writeHead(200, { "content-type": "text/plain" });
@@ -527,5 +529,130 @@ describe("a cancel or a delete drops the credentials (Deviation 9)", () => {
     // The runner drops the entry once the loop has returned, just after the row closes.
     for (let i = 0; i < 100 && held().has(running); i += 1) await sleep(20);
     expect(held().has(running)).toBe(false);
+  }, 120_000);
+});
+
+/** Pages of the crawl the gate refused (a 401 or a client_error row). */
+async function refusedRows(id: string): Promise<number> {
+  const rows = await db
+    .select({ n: sql<number>`count(*)::int` })
+    .from(pages)
+    .where(and(eq(pages.crawlId, id), sql`(${pages.fetchClass} = 'client_error' or ${pages.statusCode} = 401)`));
+  return rows[0]?.n ?? 0;
+}
+
+/** Pages of the crawl the gate let through. */
+async function okRows(id: string): Promise<number> {
+  const rows = await db
+    .select({ n: sql<number>`count(*)::int` })
+    .from(pages)
+    .where(and(eq(pages.crawlId, id), eq(pages.statusCode, 200)));
+  return rows[0]?.n ?? 0;
+}
+
+describe("27c T9 fix 1", () => {
+  it("a maximal credential set is re-supplied over HTTP after a restart (1 MiB cap); a 64 KiB route still 413s", async () => {
+    const maximal = {
+      requestHeaders: Object.fromEntries(
+        Array.from({ length: 20 }, (_, i) => [`x-h${i}`, `${HEADER_VALUE}-${String(i).padStart(2, "0")}`.padEnd(1024, "h")]),
+      ),
+      httpAuth: AUTH,
+      cookies: Array.from({ length: 50 }, (_, i) => ({ name: `c${i}`, value: `${COOKIE_VALUE}${i}`.padEnd(1024, "c") })),
+    };
+    expect(JSON.stringify(maximal).length).toBeGreaterThan(64 * 1024);
+
+    const id = await start({ siteUrl: `${site}/auth/`, maxPages: 30, ...maximal });
+    await until("running with pages", id, (b) => b["status"] === "running" && (b["frontier"] as { done: number }).done >= 1);
+    expect((await call("POST", `/crawls/${id}/pause`)).status).toBe(202);
+    await until("paused", id, (b) => b["status"] === "paused");
+    await restart();
+
+    // PATCH /config takes the whole set too (replacing what is held, i.e. nothing).
+    const patched = await call("PATCH", `/crawls/${id}/config`, { crawl: maximal });
+    expect(patched.status, patched.text.slice(0, 300)).toBe(200);
+    expect(held().get(id)).toEqual(maximal);
+    await restart();
+
+    const resumed = await call("POST", `/crawls/${id}/resume`, maximal);
+    expect(resumed.status, resumed.text.slice(0, 300)).toBe(202);
+    expect((await until("finished", id, settled))["status"]).toBe("finished");
+    expect(await refusedRows(id)).toBe(0);
+    expect(await okRows(id)).toBe(30);
+
+    const capped = await call("POST", `/crawls/${id}/fail`, { pad: "x".repeat(100 * 1024) });
+    expect(capped.status).toBe(413);
+    expect(String(capped.body["error"])).toContain(String(64 * 1024));
+    for (const r of [patched, resumed]) expectNoSecret(r.text, "an answer");
+    expectNoSecret(serverLog.join("\n"), "the server log");
+  }, 120_000);
+
+  it("a refused render leaves the held credentials as they were: a later resume without them still gets through", async () => {
+    const id = await start({ siteUrl: `${site}/auth/`, maxPages: 30, httpAuth: AUTH });
+    await until("running with pages", id, (b) => b["status"] === "running" && (b["frontier"] as { done: number }).done >= 1);
+    expect((await call("POST", `/crawls/${id}/pause`)).status).toBe(202);
+    await until("paused", id, (b) => b["status"] === "paused");
+
+    const wrong = { username: USERNAME, password: "mistyped-S3CRET" };
+    const refused = await call("POST", `/crawls/${id}/render`, { urls: [`${site}/auth/never-crawled`], httpAuth: wrong });
+    expect(refused.status, refused.text).toBe(400);
+    expectNoSecret(refused.text, "the render refusal");
+    expect(held().get(id)).toEqual({ httpAuth: AUTH });
+
+    const resumed = await call("POST", `/crawls/${id}/resume`);
+    expect(resumed.status, resumed.text).toBe(202);
+    expect((await until("finished", id, settled))["status"]).toBe("finished");
+    expect(await refusedRows(id)).toBe(0);
+    expect(await okRows(id)).toBe(30);
+  }, 120_000);
+
+  it("httpAuth null removes Basic auth from the held values and the stored shape", async () => {
+    const id = await seedPaused({ requestHeaderNames: [], httpAuth: true, cookieNames: ["sid"] });
+    const filled = await call("PATCH", `/crawls/${id}/config`, {
+      crawl: { httpAuth: AUTH, cookies: [{ name: "sid", value: COOKIE_VALUE }] },
+    });
+    expect(filled.status, filled.text).toBe(200);
+
+    const removed = await call("PATCH", `/crawls/${id}/config`, { crawl: { httpAuth: null } });
+    expect(removed.status, removed.text).toBe(200);
+    expect((await storedConfig(id))["credentialShape"]).toEqual({ requestHeaderNames: [], httpAuth: false, cookieNames: ["sid"] });
+    expect(held().get(id)).toEqual({ cookies: [{ name: "sid", value: COOKIE_VALUE }] });
+    expect(removed.body["crawl"]).not.toHaveProperty("httpAuth");
+    expect((removed.body["crawl"] as Record<string, unknown>)["cookies"]).toEqual([{ name: "sid", value: "[redacted]" }]);
+
+    // Removing what is not there is no change; the other kinds keep refusing null.
+    expect((await call("PATCH", `/crawls/${id}/config`, { crawl: { httpAuth: null } })).status).toBe(200);
+    const nulled = await call("PATCH", `/crawls/${id}/config`, { crawl: { cookies: null } });
+    expect(nulled.status).toBe(400);
+    expect(String(nulled.body["error"])).toContain("no unset");
+
+    // The last kind gone, the shape goes with it, and nothing is held.
+    expect((await call("PATCH", `/crawls/${id}/config`, { crawl: { cookies: [] } })).status).toBe(200);
+    expect(await storedConfig(id)).not.toHaveProperty("credentialShape");
+    expect(held().has(id)).toBe(false);
+
+    // On a running crawl a removal is a change, refused while it runs.
+    const running = await seedPaused({ requestHeaderNames: [], httpAuth: true, cookieNames: [] }, "running");
+    const busy = await call("PATCH", `/crawls/${running}/config`, { crawl: { httpAuth: null } });
+    expect(busy.status).toBe(409);
+    expect(String(busy.body["error"])).toContain("whenPaused");
+    expectNoSecret(filled.text + removed.text, "the answers");
+  });
+
+  it("credentials added with crawl_config_set while paused are used by the resumed run", async () => {
+    const blocker = await start({ siteUrl: `${site}/slow/`, maxPages: 100_000 });
+    await until("the blocker runs", blocker, (b) => b["status"] === "running");
+    const id = await start({ siteUrl: `${site}/auth/`, maxPages: 10 });
+    expect((await call("POST", `/crawls/${id}/pause`)).status).toBe(200);
+    expect([200, 202]).toContain((await call("POST", `/crawls/${blocker}/cancel`)).status);
+    await until("the blocker closes", blocker, settled);
+
+    const set = await call("PATCH", `/crawls/${id}/config`, { crawl: { httpAuth: AUTH } });
+    expect(set.status, set.text).toBe(200);
+    expect((set.body["crawl"] as Record<string, unknown>)["httpAuth"]).toBe("[redacted]");
+    expect((await call("POST", `/crawls/${id}/resume`)).status).toBe(202);
+    expect((await until("finished", id, settled))["status"]).toBe("finished");
+    expect(await refusedRows(id)).toBe(0);
+    expect(await okRows(id)).toBe(10);
+    expectNoSecret(JSON.stringify(await storedConfig(id)), "config_jsonb");
   }, 120_000);
 });

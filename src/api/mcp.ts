@@ -884,7 +884,8 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "and the resumed run files the pending URLs the new lists refuse as " +
         "excluded rows; pages already fetched stay. Credentials sent here replace " +
         "the ones this server holds (each field whole; an empty requestHeaders or " +
-        "cookies drops that kind) and are never stored, logged or answered; after a " +
+        "cookies, or httpAuth null — the one null accepted here — drops that kind) " +
+        "and are never stored, logged or answered; after a " +
         "server restart a change must send every credential the crawl needs, or it " +
         "is refused CREDENTIALS_REQUIRED (409). A queued " +
         "crawl this server is already starting is refused 409 (pause it first). " +

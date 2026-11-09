@@ -4265,11 +4265,6 @@ export class ApiService {
       // answer 500: a crawl that needed credentials is refused with the code an
       // agent acts on (27c). Validated here, as `runRenderPass` does not.
       const credentials = this.credentialsFor(crawlId, "crawl_render", config.credentialShape, sent);
-      // Kept for the next pass (Deviation 9) — but not for a cancelled crawl,
-      // whose credentials a cancel released: they serve this pass only.
-      if (sent !== undefined && credentials !== undefined && row.status !== "cancelled") {
-        this.credentials.set(crawlId, credentials);
-      }
       const robotsCrawlDelaySec = this.robotsCrawlDelay(row.discovery, crawlId);
       const renderUrls =
         input.urls === undefined
@@ -4296,6 +4291,15 @@ export class ApiService {
         });
       } catch (error) {
         throw mapRenderPassError(error, crawlId, this.log);
+      }
+      // Kept for the next pass (Deviation 9) only once the pass was ACCEPTED
+      // and ran, as a resume stores them only on acceptance: a render refused
+      // for its urls, its status or a lease must not replace what is held (a
+      // mistyped password would overwrite the right one). Never for a
+      // cancelled crawl, whose credentials a cancel released: they served this
+      // pass only. A cancel cannot land meanwhile — `refuseWhileBusy` holds it.
+      if (sent !== undefined && credentials !== undefined && row.status !== "cancelled") {
+        this.credentials.set(crawlId, credentials);
       }
     } finally {
       // Released on every path — a refused read, a refused list, a failed
@@ -4687,6 +4691,11 @@ export class ApiService {
           if (!Object.hasOwn(crawlSet.secrets, field)) continue;
           const value = crawlSet.secrets[field];
           if (unchanged(field, value)) continue;
+          if (field === "httpAuth" && value === null) {
+            // Removing Basic auth from a crawl that has none is no change.
+            if (Object.hasOwn(shown, "httpAuth")) secretChanges[field] = null;
+            continue;
+          }
           const why = credentialInputError(field, value);
           if (why !== null) throw new ServiceError("VALIDATION", why);
           secretChanges[field] = value;
@@ -4808,8 +4817,8 @@ export class ApiService {
   /**
    * The credentials a `crawl_config_set` leaves this process holding for the
    * crawl: what it holds now, with each field the patch sends REPLACED (a field
-   * is replaced whole; an empty `requestHeaders` or `cookies` drops that kind),
-   * or null when nothing is left.
+   * is replaced whole; an empty `requestHeaders` or `cookies`, or `httpAuth:
+   * null`, drops that kind), or null when nothing is left.
    *
    * A field the row's stored shape names and the patch does not replace must
    * already be held — and after a restart nothing is. Its value cannot be
@@ -4845,7 +4854,10 @@ export class ApiService {
       }
     }
     const next: { -readonly [K in CredentialField]?: CrawlCredentials[K] } = { ...(held ?? {}) };
-    const given = credentialsInputOf(replace as CrawlCredentials) ?? {};
+    // `httpAuth: null` is a removal, not a value to validate.
+    const { httpAuth: auth, ...values } = replace;
+    const given =
+      credentialsInputOf((auth === null ? values : replace) as CrawlCredentials) ?? {};
     for (const field of CREDENTIAL_FIELDS) {
       if (!Object.hasOwn(replace, field)) continue;
       // `credentialsInputOf` dropped an empty list: that kind goes.
@@ -4855,6 +4867,8 @@ export class ApiService {
       } else if (field === "cookies") {
         if (given.cookies === undefined) delete next.cookies;
         else next.cookies = given.cookies;
+      } else if (auth === null) {
+        delete next.httpAuth;
       } else if (given.httpAuth !== undefined) {
         next.httpAuth = given.httpAuth;
       }
@@ -4900,7 +4914,10 @@ export class ApiService {
       if (field === undefined) {
         throw new ServiceError("VALIDATION", unknownField(key));
       }
-      if (value === null) {
+      // `httpAuth: null` removes Basic auth (27c T9 fix 1, controller ruling):
+      // the one credential kind with no empty form, so null is its "none" —
+      // symmetric with an empty `requestHeaders` or `cookies`.
+      if (value === null && key !== "httpAuth") {
         throw new ServiceError(
           "VALIDATION",
           `field '${key}' is null: name the value you want; a crawl field has no unset`,
