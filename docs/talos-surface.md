@@ -72,9 +72,14 @@ existing one. The gate evidence is `docs/gates/phase-27c.md`.
   skipped, not written. Every rule treats an `excluded` row as it treats a
   `disallowed` one (not judged, not a broken link), and the rules that report a
   sitemap, pagination or hreflang URL as "not crawled" leave out the same-origin
-  URLs the crawl's current scope refuses. Refused at start: a pattern whose host is
-  not the site's (it could never match), a seed the scope refuses, and a listed URL
-  the scope refuses.
+  URLs the crawl's current scope refuses. Refused at start and by
+  `crawl_config_set`, as a pattern that could never match: one with no leading `*`
+  whose literal start is not `http://` or `https://` (`/cart*`: **a path rule needs
+  its leading `*`**, `*/cart*`), one whose host is not the site's, and one naming a
+  scheme admission never admits for the site (`http://…` on an `https` site; the
+  check asks `isSameOrigin(<pattern origin>, siteUrl)`, the one direction admission
+  asks). Refused at start: a seed the scope refuses, and a listed URL the scope
+  refuses.
 - **Scope changes while paused.** `crawl_config_set` takes `exclude`/`include` on a
   queued or paused crawl and stamps `scopeChangedAt`. The next run re-files before
   its first lease, both ways: pending URLs the new lists refuse become `excluded`

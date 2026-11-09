@@ -656,3 +656,25 @@ describe("27c T9 fix 1", () => {
     expectNoSecret(JSON.stringify(await storedConfig(id)), "config_jsonb");
   }, 120_000);
 });
+
+describe("crawl_config_set refuses a scope pattern that can never match (27c final wave I1)", () => {
+  it("a path rule without its leading '*', and an origin admission never admits for the site", async () => {
+    const id = await seedPaused(null);
+    const before = await storedConfig(id);
+    const port = new URL(site).port;
+    for (const [key, pattern, says] of [
+      ["exclude", "/cart*", "'*/cart*'"],
+      ["include", `127.0.0.1:${port}/auth/*`, "leading '*'"],
+      // An http site on a non-default port is never upgraded to https.
+      ["exclude", `https://127.0.0.1:${port}/auth/9*`, `https://127.0.0.1:${port}`],
+    ] as const) {
+      const res = await call("PATCH", `/crawls/${id}/config`, { crawl: { [key]: [pattern] } });
+      expect(res.status, res.text).toBe(400);
+      expect(res.body["code"]).toBe("VALIDATION");
+      expect(String(res.body["error"])).toContain(`${key} pattern '${pattern}'`);
+      expect(String(res.body["error"])).toContain("never match");
+      expect(String(res.body["error"])).toContain(says);
+    }
+    expect(await storedConfig(id)).toEqual(before);
+  });
+});

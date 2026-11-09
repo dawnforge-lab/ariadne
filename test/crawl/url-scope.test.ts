@@ -10,6 +10,7 @@ import {
   scopeRefusesSql,
   scopeVerdict,
 } from "../../src/crawl/url-scope.js";
+import { isSameOrigin } from "../../src/crawl/parse/url-utils.js";
 
 describe("matchesPattern", () => {
   it("anchors at both ends with * matching any run", () => {
@@ -184,9 +185,29 @@ describe("patternFamilyError", () => {
   });
   it("accepts the site's own spellings and host-less patterns", () => {
     expect(patternFamilyError("https://www.ex.com/*", site)).toBeNull();
-    expect(patternFamilyError("http://ex.com/a", site)).toBeNull();
     expect(patternFamilyError("*/blog/*", site)).toBeNull();
     expect(patternFamilyError("https://*.ex.com/*", site)).toBeNull();
-    expect(patternFamilyError("/blog/*", site)).toBeNull();
+    expect(patternFamilyError("http*", site)).toBeNull();
+    expect(patternFamilyError("*", site)).toBeNull();
+    // An http site admits the https upgrade on the default ports.
+    expect(patternFamilyError("https://ex.com/a", "http://ex.com/")).toBeNull();
+    expect(patternFamilyError("http://www.ex.com/*", "http://ex.com/")).toBeNull();
+  });
+  it("refuses a pattern with no leading '*' and no scheme, saying a path rule needs one (27c final wave I1)", () => {
+    for (const p of ["/blog/*", "/cart*", "ex.com/*", "www.ex.com/blog/*"]) {
+      const why = patternFamilyError(p, site);
+      expect(why, p).toContain("never match");
+      expect(why, p).toContain("'*/cart*'");
+    }
+  });
+  it("asks the one direction admission asks: no http pattern on an https site (27c final wave I1)", () => {
+    for (const p of ["http://ex.com/blog/*", "http://ex.com/a", "http://*", "http://www.ex.com/*"]) {
+      expect(patternFamilyError(p, site), p).toContain("never match");
+      // …and admission agrees: no URL under it is ever in the family.
+      expect(isSameOrigin(p.replace("*", "x"), site), p).toBe(false);
+    }
+    // A non-default-port http site never upgrades to https.
+    expect(patternFamilyError("https://ex.com:8080/*", "http://ex.com:8080/")).toContain("never match");
+    expect(patternFamilyError("https://*", "http://ex.com:8080/")).toContain("never match");
   });
 });

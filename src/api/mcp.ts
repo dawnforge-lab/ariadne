@@ -279,12 +279,16 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "silence is 'not measured', never 'clean'. Use it to check a known set of pages, " +
         "not to audit a site.\n\n" +
         "SCOPE. exclude and include are URL patterns matched against the whole URL, '*' " +
-        "for any run of characters ('*/cart*', 'https://example.com/blog/*'); exclude " +
+        "for any run of characters ('*/cart*', 'https://example.com/blog/*'), anchored " +
+        "at the URL's first character — a path rule needs its leading '*' ('/cart*' " +
+        "can never match and is refused); exclude " +
         "wins, and a non-empty include admits only what matches. A refused URL is " +
         "recorded as a page row of fetch class 'excluded' naming the pattern, never " +
         "fetched; past the shared never-requested budget it is counted in " +
         "crawl_status.excludedDropped. A seed or listed URL the scope refuses, and a " +
-        "pattern naming a host that is not this site's, are refused at start.\n\n" +
+        "pattern that can never match (a path with no leading '*', a host that is not " +
+        "this site's, http:// on an https site), are refused at start and by " +
+        "crawl_config_set.\n\n" +
         "CREDENTIALS. requestHeaders, httpAuth (Basic) and cookies reach only the site's " +
         "own hosts (never a CDN or another host, never https credentials over http), " +
         "are held in this server's memory only — never stored, logged or answered — and " +

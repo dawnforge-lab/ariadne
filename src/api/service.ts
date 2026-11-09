@@ -2527,8 +2527,9 @@ export class ApiService {
    *     a list spanning sites is refused, not split) and is admitted by the
    *     scope (Deviation 5). Two spellings of one URL are collapsed and counted
    *     (Deviation 3) — `checkListUrls`;
-   *  6. Phase 27c, scope: a pattern whose host is not this site's can never
-   *     match and is refused (`patternFamilyError`); a spider crawl's seed the
+   *  6. Phase 27c, scope: a pattern that can never match (no leading `*` and no
+   *     scheme, or an origin admission never admits) is refused
+   *     (`patternFamilyError`); a spider crawl's seed the
    *     scope refuses is refused (an empty crawl is not an answer);
    *  7. the judgement's `findingCap` against the top-level one, then the crawl
    *     loop's own ranges over the EFFECTIVE config — the engine's defaults,
@@ -4755,7 +4756,7 @@ export class ApiService {
         } catch (error) {
           throw new ServiceError("CONFLICT", messageOf(error));
         }
-        // A pattern whose host is not this site's could never match: refused
+        // A pattern that could never match (`patternFamilyError`): refused
         // here as at start (`patternFamilyError`), the first per list.
         for (const key of ["exclude", "include"] as const) {
           if (!Object.hasOwn(changes, key)) continue;

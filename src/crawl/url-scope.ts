@@ -152,28 +152,67 @@ export function fencedOffSql(urlExpr: SQL, scope: CrawlScope, siteUrl: string): 
   return sql`(${sameOriginSql(urlExpr, siteUrl)} AND ${scopeRefusesSql(urlExpr, scope)})`;
 }
 
+/** The schemes every stored URL starts with (admission refuses any other). */
+const STORED_SCHEMES = ["http://", "https://"] as const;
+
 /**
- * A message when the pattern's literal prefix (up to the first `*`) names a
- * scheme and host that `isSameOrigin` rejects for the site; null otherwise.
- * A pattern whose host is cut short by a `*` (or that has no scheme) cannot
- * be judged here and is never refused.
+ * A message when the pattern can provably never match a URL this crawl
+ * admits; null otherwise. The match is anchored and case-sensitive, and every
+ * stored URL starts `http://` or `https://` with a lower-case scheme and host:
+ *
+ *  - an upper-case letter in a literal scheme or host never matches;
+ *  - a non-empty literal prefix (up to the first `*`) that is neither a prefix
+ *    of `http://` / `https://` nor starts with one never matches: `/cart*`,
+ *    `/blog/*` and `example.com/*` are path or host rules missing their
+ *    leading `*`;
+ *  - a literal `scheme://host[:port]` is checked in the ONE direction
+ *    admission asks it (loop.ts `enqueue`, the list check, `sameOriginSql`):
+ *    `isSameOrigin(<a URL under it>, siteUrl)` — the site's host or its
+ *    www/apex twin on the site's scheme and port, or https for a
+ *    default-port http site. So `http://example.com/*` on an https site is
+ *    refused: no http URL is ever admitted there. A pattern whose host a `*`
+ *    cuts short (`https://*.ex.com/*`) is judged by its scheme alone.
  */
 export function patternFamilyError(pattern: string, siteUrl: string): string | null {
   const star = pattern.indexOf("*");
   const prefix = star === -1 ? pattern : pattern.slice(0, star);
   const schemeEnd = prefix.indexOf("://");
-  if (schemeEnd === -1) return null;
-  const hostStart = schemeEnd + 3;
-  const slash = prefix.indexOf("/", hostStart);
-  const literalOrigin = slash === -1 ? prefix : prefix.slice(0, slash);
-  if (/[A-Z]/.test(literalOrigin)) {
-    return `pattern '${pattern}' has an upper-case letter in its scheme or host, so it can never match: stored URLs have a lower-case scheme and host and matching is case-sensitive`;
+  if (schemeEnd !== -1) {
+    const slash = prefix.indexOf("/", schemeEnd + 3);
+    const literalOrigin = slash === -1 ? prefix : prefix.slice(0, slash);
+    if (/[A-Z]/.test(literalOrigin)) {
+      return `pattern '${pattern}' has an upper-case letter in its scheme or host, so it can never match: stored URLs have a lower-case scheme and host and matching is case-sensitive`;
+    }
   }
-  if (slash === -1 && star !== -1) return null;
+  if (
+    prefix !== "" &&
+    !STORED_SCHEMES.some((scheme) => scheme.startsWith(prefix) || prefix.startsWith(scheme))
+  ) {
+    return (
+      `pattern '${pattern}' can never match: a pattern is matched against the whole URL ` +
+      "from its first character, and every URL starts with http:// or https://. " +
+      "A path rule needs a leading '*' (e.g. '*/cart*', '*/blog/*')"
+    );
+  }
+  const scheme = STORED_SCHEMES.find((s) => prefix.startsWith(s));
+  if (scheme === undefined) return null;
+  const slash = prefix.indexOf("/", scheme.length);
+  if (slash === -1 && star !== -1) {
+    // The host is cut short by a `*`: only the scheme can be judged, spelled
+    // onto the site's own host and port.
+    if (isSameOrigin(`${scheme}${new URL(siteUrl).host}/`, siteUrl)) return null;
+    return (
+      `pattern '${pattern}' names the scheme ${scheme.slice(0, -3)}, which this crawl never ` +
+      `admits for the site ${siteUrl}, so it can never match`
+    );
+  }
   const origin = slash === -1 ? prefix : prefix.slice(0, slash);
-  const host = origin.slice(hostStart);
-  // isSameOrigin admits an http->https upgrade one way only; a pattern may
-  // name either spelling of the site, so ask both ways.
-  if (isSameOrigin(origin, siteUrl) || isSameOrigin(siteUrl, origin)) return null;
-  return `pattern '${pattern}' names host '${host}', which is not the crawl's site (${siteUrl}) or its www/apex, http/https spelling`;
+  const host = origin.slice(scheme.length);
+  if (isSameOrigin(`${origin}/`, siteUrl)) return null;
+  return (
+    `pattern '${pattern}' names origin '${origin}' (host '${host}'), which this crawl never ` +
+    `admits for the site ${siteUrl}: a crawl admits the site's host or its www/apex twin on ` +
+    "the site's own scheme and port (or https for an http site on the default port), so " +
+    "the pattern can never match"
+  );
 }

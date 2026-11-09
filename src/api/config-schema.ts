@@ -483,11 +483,15 @@ export const CRAWL_FIELDS = {
       `Up to ${MAX_SCOPE_PATTERNS} URL patterns of up to ${MAX_PATTERN_LENGTH} characters ` +
       "the crawl must not fetch. A pattern matches the whole normalised URL; '*' matches " +
       "any run of characters and nothing else is special, so '*/blog/*' is a path rule " +
-      "and 'https://shop.example.com/*' a host rule. Exclude wins over include. A " +
+      "and 'https://shop.example.com/*' a host rule. The match starts at the URL's " +
+      "first character, so a path rule needs a leading '*': '/blog/*' can never match " +
+      "and is refused. Exclude wins over include. A " +
       "refused URL is recorded as a row with fetch class 'excluded' naming the pattern, " +
       "never fetched. The seed (spider) and every listed URL (list) are checked at " +
-      "start: one these patterns refuse is a validation error. A pattern whose host " +
-      "is not this site's is refused, since it could never match.",
+      "start: one these patterns refuse is a validation error. A pattern that could " +
+      "never match is refused: one with no leading '*' that does not start http:// or " +
+      "https://, and one naming a scheme and host the crawl never admits (another " +
+      "host, or http:// on an https site).",
     default: [],
   },
   include: {

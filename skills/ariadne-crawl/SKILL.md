@@ -198,12 +198,15 @@ list-crawl finding, or the absence of one.
 **Scope — fence part of the site off.** `exclude` and `include` are URL patterns
 matched against the whole URL, `*` for any run of characters and nothing else
 special: `*/cart*` and `*?sort=*` are path and parameter rules,
-`https://example.com/blog/*` a host-and-path rule. Exclude wins; a non-empty `include`
+`https://example.com/blog/*` a host-and-path rule. The match starts at the URL's first
+character, so **a path rule needs its leading `*`**: `/cart*` can never match and is
+refused. Exclude wins; a non-empty `include`
 admits only what matches it. A refused URL is never fetched: it is a page row of fetch
 class `excluded` whose `fetchReason` names the pattern, and past the shared budget it
 is counted in `crawl_status.excludedDropped`. A seed or listed URL the scope refuses,
-and a pattern naming a host that is not the site's, are refused at start (an empty
-crawl is not an answer). Fence off only what the brief says to: every excluded URL is
+and a pattern that can never match (no leading `*` and no `http://`/`https://`, a host
+that is not the site's, or `http://` on an https site), are refused at start and by
+`crawl_config_set` (an empty crawl is not an answer). Fence off only what the brief says to: every excluded URL is
 a part of the site the audit does not see, and the findings file must say so.
 
 **Credentials — staging sites and gated pages.** `requestHeaders` (up to 20; not

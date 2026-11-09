@@ -490,3 +490,47 @@ describe("the credentials reach the crawl", () => {
     expectNoSecret(serverLog.join("\n"), "the server log after the run");
   }, 60_000);
 });
+
+describe("a scope pattern that can never match (27c final wave I1)", () => {
+  it("refuses a path rule without its leading '*' and an http pattern on an https site, on both transports", async () => {
+    const port = new URL(site).port;
+    const cases: Array<{ name: string; body: Record<string, unknown>; path: string; says: string[] }> = [
+      {
+        name: "a path rule with no leading '*'",
+        body: { siteUrl: `${site}/`, exclude: ["/cart*"] },
+        path: "exclude",
+        says: ["/cart*", "never match", "'*/cart*'"],
+      },
+      {
+        name: "a host-and-path rule with no scheme",
+        body: { siteUrl: `${site}/`, include: ["*/p/*", `127.0.0.1:${port}/*`] },
+        path: "include",
+        says: [`127.0.0.1:${port}/*`, "leading '*'"],
+      },
+      {
+        name: "an http pattern on an https site",
+        body: { siteUrl: `https://127.0.0.1:${port}/`, exclude: [`http://127.0.0.1:${port}/blog/*`] },
+        path: "exclude",
+        says: [`http://127.0.0.1:${port}`, "never match"],
+      },
+    ];
+    for (const c of cases) {
+      const checked = await a("POST", "/config/validate", c.body);
+      expect(checked.body["valid"], c.name).toBe(false);
+      const first = (checked.body["errors"] as { path: string; code: string; message: string }[])[0];
+      expect(first?.path, `${c.name}: ${checked.text}`).toBe(c.path);
+      expect(first?.code, c.name).toBe("invalid");
+      for (const phrase of c.says) expect(first?.message, `${c.name}: ${first?.message}`).toContain(phrase);
+
+      const res = await a("POST", "/crawls", c.body);
+      expect(res.status, c.name).toBe(400);
+      expect(res.body, c.name).toEqual({ error: first?.message, code: "VALIDATION" });
+
+      const viaTool = await tool("crawl_start", c.body);
+      expect(viaTool.isError, c.name).toBe(true);
+      expect(viaTool.text, c.name).toContain("never match");
+      const validated = await tool("config_validate", { config: c.body });
+      expect(validated.text, c.name).toContain("never match");
+    }
+  });
+});
