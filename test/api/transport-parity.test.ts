@@ -358,7 +358,8 @@ describe("contract clause 1: both transports accept and refuse the same fields",
 
       const viaMcp = await tool("crawl_start", c.body);
       expect(viaMcp.isError, `${c.name} over MCP was accepted`).toBe(true);
-      expect(viaMcp.text, `${c.name} over MCP`).toContain(c.field);    }
+      expect(viaMcp.text, `${c.name} over MCP`).toContain(c.field);
+    }
   }, 120_000);
 });
 
@@ -421,8 +422,9 @@ describe("contract clause 2: config_validate and crawl_start agree on every refu
         .from(crawls)
         .where(eq(crawls.id, id));
       expect(rows[0]?.config, c.name).toEqual(effective);
-      // The judgement the validate answer reports is the parsed block, or null.
-      expect(judgement === null || typeof judgement === "object", c.name).toBe(true);
+      // The judgement the validate answer reports is the parsed block the start
+      // stored, or null on both sides when the body carried none.
+      expect(rows[0]?.judgement ?? null, c.name).toEqual(judgement ?? null);
     }
   }, 120_000);
 

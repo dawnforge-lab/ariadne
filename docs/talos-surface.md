@@ -974,7 +974,7 @@ transports (§4.1b): over MCP a body that does not fit it is refused by the SDK
 before the tool runs, in the schema's own words with the path appended, rather
 than as `{error}` JSON. `config_validate` answers every one of these without
 starting anything, with the same first message
-(`test/api/transport-parity.test.ts:366` "answers valid: false exactly when POST
+(`test/api/transport-parity.test.ts:367` "answers valid: false exactly when POST
 /crawls refuses"). The body refusals themselves are pinned in
 `test/api/config-schema.test.ts:230` ("refuses a perHostDelayMs under the
 politeness floor rather than raising it").
@@ -1220,7 +1220,7 @@ same checks `crawl_start` does, allowlist and URL policy on `siteUrl`, every
 lookup**. `errors[0]` is the refusal `crawl_start` would answer with, in the
 same words; `effective`, on a valid body, is exactly what the crawl would store
 in `config_jsonb` plus the parsed `judgement` (null when none was given), and
-is null on an invalid one (`test/api/transport-parity.test.ts:366` "answers
+is null on an invalid one (`test/api/transport-parity.test.ts:367` "answers
 valid: false exactly when POST /crawls refuses").
 
 ### 4.2 `crawl_status` → the crawl in full
