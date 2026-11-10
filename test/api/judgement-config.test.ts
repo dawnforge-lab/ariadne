@@ -430,8 +430,8 @@ describe("crawl_config_set — PATCH /crawls/:id/config", () => {
   it("refuses every key other than judgement", async () => {
     const res = await patch(judgedId, { maxPages: 10 });
     expect(res.status).toBe(400);
-    expect(String(res.body["error"])).toContain("only `crawl` and `judgement` can be set");
-    expect(String(res.body["error"])).toContain("maxPages");
+    expect(String(res.body["error"])).toContain("body has an unknown field (key 1 in the order sent)");
+    expect(String(res.body["error"])).toContain("Accepted: crawl, judgement");
     // Beside a judgement too: nothing is half-applied.
     const both = await patch(judgedId, {
       judgement: { rules: { "title.too-long": { disabled: true } } },
@@ -453,7 +453,7 @@ describe("crawl_config_set — PATCH /crawls/:id/config", () => {
   it("refuses an unknown rule as a bad request, not a conflict", async () => {
     const res = await patch(judgedId, { judgement: { rules: { "no.such-rule": { disabled: true } } } });
     expect(res.status).toBe(400);
-    expect(String(res.body["error"])).toContain("rules.no.such-rule");
+    expect(String(res.body["error"])).toContain("rules: key 1 in the order sent names no rule in ruleset");
   });
 
   it("refuses a body with no judgement, a null judgement and a non-object one", async () => {

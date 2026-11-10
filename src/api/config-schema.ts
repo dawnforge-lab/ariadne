@@ -68,14 +68,14 @@ import {
 import { INDEXED_URL_MAX } from "../crawl/parse/url-utils.js";
 import { MAX_PATTERN_LENGTH, MAX_SCOPE_PATTERNS } from "../crawl/url-scope.js";
 import {
+  JUDGEMENT_BLOCK_KEYS,
   JUDGEMENT_DETAIL,
   JudgementError,
   OVERRIDABLE_THRESHOLDS,
   parseJudgement,
-  type JudgementBlock,
-  type RuleOverride,
   type ThresholdName,
 } from "../rules/judgement.js";
+import { THRESHOLD_NAMES } from "../rules/threshold-table.js";
 import { URL_FINDING_CAP } from "../rules/query/crawl-evidence.js";
 import {
   ISSUE_TYPES,
@@ -83,7 +83,7 @@ import {
   RULESET_VERSION,
   type Registry,
 } from "../rules/registry/registry.js";
-import { clip } from "./errors.js";
+import { positionOf, unknownKeyMessage } from "./errors.js";
 import type { StartCrawlInput } from "./service.js";
 
 /**
@@ -618,7 +618,11 @@ const FORBIDDEN_FIELDS: Readonly<Record<string, string>> = {
     "the process that constructs the server",
 };
 
-const ACCEPTED_FIELDS = [...Object.keys(CRAWL_FIELDS), "judgement"].join(", ");
+/** The start body's keys, in the order an unknown-field refusal lists them. */
+const ACCEPTED_FIELDS: readonly string[] = [...Object.keys(CRAWL_FIELDS), "judgement"];
+
+/** The keys `crawl_config_set`'s `crawl` object may name. */
+export const CRAWL_PATCH_FIELDS: readonly string[] = Object.keys(CRAWL_FIELDS);
 
 /**
  * The crawl-config keys the stored row carries that no request can name: the
@@ -633,8 +637,32 @@ export const OPERATOR_ONLY_FIELDS: readonly string[] = [
   "platformProfiles",
 ];
 
-export function unknownField(key: string): string {
-  return FORBIDDEN_FIELDS[key] ?? `unknown field '${clip(key)}' (accepted: ${ACCEPTED_FIELDS})`;
+/**
+ * Why `key`, sent at `position` (1-based, in the order sent) in the object at
+ * `path`, is refused: one of the two test-only fields or an operator-only
+ * field by name (an exact match of our own vocabulary, not the caller's
+ * text), or an unknown field by its POSITION. An unknown key is never
+ * repeated (27d spec §4): a key can be a secret pasted into the wrong place.
+ */
+export function unknownField(
+  key: string,
+  position: number,
+  path = "body",
+  accepted: readonly string[] = ACCEPTED_FIELDS,
+): string {
+  if (Object.hasOwn(FORBIDDEN_FIELDS, key)) return FORBIDDEN_FIELDS[key] as string;
+  if (OPERATOR_ONLY_FIELDS.includes(key)) return `field '${key}' is set by the operator, not over the API`;
+  return unknownKeyMessage(path, position, key, accepted);
+}
+
+/**
+ * The first of `keys` — the unknown keys a strict object found in `input` —
+ * as `JUDGEMENT_DETAIL.unknownKey` names it inside the judgement block.
+ */
+function unknownKeysDetail(input: unknown, keys: readonly string[], accepted: readonly string[]): string {
+  const first = keys[0];
+  if (first === undefined) throw new Error("config schema: unrecognized keys with no key");
+  return JUDGEMENT_DETAIL.unknownKey(input, first, accepted, keys.length - 1);
 }
 
 /** A field's schema as the body carries it: described, defaulted, marked. */
@@ -697,38 +725,28 @@ function judgementDetail(error: JudgementError): string {
  * `parseJudgement` as the semantic check (module header).
  */
 export function judgementSchema(registry: Registry) {
-  const kinds = new Map(registry.all().map((rule) => [rule.id, rule.kind]));
   const [firstId, ...restIds] = registry
     .all()
     .filter((rule) => rule.kind !== "metric")
     .map((rule) => rule.id);
   if (firstId === undefined) throw new Error("config schema: the ruleset has no finding rule");
 
-  const override = z.strictObject(
-    {
-      disabled: z.literal(true, { error: JUDGEMENT_DETAIL.disabledNotTrue }).optional(),
-      type: z.enum(ISSUE_TYPES).optional(),
-      priority: z.enum(PRIORITIES).optional(),
-    },
-    {
-      error: (issue) =>
-        issue.code === "unrecognized_keys"
-          ? issue.keys[0] === "severity"
-            ? JUDGEMENT_DETAIL.severity
-            : JUDGEMENT_DETAIL.unknownKey
-          : JUDGEMENT_DETAIL.notObject,
-    },
-  );
-
-  const rules = z.partialRecord(z.enum([firstId, ...restIds]), override, {
-    error: (issue) => {
-      if (issue.code !== "invalid_key") return "must be a JSON object";
-      const id = String(issue.input);
-      return kinds.get(id) === "metric"
-        ? JUDGEMENT_DETAIL.metricRule(id)
-        : JUDGEMENT_DETAIL.unknownRule(id);
-    },
+  // `rules` is checked by `parseJudgement` alone (the `.superRefine` below),
+  // never by zod: a zod issue inside a record carries the entry's KEY in its
+  // path, and the MCP SDK appends that path to its refusal — an id the
+  // ruleset lacks is a key the caller sent, never to be repeated (27d spec
+  // §4). So the zod type is `unknown`, and the shape it publishes is the
+  // partial record over the rule ids this zod schema describes.
+  const override = z.strictObject({
+    disabled: z.literal(true).optional(),
+    type: z.enum(ISSUE_TYPES).optional(),
+    priority: z.enum(PRIORITIES).optional(),
   });
+  const { $schema: _dialect, ...rulesShape } = z.toJSONSchema(
+    z.partialRecord(z.enum([firstId, ...restIds]), override),
+    { target: "draft-2020-12" },
+  );
+  const rules = z.unknown().meta(rulesShape);
 
   const thresholdShape = Object.fromEntries(
     (Object.keys(OVERRIDABLE_THRESHOLDS) as ThresholdName[]).map((name) => {
@@ -749,8 +767,8 @@ export function judgementSchema(registry: Registry) {
   const thresholds = z.strictObject(thresholdShape, {
     error: (issue) =>
       issue.code === "unrecognized_keys"
-        ? JUDGEMENT_DETAIL.notOverridableThreshold
-        : "must be a JSON object",
+        ? unknownKeysDetail(issue.input, issue.keys, THRESHOLD_NAMES)
+        : JUDGEMENT_DETAIL.notObject,
   });
 
   return z
@@ -763,7 +781,7 @@ export function judgementSchema(registry: Registry) {
       {
         error: (issue) =>
           issue.code === "unrecognized_keys"
-            ? JUDGEMENT_DETAIL.unknownKey
+            ? unknownKeysDetail(issue.input, issue.keys, JUDGEMENT_BLOCK_KEYS)
             : "field 'judgement' must be a JSON object",
       },
     )
@@ -776,6 +794,7 @@ export function judgementSchema(registry: Registry) {
           code: "custom",
           path: judgementSegments(error.path),
           message: judgementDetail(error),
+          params: { unknownKey: error.reason === "unknown-key" },
         });
       }
     });
@@ -831,7 +850,7 @@ function buildStartBodySchema(registry: Registry) {
       // `parseStartBody` answers these two itself, before the schema runs.
       error: (issue) =>
         issue.code === "unrecognized_keys"
-          ? issue.keys.map(unknownField).join("; ")
+          ? issue.keys.map((key) => unknownField(key, positionOf(issue.input, key))).join("; ")
           : BODY_NOT_OBJECT,
     },
   );
@@ -874,6 +893,10 @@ function codeOf(issue: z.core.$ZodIssue): ConfigErrorCode {
   switch (issue.code) {
     case "unrecognized_keys":
       return "unknown_field";
+    case "custom":
+      // `parseJudgement`'s refusals, raised from the block's `.superRefine`:
+      // an unknown key (`severity` among them) is still an unknown field.
+      return issue.params?.["unknownKey"] === true ? "unknown_field" : "invalid";
     case "invalid_type":
       return "invalid_type";
     case "too_small":
@@ -888,16 +911,24 @@ function codeOf(issue: z.core.$ZodIssue): ConfigErrorCode {
  * One zod issue as the refusals it stands for. A top-level field's message
  * names the field itself (`field 'maxPages' must be …`); inside the judgement
  * block the message leads with its dotted path, as `parseJudgement`'s do.
+ *
+ * An unknown key is named by its position in `raw`, the body as sent, and its
+ * `path` is the object it was found in ("" for the body): neither the path nor
+ * the message repeats the key (27d spec §4).
  */
-function configErrorsOf(issue: z.core.$ZodIssue): ConfigError[] {
+function configErrorsOf(issue: z.core.$ZodIssue, raw: object): ConfigError[] {
   const segments = issue.path.map(String);
   if (issue.code === "unrecognized_keys") {
     if (segments.length === 0) {
-      return issue.keys.map((key) => ({ path: key, code: "unknown_field", message: unknownField(key) }));
+      return issue.keys.map((key) => ({
+        path: "",
+        code: "unknown_field",
+        message: unknownField(key, positionOf(raw, key)),
+      }));
     }
     // The block's own sentence is about its first unknown key, as
-    // `parseJudgement` reports the first issue.
-    const path = [...segments, issue.keys[0] ?? ""].join(".");
+    // `parseJudgement` reports the first issue (the schema's error map).
+    const path = segments.join(".");
     return [{ path, code: "unknown_field", message: `${path}: ${issue.message}` }];
   }
   const path = segments.join(".");
@@ -919,34 +950,18 @@ export function parseStartBody(
   }
   const forbidden = Object.keys(FORBIDDEN_FIELDS)
     .filter((key) => key in raw)
-    .map((key): ConfigError => ({ path: key, code: "forbidden_field", message: unknownField(key) }));
+    .map((key): ConfigError => ({ path: key, code: "forbidden_field", message: FORBIDDEN_FIELDS[key] as string }));
   if (forbidden.length > 0) return { ok: false, errors: forbidden };
 
   const parsed = startBodySchema(registry).safeParse(raw);
-  if (!parsed.success) return { ok: false, errors: parsed.error.issues.flatMap(configErrorsOf) };
+  if (!parsed.success) {
+    return { ok: false, errors: parsed.error.issues.flatMap((issue) => configErrorsOf(issue, raw)) };
+  }
   const { judgement, ...crawl } = parsed.data;
+  // The schema's `.superRefine` accepted the block; this is the same parse,
+  // for its typed result (the schema's `rules` is `unknown`, see there).
   return {
     ok: true,
-    value: judgement === undefined ? crawl : { ...crawl, judgement: judgementBlockOf(judgement) },
+    value: judgement === undefined ? crawl : { ...crawl, judgement: parseJudgement(judgement, registry) },
   };
-}
-
-/**
- * The parsed block as a `JudgementBlock`. `z.partialRecord` types every rule's
- * entry as possibly undefined; the override schema refuses an undefined entry,
- * so one here is a defect in this module, and it throws.
- */
-function judgementBlockOf(
-  block: z.output<ReturnType<typeof judgementSchema>>,
-): JudgementBlock {
-  const { rules, ...rest } = block;
-  if (rules === undefined) return rest;
-  const overrides: Record<string, RuleOverride> = {};
-  for (const [id, override] of Object.entries(rules)) {
-    if (override === undefined) {
-      throw new Error(`config schema: rule '${id}' parsed to no override`);
-    }
-    overrides[id] = override;
-  }
-  return { ...rest, rules: overrides };
 }

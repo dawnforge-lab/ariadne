@@ -2683,7 +2683,7 @@ describe("GET /rules", () => {
   it("400s a query parameter this route does not take", async () => {
     const res = await call("/rules?category=links");
     expect(res.status).toBe(400);
-    expect(String(res.body["error"])).toContain("category");
+    expect(String(res.body["error"])).toContain("unknown query parameter (key 1 in the order sent)");
   });
 
   it("409s a crawl holding rows for a rule this ruleset no longer defines", async () => {
@@ -4070,13 +4070,13 @@ describe("unknown query parameters", () => {
     // silently drops is a wrong answer with a success code on it.
     const severity = await call(`/crawls/${crawlA}/issues?serverity=critical`);
     expect(severity.status).toBe(400);
-    expect(String(severity.body["error"])).toContain("serverity");
-    expect(String(severity.body["error"])).toContain("severity");
+    expect(String(severity.body["error"])).not.toContain("serverity");
+    expect(String(severity.body["error"])).toContain("did you mean 'severity'?");
 
     const indexable = await call(`/crawls/${crawlA}/pages?indexible=true`);
     expect(indexable.status).toBe(400);
-    expect(String(indexable.body["error"])).toContain("indexible");
-    expect(String(indexable.body["error"])).toContain("indexable");
+    expect(String(indexable.body["error"])).not.toContain("indexible");
+    expect(String(indexable.body["error"])).toContain("did you mean 'indexable'?");
   });
 
   it("holds on every listing, including the ones with no filters at all", async () => {

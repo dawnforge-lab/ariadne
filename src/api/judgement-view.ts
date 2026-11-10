@@ -166,9 +166,8 @@ export function readJudgementBlock(
     return readStoredJudgement(raw, crawlId, registry);
   } catch (error) {
     if (error instanceof JudgementError && error.reason === "unknown-rule") {
-      const ruleId = error.path.startsWith("rules.")
-        ? error.path.slice("rules.".length)
-        : error.path;
+      const ruleId = error.ruleId;
+      if (ruleId === undefined) throw new Error("judgement: an unknown-rule refusal carries no rule id");
       throw new ServiceError(
         "CONFLICT",
         `crawl ${crawlId}'s stored judgement overrides rule '${clip(ruleId)}', which ruleset ` +

@@ -193,6 +193,7 @@ import { isHostAllowed, type ServiceConfig } from "./config.js";
 import {
   API_CRAWL_DEFAULTS,
   CRAWL_FIELDS,
+  CRAWL_PATCH_FIELDS,
   MAX_SUPPLIED_SITEMAPS,
   OPERATOR_ONLY_FIELDS,
   parseStartBody,
@@ -221,7 +222,7 @@ import {
   type CsvViewName,
   type ExportFormat,
 } from "./csv.js";
-import { ServiceError, clip } from "./errors.js";
+import { ServiceError, clip, unknownKeyMessage, unknownKeysMessage } from "./errors.js";
 import {
   buildCrawlOverview,
   buildIssuesOverview,
@@ -377,6 +378,9 @@ export const RENDER_CRAWL_FIELDS: Record<keyof RenderCrawlInput, FieldKind> = {
   cookies: "credential",
 };
 
+/** The keys a `crawl_config_set` body (`PATCH /crawls/:id/config`) may carry. */
+const CONFIG_SET_FIELDS: readonly string[] = ["crawl", "judgement"];
+
 /**
  * Validate a `POST /crawls/:id/resume` body (27c): absent is a resume with
  * nothing sent; otherwise only the three credential fields, each checked as
@@ -391,12 +395,10 @@ export function parseResumeCrawlInput(raw: unknown): CrawlCredentials {
     throw new ServiceError("VALIDATION", "request body must be a JSON object");
   }
   const input: Record<string, unknown> = {};
-  for (const [key, value] of Object.entries(raw)) {
+  for (const [index, [key, value]] of Object.entries(raw).entries()) {
     if (!(CREDENTIAL_FIELDS as readonly string[]).includes(key)) {
-      throw new ServiceError(
-        "VALIDATION",
-        `unknown field '${clip(key)}' (accepted: ${CREDENTIAL_FIELDS.join(", ")})`,
-      );
+      // By position, never quoted (27d spec §4).
+      throw new ServiceError("VALIDATION", unknownKeyMessage("body", index + 1, key, CREDENTIAL_FIELDS));
     }
     if (value === undefined) continue;
     const why = credentialInputError(key as CredentialField, value);
@@ -434,14 +436,15 @@ export function parseRenderCrawlInput(raw: unknown): RenderCrawlInput {
   const body = raw as Record<string, unknown>;
 
   const input: Record<string, unknown> = {};
-  for (const [key, value] of Object.entries(body)) {
-    const kind = RENDER_CRAWL_FIELDS[key as keyof RenderCrawlInput];
-    if (kind === undefined) {
+  for (const [index, [key, value]] of Object.entries(body).entries()) {
+    if (!Object.hasOwn(RENDER_CRAWL_FIELDS, key)) {
+      // By position, never quoted (27d spec §4).
       throw new ServiceError(
         "VALIDATION",
-        `unknown field '${clip(key)}' (accepted: ${Object.keys(RENDER_CRAWL_FIELDS).join(", ")})`,
+        unknownKeyMessage("body", index + 1, key, Object.keys(RENDER_CRAWL_FIELDS)),
       );
     }
+    const kind = RENDER_CRAWL_FIELDS[key as keyof RenderCrawlInput];
     if (value === undefined) continue;
     assertKind(key, value, kind);
     input[key] = value;
@@ -4621,10 +4624,9 @@ export class ApiService {
     }
     const others = Object.keys(patch).filter((key) => key !== "crawl" && key !== "judgement");
     if (others.length > 0) {
-      throw new ServiceError(
-        "VALIDATION",
-        `only \`crawl\` and \`judgement\` can be set (refused: ${others.map(clip).join(", ")})`,
-      );
+      // The first refused key by position and a count of the rest, never a
+      // key as sent (27d spec §4).
+      throw new ServiceError("VALIDATION", unknownKeysMessage("body", patch, others, CONFIG_SET_FIELDS));
     }
     const crawlPatch = patch["crawl"];
     const judgementPatch = patch["judgement"];
@@ -4830,6 +4832,7 @@ export class ApiService {
         const merged = mergePatch(row.judgement ?? {}, blockPatch) as Record<string, unknown>;
         const block = this.parseJudgementInput(
           capPatch === undefined ? merged : { ...merged, findingCap: capPatch },
+          judgementPatch,
         );
 
         if (block.findingCap !== undefined) {
@@ -4947,7 +4950,7 @@ export class ApiService {
     const operatorOnly: Record<string, unknown> = {};
     const reported: Record<string, unknown> = {};
     const secrets: Partial<Record<CredentialField, unknown>> = {};
-    for (const [key, value] of Object.entries(raw)) {
+    for (const [index, [key, value]] of Object.entries(raw).entries()) {
       if (OPERATOR_ONLY_FIELDS.includes(key)) {
         // Decided against the stored value in the transaction (Ruling 12): an
         // unchanged one is no change, a changed one is refused there.
@@ -4965,9 +4968,9 @@ export class ApiService {
           "findingCap belongs to the judgement: set it as judgement.findingCap",
         );
       }
-      const field = wire[key];
+      const field = Object.hasOwn(wire, key) ? wire[key] : undefined;
       if (field === undefined) {
-        throw new ServiceError("VALIDATION", unknownField(key));
+        throw new ServiceError("VALIDATION", unknownField(key, index + 1, "crawl", CRAWL_PATCH_FIELDS));
       }
       // `httpAuth: null` removes Basic auth (27c T9 fix 1, controller ruling):
       // the one credential kind with no empty form, so null is its "none" —
@@ -7177,9 +7180,9 @@ export class ApiService {
    * included, which on a REQUEST is the caller's mistake rather than a stored
    * row's drift — is a 400 carrying `parseJudgement`'s "<path>: <reason>".
    */
-  private parseJudgementInput(raw: unknown): JudgementBlock {
+  private parseJudgementInput(raw: unknown, sent: unknown = raw): JudgementBlock {
     try {
-      return parseJudgement(raw, this.registry);
+      return parseJudgement(raw, this.registry, sent);
     } catch (error) {
       if (error instanceof JudgementError) throw new ServiceError("VALIDATION", error.message);
       throw error;

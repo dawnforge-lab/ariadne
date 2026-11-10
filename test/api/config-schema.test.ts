@@ -197,16 +197,16 @@ describe("parseStartBody: the refusals the transport suites used to pin", () => 
   });
 
   // http.test.ts "refuses an unknown field by name rather than ignoring it".
-  it("refuses an unknown field by name, listing the accepted ones", () => {
+  it("refuses an unknown field by position, never quoting it, listing the accepted ones", () => {
     const error = first({ siteUrl: SITE, maxpages: 3 });
     expect(error.code).toBe("unknown_field");
-    expect(error.path).toBe("maxpages");
-    expect(error.message).toContain("unknown field 'maxpages'");
-    expect(error.message).toContain("(accepted: siteUrl, maxPages,");
+    expect(error.path).toBe("");
+    expect(error.message).toContain("body has an unknown field (key 2 in the order sent); did you mean 'maxPages'?");
+    expect(error.message).toContain("Accepted: siteUrl, maxPages,");
   });
 
   it("names every unknown field, one error each", () => {
-    expect(refused({ siteUrl: SITE, a: 1, b: 2 }).map((e) => e.path)).toEqual(["a", "b"]);
+    expect(refused({ siteUrl: SITE, a: 1, b: 2 }).map((e) => /key (\d+) in the order sent/.exec(e.message)?.[1])).toEqual(["2", "3"]);
   });
 
   // http.test.ts "refuses a field of the wrong type".
@@ -334,9 +334,9 @@ describe("parseStartBody: the judgement block", () => {
 
   it("refuses a rule id the ruleset does not have, and a metric id, in parseJudgement's words", () => {
     const unknown = first({ siteUrl: SITE, judgement: { rules: { "no.such-rule": { disabled: true } } } });
-    expect(unknown.path).toBe("judgement.rules.no.such-rule");
+    expect(unknown.path).toBe("judgement.rules");
     expect(unknown.message).toBe(
-      "judgement.rules.no.such-rule: no rule 'no.such-rule' in ruleset",
+      `judgement.rules: key 1 in the order sent names no rule in ruleset ${RULESET_VERSION}`,
     );
     const metricId = registry.byKind("metric")[0]!.id;
     const metric = first({ siteUrl: SITE, judgement: { rules: { [metricId]: { disabled: true } } } });
@@ -353,12 +353,12 @@ describe("parseStartBody: the judgement block", () => {
     expect(severity.message).toContain("severity cannot be overridden");
 
     const threshold = first({ siteUrl: SITE, judgement: { thresholds: { NOPE: 3 } } });
-    expect(threshold.path).toBe("judgement.thresholds.NOPE");
-    expect(threshold.message).toContain("not an overridable threshold");
+    expect(threshold.path).toBe("judgement.thresholds");
+    expect(threshold.message).toContain("judgement.thresholds: unknown field (key 1 in the order sent)");
 
     const key = first({ siteUrl: SITE, judgement: { bogus: 1 } });
-    expect(key.path).toBe("judgement.bogus");
-    expect(key.message).toBe("judgement.bogus: unknown key");
+    expect(key.path).toBe("judgement");
+    expect(key.message).toBe("judgement: unknown field (key 1 in the order sent). Accepted: rules, thresholds, findingCap");
   });
 
   it("refuses a threshold out of its range, naming the range", () => {

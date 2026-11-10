@@ -254,7 +254,7 @@ async function buildCases(): Promise<{ valid: Case[]; invalid: Case[] }> {
   }
 
   invalid.push(
-    { name: "an unknown field", body: { siteUrl: seed, bogus: 1 }, field: "bogus" },
+    { name: "an unknown field", body: { siteUrl: seed, bogus: 1 }, field: "key 2 in the order sent" },
     { name: "allowPrivate", body: { siteUrl: seed, allowPrivate: true }, field: "allowPrivate" },
     {
       name: "a rule id the ruleset does not have",

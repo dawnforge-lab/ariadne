@@ -77,7 +77,7 @@ describe("parseJudgement", () => {
 
   const cases: [string, unknown, string][] = [
     ["severity", { rules: { "title.too-long": { severity: "info" } } }, "rules.title.too-long.severity"],
-    ["an unknown rule id", { rules: { "nope.rule": { disabled: true } } }, "rules.nope.rule"],
+    ["an unknown rule id", { rules: { "nope.rule": { disabled: true } } }, "rules"],
     ["a metric rule id", { rules: { "site.health": { disabled: true } } }, "rules.site.health"],
     ["an empty override", { rules: { "title.too-long": {} } }, "rules.title.too-long"],
     ["disabled: false", { rules: { "title.too-long": { disabled: false } } }, "rules.title.too-long.disabled"],
@@ -85,10 +85,10 @@ describe("parseJudgement", () => {
     ["a threshold below its range", { thresholds: { SLOW_MS: 99 } }, "thresholds.SLOW_MS"],
     ["a threshold above its range", { thresholds: { THIN_WORDS: 10001 } }, "thresholds.THIN_WORDS"],
     ["a non-integer threshold", { thresholds: { SLOW_MS: 1.5 } }, "thresholds.SLOW_MS"],
-    ["a threshold that is not overridable", { thresholds: { NEAR_DUPLICATE_HAMMING: 4 } }, "thresholds.NEAR_DUPLICATE_HAMMING"],
+    ["a threshold that is not overridable", { thresholds: { NEAR_DUPLICATE_HAMMING: 4 } }, "thresholds"],
     ["a findingCap of 0", { findingCap: 0 }, "findingCap"],
     ["a non-integer findingCap", { findingCap: 2.5 }, "findingCap"],
-    ["an unknown top-level key", { extra: 1 }, "extra"],
+    ["an unknown top-level key", { extra: 1 }, ""],
   ];
   for (const [what, raw, path] of cases) {
     it(`refuses ${what}, naming ${path}`, () => {
