@@ -24,7 +24,8 @@ existing one. The gate evidence is `docs/gates/phase-27c.md`.
   redirect hop; the whole walk is capped at 10 min. A walk the cap cut records
   `discovery.truncation.timeLimited`. A pause or cancel lands within about a second
   (bound 2 s) in the host probe, the sitemap walk, the post-discovery seeding, the
-  recheck pass and the resource pass (§4.1c).
+  known-404 probe, the recheck pass and the resource pass, a third-party host's
+  robots.txt read included (§4.1c).
 - **`hreflang.declarations-incomplete` has two new causes**, `timeLimited` and
   `interrupted` (a resumed crawl whose sitemap re-walk was cut by any exit), each an
   evidence key, a column and a sentence (the Phase 26c block below, and "Sitemap timing" there).
@@ -301,9 +302,10 @@ info counting the fourteen metric rules). The new ids:
   `Failures` row. A pause or cancel during the walk is not a failure and not
   `timeLimited`; it drops what the walk learned, and a resume re-walks.
   `interrupted` marks the one case where a re-walk's evidence is stale: a resumed
-  crawl cleared its staged sitemap rows, and then any exit (stop, failed poll, error)
-  came before the walk's evidence was rewritten. The next completed walk rewrites the
-  evidence and clears it.
+  crawl cleared its staged sitemap rows, and then any exit (stop, failed poll, error,
+  or the process dying) came before the walk's evidence was rewritten. The mark is
+  written before the rows are cleared, so no exit can skip it. The next completed walk
+  rewrites the evidence and clears it.
 
 What changed under existing ids. **Hreflang is read from all three sources**: the
 page's HTML, its HTTP `Link` header (read whole at fetch, on every classified
@@ -1352,8 +1354,8 @@ cleared scope admits, and fetches it to an ok row".
 rulings 5 and 6). The stop path decides nothing on its way out: URLs never leased
 stay pending, resource rows never reached stay null with no reason, and a stop
 skips whatever epilogue work had not started (the order is probe → recheck →
-resources): the 404 probe if the stop came during the page crawl; otherwise the
-rest of the 5xx recheck and the resource pass. Skipped work is never recorded as
+resources): the 404 probe if the stop came during the page crawl or the probe
+itself; otherwise the rest of the 5xx recheck and the resource pass. Skipped work is never recorded as
 having found nothing. So what a pause leaves is exactly the set of questions nobody
 has answered, and the owed-work check below applies only to a `finished` or `failed`
 row (a paused crawl may owe work its stop skipped that no row counts). A `cancelled` crawl is
@@ -1442,7 +1444,8 @@ crawl within about a second (bound 2 s on an idle machine):
 | sitemap walk | the in-flight document is aborted, including while its rows are being flushed; what the walk had learned is dropped and a resume re-walks |
 | post-discovery seeding | the sitemap-entry enqueue and the `sitemap_urls` write check the request between batches; the frontier is partial and a resume re-enqueues to the same set |
 | page crawl | in-flight page fetches go back to the frontier and are never written as failures (an aborted fetch refunds its attempt) |
-| 5xx recheck, resource pass | the in-flight request is aborted and its row left unwritten, so a resume asks it again |
+| known-404 probe | the probe's request (or its wait for a slot) is aborted; the probe is recorded as not run (`skipped`, "crawl stopped … before the known-404 probe") and the recheck and resource passes are skipped; a resume probes |
+| 5xx recheck, resource pass | the in-flight request is aborted and its row left unwritten, so a resume asks it again; in the resource pass that includes a third-party asset host's robots.txt read, which a resume reads again |
 | render pass | none to land: a crawl that renders is already `finished`, so `crawl_pause` and `crawl_cancel` answer 409, as before (27b) |
 
 On a deep crawl the status flip waits for the close, which runs template inference over
@@ -1459,7 +1462,7 @@ earned and its throttle record; it survives a server restart, and nothing starts
 crawl but `crawl_resume`. A paused crawl that has run can be rendered and judged
 (looking at partial results is a reason to pause). A cancel keeps the pages crawled,
 which stay judgeable and exportable. A stop skips whatever epilogue work had not
-started: the 404 probe if it came during the page crawl; otherwise the rest of the
+started: the 404 probe if it came during the page crawl or the probe itself; otherwise the rest of the
 5xx recheck and the resource pass (a request in flight is aborted, not awaited). The skipped checks read as not measured, never as
 a pass. `crawl_status.neverFetched` says how many URLs the crawl never asked for.
 

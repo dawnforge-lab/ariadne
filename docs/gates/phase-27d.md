@@ -3,7 +3,9 @@
 Date: 2026-11-10. Spec: `docs/superpowers/specs/2026-11-10-phase-27d-backlog-design.md`
 ("Gate 27d"). Plan: `docs/superpowers/plans/2026-11-10-phase-27d-backlog.md`. Branch
 `worktree-phase-27d`, built on `be367ce` (main) through plan commit `1f18860`. The code under
-test is `491c23c` (Task 10's last fix); this gate adds only docs, skills and this file.
+test is `491c23c` (Task 10's last fix); this gate adds only docs, skills and this file. The
+final fix wave after the whole-branch review changed code again; its own results are in
+"Final fix wave" below.
 
 **Verdict: every clause passes on the code, one is open until the PR exists.** Clause 1's last
 sentence, "the PR's first CI run is green", cannot be shown before the PR is opened; it is the
@@ -22,7 +24,7 @@ changed on the surface: `docs/talos-surface.md` ("What Phase 27d changed here", 
 |---|---|---|---|
 | 1 | full suite and `tsc` clean; both formerly flaky tests pass 50 runs in a row under CPU stress; the PR's first CI run is green | **pass, CI open**: `tsc` clean; two full runs of 156 files / 4,159 tests, 0 failed; renderer misprediction test 50/50 and the four HostGate pacing tests 50/50 under 2 CPU burners. The PR's first CI run: after the PR is opened | §1 |
 | 2 | the sentinel-key test passes on every parser, route and MCP tool | **pass**: `test/api/no-key-echo.test.ts` (16 tests passed) | §2 |
-| 3 | a pause and a cancel during each phase close within 2 s; a crawl paused in discovery and resumed has the same discovery result as an uninterrupted one | **pass**: `test/crawl/loop-stop-early.test.ts` 19 tests passed; highest measured latency 1,047 ms. Render has no stop to time: a rendering crawl is `finished`, so pause and cancel answer 409 (pinned) | §3 |
+| 3 | a pause and a cancel during each phase close within 2 s; a crawl paused in discovery and resumed has the same discovery result as an uninterrupted one | **pass**: `test/crawl/loop-stop-early.test.ts` 19 tests passed; highest measured latency 1,047 ms (24 tests after the final fix wave, 10 of 10 runs green, highest 1,161 ms; see "Final fix wave"). Render has no stop to time: a rendering crawl is `finished`, so pause and cancel answer 409 (pinned) | §3 |
 | 4 | a sitemap with late headers is read; one silent mid-body fails "no data for N s"; a walk past its total stops with `timeLimited` and the marker fires | **pass** on scaled timing (Deviation 1), with the real defaults pinned by a test | §4 |
 | 5 | the 50k `--exclude` gate within 290.2 MB; template inference shows no growth with the number of shapes | **pass**: **271.9 MB** peak (crawl 271.9, render 217.7, rules 265.1); inference is one SQL statement returning one row at 3 and at 40,002 shapes | §5 |
 | 6 | a Hurtigruten crawl reads every locale sitemap | **pass** (owner OK 2026-11-10): `crawl_d5207a58-e431-44b7-8f56-9b095e8a1c8b`, 11 sitemaps read, 0 failed, `timeLimited` false, 600 pages, hreflang coverage 100% | §6 |
@@ -42,7 +44,8 @@ The baseline at `1f18860` was 152 files / 4,062 tests; 27d adds the files
 `test/crawl/loop-stop-early.test.ts` and `test/scripts/prune-test-crawls.test.ts`.
 
 **The two formerly flaky tests, 50 of 50 each under CPU stress** (two `for(;;){}` burners on
-this machine; recorded in the task reports, not re-run for the gate):
+this machine; recorded in the task reports, which lived in the deleted SDD workspace and whose
+numbers are copied here; not re-run for the gate):
 
 - Task 1, `test/crawl/renderer.test.ts` "never predicts a URL twice once a prediction for it
   was wrong". Diagnosis over 30 runs: 29 passed and one failed with "expected 7 to be 8".
@@ -86,6 +89,8 @@ no extra slack. Latency, measured, in ms:
 | pause during a resumed crawl's re-walk | 993–1,012 | Task 4 |
 | pause during the 5xx recheck pass | **898** (was 15,030) | Task 5 |
 | pause during the resource pass | **959** (was 15,069) | Task 5 |
+| pause / cancel while the resource pass reads a third-party robots.txt | **884–1,043 / 934–1,005** (was 15,036 / 15,028) | final wave F1, 10 runs |
+| pause during the known-404 probe | **932–1,003** (was 15,024) | final wave F2, 10 runs |
 | render pass | none: pause and cancel answer 409 (the crawl is `finished`); a test pins the refusal while a page is in the browser | Task 5 |
 
 A fresh pass with `STOP_LATENCY_LOG` set, in the first full run (one sample each, ms): probe
@@ -134,7 +139,9 @@ DATABASE_URL=postgresql://ariadne:ariadne@localhost:5440/ariadne_gate27d \
   node --max-old-space-size=512 --import tsx scripts/gate-rules.ts --exclude '*/products/p1*'
 ```
 
-Node v22.23.2, on `491c23c`. Log: `gate27d.log` in the SDD workspace.
+Node v22.23.2, on `491c23c`. The numbers below are copied from the run's log into this
+record; the raw log (`gate27d.log`) was kept in the SDD workspace, which is not committed and
+is deleted after the merge.
 
 | | 27d (this run) | 27c run 1 | 27c run 2 |
 |---|---|---|---|
@@ -171,7 +178,8 @@ inference timing at 50k remains unmeasured (open item 3).
 
 ## 6. Clause 6: Hurtigruten (owner OK 2026-11-10)
 
-Driver `crawl-hurtigruten.mts` in the SDD workspace (not in `scripts/`), run once, on the dev
+Driver `crawl-hurtigruten.mts`, kept in the SDD workspace (not committed, deleted after the
+merge; not in `scripts/`), run once, on the dev
 database: `siteUrl https://www.hurtigruten.com/en/`, `sitemapUrls
 […/en/sitemaps/en/sitemap.xml]`, `maxPages 600`, `fetchResources false`, the default robots,
 crawl-delay and governor (1 s spacing, 16 workers), the project's branded user agent
@@ -205,7 +213,8 @@ spacing, which is far more than spacing alone costs (about 20 s), so several doc
 well over the old 20 s limit, as 26c's cold-cache finding predicts (about 33 s on a cold copy).
 On 26c's first crawl that was 20 of 20 documents failing; with the 27d limits it was 11 of 11
 read. That is the clause's point: the cold case is now read, and the fixture in clause 4
-carries the exact 33 s case in scaled form. The log: `hurtigruten.log` in the SDD workspace.
+carries the exact 33 s case in scaled form. The numbers in this section are copied from the
+run's log (`hurtigruten.log`), which was kept in the deleted SDD workspace.
 
 ## Rulings
 
@@ -244,6 +253,7 @@ Made by the controller during the build, with the cost if wrong. Owner to see.
   `sitemap_hreflang` was cleared, any exit before the re-walk's evidence is written (stop,
   failed poll, any error) marks the kept evidence before the error propagates. Cost: a resumed
   crawl that failed mid-walk shows the marker instead of being judged on partial staging.
+  (Final wave, F4: the mark is now written ahead of the clear, so it holds across a crash too.)
 - **R11.** The 100,000-key timing tests' bound went from 1,000 ms to 5,000 ms: the quadratic
   version takes minutes, and 1 s left a few-times margin over 0.3 s on a 2-core CI runner.
   Cost: a regression to 2–4 s parse time would pass.
@@ -261,6 +271,18 @@ Made by the controller during the build, with the cost if wrong. Owner to see.
   UPDATE clears a pending `control_request` whatever the status, and sets `cancelled` only for
   `queued`/`running`. Found by the first `--confirm` run (below). Cost: none for test-host
   rows.
+- **R16.** The final fix wave takes the whole-branch review's I1 (the resource pass's
+  third-party robots.txt read ignored the stop), M2 (the R10 mark was not crash-proof: write it
+  ahead), M3 (the known-404 probe was unstoppable), M4 (`requestResource`'s catch order), M5
+  (open item 2 here was stale), M1 as a docblock only, T9's planner pin and 30 s bound, T11's
+  log pointers and T3's dead `isTimeout` import. M3 because the spec says a stop is honoured in
+  "whatever phase" and the probe is a fetch; M2 because a write-ahead mark makes R10 hold
+  across a crash with less code (the guard removed only if the R10 tests passed unchanged,
+  which they did). Cost: one more round of `loop.ts` churn, caught by `loop-stop-early`.
+- **R17.** Carried to Phase 28 (open item 2 below): M1's same-shape credential window (it
+  needs a row generation), T4's `sitemap_memberships` staging across a changed site, and the
+  robots-unreachable-on-resume staging. The reviewer's "declined to judge" items are accepted
+  as listed. Cost: none now; the items stay visible.
 
 ## Deviations from the plan and spec
 
@@ -333,15 +355,16 @@ after the merge):
 - **T2:** `docs/gates/phase-26a.md:519-520` still names the deleted `minGap() >= 1000 -
   SLACK_MS`; `loop.test.ts:376` two type imports on one line, `:459` terse `void (…)`.
 - **T3:** the idle timer is not reset on `readCapped` paths (robots bodies, 3xx/4xx drains); undici
-  backstop and connect timeouts fall through to `describeError` (raw text), and `isTimeout` is a
-  dead import in `discovery.ts`; the walk-budget test does not pin the in-flight abort;
+  backstop and connect timeouts fall through to `describeError` (raw text); `isTimeout` was a
+  dead import in `discovery.ts` (removed in the final wave, F7); the walk-budget test does not pin the in-flight abort;
   `DiscoveryTruncation.timeLimited` is typed required though pre-27d rows lack it;
   `docsFetched` counts a budget-aborted document, the crawl-delay sleep precedes the budget
   check, the budget clock starts before the first sleep; un-reindented try blocks, an import at
   the end of `discovery.test.ts`, the hop fixture comment still says "< headers 600".
 - **T4:** staged `sitemap_memberships` from a stopped walk survive via `onConflictDoNothing`;
   a fresh crawl stopped during `persistSitemap` keeps partial `sitemap_urls` with discovery null;
-  unindented try body in `runToCompletion`; a pre-existing case: robots unreachable on a resume
+  the unindented try body in `runToCompletion` went with the staging guard (final wave, F4);
+  a pre-existing case: robots unreachable on a resume
   deletes the staging and rewrites evidence with no walk, so absence rules run over empty staging.
 - **T5:** `AbortSignal.any` per resource over the long-lived crawl signal (listener build-up
   unverified; the 50k gate peak is the check, and it passed); a render test comment overclaims
@@ -354,19 +377,53 @@ after the merge):
   lands between commit and settle (theoretical).
 - **T8:** `list-mode.ts` imports a type from `api/overview`; `overviewDetailOn` runs two
   queries; no test for a scoped crawl with `excluded_dropped` null.
-- **T9 (recommend fixing in the final wave):** nothing pins the planner setting. Assert the
-  structural test sees `set local enable_nestloop = off` before the collapse and put a wall-clock
-  bound (under 30 s) on the 40,002-shape run so a quadratic plan fails by name, not by a 120 s
-  timeout. The family predicate is evaluated 3x per row; the 40,002-shape test takes 11–12 s.
+- **T9:** the planner-setting pin and the 30 s bound are done (final wave, F6). The family
+  predicate is evaluated 3x per row; the 40,002-shape test takes 11–12 s.
 - **T10:** the prune script loads every crawl row and filters in JS; `beforeCancel` is a test
   seam on an exported option; a non-pending, non-live crawl with an unexpired lease aborts the
   run via `deleteCrawl`'s lease refusal instead of "live, skipped"; `siteUrl` printed verbatim
   (a `user:pass@` URL would echo, pre-existing).
 
+## Final fix wave (Ruling R16)
+
+After the whole-branch review, on top of `64f325d`. Code changed, so the clause 1 and 3 numbers
+were taken again on the result:
+
+- **F1** (review I1): the resource pass reads a third-party asset host's robots.txt with the
+  crawl's signal; a stop resolves the host's record to "aborted", the row stays unasked, and a
+  resume reads the robots.txt again. Was 15 s against a stalled robots.txt in the new test.
+- **F2** (M3): the known-404 probe waits for its slot and fetches with the signal. A stop
+  records it as not run (`STOPPED_BEFORE_404_PROBE`) and closes stopped, skipping the recheck
+  and resource passes; a failed control poll is raised first and the row closes failed with no
+  "crawl stopped" record. A resume probes.
+- **F3** (M4): `requestResource` rethrows a programmer error before checking for an abort.
+- **F4** (M2): the `interrupted` mark is written ahead of the staging clear on every run, and
+  the re-walk's evidence write clears it, so R10 holds across a crash. The try/catch staging
+  guard and the stopped close's own mark were removed; every existing R8/R10 test passed
+  unchanged. A new test reads the mark from inside a resumed walk.
+- **F5** (M1): the credential store's module doc states the same-shape window (open item 2).
+- **F6** (T9): the structural inference test asserts `set local enable_nestloop = off` before
+  the collapse and bounds the 40,002-shape run under 30 s. With the setting removed the test
+  failed by name (and the run took 118 s).
+- **F7** (T3): the dead `isTimeout` import is gone.
+
+`npx tsc --noEmit` clean; `npm test` 156 files / **4,164 tests**, 0 failed (5 new, all in
+`test/crawl/loop-stop-early.test.ts`, appended at the end of the file); `loop-stop-early` 24 of
+24 in each of 10 consecutive runs, every measured stop between 42 and 1,161 ms.
+
 ## Open items carried to Phase 28
 
 1. **The PR's first CI run** (clause 1's last sentence), after the PR is opened.
-2. **The final-wave fixes above** (T9's planner pin and wall-clock bound first).
+2. **Carried from the final review (Ruling R17).**
+   - **Same-shape credential window.** A `crawl_config_set` that keeps the credential shape
+     and changes the values holds two entries of one shape until it settles; a runner that
+     dequeues between the commit and the settle gets the old values
+     (`src/api/credential-store.ts` module doc). Closing it needs a generation on the row.
+   - **`sitemap_memberships` staging across a changed site.** A stopped walk's memberships
+     survive (`onConflictDoNothing`), which equals a whole walk's only while the site is
+     unchanged.
+   - **robots.txt unreachable on a resume** deletes the hreflang staging and rewrites the
+     evidence with no walk, so the absence rules run over empty staging.
 3. **Inference timing at 50k was not isolated.** The close window is 25.9 s; isolating
    `inferPageTemplates` needs a timing line in `scripts/gate-rules.ts`.
 4. **Per-sitemap response time is not recorded**, so "was the CDN cold" is inferred from the

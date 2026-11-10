@@ -852,7 +852,7 @@ longer wanted. `crawl_pause` and `crawl_cancel` answer 200 when the change happe
 now (a `queued` or `paused` crawl) and 202 when it was requested of a `running`
 crawl; read `controlRequested` in `crawl_status` until the status changes (about a
 second on a small crawl, in every phase since 27d: the host probe, the sitemap walk,
-the seeding after it, the page crawl, the recheck and the resource pass each stop within
+the seeding after it, the page crawl, the 404 probe, the recheck and the resource pass each stop within
 about a second; longer on a deep one, because the close runs template inference over
 every page before the status flips — the 50k-page gate crawl, paused with 20,000 pages
 done, flipped 5.3 s after the request. A crawl that is rendering is already `finished`:
