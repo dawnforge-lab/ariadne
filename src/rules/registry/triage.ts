@@ -193,7 +193,7 @@ export const TRIAGE: Readonly<Record<string, Readonly<TriageRow>>> = {
   "pagination.next-target-uncrawled": { type: "warning", priority: "low" },
   "pagination.non-indexable-target": { type: "warning", priority: "high", sfIssue: "Pagination: Non-Indexable" },
   "pagination.sequence-error": { type: "issue", priority: "low", sfIssue: "Pagination: Sequence Error" },
-  "performance.slow-response": { type: "warning", priority: "medium" },
+  "performance.slow-response": { type: "warning", priority: "medium", sfIssue: "PageSpeed: Document Request Latency" },
   "redirect.chain": { type: "warning", priority: "medium", sfIssue: "Response Codes: Internal Redirect Chain" },
   "redirect.js": { type: "warning", priority: "low", sfIssue: "Response Codes: Internal Redirection (JavaScript)" },
   "redirect.loop": { type: "issue", priority: "high", sfIssue: "Response Codes: Internal Redirect Loop" },
