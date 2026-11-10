@@ -40,7 +40,7 @@ existing one. The gate evidence is `docs/gates/phase-27c.md`.
   `crawl_overview` now counts the `excluded` rows (§13).
 - `performance.slow-response` now maps to Screaming Frog's `PageSpeed: Document
   Request Latency`. `scripts/prune-test-crawls.ts` removes test-host crawls from a
-  development database (dry run by default; an operator tool, not part of the surface).
+  development database (dry run by default; an operator tool, not part of the surface); `--confirm` refuses while any other session is connected to the database.
 - **Nine `crawl_start` fields** (§4.1), all in `config_schema` with their bounds:
 
   | field | default | bounds | mutability | secret |

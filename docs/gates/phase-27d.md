@@ -284,6 +284,14 @@ Made by the controller during the build, with the cost if wrong. Owner to see.
   robots-unreachable-on-resume staging. The reviewer's "declined to judge" items are accepted
   as listed. Cost: none now; the items stay visible.
 
+- **R18.** `/code-review` on PR #28 confirmed that the prune script's lease check cannot see a
+  live crawl in another process (host probe, sitemap walk, seeding, the post-loop probes, a
+  queued crawl in another server's memory). With `--confirm` the script now refuses, loudly and
+  before any write, while any other session is connected to the same database
+  (`pg_stat_activity`, excluding its own pool by `application_name`), and re-checks before each
+  crawl's cancel and delete. The dry run prints the count. The lease guard stays. Cost: the
+  operator stops every Ariadne server and test run first.
+
 ## Deviations from the plan and spec
 
 1. **Clause 4 tests use scaled timing** (a smaller `sitemapTiming` / `walkBudgetMs`), so the
@@ -317,8 +325,12 @@ Made by the controller during the build, with the cost if wrong. Owner to see.
 
 ## The dev database clean-up (Task 10)
 
-`scripts/prune-test-crawls.ts` (dry run by default, `--confirm` to delete; skips any crawl with
-an unexpired lease). Run with the owner's approval of 2026-11-10: the first `--confirm` run
+`scripts/prune-test-crawls.ts` (dry run by default, `--confirm` to delete; refuses while any
+other session is connected to the database, Ruling R18, and skips any crawl with an unexpired
+lease as a second guard). A lease alone is not liveness: a running crawl holds none outside the
+page loop, a crawl queued in another server's memory holds none, and `crawls` has no heartbeat.
+So "never deletes a live crawl" rests on the session count, not the lease. The first run below
+predates that rule. Run with the owner's approval of 2026-11-10: the first `--confirm` run
 deleted about 128 test crawls and then **stopped loudly** on a `failed` crawl
 (`crawl_lifecycle_afaa2375…`) with a cancel `control_request` still pending, because
 `deleteCrawl` refuses a pending request and the script cleared one only on queued/running rows.
@@ -410,6 +422,9 @@ were taken again on the result:
 `npx tsc --noEmit` clean; `npm test` 156 files / **4,164 tests**, 0 failed (5 new, all in
 `test/crawl/loop-stop-early.test.ts`, appended at the end of the file); `loop-stop-early` 24 of
 24 in each of 10 consecutive runs, every measured stop between 42 and 1,161 ms.
+
+`/code-review` on PR #28: 1 confirmed issue, fixed (Ruling R18). `test/scripts/prune-test-crawls.test.ts`
+gained 4 tests, appended at the end of the file.
 
 ## Open items carried to Phase 28
 

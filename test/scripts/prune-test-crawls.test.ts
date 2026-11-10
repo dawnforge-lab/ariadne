@@ -5,6 +5,7 @@
  * on loopback hosts too — are never touched.
  */
 import { randomUUID } from "node:crypto";
+import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { eq, sql } from "drizzle-orm";
 
@@ -13,7 +14,7 @@ import { runMigrations } from "../../src/db/migrate.js";
 import { crawls, frontier } from "../../src/db/schema.js";
 import { ApiService } from "../../src/api/service.js";
 import { TRIAGE } from "../../src/rules/registry/triage.js";
-import { isTestHost, pruneTestCrawls } from "../../scripts/prune-test-crawls.js";
+import { countOtherSessions, createPruneDb, isTestHost, PRUNE_APPLICATION_NAME, pruneTestCrawls } from "../../scripts/prune-test-crawls.js";
 
 function databaseUrl(): string {
   const url = process.env.DATABASE_URL;
@@ -63,6 +64,9 @@ describe("performance.slow-response triage", () => {
     expect(TRIAGE["performance.slow-response"]?.sfIssue).toBe("PageSpeed: Document Request Latency");
   });
 });
+
+// Test seam: the suite shares the database with other vitest workers, so the real count is never 0 here.
+const none = async (): Promise<number> => 0;
 
 describe("pruneTestCrawls", () => {
   let db: Db;
@@ -124,7 +128,7 @@ describe("pruneTestCrawls", () => {
 
   it("a dry run lists the fixture crawls only, with totals, and changes nothing", async () => {
     lines.length = 0;
-    const result = await pruneTestCrawls(db, service, { confirm: false, onlyIds: only() }, (l) => lines.push(l));
+    const result = await pruneTestCrawls(db, service, { confirm: false, onlyIds: only(), otherSessions: none }, (l) => lines.push(l));
     expect(result.matched).toBe(4);
     expect(result.liveSkipped).toBe(1);
     const text = lines.join("\n");
@@ -142,7 +146,7 @@ describe("pruneTestCrawls", () => {
   });
 
   it("--confirm cancels the dead live row, deletes the fixture crawls and their children, keeps the real one", async () => {
-    const result = await pruneTestCrawls(db, service, { confirm: true, onlyIds: only() }, () => {});
+    const result = await pruneTestCrawls(db, service, { confirm: true, onlyIds: only(), otherSessions: none }, () => {});
     expect(result.deleted).toBe(3);
     expect(result.cancelled).toBe(2);
     expect(result.liveSkipped).toBe(1);
@@ -171,6 +175,7 @@ describe("pruneTestCrawls", () => {
         {
           confirm: true,
           onlyIds: new Set([racing]),
+          otherSessions: none,
           beforeCancel: async (id) => {
             await db.insert(frontier).values({
               crawlId: id, url: "http://racing.localhost:3000/l", state: "leased", depth: 0, discoveredVia: "seed",
@@ -206,7 +211,7 @@ describe("pruneTestCrawls", () => {
       (await db.select({ r: crawls.controlRequest }).from(crawls).where(eq(crawls.id, id)))[0]!.r;
     try {
       const out: string[] = [];
-      const dry = await pruneTestCrawls(db, service, { confirm: false, onlyIds: new Set(ids) }, (l) => out.push(l));
+      const dry = await pruneTestCrawls(db, service, { confirm: false, onlyIds: new Set(ids), otherSessions: none }, (l) => out.push(l));
       expect(dry.matched).toBe(3);
       const text = out.join("\n");
       expect(text).toContain(`${failed} failed http://127.0.0.1:40655/ 0 request pending (cancel)`);
@@ -216,7 +221,7 @@ describe("pruneTestCrawls", () => {
       expect(await reqOf(failed)).toBe("cancel");
       expect(await reqOf(paused)).toBe("pause");
 
-      const result = await pruneTestCrawls(db, service, { confirm: true, onlyIds: new Set(ids) }, () => {});
+      const result = await pruneTestCrawls(db, service, { confirm: true, onlyIds: new Set(ids), otherSessions: none }, () => {});
       expect(result.deleted).toBe(3);
       expect(result.cancelled).toBe(0);
       expect(result.liveSkipped).toBe(0);
@@ -240,7 +245,7 @@ describe("pruneTestCrawls", () => {
       leaseId: "w", leasedUntil: new Date(Date.now() + 60_000),
     });
     try {
-      const result = await pruneTestCrawls(db, service, { confirm: true, onlyIds: new Set([id]) }, () => {});
+      const result = await pruneTestCrawls(db, service, { confirm: true, onlyIds: new Set([id]), otherSessions: none }, () => {});
       expect(result.deleted).toBe(0);
       expect(result.liveSkipped).toBe(1);
       expect(await count(id)).toBe(1);
@@ -249,6 +254,112 @@ describe("pruneTestCrawls", () => {
     } finally {
       await db.delete(frontier).where(eq(frontier.crawlId, id));
       await db.delete(crawls).where(eq(crawls.id, id));
+    }
+  });
+
+  it("--confirm refuses before any write while another session is connected; the error names the database and the count", async () => {
+    const id = await seed("http://refused.localhost:3000/", "running");
+    const done = await seed("http://refused2.localhost:3000/", "finished");
+    try {
+      const err = await pruneTestCrawls(
+        db, service, { confirm: true, onlyIds: new Set([id, done]), otherSessions: async () => 1 }, () => {},
+      ).catch((e: unknown) => e as Error);
+      expect(err).toBeInstanceOf(Error);
+      const msg = (err as Error).message;
+      expect(msg).toContain("1 other session");
+      expect(msg).toContain((await db.execute(sql`select current_database() as d`)).rows[0]!["d"] as string);
+      expect(msg).toContain("stop every Ariadne server and test run");
+      expect(await count(id)).toBe(1);
+      expect(await count(done)).toBe(1);
+      const [row] = await db.select({ status: crawls.status }).from(crawls).where(eq(crawls.id, id));
+      expect(row?.status).toBe("running");
+    } finally {
+      for (const c of [id, done]) {
+        await db.delete(frontier).where(eq(frontier.crawlId, c));
+        await db.delete(crawls).where(eq(crawls.id, c));
+      }
+    }
+  });
+
+  it("a session that appears mid-run stops the run at the next crawl; crawls already deleted stay deleted, the rest are untouched", async () => {
+    const ids = [
+      await seed("http://mid1.localhost:3000/", "finished"),
+      await seed("http://mid2.localhost:3000/", "finished"),
+      await seed("http://mid3.localhost:3000/", "finished"),
+    ];
+    try {
+      // Another process "connects" once the first deletion has landed.
+      const otherSessions = async (): Promise<number> => {
+        const remaining = await Promise.all(ids.map((i) => count(i)));
+        return remaining.some((n) => n === 0) ? 1 : 0;
+      };
+      const err = await pruneTestCrawls(
+        db, service, { confirm: true, onlyIds: new Set(ids), otherSessions }, () => {},
+      ).catch((e: unknown) => e as Error);
+      expect(err).toBeInstanceOf(Error);
+      expect((err as Error).message).toContain("1 other session");
+      const remaining = await Promise.all(ids.map((i) => count(i)));
+      expect(remaining.filter((n) => n === 0)).toHaveLength(1);
+      expect(remaining.filter((n) => n === 1)).toHaveLength(2);
+    } finally {
+      for (const c of ids) {
+        await db.delete(frontier).where(eq(frontier.crawlId, c));
+        await db.delete(crawls).where(eq(crawls.id, c));
+      }
+    }
+  });
+
+  it("the dry run reports the other-session count, says --confirm would refuse, and writes nothing", async () => {
+    const id = await seed("http://dry.localhost:3000/", "running");
+    try {
+      const out: string[] = [];
+      await pruneTestCrawls(db, service, { confirm: false, onlyIds: new Set([id]), otherSessions: async () => 2 }, (l) => out.push(l));
+      const text = out.join("\n");
+      expect(text).toContain("2 other sessions connected");
+      expect(text).toContain("--confirm would refuse");
+      const [row] = await db.select({ status: crawls.status }).from(crawls).where(eq(crawls.id, id));
+      expect(row?.status).toBe("running");
+      expect(await frontierRows(id)).toBe(1);
+    } finally {
+      await db.delete(frontier).where(eq(frontier.crawlId, id));
+      await db.delete(crawls).where(eq(crawls.id, id));
+    }
+  });
+});
+
+describe("countOtherSessions (the real query)", () => {
+  it("counts a second connection to the database and not the script's own application_name connections", async () => {
+    const db = createDb(databaseUrl());
+    const pruneDb = createPruneDb(databaseUrl());
+    const other = new pg.Client({ connectionString: databaseUrl(), application_name: `other-${randomUUID().slice(0, 8)}` });
+    await other.connect();
+    try {
+      // The caller's own connection is never counted; the separate client is.
+      expect(await countOtherSessions(db)).toBeGreaterThanOrEqual(1);
+
+      // Hold several pool connections open under the script's application_name.
+      const held = Array.from({ length: 3 }, async () => pruneDb.execute(sql`select pg_sleep(1.5)`));
+      await new Promise((r) => setTimeout(r, 400));
+      const named = (await db.execute(
+        sql`select count(*)::int as n from pg_stat_activity where application_name = ${PRUNE_APPLICATION_NAME} and datname = current_database()`,
+      )).rows[0]!["n"] as number;
+      expect(named).toBeGreaterThanOrEqual(3);
+      // Same query, other pool: with the name excluded the held connections vanish from the count.
+      // (Other vitest workers may connect or leave between the two reads, so take the best of three.)
+      let best = 0;
+      for (let i = 0; i < 3; i += 1) {
+        const withOwn = await countOtherSessions(db, "not-the-script");
+        const without = await countOtherSessions(db);
+        best = Math.max(best, withOwn - without);
+      }
+      expect(best).toBeGreaterThanOrEqual(3);
+      await Promise.all(held);
+      // The script's real pool counts none of its own connections: asked through it, the held ones are not seen.
+      expect(await countOtherSessions(pruneDb)).toBeGreaterThanOrEqual(1);
+    } finally {
+      await other.end();
+      await closeDb(pruneDb);
+      await closeDb(db);
     }
   });
 });
