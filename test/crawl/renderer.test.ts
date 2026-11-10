@@ -2745,3 +2745,77 @@ describe("PageRenderer credentials", () => {
     expect(result.blockedRequests).toBeGreaterThanOrEqual(1);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Phase 27d Task 7 (27c M6): a credentialed render keeps each request header
+// as exactly one line — the credential replaces the page's own value of the
+// same name, and every other header the page set is kept once.
+// ---------------------------------------------------------------------------
+
+describe("PageRenderer credentials: one line per request header (27c M6)", () => {
+  const rawLines: string[][] = [];
+  let echoSite: Server;
+  let echoBase: string;
+  let htmlDir: string;
+  let renderer: PageRenderer;
+
+  beforeAll(async () => {
+    echoSite = createServer((req: IncomingMessage, res: ServerResponse) => {
+      const path = (req.url ?? "/").split("?")[0] ?? "/";
+      if (path === "/echo") {
+        // The raw header lines exactly as they arrived: name and value, in order.
+        const lines: string[] = [];
+        for (let i = 0; i < req.rawHeaders.length; i += 2) {
+          lines.push(`${req.rawHeaders[i]!.toLowerCase()}: ${req.rawHeaders[i + 1]}`);
+        }
+        rawLines.push(lines);
+        res.writeHead(200, { "content-type": "text/plain" });
+        res.end("ok");
+        return;
+      }
+      if (path === "/hdr-page") {
+        res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+        res.end(
+          `<!doctype html><html><head><title>Hdr</title></head><body><p>one two</p>` +
+            `<script>fetch('/echo', {headers: {'x-own': 'one', 'authorization': 'page-value'}})` +
+            `.then(() => { document.title = 'Hdr done'; });</script></body></html>`,
+        );
+        return;
+      }
+      res.writeHead(404, { "content-type": "text/html; charset=utf-8" });
+      res.end("<!doctype html><title>404</title>");
+    });
+    await new Promise<void>((resolve) => echoSite.listen(0, "127.0.0.1", resolve));
+    echoBase = siteBase(echoSite);
+    htmlDir = await mkdtemp(join(tmpdir(), "ariadne-render-hdr-"));
+    renderer = await PageRenderer.launch({
+      origin: echoBase,
+      htmlDir,
+      userAgent: "AriadneBot/0.1 (render header lines test)",
+      perHostDelayMs: 0,
+      settleMs: SETTLE_MS,
+      allowPrivate: true,
+      credentials: { siteUrl: echoBase, values: { requestHeaders: { authorization: "Bearer cred" } } },
+    });
+  }, 120_000);
+
+  afterAll(async () => {
+    await renderer.close();
+    await new Promise<void>((resolve, reject) =>
+      echoSite.close((error) => (error === undefined ? resolve() : reject(error))),
+    );
+    await rm(htmlDir, { recursive: true, force: true });
+  });
+
+  it("a page's own header of a credential's name is replaced, and the others stay, each as one line", async () => {
+    const result = await renderer.render(`${echoBase}/hdr-page`);
+
+    expect(result.error).toBeNull();
+    expect(result.title).toBe("Hdr done");
+    expect(rawLines.length).toBeGreaterThan(0);
+    for (const lines of rawLines) {
+      expect(lines.filter((l) => l.startsWith("authorization:"))).toEqual(["authorization: Bearer cred"]);
+      expect(lines.filter((l) => l.startsWith("x-own:"))).toEqual(["x-own: one"]);
+    }
+  });
+});

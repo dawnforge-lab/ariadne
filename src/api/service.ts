@@ -93,6 +93,7 @@ import {
   type CrawlCredentials,
   type CredentialShape,
 } from "../crawl/credentials.js";
+import { CredentialStore } from "./credential-store.js";
 import {
   matchesPattern,
   patternFamilyError,
@@ -2477,7 +2478,7 @@ export class ApiService {
    * rather than run without them (`requireCredentials`, the crawl loop).
    * Bounded by the crawls this process accepted with credentials.
    */
-  private readonly credentials = new Map<string, CrawlCredentials>();
+  private readonly credentials = new CredentialStore();
 
   /** Crawls accepted by this process and not yet started, in FIFO order. */
   private readonly waiting: QueueEntry[] = [];
@@ -4155,8 +4156,8 @@ export class ApiService {
       return supplied === null ? undefined : sent;
     }
     if (required === null) return undefined;
-    const held = this.credentials.get(crawlId);
-    if (held === undefined) {
+    const held = this.credentials.get(crawlId, required);
+    if (held === undefined && !this.credentials.has(crawlId)) {
       throw new ServiceError(
         "CREDENTIALS_REQUIRED",
         `crawl ${crawlId} needs credentials this server does not hold: ${describeShape(required)}. ` +
@@ -4165,7 +4166,7 @@ export class ApiService {
           "never run without them",
       );
     }
-    if (!sameShape(required, shapeOf(held))) {
+    if (held === undefined) {
       throw new ServiceError(
         "CREDENTIALS_REQUIRED",
         `crawl ${crawlId} needs ${describeShape(required)}, and the credentials this server ` +
@@ -4653,12 +4654,15 @@ export class ApiService {
 
     const { findingCap: capPatch, ...blockPatch } = judgementPatch ?? {};
     /**
-     * The credentials this process holds for the crawl once the transaction has
-     * COMMITTED (27c): `entry` set to the new values, or null to drop them; no
-     * `entry` key leaves the map alone. Applied after the commit, so a refused
-     * or rolled-back patch never changes what is held.
+     * The new credentials are STAGED beside the held ones as soon as they are
+     * known, before the transaction can commit (27d, closing 27c M9), and
+     * settled on its outcome: a committed change keeps only the new entry, a
+     * refused or rolled-back one drops it and the old values stay usable. A
+     * queue runner that dequeues in the gap between the commit and the settle
+     * asks by the shape its row states (`CredentialStore.get`) and finds
+     * whichever entry belongs to the row it read.
      */
-    const holdAfter: { entry?: CrawlCredentials | null } = {};
+    const staged: { settle: ((committed: boolean) => void) | null } = { settle: null };
     await this.db.transaction(async (tx) => {
       const rows = await tx
         .select({
@@ -4775,7 +4779,7 @@ export class ApiService {
           const { credentialShape: _previous, ...rest } = merged;
           const shape = next === null ? null : shapeOf(next);
           merged = shape === null ? rest : { ...rest, credentialShape: shape };
-          holdAfter.entry = shape === null ? null : next;
+          staged.settle = this.credentials.stage(crawlId, shape === null ? null : next);
         }
         // The merged config is validated as a stored one is read — with the
         // operator's `allowPrivate`, which is never stored — and written back
@@ -4870,9 +4874,20 @@ export class ApiService {
           ...(scopeChanged ? { scopeChangedAt: new Date() } : {}),
         })
         .where(eq(crawls.id, crawlId));
+      await this.config.afterConfigWrite?.("written");
+    }).catch((error: unknown) => {
+      staged.settle?.(false);
+      throw error;
     });
-    if (holdAfter.entry === null) this.credentials.delete(crawlId);
-    else if (holdAfter.entry !== undefined) this.credentials.set(crawlId, holdAfter.entry);
+    // Committed: the row states the new shape from here, and the staged entry
+    // is still beside the old one until the settle below.
+    try {
+      await this.config.afterConfigWrite?.("committed");
+    } catch (error) {
+      staged.settle?.(true);
+      throw error;
+    }
+    staged.settle?.(true);
     return await this.getCrawlConfig(crawlId);
   }
 
@@ -4899,7 +4914,7 @@ export class ApiService {
     } catch (error) {
       throw new ServiceError("CONFLICT", messageOf(error));
     }
-    const held = this.credentials.get(crawlId);
+    const held = this.credentials.get(crawlId, required);
     if (held === undefined && required !== null) {
       const missing: CredentialShape = {
         requestHeaderNames: Object.hasOwn(replace, "requestHeaders") ? [] : required.requestHeaderNames,
@@ -6759,9 +6774,12 @@ export class ApiService {
       // Nothing is set when the map has no entry; a crawl whose row has a
       // shape is then refused by the loop (`requireCredentials`), never run
       // without them.
-      const credentials = this.credentials.get(entry.crawlId);
+      // Asked by the shape the row ITS read states (27d M9): a change in
+      // flight holds both shapes, and this finds the one that belongs to the row.
+      const parsed = parseStoredConfig(row.config, entry.crawlId);
+      const credentials = this.credentials.get(entry.crawlId, parsed.credentialShape ?? null);
       const config: CrawlConfig = {
-        ...parseStoredConfig(row.config, entry.crawlId),
+        ...parsed,
         ...this.processTrustConfig(),
         ...(credentials === undefined ? {} : { credentials }),
       };

@@ -99,8 +99,8 @@ async function tool(name: string, args: Record<string, unknown>): Promise<{ isEr
 }
 
 /** This server's in-memory credentials, the one place a value lives. */
-function held(): Map<string, unknown> {
-  return (api.service as unknown as { credentials: Map<string, unknown> }).credentials;
+function held(): { has(id: string): boolean; get(id: string): unknown } {
+  return ((s) => ({ has: (id: string) => s.has(id), get: (id: string) => s.current(id) }))((api.service as unknown as { credentials: import("../../src/api/credential-store.js").CredentialStore }).credentials);
 }
 
 async function newApi(): Promise<ApiServer> {
