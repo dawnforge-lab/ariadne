@@ -1184,3 +1184,76 @@ describe("a stop while the resource pass reads a third-party robots.txt", () => 
     robotsHang = false;
   }, 60_000);
 });
+
+/**
+ * 27d final fix F2: the known-404 probe is one more request to the site, and a
+ * stop aborts it like any other. The probe path stalls 15 s, far past the stop
+ * target, so no test can pass by the fixture answering.
+ */
+describe("a stop during the known-404 probe", () => {
+  let probe404Site: Site;
+  /** While set, the 404 probe's request hangs 15 s; otherwise it is a plain 404. */
+  let probeHang = true;
+  const isProbe = (p: string): boolean => p.startsWith("/__ariadne-404-probe-");
+
+  beforeAll(async () => {
+    probe404Site = await site((req, res) => {
+      const p = path(req);
+      if (p === "/robots.txt") return robots(res, []);
+      if (isProbe(p)) {
+        const answer = (): void => {
+          res.writeHead(404, { "content-type": "text/plain" });
+          res.end("not here");
+        };
+        if (probeHang) return answerLater(res, 15_000, answer);
+        return answer();
+      }
+      html(res, `page ${p}`);
+    });
+  });
+
+  async function stalledAtProbe(): Promise<{ id: string; run: Promise<CrawlSummary> }> {
+    probeHang = true;
+    const before = hits(probe404Site, isProbe);
+    const run = start(config(probe404Site));
+    const id = await newCrawlOf(`${probe404Site.base}/`);
+    await until("the 404 probe in flight", () => hits(probe404Site, isProbe) > before);
+    return { id, run };
+  }
+
+  it("pause: paused within the stop target, the probe recorded as not run, and a resume runs it", async () => {
+    const { id, run } = await stalledAtProbe();
+    expect(await measureStop("pause during the 404 probe", id, "pause")).toBeLessThanOrEqual(STOP_TARGET_MS);
+    expect((await run).status).toBe("paused");
+    expect((await crawlRow(id)).notfoundProbe).toEqual({
+      skipped: "crawl stopped (paused or cancelled) before the known-404 probe",
+    });
+
+    probeHang = false;
+    const before = hits(probe404Site, isProbe);
+    const resumed = await resumeCrawl(db, id, { config: config(probe404Site) });
+    expect(resumed.status).toBe("finished");
+    expect(hits(probe404Site, isProbe)).toBe(before + 1);
+    expect((await crawlRow(id)).notfoundProbe).toMatchObject({ statusCode: 404 });
+  }, 60_000);
+
+  it("a control poll that fails during the probe closes the row failed, with no 'crawl stopped' probe record", async () => {
+    const { id, run } = await stalledAtProbe();
+    // A value this engine never writes: the watcher's next poll fails on it.
+    const at = Date.now();
+    await db.update(crawls).set({ controlRequest: "stop" }).where(eq(crawls.id, id));
+
+    const error = await run.then(
+      () => {
+        throw new Error("the run resolved");
+      },
+      (e: unknown) => e as Error,
+    );
+    expect(Date.now() - at).toBeLessThanOrEqual(STOP_TARGET_MS);
+    expect(error.message).toMatch(/"stop"/);
+    const row = await crawlRow(id);
+    expect(row.status).toBe("failed");
+    expect(row.notfoundProbe).toBeNull();
+    probeHang = false;
+  }, 60_000);
+});

@@ -2779,13 +2779,23 @@ async function runToCompletion(
   // The one thing not on offer is log-and-continue. If the skip cannot be
   // recorded either, the crawl has lost its ability to say what it knows, and
   // both errors go into the same aggregation the loop and the shutdown use.
+  //
+  // A STOP DURING THE PROBE (27d) aborts its request and is not a failure of
+  // it: the run closes stopped, as a stop in the page loop does (the probe
+  // recorded as not run, the recheck and resource passes skipped), and a
+  // resume probes. A failed control poll also fires the signal; it is raised
+  // here, before any "crawl stopped" record, as the page loop raises it above,
+  // and the row closes failed.
+  let probeStopped = false;
   try {
-    await probeKnownMissing(db, crawlId, config, discovery, gate, {
-      allowPrivate,
-      credentials,
-      pagesCrawled,
-      aborted,
-    });
+    probeStopped =
+      (await probeKnownMissing(db, crawlId, config, discovery, gate, {
+        allowPrivate,
+        credentials,
+        pagesCrawled,
+        aborted,
+        signal,
+      })) === "aborted";
   } catch (error) {
     try {
       await writeNotFoundProbe(db, crawlId, {
@@ -2796,6 +2806,12 @@ async function runToCompletion(
     }
   }
   raiseFailures(crawlId, failures, "while probing for a known-404");
+  if (probeStopped) {
+    const pollFailure = watcher.failure();
+    if (pollFailure !== null) throw pollFailure;
+    await writeNotFoundProbe(db, crawlId, { skipped: STOPPED_BEFORE_404_PROBE });
+    aborted = true;
+  }
 
   // INSERTION 3c — the crawl takes a SECOND look at every page that answered
   // "server error", so a finding can say whether the error persists rather than
@@ -3260,6 +3276,10 @@ async function writeNotFoundProbe(
  * Every reason not to probe is written down instead of leaving the column null
  * (hard rule 7): a null means "this crawl predates the probe", and a reader
  * cannot be left guessing which of the two it is looking at.
+ *
+ * Answers `"aborted"`, having written nothing, when `opts.signal` fires while
+ * the probe waits for its slot or is on the wire (27d): the caller records the
+ * stop, or raises the failed poll that fired it.
  */
 async function probeKnownMissing(
   db: Db,
@@ -3272,20 +3292,21 @@ async function probeKnownMissing(
     credentials: CredentialTarget | undefined;
     pagesCrawled: number;
     aborted: boolean;
+    signal: AbortSignal;
   },
-): Promise<void> {
+): Promise<"recorded" | "aborted"> {
   if (opts.aborted) {
     // The crawl was told to stop (paused or cancelled). Issuing another
     // request would be the one thing a stop is meant to prevent; a resume will
     // take the sample.
     await writeNotFoundProbe(db, crawlId, { skipped: STOPPED_BEFORE_404_PROBE });
-    return;
+    return "recorded";
   }
   if (opts.pagesCrawled === 0) {
     await writeNotFoundProbe(db, crawlId, {
       skipped: "no pages crawled: nothing to compare a 404 template against",
     });
-    return;
+    return "recorded";
   }
 
   const probeUrl = `${new URL(config.siteUrl).origin}/__ariadne-404-probe-${randomUUID()}`;
@@ -3293,17 +3314,28 @@ async function probeKnownMissing(
     await writeNotFoundProbe(db, crawlId, {
       skipped: `robots.txt disallows the probe path (${probeUrl})`,
     });
-    return;
+    return "recorded";
   }
 
-  await gate.acquire(new URL(probeUrl).host);
-  const result = await fetchPage(probeUrl, {
-    userAgent: config.userAgent,
-    allowPrivate: opts.allowPrivate,
-    credentials: opts.credentials,
-    maxUrlLength: config.maxUrlLength ?? CRAWL_DEFAULTS.maxUrlLength,
-    timeoutMs: FETCH_TIMEOUT_MS,
-  });
+  // A stop wakes the slot wait and aborts the request on the wire (27d): the
+  // probe is a request to the site like any other, and a stop is honoured in
+  // whatever phase it lands. Nothing is written for it here; the caller decides
+  // what the stop means (a stopped close, or a failed poll raised).
+  if (!(await gate.acquire(new URL(probeUrl).host, opts.signal))) return "aborted";
+  let result: FetchResult;
+  try {
+    result = await fetchPage(probeUrl, {
+      userAgent: config.userAgent,
+      allowPrivate: opts.allowPrivate,
+      credentials: opts.credentials,
+      maxUrlLength: config.maxUrlLength ?? CRAWL_DEFAULTS.maxUrlLength,
+      timeoutMs: FETCH_TIMEOUT_MS,
+      signal: opts.signal,
+    });
+  } catch (error) {
+    if (error instanceof FetchAbortedError && opts.signal.aborted) return "aborted";
+    throw error;
+  }
   // Only a 200 with HTML carries a template. Everything else — the 404 we
   // hoped for, a redirect, a block — is recorded as the class it was.
   const analysis =
@@ -3318,6 +3350,7 @@ async function probeKnownMissing(
     wordCount: analysis?.wordCount ?? null,
     simhash: analysis === null ? null : String(BigInt.asIntN(64, analysis.simhash)),
   });
+  return "recorded";
 }
 
 /**
