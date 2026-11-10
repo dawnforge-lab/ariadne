@@ -193,4 +193,62 @@ describe("pruneTestCrawls", () => {
       await db.delete(crawls).where(eq(crawls.id, racing));
     }
   });
+
+  it("clears a pending request on a failed or paused crawl before deleting; the dry run flags it and changes nothing", async () => {
+    const failed = await seed("http://127.0.0.1:40655/", "failed");
+    const paused = await seed("http://paused.localhost:3000/", "paused");
+    const pausedCancel = await seed("http://paused2.localhost:3000/", "paused");
+    await db.update(crawls).set({ controlRequest: "cancel" }).where(eq(crawls.id, failed));
+    await db.update(crawls).set({ controlRequest: "pause" }).where(eq(crawls.id, paused));
+    await db.update(crawls).set({ controlRequest: "cancel" }).where(eq(crawls.id, pausedCancel));
+    const ids = [failed, paused, pausedCancel];
+    const reqOf = async (id: string): Promise<string | null> =>
+      (await db.select({ r: crawls.controlRequest }).from(crawls).where(eq(crawls.id, id)))[0]!.r;
+    try {
+      const out: string[] = [];
+      const dry = await pruneTestCrawls(db, service, { confirm: false, onlyIds: new Set(ids) }, (l) => out.push(l));
+      expect(dry.matched).toBe(3);
+      const text = out.join("\n");
+      expect(text).toContain(`${failed} failed http://127.0.0.1:40655/ 0 request pending (cancel)`);
+      expect(text).toContain(`${paused} paused http://paused.localhost:3000/ 0 request pending (pause)`);
+      expect(text).toContain(`${pausedCancel} paused http://paused2.localhost:3000/ 0 request pending (cancel)`);
+      for (const id of ids) expect(await count(id)).toBe(1);
+      expect(await reqOf(failed)).toBe("cancel");
+      expect(await reqOf(paused)).toBe("pause");
+
+      const result = await pruneTestCrawls(db, service, { confirm: true, onlyIds: new Set(ids) }, () => {});
+      expect(result.deleted).toBe(3);
+      expect(result.cancelled).toBe(0);
+      expect(result.liveSkipped).toBe(0);
+      for (const id of ids) {
+        expect(await count(id)).toBe(0);
+        expect(await frontierRows(id)).toBe(0);
+      }
+    } finally {
+      for (const id of ids) {
+        await db.delete(frontier).where(eq(frontier.crawlId, id));
+        await db.delete(crawls).where(eq(crawls.id, id));
+      }
+    }
+  });
+
+  it("a failed crawl with a pending request and an unexpired lease is left alone and reported live", async () => {
+    const id = await seed("http://leasedfail.localhost:3000/", "failed");
+    await db.update(crawls).set({ controlRequest: "cancel" }).where(eq(crawls.id, id));
+    await db.insert(frontier).values({
+      crawlId: id, url: "http://leasedfail.localhost:3000/l", state: "leased", depth: 0, discoveredVia: "seed",
+      leaseId: "w", leasedUntil: new Date(Date.now() + 60_000),
+    });
+    try {
+      const result = await pruneTestCrawls(db, service, { confirm: true, onlyIds: new Set([id]) }, () => {});
+      expect(result.deleted).toBe(0);
+      expect(result.liveSkipped).toBe(1);
+      expect(await count(id)).toBe(1);
+      const [row] = await db.select({ r: crawls.controlRequest }).from(crawls).where(eq(crawls.id, id));
+      expect(row?.r).toBe("cancel");
+    } finally {
+      await db.delete(frontier).where(eq(frontier.crawlId, id));
+      await db.delete(crawls).where(eq(crawls.id, id));
+    }
+  });
 });

@@ -15,7 +15,8 @@
  * crawl at a time, set to `cancelled` (`deleteCrawl` refuses live statuses) and
  * deleted through `ApiService.deleteCrawl`, which removes every child table and
  * file. A queued/running match holding an unexpired lease has a worker on it:
- * it is listed as "live, skipped" and never cancelled or deleted. The first failure stops the run, naming the crawl, and exits non-zero.
+ * it is listed as "live, skipped" and never cancelled or deleted. A pending pause/cancel request on any
+ * matched crawl is cleared first (no process will act on it; `deleteCrawl` refuses it), and flagged in the dry run. The first failure stops the run, naming the crawl, and exits non-zero.
  * Only site URLs are printed — never a crawl's config or credentials.
  */
 import { isIPv4, isIPv6 } from "node:net";
@@ -63,7 +64,7 @@ export async function pruneTestCrawls(
   print: (line: string) => void,
 ): Promise<PruneResult> {
   const rows = await db
-    .select({ id: crawls.id, status: crawls.status, siteUrl: crawls.siteUrl, pages: crawls.pagesCrawled })
+    .select({ id: crawls.id, status: crawls.status, siteUrl: crawls.siteUrl, pages: crawls.pagesCrawled, request: crawls.controlRequest })
     .from(crawls)
     .orderBy(crawls.startedAt);
   const matches = rows.filter(
@@ -71,7 +72,10 @@ export async function pruneTestCrawls(
   );
   const isLiveStatus = (status: string): boolean => status === "queued" || status === "running";
   // A queued/running row with an unexpired lease has a worker on it: not dead.
-  const candidates = matches.filter((r) => isLiveStatus(r.status)).map((r) => r.id);
+  // A pending control request on any status is one no process will ever act on, and deleteCrawl refuses it.
+  const needsUpdate = (r: { status: string; request: string | null }): boolean =>
+    isLiveStatus(r.status) || r.request !== null;
+  const candidates = matches.filter(needsUpdate).map((r) => r.id);
   const leased =
     candidates.length === 0
       ? new Set<string>()
@@ -87,7 +91,12 @@ export async function pruneTestCrawls(
   const targets = matches.filter((r) => !leased.has(r.id));
   const dead = targets.filter((r) => isLiveStatus(r.status));
 
-  for (const r of targets) print(`${r.id} ${r.status} ${r.siteUrl} ${String(r.pages)}`);
+  for (const r of targets) {
+    print(
+      `${r.id} ${r.status} ${r.siteUrl} ${String(r.pages)}` +
+        (r.request !== null ? ` request pending (${r.request})` : ""),
+    );
+  }
   for (const r of liveRows) print(`${r.id} ${r.status} ${r.siteUrl} live, skipped`);
   const pages = targets.reduce((sum, r) => sum + r.pages, 0);
   print(
@@ -106,17 +115,23 @@ export async function pruneTestCrawls(
   let liveSkipped = liveRows.length;
   for (const r of targets) {
     try {
-      if (isLiveStatus(r.status)) {
+      if (needsUpdate(r)) {
         if (options.beforeCancel !== undefined) await options.beforeCancel(r.id);
-        // The lease check above may be stale by now: the cancel re-checks on the database clock,
+        // The lease check above may be stale by now: the update re-checks on the database clock,
         // and a crawl it does not touch is treated as live (a worker took a lease, or it moved on).
+        // A queued/running row becomes cancelled; any status loses its pending request.
+        const live = isLiveStatus(r.status);
         const done = await db
           .update(crawls)
-          .set({ status: "cancelled", controlRequest: null, pauseReason: null, cancelledAt: sql`now()` })
+          .set(
+            live
+              ? { status: "cancelled", controlRequest: null, pauseReason: null, cancelledAt: sql`now()` }
+              : { controlRequest: null },
+          )
           .where(
             and(
               eq(crawls.id, r.id),
-              inArray(crawls.status, ["queued", "running"]),
+              live ? inArray(crawls.status, ["queued", "running"]) : undefined,
               notExists(
                 db
                   .select({ one: sql`1` })
@@ -130,7 +145,7 @@ export async function pruneTestCrawls(
           liveSkipped += 1;
           continue;
         }
-        cancelled += 1;
+        if (live) cancelled += 1;
       }
       await service.deleteCrawl(r.id, r.id);
     } catch (error) {
