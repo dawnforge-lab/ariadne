@@ -8,9 +8,18 @@
  * loop refused it (`requireCredentials`: "needs credentials of another
  * shape"). The service now `stage`s the new values BEFORE the transaction and
  * settles them on its outcome, and holds both beside each other meanwhile; a
- * reader asks for the entry of the shape ITS row states, so whichever row it
- * read finds the values that belong to it. A rolled-back change drops only the
- * staged entry: the old values stay usable.
+ * reader asks for the entry of the shape ITS row states. A rolled-back change
+ * drops only the staged entry: the old values stay usable.
+ *
+ * WHAT THE SHAPE KEY DOES NOT COVER. The shape tells the two entries apart
+ * only when it differs. A change that keeps the shape and changes the VALUES
+ * (a rotated password under the same scheme and header names) holds two
+ * entries of one shape, and `get` answers with the first, the old one, until
+ * the change is settled: a runner that dequeues the crawl between the commit
+ * and the settle reads the new row and gets the old values. That window is
+ * the one 27c already had for every change, now narrowed to same-shape ones;
+ * closing it needs a generation on the row that the entry is matched by
+ * (carried to Phase 28, `docs/gates/phase-27d.md`).
  *
  * Bounded by the crawls this process accepted with credentials (at most two
  * entries each, while a change is in flight).
