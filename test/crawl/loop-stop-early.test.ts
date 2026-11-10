@@ -1257,3 +1257,37 @@ describe("a stop during the known-404 probe", () => {
     probeHang = false;
   }, 60_000);
 });
+
+/**
+ * 27d final fix F4: the `interrupted` mark is written AHEAD of the staging
+ * clear on a resume (ruling R10, crash-proof): a process that dies mid
+ * re-walk, which runs no close and no catch, still leaves kept evidence that
+ * says its staging is partial. Observed from inside the walk; the walk's own
+ * evidence write then clears it.
+ */
+describe("the interrupted mark is written ahead of the re-walk (R10, crash-proof)", () => {
+  it("a resumed crawl's kept evidence reads interrupted while its re-walk runs, and not once the walk's evidence is written", async () => {
+    const cfg = config(hreflangSite, { maxPages: 10 });
+    hreflangSlow = false;
+    const first = await runCrawl(db, cfg);
+    createdCrawls.push(first.crawlId);
+    expect(first.status).toBe("finished");
+    const id = first.crawlId;
+    expect((await evidenceOf(id)).truncation.interrupted).toBeUndefined();
+
+    const seen: Array<boolean | undefined> = [];
+    const resumed = await resumeCrawl(db, id, {
+      config: cfg,
+      testHooks: {
+        // Inside the walk: the staging has been cleared, no evidence written.
+        onSitemapFlush: async () => {
+          seen.push((await evidenceOf(id)).truncation.interrupted);
+        },
+      },
+    });
+    expect(resumed.status).toBe("finished");
+    expect(seen.length).toBeGreaterThan(0);
+    expect(seen.filter((v) => v !== true)).toEqual([]);
+    expect((await evidenceOf(id)).truncation.interrupted).toBeUndefined();
+  }, 60_000);
+});
