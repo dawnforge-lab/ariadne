@@ -645,11 +645,16 @@ describe("cancel", () => {
     const summary = await runPass(crawlId, { signal: ac.signal, minGapMs: 200 });
 
     expect(summary.aborted).toBe(true);
-    // The row in flight when the signal fired is still settled — it was already
-    // asked, and throwing away an answer we have would be the silent loss hard
-    // rule 7 forbids. The row after it was never asked.
-    expect(summary.rechecked).toBe(1);
+    // The request in flight when the signal fired is ABORTED, not awaited
+    // (27b Ruling 4, shipped in 27d): it learned nothing, so its row keeps both
+    // nulls and is not counted. The row after it was never asked.
+    expect(summary.rechecked).toBe(0);
+    expect(hitCount("/broken-a")).toBe(1);
     expect(hitCount("/broken-b")).toBe(0);
+    const first = await rowFor(crawlId, "/broken-a");
+    expect(first.recheckFetchClass).toBeNull();
+    expect(first.recheckReason).toBeNull();
+    expect(first.recheckAt).toBeNull();
     const second = await rowFor(crawlId, "/broken-b");
     expect(second.recheckFetchClass).toBeNull();
     expect(second.recheckReason).toBeNull();
@@ -709,8 +714,12 @@ describe("the cap", () => {
     // check the signal first — so within one pass the two flags cannot both be
     // true, and the abort is always the one that wins. The guard on the stamp
     // is what keeps that true if either check ever moves.
-    expect(summary).toMatchObject({ rechecked: 1, aborted: true, capped: false });
+    expect(summary).toMatchObject({ rechecked: 0, aborted: true, capped: false });
 
+    // The row in flight was aborted (27d), so it is as unwritten as the next.
+    const first = await rowFor(crawlId, "/broken-a");
+    expect(first.recheckFetchClass).toBeNull();
+    expect(first.recheckReason).toBeNull();
     const second = await rowFor(crawlId, "/broken-b");
     expect(second.recheckFetchClass).toBeNull();
     expect(second.recheckReason).toBeNull();
@@ -799,9 +808,11 @@ describe("resume", () => {
       { path: "/broken-b", fetchClass: "server_error", statusCode: 500, agoSec: 1 },
     ]);
 
+    // The abort lands on the SECOND row's request: the first settled, the
+    // second is aborted in flight and unwritten (27b Ruling 4, 27d).
     const ac = new AbortController();
     onHit = (path) => {
-      if (path === "/broken-a") ac.abort();
+      if (path === "/broken-b") ac.abort();
     };
     const first = await runPass(crawlId, { signal: ac.signal, minGapMs: 200 });
     expect(first.aborted).toBe(true);

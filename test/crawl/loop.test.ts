@@ -723,10 +723,10 @@ describe("runCrawl", () => {
     const ac = new AbortController();
     boomHits = 0;
     // A 5xx is not in the loop's `RETRYABLE` set, so the page crawl asks each of
-    // the two broken pages exactly once: hit 3 is the RECHECK's first request,
-    // and the abort lands between the row it is settling and the row after it.
+    // the two broken pages once each: hit 3 is the RECHECK's first request, which settles;
+    // hit 4 is its second, cut in flight (27b Ruling 4, 27d), so that row stays unwritten.
     onBoomHit = (n) => {
-      if (n === 3) ac.abort();
+      if (n === 4) ac.abort();
     };
     let summary;
     try {
@@ -740,8 +740,8 @@ describe("runCrawl", () => {
       onBoomHit = null;
     }
 
-    // Two by the crawl, one by the pass, and nothing after the signal fired.
-    expect(boomHits).toBe(3);
+    // Two by the crawl, two by the pass (the second cut in flight), none after the signal.
+    expect(boomHits).toBe(4);
     expect([summary.status, summary.pauseReason]).toEqual(["paused", "shutdown"]);
     // The pass RAN, unlike the case above, and says what it settled before it
     // was stopped.

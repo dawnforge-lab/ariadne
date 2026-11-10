@@ -13,7 +13,9 @@
  * Measured latencies are not printed; set STOP_LATENCY_LOG to a file path to
  * have them written there as JSON when the file finishes.
  */
-import { writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
@@ -33,7 +35,7 @@ import {
 } from "../../src/crawl/loop.js";
 import { closeDb, createDb, type Db } from "../../src/db/client.js";
 import { runMigrations } from "../../src/db/migrate.js";
-import { crawls, frontier, pages, sitemapMemberships, sitemapUrls } from "../../src/db/schema.js";
+import { crawls, frontier, pages, resources, sitemapMemberships, sitemapUrls } from "../../src/db/schema.js";
 import { deriveSitemapHreflang } from "../../src/rules/derive/sitemap-hreflang.js";
 import { hreflangIntegrityRules } from "../../src/rules/query/hreflang-integrity.js";
 import { hreflangRules } from "../../src/rules/query/hreflang.js";
@@ -929,4 +931,166 @@ describe("discover honours the caller's signal", () => {
     );
     expect(indexSite.seen.length).toBe(seen);
   });
+});
+
+/**
+ * Phase 27d Task 5 (27b Ruling 4): a stop during the recheck pass or the
+ * resource pass aborts the request in flight. Its row stays unwritten, and a
+ * resume asks again. The 15 s stall is far beyond the stop target, so no test
+ * can pass by the fixture answering on its own.
+ */
+describe("a stop during the recheck and resource passes", () => {
+  let recheckSite: Site;
+  let resourceSite: Site;
+  /** While set, the page's second request / the asset's requests hang 15 s. */
+  let recheckHang = true;
+  let assetHang = true;
+
+  beforeAll(async () => {
+    recheckSite = await site((req, res) => {
+      const p = path(req);
+      if (p === "/robots.txt") return robots(res, []);
+      if (p === "/bad") {
+        const nth = hits(recheckSite, (q) => q === "/bad");
+        if (nth === 1) {
+          res.writeHead(503, { "content-type": "text/plain" });
+          res.end("first look: down");
+          return;
+        }
+        if (recheckHang) return answerLater(res, 15_000, () => html(res, "late bad"));
+        return html(res, "recovered");
+      }
+      html(res, `page ${p}`, p === "/" ? ["/bad"] : []);
+    });
+
+    resourceSite = await site((req, res) => {
+      const p = path(req);
+      if (p === "/robots.txt") return robots(res, []);
+      if (p === "/slow.png") {
+        if (assetHang) return answerLater(res, 15_000, () => xml(res, "late"));
+        res.writeHead(200, { "content-type": "image/png", "content-length": "3" });
+        res.end("png");
+        return;
+      }
+      if (p === "/") {
+        res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+        res.end(
+          `<!doctype html><html><head><title>home</title></head><body>` +
+            `<img src="/slow.png" alt="x"></body></html>`,
+        );
+        return;
+      }
+      html(res, `page ${p}`);
+    });
+  });
+
+  async function badRow(id: string) {
+    const rows = await db.select().from(pages).where(eq(pages.crawlId, id));
+    const row = rows.find((r) => r.url.endsWith("/bad"));
+    if (row === undefined) throw new Error("the /bad page has no row");
+    return row;
+  }
+
+  it("recheck: a pause aborts the request in flight, leaves the recheck columns null, and a resume rechecks", async () => {
+    recheckHang = true;
+    const cfg = config(recheckSite, { recheckMinGapMs: 50 });
+    const before = hits(recheckSite, (p) => p === "/bad");
+    const run = start(cfg);
+    const id = await newCrawlOf(`${recheckSite.base}/`);
+    // The first look is the 503; the second, the recheck, is the one that hangs.
+    await until("the recheck in flight", () => hits(recheckSite, (p) => p === "/bad") >= before + 2);
+
+    expect(await measureStop("pause during recheck", id, "pause")).toBeLessThanOrEqual(STOP_TARGET_MS);
+    expect((await run).status).toBe("paused");
+
+    const cut = await badRow(id);
+    expect(cut.fetchClass).toBe("server_error");
+    expect(cut.recheckFetchClass).toBeNull();
+    expect(cut.recheckStatusCode).toBeNull();
+    expect(cut.recheckAt).toBeNull();
+
+    recheckHang = false;
+    const resumed = await resumeCrawl(db, id, { config: cfg });
+    expect(resumed.status).toBe("finished");
+    const done = await badRow(id);
+    expect(done.recheckFetchClass).toBe("ok");
+    expect(done.recheckStatusCode).toBe(200);
+  }, 60_000);
+
+  it("resources: a pause aborts the request in flight, writes no row for it, and a resume fetches it", async () => {
+    assetHang = true;
+    const cfg = config(resourceSite, { fetchResources: true });
+    const before = hits(resourceSite, (p) => p === "/slow.png");
+    const run = start(cfg);
+    const id = await newCrawlOf(`${resourceSite.base}/`);
+    await until("the asset in flight", () => hits(resourceSite, (p) => p === "/slow.png") > before);
+
+    expect(await measureStop("pause during resources", id, "pause")).toBeLessThanOrEqual(STOP_TARGET_MS);
+    expect((await run).status).toBe("paused");
+
+    const unasked = await db.select().from(resources).where(eq(resources.crawlId, id));
+    expect(unasked).toHaveLength(1);
+    expect(unasked[0]!.fetchClass).toBeNull();
+    expect(unasked[0]!.statusCode).toBeNull();
+
+    assetHang = false;
+    const resumed = await resumeCrawl(db, id, { config: cfg });
+    expect(resumed.status).toBe("finished");
+    const fetched = await db.select().from(resources).where(eq(resources.crawlId, id));
+    expect(fetched[0]!.fetchClass).toBe("ok");
+    expect(fetched[0]!.statusCode).toBe(200);
+  }, 60_000);
+});
+
+/**
+ * THE RENDER PASS, MEASURED, NOT CHANGED (27d Task 5). A pause cannot reach a
+ * render pass: it moves only `queued` and `running` crawls, and a render pass
+ * refuses those, so the crawl it works on is `finished` (or `failed`) and
+ * `crawl_pause` answers 409; so does `crawl_cancel`, for the same status, and
+ * `refuseWhileBusy` (27b: "neither can be interrupted") covers a paused one. No
+ * stop latency to measure and no render fix: the 27b refusal stands, and
+ * this test pins both refusals while a page is in the browser.
+ */
+describe("a stop during the render pass", () => {
+  let renderSite: Site;
+  let renderHang = false;
+  let renderDir: string;
+
+  beforeAll(async () => {
+    renderDir = mkdtempSync(join(tmpdir(), "ariadne-render-stop-"));
+    renderSite = await site((req, res) => {
+      const p = path(req);
+      if (p === "/robots.txt") return robots(res, []);
+      if (renderHang) return answerLater(res, 4_000, () => html(res, "late home"));
+      html(res, `page ${p}`);
+    });
+  });
+
+  afterAll(() => {
+    rmSync(renderDir, { recursive: true, force: true });
+  });
+
+  it("crawl_pause and crawl_cancel are refused while a page renders, so there is no render stop to time", async () => {
+    renderHang = false;
+    const first = await runCrawl(db, config(renderSite, { maxPages: 1 }));
+    createdCrawls.push(first.crawlId);
+    expect(first.status).toBe("finished");
+
+    const service = new ApiService(db, {
+      allowedDomains: ["127.0.0.1"],
+      crawlDefaults: { allowPrivate: true, probeHosts: false, perHostDelayMs: 0 },
+      renderDir,
+      log: () => {},
+    });
+    renderHang = true;
+    const before = hits(renderSite, (p) => p === "/");
+    const rendering = service.renderCrawl(first.crawlId);
+    rendering.catch(() => undefined);
+    await until("the page in the browser", () => hits(renderSite, (p) => p === "/") > before, 30_000);
+
+    await expect(service.pauseCrawl(first.crawlId)).rejects.toMatchObject({ code: "CONFLICT" });
+    await expect(service.cancelCrawl(first.crawlId)).rejects.toThrow(/is .finished.: only a queued, running or paused crawl can be cancelled/);
+    renderHang = false;
+    await rendering;
+  }, 90_000);
 });
