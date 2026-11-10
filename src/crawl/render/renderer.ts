@@ -1058,7 +1058,7 @@ class RenderTraffic {
 
     if (event.request.method === "GET" && this.ledger.isFresh(target, Date.now())) {
       if (event.networkId !== undefined) this.predicted.add(event.networkId);
-      await this.release(event);
+      await this.release(event, true);
       return;
     }
 
@@ -1100,7 +1100,7 @@ class RenderTraffic {
    * the ONE place that ever happens, and only while the render is open. A shut
    * render fails it instead.
    */
-  private async release(event: PausedRequest): Promise<void> {
+  private async release(event: PausedRequest, predicted = false): Promise<void> {
     if (!this.open) {
       await this.fail(event);
       return;
@@ -1111,7 +1111,7 @@ class RenderTraffic {
     if (event.networkId !== undefined) {
       this.inFlight.set(event.networkId, { url: event.request.url, method: event.request.method });
     }
-    this.testFaults?.onRelease?.(event.request.url, Date.now());
+    this.testFaults?.onRelease?.(event.request.url, Date.now(), { predicted });
     // THIS request's URL decides (Phase 27c). `Fetch.continueRequest` with
     // `headers` REPLACES the request's headers, so they are the paused
     // request's own with the credential headers merged over them — same name,
@@ -1385,12 +1385,13 @@ export interface RenderTestFaults {
   /**
    * Told each time a paused request is actually released — just before its
    * `Fetch.continueRequest` — with `Date.now()`, the clock the host gate
-   * spaces slots on. Observes only; it changes nothing about the release. A
+   * spaces slots on (`predicted`: the ledger released it on a cache-hit prediction,
+   * not the gate). Observes only; it changes nothing about the release. A
    * suite measures pacing here, where the gate imposes it, rather than at the
    * server, where each request's own trip through Chromium's network stack
    * adds jitter that is not the gate's.
    */
-  onRelease?: (url: string, atMs: number) => void;
+  onRelease?: (url: string, atMs: number, release: { predicted: boolean }) => void;
   /**
    * Awaited between the traffic's `shut` and the page's close, so a suite can
    * hold the window in which an answer to a request released BEFORE the shut

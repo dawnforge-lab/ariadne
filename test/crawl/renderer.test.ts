@@ -266,16 +266,16 @@ function limitedHtml(): string {
 }
 
 /**
- * `/mispredict/{n}`: the cacheable `/volatile.js` twice — once as a script
- * (the browser's cache answers it), once as `fetch(…, {cache: "no-store"})`,
- * which the browser sends to the network although nothing in the paused
- * request's headers says so. The ledger predicts the second one a cache hit
- * exactly once; after that it must never predict that URL again.
+ * `/mispredict/prime`: the cacheable `/volatile.js` as a script only, so the
+ * ledger learns it. `/mispredict/fetch/{n}`: only
+ * `fetch('/volatile.js', {cache: "no-store"})`, which the browser sends to the
+ * network although nothing in the paused request says so. The ledger predicts
+ * the first such fetch a hit exactly once; after that, never again.
  */
-function mispredictHtml(): string {
-  return `<!doctype html><html lang="en"><head><title>Mispredict</title>
-<script src="/volatile.js"></script></head>
-<body><p>volatile</p><script>fetch('/volatile.js', { cache: 'no-store' });</script></body></html>`;
+function mispredictHtml(prime: boolean): string {
+  const script = prime ? `<script src="/volatile.js"></script>` : "";
+  const fetcher = prime ? "" : `<script>fetch('/volatile.js', { cache: 'no-store' });</script>`;
+  return `<!doctype html><html lang="en"><head><title>Mispredict</title>${script}</head><body><p>volatile</p>${fetcher}</body></html>`;
 }
 
 /**
@@ -504,7 +504,7 @@ async function startSite(otherOrigin: () => string): Promise<Site> {
       }, LATE_ANSWER_MS);
       return;
     }
-    if (path.startsWith("/mispredict/")) return html(mispredictHtml());
+    if (path.startsWith("/mispredict/")) return html(mispredictHtml(path === "/mispredict/prime"));
     if (path === "/iso/unload") return html(isoUnloadHtml());
     if (path === "/teardown") return html(teardownHtml());
     if (path === "/escape") return html(escapeHtml(otherOrigin()));
@@ -1302,23 +1302,23 @@ describe("PageRenderer under the crawl's pacing (Phase 24a)", () => {
   }, 30_000);
 
   it("never predicts a URL twice once a prediction for it was wrong", async () => {
-    // Fix round 1, I1. Page 1: the script fills the cache, then the no-store
-    // fetch is predicted a hit and goes to the network — the one unpaced miss.
-    // Pages 2 and 3: the URL is on the never-predict list, so both requests
-    // for it are paced, however cacheable its responses look.
-    const renderer = await launch();
+    // The priming page teaches the ledger; the fetch-only pages then ask for the URL.
+    // Which page the wrong prediction lands on depends on CDP event order, so assert
+    // the releases themselves: exactly one prediction, never a second.
+    const releases: { url: string; predicted: boolean }[] = [];
+    const renderer = await launch({ testFaults: { onRelease: (url, _at, r) => releases.push({ url, predicted: r.predicted }) } });
     try {
+      expect((await renderer.render(`${site.base}/mispredict/prime`)).error).toBeNull();
       let unpaced = 0;
-      let paced = 0;
       for (const n of [1, 2, 3]) {
-        const result = await renderer.render(`${site.base}/mispredict/${n}`);
+        const result = await renderer.render(`${site.base}/mispredict/fetch/${n}`);
         expect(result.error).toBeNull();
         unpaced += result.unpacedNetworkRequests;
-        paced += result.pacedRequests;
       }
+      const volatile = releases.filter((r) => r.url.endsWith("/volatile.js"));
+      // The script on the priming page (paced), then three fetches.
+      expect(volatile.map((r) => r.predicted)).toEqual([false, true, false, false]);
       expect(unpaced).toBe(1);
-      // Page 1: document + script. Pages 2 and 3: document + script + fetch.
-      expect(paced).toBe(2 + 3 + 3);
     } finally {
       await renderer.close();
     }
