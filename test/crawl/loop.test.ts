@@ -10,7 +10,7 @@ import {
   runCrawl,
   resumeCrawl,
   parseStoredConfig,
-  type CrawlConfig,
+  type CrawlConfig, type LoopTestHooks,
   type DiscoveryEvidence,
   type NotFoundProbeSample,
 } from "../../src/crawl/loop.js";
@@ -209,8 +209,8 @@ async function listen(server: Server): Promise<string> {
 let db: Db;
 const createdCrawls: string[] = [];
 
-async function crawl(config: CrawlConfig, signal?: AbortSignal) {
-  const summary = await runCrawl(db, config, signal);
+async function crawl(config: CrawlConfig, signal?: AbortSignal, testHooks?: LoopTestHooks) {
+  const summary = await runCrawl(db, config, signal, testHooks);
   createdCrawls.push(summary.crawlId);
   return summary;
 }
@@ -2078,6 +2078,13 @@ describe("platform profile", () => {
   let maxInFlight = 0;
   /** Start times of every page request, robots.txt and the sitemap excluded. */
   let starts: number[] = [];
+  /**
+   * The slots the crawl's host gate scheduled for the storefront host, through
+   * `LoopTestHooks.onGrant`. Pacing is asserted here, where the gate imposes it,
+   * not on `starts`: an arrival adds timer and network jitter, so one late
+   * arrival followed by an on-time one reads short while the slots are exact.
+   */
+  let slots: number[] = [];
   /** Every request the site saw, robots.txt and the sitemap included. */
   let hits: { path: string; start: number; end: number | null }[] = [];
   /** When true, `/` answers 301 -> `/home` (a two-hop probe chain on one host). */
@@ -2151,8 +2158,15 @@ describe("platform profile", () => {
     inFlight = 0;
     maxInFlight = 0;
     starts = [];
+    slots = [];
     hits = [];
     rootRedirects = false;
+  }
+
+  /** Hooks that record the gate's slots for the storefront host only. */
+  function slotHooks(): LoopTestHooks {
+    const host = new URL(storefrontBase).host;
+    return { onGrant: (h, slotAtMs) => void (h === host && slots.push(slotAtMs)) };
   }
 
   async function rowOf(crawlId: string) {
@@ -2161,16 +2175,18 @@ describe("platform profile", () => {
     return row;
   }
 
-  /** The smallest gap between two consecutive page-request starts. */
-  function minGap(): number {
+  /** The smallest gap between two consecutive scheduled slots. */
+  function minSlotGap(): number {
     let gap = Infinity;
-    for (let i = 1; i < starts.length; i += 1) {
-      gap = Math.min(gap, (starts[i] as number) - (starts[i - 1] as number));
+    for (let i = 1; i < slots.length; i += 1) {
+      gap = Math.min(gap, (slots[i] as number) - (slots[i - 1] as number));
     }
     return gap;
   }
 
-  // Timer slack: setTimeout may fire a few ms early relative to Date.now().
+  // Slack for the tests below that still measure arrivals at the server (the
+  // in-flight and robots/sitemap/redirect-hop ones): arrival jitter, not the
+  // gate's slots, which `minSlotGap` measures exactly.
   const SLACK_MS = 15;
 
   it(
@@ -2180,6 +2196,8 @@ describe("platform profile", () => {
       const before = Date.now();
       const summary = await crawl(
         config({ siteUrl: storefrontBase, maxConcurrency: 4, perHostDelayMs: 0 }),
+        undefined,
+        slotHooks(),
       );
       expect(summary.status).toBe("finished");
       expect(summary.pagesCrawled).toBe(5);
@@ -2202,11 +2220,11 @@ describe("platform profile", () => {
       expect(row.hostSpacingMs).toBeGreaterThanOrEqual(1000);
 
       expect(maxInFlight).toBe(1);
-      // The probe's own hops ran at the configured 0 ms (they precede the
-      // verdict), so the gap is measured over the crawl's requests only: the
-      // last six (five pages and the known-404 probe).
-      starts = starts.slice(-6);
-      expect(minGap()).toBeGreaterThanOrEqual(1000 - SLACK_MS);
+      // The probe's own hops ran at the configured 0 ms on the probe's own gate
+      // (they precede the verdict), so the slots are the crawl gate's only: five
+      // pages and the known-404 probe. Scheduled, so the bound is exact.
+      expect(slots.length).toBeGreaterThanOrEqual(6);
+      expect(minSlotGap()).toBeGreaterThanOrEqual(1000);
     },
     30_000,
   );
@@ -2223,6 +2241,8 @@ describe("platform profile", () => {
           perHostDelayMs: 0,
           probeHosts: false,
         }),
+        undefined,
+        slotHooks(),
       );
       expect(summary.status).toBe("finished");
       const row = await rowOf(summary.crawlId);
@@ -2238,7 +2258,8 @@ describe("platform profile", () => {
       // The seed was the only URL in the first batch, so nothing was in flight
       // beside it when the clamp landed: the whole crawl is one at a time.
       expect(maxInFlight).toBe(1);
-      expect(minGap()).toBeGreaterThanOrEqual(1000 - SLACK_MS);
+      expect(slots.length).toBeGreaterThanOrEqual(2);
+      expect(minSlotGap()).toBeGreaterThanOrEqual(1000);
     },
     30_000,
   );
@@ -2255,11 +2276,14 @@ describe("platform profile", () => {
           probeHosts: false,
           maxPages: 2,
         }),
+        undefined,
+        slotHooks(),
       );
       const row = await rowOf(summary.crawlId);
       expect(row.platformProfile?.applied?.perHostDelayMs).toBe(3000);
       expect(row.hostSpacingMs).toBe(3000);
-      expect(minGap()).toBeGreaterThanOrEqual(3000 - SLACK_MS);
+      expect(slots.length).toBeGreaterThanOrEqual(2);
+      expect(minSlotGap()).toBeGreaterThanOrEqual(3000);
     },
     30_000,
   );
@@ -2329,6 +2353,7 @@ describe("platform profile", () => {
       const first = await crawl(
         config({ siteUrl: storefrontBase, maxConcurrency: 4, perHostDelayMs: 0 }),
         ac.signal,
+        slotHooks(),
       );
       expect([first.status, first.pauseReason]).toEqual(["paused", "shutdown"]);
       const recorded = (await rowOf(first.crawlId)).platformProfile;
@@ -2345,10 +2370,13 @@ describe("platform profile", () => {
           probeHosts: false,
         }),
         reclaimLeases: true,
+        testHooks: slotHooks(),
       });
       expect(resumed.status).toBe("finished");
       expect(maxInFlight).toBe(1);
-      expect(minGap()).toBeGreaterThanOrEqual(1000 - SLACK_MS);
+      // `reset` above cleared `slots`: this is the resumed run alone.
+      expect(slots.length).toBeGreaterThanOrEqual(2);
+      expect(minSlotGap()).toBeGreaterThanOrEqual(1000);
       // Unchanged: the record is when the profile was applied, not re-stamped.
       expect((await rowOf(first.crawlId)).platformProfile).toEqual(recorded);
     },

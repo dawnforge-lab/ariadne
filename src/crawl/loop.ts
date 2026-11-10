@@ -698,6 +698,21 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+/**
+ * TEST ONLY — never wire it to an API field. Observation points a suite uses to
+ * measure the loop where it imposes its behaviour, like the renderer's
+ * `RenderTestFaults`.
+ */
+export interface LoopTestHooks {
+  /**
+   * Told each slot the crawl's host gate hands out, with the host and the
+   * slot's scheduled start (`Date.now()`, the clock the gate spaces on). A
+   * pacing test asserts on these rather than on request arrival at the server,
+   * which adds jitter that is not the gate's. Observes only.
+   */
+  onGrant?: (host: string, slotAtMs: number) => void;
+}
+
 export interface ResumeOpts {
   /**
    * Overrides the config stored on the `crawls` row. Use it to change pacing
@@ -740,6 +755,8 @@ export interface ResumeOpts {
    * worker's URLs to this one.
    */
   reclaimLeases?: boolean;
+  /** TEST ONLY — see `LoopTestHooks`. */
+  testHooks?: LoopTestHooks;
 }
 
 /**
@@ -773,6 +790,7 @@ export async function runCrawl(
   db: Db,
   config: CrawlConfig,
   signal?: AbortSignal,
+  testHooks?: LoopTestHooks,
 ): Promise<CrawlSummary> {
   validateCrawlConfig(config);
   // A list crawl's URLs live in `list_urls`, written by the API's start with
@@ -799,7 +817,7 @@ export async function runCrawl(
     status: "running",
   });
 
-  return execute(db, crawlId, config, signal);
+  return execute(db, crawlId, config, signal, testHooks);
 }
 
 /**
@@ -942,7 +960,7 @@ export async function resumeCrawl(
     await releaseLeases(db, crawlId, null);
   }
 
-  return execute(db, crawlId, config, opts.signal);
+  return execute(db, crawlId, config, opts.signal, opts.testHooks);
 }
 
 /**
@@ -1393,6 +1411,7 @@ async function execute(
   crawlId: string,
   config: CrawlConfig,
   signal: AbortSignal | undefined,
+  testHooks: LoopTestHooks | undefined,
 ): Promise<CrawlSummary> {
   // THE ONE SIGNAL THE RUN STOPS ON (Phase 27b). It fires on an agent's pause
   // or cancel (polled off `crawls.control_request`), on the process's own
@@ -1425,7 +1444,7 @@ async function execute(
         engineVersion: engineVersion(),
       })
       .where(eq(crawls.id, crawlId));
-    return await runToCompletion(db, crawlId, config, watcher);
+    return await runToCompletion(db, crawlId, config, watcher, testHooks);
   } catch (caught) {
     // A control poll that failed on the way down is surfaced beside whatever
     // ended the run, never lost to it (rule 7). The run's own paths already
@@ -1575,6 +1594,7 @@ async function runToCompletion(
   crawlId: string,
   config: CrawlConfig,
   watcher: ControlWatcher,
+  testHooks: LoopTestHooks | undefined,
 ): Promise<CrawlSummary> {
   const allowPrivate = config.allowPrivate === true;
   const listMode = config.mode === "list";
@@ -1764,6 +1784,7 @@ async function runToCompletion(
     perHostDelayMs,
     robotsCrawlDelaySec: discovery.robots.crawlDelaySec,
     earnedSpacingMs,
+    onGrant: testHooks?.onGrant,
   });
   // The PER-HOST state beside the crawl-wide number: each host re-enters its own
   // earned spacing — and, since Phase 24a, its place on the ratchet — rather than
