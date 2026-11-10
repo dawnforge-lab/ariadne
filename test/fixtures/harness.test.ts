@@ -1144,7 +1144,7 @@ describe("the fixture site end to end", () => {
         hreflangLimited: false,
         entryLimited: false,
         docLimited: false,
-        depthLimited: false, timeLimited: false,
+        depthLimited: false, timeLimited: false, interrupted: false,
         sitemapDocsFailed: 1,
         sitemapDocsOversized: 0,
         alternatesCapped: 0,

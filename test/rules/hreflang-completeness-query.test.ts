@@ -68,6 +68,7 @@ describe("hreflang.declarations-incomplete metadata", () => {
       "docLimited",
       "depthLimited",
       "timeLimited",
+      "interrupted",
       "sitemapDocsFailed",
       "sitemapDocsOversized",
       "alternatesCapped",
@@ -226,6 +227,7 @@ describe("hreflang.declarations-incomplete against the database", () => {
     docLimited: false,
     depthLimited: false,
     timeLimited: false,
+    interrupted: false,
     sitemapDocsFailed: 0,
     sitemapDocsOversized: 0,
     alternatesCapped: 0,
@@ -579,6 +581,7 @@ describe("hreflang.declarations-incomplete against the database", () => {
       docLimited: null,
       depthLimited: null,
       timeLimited: null,
+      interrupted: null,
       sitemapDocsFailed: null,
       sitemapDocsOversized: null,
       alternatesCapped: null,
@@ -653,5 +656,45 @@ describe("hreflang.declarations-incomplete against the database", () => {
       truncation: { ...discovery.truncation, timeLimited: "yes" } as unknown as DiscoveryEvidence["truncation"],
     });
     await expect(run(MARKER, crawlId)).rejects.toThrow(/timeLimited/);
+  });
+
+  // Phase 27d ruling R8: a resumed crawl stopped during its re-walk.
+  it("(27d) an interrupted re-walk refuses the four rules and the marker names interrupted", async () => {
+    const discovery = mkDiscovery();
+    const crawlId = await newCrawl({
+      ...discovery,
+      truncation: { ...discovery.truncation, interrupted: true },
+    });
+    await seedAbsences(crawlId);
+    expect(await absenceCounts(crawlId)).toEqual(NONE_FIRE);
+    const found = await run(MARKER, crawlId);
+    expect(found).toHaveLength(1);
+    expect(withoutReason(found[0]!)).toEqual({ ...CLEAN, interrupted: true });
+    const reason = String(found[0]!.evidence.reason);
+    expect(reason).toMatch(/paused or cancelled.*\(interrupted\)/);
+    // Only the interruption fired: neither the limit nor the time sentence is said.
+    expect(reason).not.toMatch(/size, entry, file-count or nesting limit/);
+    expect(reason).not.toMatch(/timeLimited/);
+  });
+
+  it("(27d) interrupted: false, or no key at all, is not cut short", async () => {
+    const discovery = mkDiscovery();
+    const crawlId = await newCrawl({
+      ...discovery,
+      truncation: { ...discovery.truncation, interrupted: false },
+    });
+    await seedAbsences(crawlId);
+    expect(await run(MARKER, crawlId)).toEqual([]);
+    expect(await absenceCounts(crawlId)).toEqual(ALL_FIRE);
+  });
+
+  it("(27d) a non-boolean interrupted is a loud error, not false", async () => {
+    const discovery = mkDiscovery();
+    const crawlId = await newCrawl({
+      ...discovery,
+      truncation: { ...discovery.truncation, interrupted: 1 } as unknown as DiscoveryEvidence["truncation"],
+    });
+    await expect(run(MARKER, crawlId)).rejects.toThrow(/interrupted/);
+    await expect(run(RETURN_LINK, crawlId)).rejects.toThrow(/interrupted/);
   });
 });

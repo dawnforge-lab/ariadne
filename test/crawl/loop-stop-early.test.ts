@@ -1,13 +1,19 @@
 /**
  * Phase 27d Task 4: a pause or cancel stops the crawl while it is still in the
- * host probe or the sitemap discovery walk, within the spec's stop target —
- * `CONTROL_POLL_MS` (1 s) + 1 s, from the `control_request` write to the row's
- * terminal status.
+ * host probe, the sitemap discovery walk, or the seeding that follows it,
+ * within the spec's stop target — `CONTROL_POLL_MS` (1 s) + 1 s, from the
+ * `control_request` write to the row's terminal status.
  *
  * Every fixture stall is far beyond that bound (a 5 s probe answer, 3 s
  * sitemap children, 15 s pages), so no test can pass by the fixture finishing
- * on its own.
+ * on its own. A stop that must land between two batches of work is placed
+ * there by a test hook, which writes the request and then holds until the
+ * run's stop signal has fired.
+ *
+ * Measured latencies are not printed; set STOP_LATENCY_LOG to a file path to
+ * have them written there as JSON when the file finishes.
  */
+import { writeFileSync } from "node:fs";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
@@ -22,14 +28,22 @@ import {
   runCrawl,
   type CrawlConfig,
   type CrawlSummary,
+  type DiscoveryEvidence,
   type LoopTestHooks,
 } from "../../src/crawl/loop.js";
 import { closeDb, createDb, type Db } from "../../src/db/client.js";
 import { runMigrations } from "../../src/db/migrate.js";
 import { crawls, frontier, pages, sitemapMemberships, sitemapUrls } from "../../src/db/schema.js";
+import { deriveSitemapHreflang } from "../../src/rules/derive/sitemap-hreflang.js";
+import { hreflangIntegrityRules } from "../../src/rules/query/hreflang-integrity.js";
+import { hreflangRules } from "../../src/rules/query/hreflang.js";
+import type { Finding } from "../../src/rules/registry/types.js";
 
 /** The spec's stop target: one poll interval, plus one second for the close. */
 const STOP_TARGET_MS = CONTROL_POLL_MS + 1_000;
+
+/** Every stop latency this file measured, by test, for STOP_LATENCY_LOG. */
+const latencies: Record<string, number> = {};
 
 function databaseUrl(): string {
   const url = process.env.DATABASE_URL;
@@ -97,6 +111,11 @@ function urlset(locs: string[]): string {
   );
 }
 
+function robots(res: ServerResponse, sitemaps: string[]): void {
+  res.writeHead(200, { "content-type": "text/plain" });
+  res.end(`User-agent: *\nAllow: /\n${sitemaps.map((s) => `Sitemap: ${s}\n`).join("")}`);
+}
+
 interface Site {
   base: string;
   /** Every request path the site has seen, in order. */
@@ -106,8 +125,7 @@ interface Site {
 async function site(handler: (req: IncomingMessage, res: ServerResponse, base: string) => void): Promise<Site> {
   const s: Site = { base: "", seen: [] };
   const server = createServer((req, res) => {
-    const path = (req.url ?? "/").split("?")[0] ?? "/";
-    s.seen.push(path);
+    s.seen.push(path(req));
     handler(req, res, s.base);
   });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
@@ -119,6 +137,13 @@ async function site(handler: (req: IncomingMessage, res: ServerResponse, base: s
 function path(req: IncomingMessage): string {
   return (req.url ?? "/").split("?")[0] ?? "/";
 }
+
+/** How many times `s` has been asked for a path `match` accepts. */
+function hits(s: Site, match: (p: string) => boolean): number {
+  return s.seen.filter(match).length;
+}
+
+const isChild = (p: string): boolean => p.startsWith("/sm-");
 
 /**
  * THE PROBE SITE. Its home page answers after 5 s, so the host probe's first
@@ -135,7 +160,8 @@ let indexSite: Site;
 /**
  * THE FLUSH-HEAVY SITE. robots.txt declares one sitemap of HEAVY_LOCS `<loc>`s,
  * a document that arrives in several chunks and so is flushed several times;
- * every page it lists answers at once.
+ * every page answers at once. Also the seeding fixture: HEAVY_LOCS entries
+ * are many batches of `sitemap_urls` rows and many frontier lookup chunks.
  */
 let heavySite: Site;
 const HEAVY_LOCS = 10_000;
@@ -148,27 +174,27 @@ let heavyXml = "";
  */
 let slowPageSite: Site;
 
+/**
+ * THE HREFLANG SITE. Two sitemaps. The first says `/a` has a French alternate
+ * `/b`, and `/b` does not name `/a` back — `hreflang.missing-return-link` on a
+ * whole read. The second answers at once, or after 3 s while `hreflangSlow` is
+ * set, which is how a RESUMED crawl is stopped in the middle of its re-walk.
+ */
+let hreflangSite: Site;
+let hreflangSlow = false;
+
 beforeAll(async () => {
   db = createDb(databaseUrl());
   await runMigrations(db);
 
   probeSite = await site((req, res) => {
-    const p = path(req);
-    if (p === "/robots.txt") {
-      res.writeHead(200, { "content-type": "text/plain" });
-      res.end("User-agent: *\nAllow: /\n");
-      return;
-    }
+    if (path(req) === "/robots.txt") return robots(res, []);
     answerLater(res, 5_000, () => html(res, "late home"));
   });
 
   indexSite = await site((req, res, base) => {
     const p = path(req);
-    if (p === "/robots.txt") {
-      res.writeHead(200, { "content-type": "text/plain" });
-      res.end(`User-agent: *\nAllow: /\nSitemap: ${base}/sitemap-index.xml\n`);
-      return;
-    }
+    if (p === "/robots.txt") return robots(res, [`${base}/sitemap-index.xml`]);
     if (p === "/sitemap-index.xml") {
       xml(
         res,
@@ -190,15 +216,8 @@ beforeAll(async () => {
 
   heavySite = await site((req, res, base) => {
     const p = path(req);
-    if (p === "/robots.txt") {
-      res.writeHead(200, { "content-type": "text/plain" });
-      res.end(`User-agent: *\nAllow: /\nSitemap: ${base}/heavy.xml\n`);
-      return;
-    }
-    if (p === "/heavy.xml") {
-      xml(res, heavyXml);
-      return;
-    }
+    if (p === "/robots.txt") return robots(res, [`${base}/heavy.xml`]);
+    if (p === "/heavy.xml") return xml(res, heavyXml);
     html(res, `page ${p}`, p === "/" ? ["/p/1", "/p/2"] : []);
   });
   const heavyLocs: string[] = [];
@@ -207,16 +226,35 @@ beforeAll(async () => {
 
   slowPageSite = await site((req, res, base) => {
     const p = path(req);
-    if (p === "/robots.txt") {
-      res.writeHead(200, { "content-type": "text/plain" });
-      res.end(`User-agent: *\nAllow: /\nSitemap: ${base}/sitemap.xml\n`);
-      return;
-    }
-    if (p === "/sitemap.xml") {
-      xml(res, urlset([`${base}/a`, `${base}/b`]));
-      return;
-    }
+    if (p === "/robots.txt") return robots(res, [`${base}/sitemap.xml`]);
+    if (p === "/sitemap.xml") return xml(res, urlset([`${base}/a`, `${base}/b`]));
     answerLater(res, 15_000, () => html(res, `late ${p}`));
+  });
+
+  hreflangSite = await site((req, res, base) => {
+    const p = path(req);
+    if (p === "/robots.txt") return robots(res, [`${base}/sitemap.xml`, `${base}/sitemap-2.xml`]);
+    if (p === "/sitemap.xml") {
+      xml(
+        res,
+        `<?xml version="1.0" encoding="UTF-8"?>\n` +
+          `<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9" ` +
+          `xmlns:xhtml="http://www.w3.org/1999/xhtml">` +
+          `<url><loc>${base}/a</loc>` +
+          `<xhtml:link rel="alternate" hreflang="en" href="${base}/a"/>` +
+          `<xhtml:link rel="alternate" hreflang="fr" href="${base}/b"/></url>` +
+          `<url><loc>${base}/b</loc></url>` +
+          `</urlset>`,
+      );
+      return;
+    }
+    if (p === "/sitemap-2.xml") {
+      const answer = (): void => xml(res, urlset([`${base}/c`]));
+      if (hreflangSlow) answerLater(res, 3_000, answer);
+      else answer();
+      return;
+    }
+    html(res, `page ${p}`, p === "/" ? ["/a", "/b", "/c"] : []);
   });
 });
 
@@ -231,6 +269,8 @@ afterAll(async () => {
     server.closeAllConnections();
     await new Promise<void>((r) => server.close(() => r()));
   }
+  const logTo = process.env["STOP_LATENCY_LOG"];
+  if (logTo !== undefined && logTo !== "") writeFileSync(logTo, JSON.stringify(latencies));
 });
 
 function config(s: Site, overrides: Partial<CrawlConfig> = {}): CrawlConfig {
@@ -274,6 +314,10 @@ async function frontierRows(id: string) {
   return db.select().from(frontier).where(eq(frontier.crawlId, id));
 }
 
+async function frontierUrlSet(id: string): Promise<string[]> {
+  return (await frontierRows(id)).map((r) => r.url).sort();
+}
+
 async function pageRows(id: string) {
   return db.select().from(pages).where(eq(pages.crawlId, id));
 }
@@ -291,11 +335,24 @@ async function membershipCount(id: string): Promise<number> {
   return rows.length;
 }
 
+/** The row's discovery evidence, which the test expects to be on record. */
+async function evidenceOf(id: string): Promise<DiscoveryEvidence> {
+  const discovery = (await crawlRow(id)).discovery as DiscoveryEvidence | null;
+  if (discovery === null) throw new Error(`crawl ${id} holds no discovery evidence`);
+  return discovery;
+}
+
 /**
- * Write `request` for the running crawl `id` and resolve with the time it took
- * the row to reach `terminal` — the spec's measure of a stop.
+ * Wait for the row to reach the terminal status `request` leads to, and record
+ * the time from `setAt` (the `control_request` write) — the spec's measure of a
+ * stop. Without `setAt`, the request is written here first.
  */
-async function requestAndMeasure(id: string, request: "pause" | "cancel", setAt?: number): Promise<number> {
+async function measureStop(
+  name: string,
+  id: string,
+  request: "pause" | "cancel",
+  setAt?: number,
+): Promise<number> {
   const terminal = request === "pause" ? "paused" : "cancelled";
   let at = setAt;
   if (at === undefined) {
@@ -303,7 +360,9 @@ async function requestAndMeasure(id: string, request: "pause" | "cancel", setAt?
     expect(await setControlRequest(db, id, request)).toBe(true);
   }
   await until(`the row to read ${terminal}`, async () => (await crawlRow(id)).status === terminal, 20_000);
-  return Date.now() - at;
+  const latencyMs = Date.now() - at;
+  latencies[name] = latencyMs;
+  return latencyMs;
 }
 
 /** Run a crawl with its rejection observed, so a stop test never leaves one unhandled. */
@@ -325,16 +384,59 @@ function deferredId(): { promise: Promise<string>; resolve: (id: string) => void
   return { promise, resolve };
 }
 
+/**
+ * A hook body that writes `request` for the crawl, records when, and holds
+ * until the run's stop signal has fired — so the stop provably lands at the
+ * point the hook was called from.
+ */
+function stopHere(
+  known: { promise: Promise<string> },
+  request: "pause" | "cancel",
+  stamp: (at: number) => void,
+): (stop: AbortSignal) => Promise<void> {
+  return async (stop) => {
+    const crawlId = await known.promise;
+    stamp(Date.now());
+    expect(await setControlRequest(db, crawlId, request)).toBe(true);
+    await until("the stop signal", () => stop.aborted, 5_000);
+  };
+}
+
+/**
+ * Hooks that pause a run at its first page slot, written without waiting: the
+ * seeding is over by then, so the frontier holds every URL the run seeded, and
+ * the pause ends the run within a poll interval rather than after HEAVY_LOCS
+ * pages.
+ */
+function pauseAtFirstSlot(known: { promise: Promise<string> }): LoopTestHooks {
+  let asked = false;
+  return {
+    onGrant: () => {
+      if (asked) return;
+      asked = true;
+      void known.promise.then((crawlId) => setControlRequest(db, crawlId, "pause"));
+    },
+  };
+}
+
+/** The frontier an uninterrupted seeding of `s` leaves (paused at its first slot). */
+async function uninterruptedSeeding(s: Site, cfg: CrawlConfig): Promise<{ id: string; urls: string[] }> {
+  const known = deferredId();
+  const run = start(cfg, pauseAtFirstSlot(known));
+  const id = await newCrawlOf(`${s.base}/`);
+  known.resolve(id);
+  expect((await run).status).toBe("paused");
+  return { id, urls: await frontierUrlSet(id) };
+}
+
 describe("a stop during the host probe", () => {
   it("pause: paused within the stop target, no discovery evidence and no frontier rows", async () => {
-    const before = probeSite.seen.filter((p) => p === "/").length;
+    const before = hits(probeSite, (p) => p === "/");
     const run = start(config(probeSite, { probeHosts: true }));
     const id = await newCrawlOf(`${probeSite.base}/`);
-    await until("the probe's first hop in flight", () => probeSite.seen.filter((p) => p === "/").length > before);
+    await until("the probe's first hop in flight", () => hits(probeSite, (p) => p === "/") > before);
 
-    const latencyMs = await requestAndMeasure(id, "pause");
-    console.log(`pause during probe: ${latencyMs} ms`);
-    expect(latencyMs).toBeLessThanOrEqual(STOP_TARGET_MS);
+    expect(await measureStop("pause during probe", id, "pause")).toBeLessThanOrEqual(STOP_TARGET_MS);
 
     const summary = await run;
     expect(summary.status).toBe("paused");
@@ -358,14 +460,12 @@ describe("a stop during the host probe", () => {
   }, 30_000);
 
   it("cancel: cancelled within the stop target, and the status read says it never ran", async () => {
-    const before = probeSite.seen.filter((p) => p === "/").length;
+    const before = hits(probeSite, (p) => p === "/");
     const run = start(config(probeSite, { probeHosts: true }));
     const id = await newCrawlOf(`${probeSite.base}/`);
-    await until("the probe's first hop in flight", () => probeSite.seen.filter((p) => p === "/").length > before);
+    await until("the probe's first hop in flight", () => hits(probeSite, (p) => p === "/") > before);
 
-    const latencyMs = await requestAndMeasure(id, "cancel");
-    console.log(`cancel during probe: ${latencyMs} ms`);
-    expect(latencyMs).toBeLessThanOrEqual(STOP_TARGET_MS);
+    expect(await measureStop("cancel during probe", id, "cancel")).toBeLessThanOrEqual(STOP_TARGET_MS);
 
     const summary = await run;
     expect(summary.status).toBe("cancelled");
@@ -375,27 +475,31 @@ describe("a stop during the host probe", () => {
     expect(row.cancelledAt).not.toBeNull();
     expect(row.discovery).toBeNull();
     expect(await frontierRows(id)).toEqual([]);
-
-    // The 27b never-ran wording (Ruling 11): no count of URLs never fetched,
-    // because nothing was seen, and the rules refuse a crawl that never ran.
-    const service = new ApiService(db, { allowedDomains: ["127.0.0.1"], log: () => {} });
-    const detail = await service.getCrawl(id);
-    expect(detail.status).toBe("cancelled");
-    expect(detail.neverFetched).toBeNull();
-    await expect(service.runRulesForCrawl(id)).rejects.toThrow(/never ran \(it was cancelled before discovery\)/);
+    await expectNeverRan(id);
   }, 30_000);
 });
 
+/**
+ * The 27b never-ran wording on the status read (Ruling 11): no count of URLs
+ * never fetched, because nothing was seen, and the rules refuse a crawl that
+ * never ran.
+ */
+async function expectNeverRan(id: string): Promise<void> {
+  const service = new ApiService(db, { allowedDomains: ["127.0.0.1"], log: () => {} });
+  const detail = await service.getCrawl(id);
+  expect(detail.status).toBe("cancelled");
+  expect(detail.neverFetched).toBeNull();
+  await expect(service.runRulesForCrawl(id)).rejects.toThrow(/never ran \(it was cancelled before discovery\)/);
+}
+
 describe("a stop during the sitemap walk", () => {
   it("pause: paused within the stop target, no sitemap entries enqueued, no discovery evidence", async () => {
-    const before = indexSite.seen.filter((p) => p.startsWith("/sm-")).length;
+    const before = hits(indexSite, isChild);
     const run = start(config(indexSite));
     const id = await newCrawlOf(`${indexSite.base}/`);
-    await until("a sitemap child in flight", () => indexSite.seen.filter((p) => p.startsWith("/sm-")).length > before);
+    await until("a sitemap child in flight", () => hits(indexSite, isChild) > before);
 
-    const latencyMs = await requestAndMeasure(id, "pause");
-    console.log(`pause during the sitemap walk: ${latencyMs} ms`);
-    expect(latencyMs).toBeLessThanOrEqual(STOP_TARGET_MS);
+    expect(await measureStop("pause during walk", id, "pause")).toBeLessThanOrEqual(STOP_TARGET_MS);
 
     const summary = await run;
     expect(summary.status).toBe("paused");
@@ -408,71 +512,178 @@ describe("a stop during the sitemap walk", () => {
     expect(await frontierRows(id)).toEqual([]);
     expect(await sitemapUrlSet(id)).toEqual([]);
     // The walk stopped at the child in flight: the second was never asked for.
-    expect(indexSite.seen.filter((p) => p.startsWith("/sm-")).length - before).toBe(1);
+    expect(hits(indexSite, isChild) - before).toBe(1);
+  }, 30_000);
+
+  it("cancel: cancelled within the stop target, and the status read says it never ran", async () => {
+    const before = hits(indexSite, isChild);
+    const run = start(config(indexSite));
+    const id = await newCrawlOf(`${indexSite.base}/`);
+    await until("a sitemap child in flight", () => hits(indexSite, isChild) > before);
+
+    expect(await measureStop("cancel during walk", id, "cancel")).toBeLessThanOrEqual(STOP_TARGET_MS);
+
+    const summary = await run;
+    expect(summary.status).toBe("cancelled");
+    const row = await crawlRow(id);
+    expect(row.cancelledAt).not.toBeNull();
+    expect(row.discovery).toBeNull();
+    expect(await frontierRows(id)).toEqual([]);
+    expect(await sitemapUrlSet(id)).toEqual([]);
+    await expectNeverRan(id);
+  }, 30_000);
+
+  it("a control poll that fails mid-walk closes the crawl failed on the poll failure alone, never paused", async () => {
+    const before = hits(indexSite, isChild);
+    const run = start(config(indexSite));
+    const id = await newCrawlOf(`${indexSite.base}/`);
+    await until("a sitemap child in flight", () => hits(indexSite, isChild) > before);
+    // A value this engine never writes: the watcher's next poll fails on it.
+    await db.update(crawls).set({ controlRequest: "stop" }).where(eq(crawls.id, id));
+
+    const error = await run.then(
+      () => {
+        throw new Error("the run resolved");
+      },
+      (e: unknown) => e,
+    );
+    expect(String((error as Error).message)).toMatch(/"stop"/);
+    const row = await crawlRow(id);
+    expect(row.status).toBe("failed");
+    expect(row.pauseReason).toBeNull();
+    expect(row.failureReason).toMatch(/"stop"/);
+    expect(row.discovery).toBeNull();
+    // Failed, so the stopped close's 404 sentence was never written.
+    expect(row.notfoundProbe).toBeNull();
+    expect(await frontierRows(id)).toEqual([]);
+    // The walk stopped at the child in flight, as a pause would have.
+    expect(hits(indexSite, isChild) - before).toBe(1);
   }, 30_000);
 });
 
 describe("a stop while a sitemap's rows are being flushed (Review Focus 2)", () => {
-  let pausedId: string;
-
-  it("pause during a mid-document flush: paused within the stop target, the document cut short", async () => {
+  it("pause during a mid-document flush closes within the stop target, and the resumed walk equals an uninterrupted one", async () => {
     let flushes = 0;
     let setAt: number | undefined;
     const known = deferredId();
-    const hooks: LoopTestHooks = {
+    const hold = stopHere(known, "pause", (at) => (setAt = at));
+    const run = start(config(heavySite), {
       // The second flush of the heavy document: rows are written, the
       // document's clocks are paused, and the body is still arriving.
       onSitemapFlush: async (stop) => {
         flushes += 1;
-        if (flushes !== 2) return;
-        const crawlId = await known.promise;
-        setAt = Date.now();
-        expect(await setControlRequest(db, crawlId, "pause")).toBe(true);
-        // Held inside the flush until the poll has turned the request into an
-        // abort, so the abort provably lands while the rows are being written.
-        await until("the stop signal", () => stop.aborted, 5_000);
+        if (flushes === 2) await hold(stop);
       },
-    };
-    const run = start(config(heavySite), hooks);
-    const crawlId = await newCrawlOf(`${heavySite.base}/`);
-    known.resolve(crawlId);
-    pausedId = crawlId;
+    });
+    const pausedId = await newCrawlOf(`${heavySite.base}/`);
+    known.resolve(pausedId);
     await until("the flush hook's request", () => setAt !== undefined);
 
-    const latencyMs = await requestAndMeasure(crawlId, "pause", setAt);
-    console.log(`pause during a flush: ${latencyMs} ms`);
-    expect(latencyMs).toBeLessThanOrEqual(STOP_TARGET_MS);
+    expect(await measureStop("pause during a flush", pausedId, "pause", setAt)).toBeLessThanOrEqual(
+      STOP_TARGET_MS,
+    );
 
-    const summary = await run;
-    expect(summary.status).toBe("paused");
-    const row = await crawlRow(crawlId);
-    expect(row.discovery).toBeNull();
-    expect(await frontierRows(crawlId)).toEqual([]);
-    expect(await sitemapUrlSet(crawlId)).toEqual([]);
+    expect((await run).status).toBe("paused");
+    expect((await crawlRow(pausedId)).discovery).toBeNull();
+    expect(await frontierRows(pausedId)).toEqual([]);
+    expect(await sitemapUrlSet(pausedId)).toEqual([]);
     // Cut short mid-document: some memberships were flushed, not all.
-    const staged = await membershipCount(crawlId);
+    const staged = await membershipCount(pausedId);
     expect(staged).toBeGreaterThan(0);
     expect(staged).toBeLessThan(HEAVY_LOCS);
-  }, 30_000);
 
-  it("the resumed crawl's discovery equals an uninterrupted crawl's", async () => {
+    // Resume to the end, then compare with a crawl that was never interrupted.
     const resumed = await resumeCrawl(db, pausedId, { config: config(heavySite) });
     expect(resumed.status).toBe("finished");
-
     const whole = await runCrawl(db, config(heavySite));
     createdCrawls.push(whole.crawlId);
     expect(whole.status).toBe("finished");
 
     // Nothing in the evidence is timing-dependent: it compares whole.
-    const resumedRow = await crawlRow(pausedId);
-    const wholeRow = await crawlRow(whole.crawlId);
-    expect(resumedRow.discovery).not.toBeNull();
-    expect(resumedRow.discovery).toEqual(wholeRow.discovery);
-
+    const resumedEvidence = await evidenceOf(pausedId);
+    expect(resumedEvidence).toEqual(await evidenceOf(whole.crawlId));
     const resumedUrls = await sitemapUrlSet(pausedId);
     expect(resumedUrls).toHaveLength(HEAVY_LOCS);
     expect(resumedUrls).toEqual(await sitemapUrlSet(whole.crawlId));
     expect(await membershipCount(pausedId)).toBe(await membershipCount(whole.crawlId));
+  }, 120_000);
+});
+
+describe("a stop during the seeding after discovery (ruling R9)", () => {
+  // Room for every entry and the seed, so the frontier lookup runs every chunk.
+  const seedingConfig = (): CrawlConfig =>
+    config(heavySite, { maxPages: HEAVY_LOCS + 1, maxConcurrency: 4 });
+
+  async function stopInStage(
+    name: string,
+    stage: "sitemap_urls" | "frontier",
+  ): Promise<{ id: string; latencyMs: number }> {
+    let batches = 0;
+    let setAt: number | undefined;
+    const known = deferredId();
+    const hold = stopHere(known, "pause", (at) => (setAt = at));
+    const run = start(seedingConfig(), {
+      onSeedingBatch: async (at, stop) => {
+        if (at !== stage) return;
+        batches += 1;
+        if (batches === 3) await hold(stop);
+      },
+    });
+    const id = await newCrawlOf(`${heavySite.base}/`);
+    known.resolve(id);
+    await until("the seeding hook's request", () => setAt !== undefined);
+    const latencyMs = await measureStop(name, id, "pause", setAt);
+    expect((await run).status).toBe("paused");
+    return { id, latencyMs };
+  }
+
+  async function resumeSeeding(id: string): Promise<string[]> {
+    const known = deferredId();
+    known.resolve(id);
+    const resumed = await resumeCrawl(db, id, { config: seedingConfig(), testHooks: pauseAtFirstSlot(known) });
+    expect(resumed.status).toBe("paused");
+    return frontierUrlSet(id);
+  }
+
+  it("pause while sitemap_urls is written: closes within the stop target, before any evidence; the resume seeds what an uninterrupted crawl does", async () => {
+    const { id, latencyMs } = await stopInStage("pause while writing sitemap_urls", "sitemap_urls");
+    expect(latencyMs).toBeLessThanOrEqual(STOP_TARGET_MS);
+
+    // Stopped between two batches: some rows, not all, and no evidence beside
+    // them claiming the whole sitemap.
+    const written = (await sitemapUrlSet(id)).length;
+    expect(written).toBeGreaterThan(0);
+    expect(written).toBeLessThan(HEAVY_LOCS);
+    expect((await crawlRow(id)).discovery).toBeNull();
+    expect(await frontierRows(id)).toEqual([]);
+    expect(await pageRows(id)).toEqual([]);
+
+    const resumedUrls = await resumeSeeding(id);
+    const whole = await uninterruptedSeeding(heavySite, seedingConfig());
+    expect(resumedUrls).toHaveLength(HEAVY_LOCS + 1);
+    expect(resumedUrls).toEqual(whole.urls);
+    expect(await sitemapUrlSet(id)).toEqual(await sitemapUrlSet(whole.id));
+    expect(await evidenceOf(id)).toEqual(await evidenceOf(whole.id));
+  }, 120_000);
+
+  it("pause while the frontier is seeded: closes within the stop target with the frontier partial; the resume seeds what an uninterrupted crawl does", async () => {
+    const { id, latencyMs } = await stopInStage("pause while seeding the frontier", "frontier");
+    expect(latencyMs).toBeLessThanOrEqual(STOP_TARGET_MS);
+
+    // The evidence and `sitemap_urls` were whole before the seeding began; the
+    // frontier holds only the chunks looked up before the stop, and no page
+    // was leased.
+    expect((await evidenceOf(id)).docsFetched).toBe(1);
+    expect(await sitemapUrlSet(id)).toHaveLength(HEAVY_LOCS);
+    const seeded = (await frontierRows(id)).length;
+    expect(seeded).toBeGreaterThan(0);
+    expect(seeded).toBeLessThan(HEAVY_LOCS + 1);
+    expect(await pageRows(id)).toEqual([]);
+
+    const resumedUrls = await resumeSeeding(id);
+    const whole = await uninterruptedSeeding(heavySite, seedingConfig());
+    expect(resumedUrls).toHaveLength(HEAVY_LOCS + 1);
+    expect(resumedUrls).toEqual(whole.urls);
   }, 120_000);
 });
 
@@ -491,45 +702,106 @@ describe("a pause right after discovery (Review Focus 1)", () => {
     known.resolve(crawlId);
     await until("the hook's request", () => setAt !== undefined);
 
-    const latencyMs = await requestAndMeasure(crawlId, "pause", setAt);
-    console.log(`pause written as discovery returns: ${latencyMs} ms`);
-    expect(latencyMs).toBeLessThanOrEqual(STOP_TARGET_MS);
+    expect(await measureStop("pause written as discovery returns", crawlId, "pause", setAt)).toBeLessThanOrEqual(
+      STOP_TARGET_MS,
+    );
 
-    const summary = await run;
-    expect(summary.status).toBe("paused");
+    expect((await run).status).toBe("paused");
+    // The stop was the page loop's to see: the frontier was seeded (so this is
+    // not the post-discovery check's close), and its page fetch was cut off.
+    const rows = await frontierRows(crawlId);
+    expect(rows.length).toBeGreaterThan(0);
+    expect(rows.every((r) => r.state === "pending")).toBe(true);
     expect(await pageRows(crawlId)).toEqual([]);
-    const states = (await frontierRows(crawlId)).map((r) => r.state);
-    expect(states.every((s) => s === "pending")).toBe(true);
   }, 30_000);
 
   it("a request the poll has already seen when discovery returns: no evidence written, nothing enqueued", async () => {
     let setAt: number | undefined;
     const known = deferredId();
     const run = start(config(slowPageSite), {
-      afterDiscovery: async (stop) => {
-        const crawlId = await known.promise;
-        setAt = Date.now();
-        expect(await setControlRequest(db, crawlId, "pause")).toBe(true);
-        await until("the stop signal", () => stop.aborted, 5_000);
-      },
+      afterDiscovery: stopHere(known, "pause", (at) => (setAt = at)),
     });
     const crawlId = await newCrawlOf(`${slowPageSite.base}/`);
     known.resolve(crawlId);
     await until("the hook's request", () => setAt !== undefined);
 
-    const latencyMs = await requestAndMeasure(crawlId, "pause", setAt);
-    console.log(`pause seen as discovery returns: ${latencyMs} ms`);
-    expect(latencyMs).toBeLessThanOrEqual(STOP_TARGET_MS);
+    expect(await measureStop("pause seen as discovery returns", crawlId, "pause", setAt)).toBeLessThanOrEqual(
+      STOP_TARGET_MS,
+    );
 
     const summary = await run;
     expect(summary.status).toBe("paused");
     expect(summary.discovery).toBeNull();
-    const row = await crawlRow(crawlId);
-    expect(row.discovery).toBeNull();
+    expect((await crawlRow(crawlId)).discovery).toBeNull();
     expect(await frontierRows(crawlId)).toEqual([]);
     expect(await sitemapUrlSet(crawlId)).toEqual([]);
     expect(await pageRows(crawlId)).toEqual([]);
   }, 30_000);
+});
+
+describe("a resumed crawl stopped during its re-walk (ruling R8)", () => {
+  const MARKER = "hreflang.declarations-incomplete";
+  const RETURN_LINK = "hreflang.missing-return-link";
+  const ABSENCE_RULES = [
+    RETURN_LINK,
+    "hreflang.missing-self-reference",
+    "hreflang.missing-x-default",
+    "hreflang.self-only",
+  ];
+  const byId = new Map([...hreflangRules, ...hreflangIntegrityRules].map((r) => [r.id, r]));
+
+  /** The four absence rules and the marker over the crawl as it stands. */
+  async function judge(crawlId: string): Promise<Record<string, Finding[]>> {
+    await deriveSitemapHreflang(db, crawlId);
+    const out: Record<string, Finding[]> = {};
+    for (const id of [...ABSENCE_RULES, MARKER]) {
+      const r = byId.get(id);
+      if (r === undefined) throw new Error(`no rule '${id}'`);
+      out[id] = await r.run(db, crawlId);
+    }
+    return out;
+  }
+
+  it("marks the kept evidence interrupted: the absence rules refuse, the marker names it, and a complete walk clears it", async () => {
+    const cfg = config(hreflangSite, { maxPages: 10 });
+    hreflangSlow = false;
+    const first = await runCrawl(db, cfg);
+    createdCrawls.push(first.crawlId);
+    expect(first.status).toBe("finished");
+    const id = first.crawlId;
+    // The baseline: read whole, /a's French alternate is not named back.
+    const whole = await judge(id);
+    expect(whole[RETURN_LINK]!.length).toBeGreaterThan(0);
+    expect(whole[MARKER]).toEqual([]);
+    expect((await evidenceOf(id)).truncation.interrupted).toBeUndefined();
+
+    // The re-walk: the first sitemap is read again, the second is in flight.
+    hreflangSlow = true;
+    const before = hits(hreflangSite, (p) => p === "/sitemap-2.xml");
+    const resumed = resumeCrawl(db, id, { config: cfg });
+    resumed.catch(() => undefined);
+    await until("the second sitemap in flight", () => hits(hreflangSite, (p) => p === "/sitemap-2.xml") > before);
+    expect(await measureStop("pause during a re-walk", id, "pause")).toBeLessThanOrEqual(STOP_TARGET_MS);
+    expect((await resumed).status).toBe("paused");
+
+    expect((await evidenceOf(id)).truncation.interrupted).toBe(true);
+    const cut = await judge(id);
+    for (const ruleId of ABSENCE_RULES) expect(cut[ruleId], ruleId).toEqual([]);
+    expect(cut[MARKER]).toHaveLength(1);
+    const marker = cut[MARKER]![0]!;
+    expect(marker.evidence.interrupted).toBe(true);
+    expect(String(marker.evidence.reason)).toMatch(/\(interrupted\)/);
+
+    // Resumed to the end: the complete walk rewrites the evidence, and the
+    // rules judge again.
+    hreflangSlow = false;
+    const finished = await resumeCrawl(db, id, { config: cfg });
+    expect(finished.status).toBe("finished");
+    expect((await evidenceOf(id)).truncation.interrupted).toBeUndefined();
+    const again = await judge(id);
+    expect(again[RETURN_LINK]!.length).toBe(whole[RETURN_LINK]!.length);
+    expect(again[MARKER]).toEqual([]);
+  }, 60_000);
 });
 
 describe("discover honours the caller's signal", () => {
@@ -552,10 +824,10 @@ describe("discover honours the caller's signal", () => {
 
   it("an abort mid-document throws DiscoveryAbortedError, never a time-limited or failed document", async () => {
     const controller = new AbortController();
-    const before = indexSite.seen.filter((p) => p.startsWith("/sm-")).length;
+    const before = hits(indexSite, isChild);
     const walk = discover(`${indexSite.base}/`, opts(controller.signal, { walkBudgetMs: 60_000 }));
     walk.catch(() => undefined);
-    await until("a sitemap child in flight", () => indexSite.seen.filter((p) => p.startsWith("/sm-")).length > before);
+    await until("a sitemap child in flight", () => hits(indexSite, isChild) > before);
     const at = Date.now();
     controller.abort();
     await expect(walk).rejects.toBeInstanceOf(DiscoveryAbortedError);
@@ -564,19 +836,19 @@ describe("discover honours the caller's signal", () => {
 
   it("an abort during the pacing sleep between documents throws at once", async () => {
     const controller = new AbortController();
-    const before = indexSite.seen.filter((p) => p === "/sitemap-index.xml").length;
-    const robotsBefore = indexSite.seen.filter((p) => p === "/robots.txt").length;
+    const before = hits(indexSite, (p) => p === "/sitemap-index.xml");
+    const robotsBefore = hits(indexSite, (p) => p === "/robots.txt");
     // A 10 s spacing: the walk sleeps before the index, robots.txt having just
     // been read.
     const walk = discover(`${indexSite.base}/`, opts(controller.signal, { perHostDelayMs: 10_000 }));
     walk.catch(() => undefined);
-    await until("robots.txt read", () => indexSite.seen.filter((p) => p === "/robots.txt").length > robotsBefore);
+    await until("robots.txt read", () => hits(indexSite, (p) => p === "/robots.txt") > robotsBefore);
     await sleep(100);
     const at = Date.now();
     controller.abort();
     await expect(walk).rejects.toBeInstanceOf(DiscoveryAbortedError);
     expect(Date.now() - at).toBeLessThan(500);
-    expect(indexSite.seen.filter((p) => p === "/sitemap-index.xml").length).toBe(before);
+    expect(hits(indexSite, (p) => p === "/sitemap-index.xml")).toBe(before);
   });
 
   it("an already-aborted signal makes no request at all", async () => {

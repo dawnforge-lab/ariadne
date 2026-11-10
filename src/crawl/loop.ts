@@ -50,7 +50,7 @@
  * done and the row was still in a buffer (build plan §7).
  */
 import { randomUUID } from "node:crypto";
-import { and, asc, eq, gt, ne, sql } from "drizzle-orm";
+import { and, asc, eq, gt, isNotNull, ne, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import { crawls, frontier, listUrls, sitemapHreflang, sitemapMemberships, sitemapUrls } from "../db/schema.js";
 // Ruleset provenance for the `crawls` row: the registry owns the number, the
@@ -470,7 +470,15 @@ export interface DiscoveryEvidence {
    * the wrong shape as a refusal; see `parseDiscovery`).
    */
   suppliedSitemaps: string[];
-  truncation: DiscoveryTruncation;
+  /**
+   * The walk's own truncation, plus `interrupted` (Phase 27d): set to true by
+   * the stopped close of a run that was stopped after it had cleared the
+   * staged sitemap alternates for its re-walk, on the evidence an EARLIER run
+   * wrote — which then no longer describes what is staged. Never written by a
+   * walk that returned: the next complete walk rewrites this object whole and
+   * the key is gone. Absent reads false (`readSitemapHreflang`).
+   */
+  truncation: DiscoveryTruncation & { interrupted?: boolean };
   /** Sitemap documents attempted. Lifted out of `truncation` for the rules. */
   docsFetched: number;
   /**
@@ -718,7 +726,10 @@ export interface LoopTestHooks {
    * Told each slot the crawl's host gate hands out, with the host and the
    * slot's scheduled start (`Date.now()`, the clock the gate spaces on). A
    * pacing test asserts on these rather than on request arrival at the server,
-   * which adds jitter that is not the gate's. Observes only.
+   * which adds jitter that is not the gate's. Called synchronously as the slot
+   * is claimed, before the wait: the loop ignores what it returns, but a test
+   * may act on it — a shutdown test aborts its run from here to land the stop
+   * at a known point in the page loop.
    */
   onGrant?: (host: string, slotAtMs: number) => void;
   /**
@@ -734,6 +745,13 @@ export interface LoopTestHooks {
    * and the first lease (27d Review Focus 1).
    */
   afterDiscovery?: (stop: AbortSignal) => Promise<void>;
+  /**
+   * Awaited after each batch of the run's seeding — a batch of `sitemap_urls`
+   * rows, or a chunk of the sitemap or list URLs looked up for the frontier —
+   * with the run's stop signal, so a stop test can land a pause between two
+   * batches (27d ruling R9).
+   */
+  onSeedingBatch?: (stage: "sitemap_urls" | "frontier", stop: AbortSignal) => Promise<void>;
 }
 
 export interface ResumeOpts {
@@ -1697,7 +1715,7 @@ async function runToCompletion(
       });
     } catch (error) {
       if (error instanceof FetchAbortedError && signal.aborted) {
-        return closeStoppedBeforePages(db, crawlId, watcher);
+        return closeStoppedBeforePages(db, crawlId, watcher, { stagingCleared: false });
       }
       throw error;
     }
@@ -1747,25 +1765,33 @@ async function runToCompletion(
     });
   } catch (error) {
     if (error instanceof DiscoveryAbortedError && signal.aborted) {
-      return closeStoppedBeforePages(db, crawlId, watcher);
+      return closeStoppedBeforePages(db, crawlId, watcher, { stagingCleared: true });
     }
     throw error;
   }
   await testHooks?.afterDiscovery?.(signal);
   // A stop that landed as the walk finished — after its last request, before
   // anything below writes evidence or enqueues a URL — closes the run exactly
-  // as one inside the walk does. One that lands after this check is the page
-  // loop's: its first lease is preceded by the same check.
+  // as one inside the walk does. One that lands later is caught between the
+  // batches of `persistSitemap` and of the seeding enqueue below, and finally
+  // by the page loop's own check before its first lease.
   //
   // A failed control poll is not a stop, and discovery is complete: it is left
   // to the paths below, which raise it beside whatever else they conclude —
   // the robots refusal keeps its note beside it (27b M7), and the page loop
   // stops on the signal and raises it before any close.
-  //
-  // (Read as `watcher.signal`, the same object: a check on `signal` here would
-  // narrow `signal.aborted` to false for the type checker in every later check.)
-  if (watcher.signal.aborted && watcher.failure() === null) {
-    return closeStoppedBeforePages(db, crawlId, watcher);
+  if (signal.aborted && watcher.failure() === null) {
+    return closeStoppedBeforePages(db, crawlId, watcher, { stagingCleared: true });
+  }
+
+  // THE SITEMAP'S ENTRIES, ON RECORD BEFORE THE EVIDENCE THAT COUNTS THEM
+  // (Phase 27d). Written in batches, and a stop between two batches closes the
+  // run as a stop in the walk does: no evidence goes on the row over a partial
+  // `sitemap_urls`, so no reader is shown evidence counting entries the table
+  // does not hold. A resume writes them again (the rows are keyed). A failed
+  // poll stops it too; the close then raises it and the row closes failed.
+  if (!(await persistSitemap(db, crawlId, discovery, signal, testHooks?.onSeedingBatch))) {
+    return closeStoppedBeforePages(db, crawlId, watcher, { stagingCleared: true });
   }
 
   // INSERTION 2 — discovery's own findings, written before anything branches on
@@ -2196,6 +2222,8 @@ async function runToCompletion(
     // reported by `robots.blocks-sitemap-urls`; see `CrawlConfig.maxBlockedUrls`.
     // Entries the scope refuses are skipped for the same reason (Deviation 8).
     const recordsBlocked = discoveredVia !== "sitemap";
+    // The run's seeding, which a resume repeats (see the chunk loop).
+    const seeding = discoveredVia === "sitemap" || discoveredVia === "list";
     // The seed is the API's to check against the scope (a seed the scope
     // refuses is a validation error before the row exists); here it is the
     // crawl's starting point, and refusing it would be an empty crawl.
@@ -2222,6 +2250,16 @@ async function runToCompletion(
     // Whether this call is the one that met the cap first (see below).
     let stampCapped = false;
     for (let start = 0; start < urls.length; start += ENQUEUE_LOOKUP_CHUNK) {
+      // THE SEEDING STOPS ON A STOP (Phase 27d, ruling R9): between two chunks
+      // of the sitemap's entries or the listed URLs, a pause or cancel ends the
+      // scan, what is reserved so far is inserted below, and the page loop's
+      // first check closes the run. A resume enqueues them all again. A page's
+      // links never stop here: that page's row is written, and a link cut off
+      // now would never be offered to the frontier again.
+      if (seeding) {
+        if (start > 0) await testHooks?.onSeedingBatch?.("frontier", signal);
+        if (signal.aborted) break;
+      }
       // The sitemap stops at the cap; a page's links are scanned to the end
       // for the robots-blocked ones (see the docblock).
       if (frontierRows >= config.maxPages && frontierCapped === true && !recordsBlocked) break;
@@ -2550,6 +2588,8 @@ async function runToCompletion(
       // pages table, so a URL already fetched is not queued twice.
       let read = 0;
       for (let after = -1; ; ) {
+        // A stop between chunks ends the read (Phase 27d): see `enqueue`.
+        if (signal?.aborted === true) break;
         const chunk = await db
           .select({ position: listUrls.position, url: listUrls.url })
           .from(listUrls)
@@ -2568,7 +2608,9 @@ async function runToCompletion(
       // The table must hold what the start promised, before a page is leased:
       // a short or missing list would otherwise run as a short crawl whose
       // "nothing to crawl" note blames robots.txt (27c final wave M8; rule 7).
-      if (read !== config.listUrlCount) {
+      // A read a stop cut short is not that: the run closes stopped, and its
+      // resume reads the list again from the start.
+      if (signal?.aborted !== true && read !== config.listUrlCount) {
         throw new Error(
           `crawl ${crawlId}: read ${read} list_urls rows, but its config.listUrlCount ` +
             `is ${String(config.listUrlCount)}; the listed URLs are not what the crawl's ` +
@@ -2583,7 +2625,7 @@ async function runToCompletion(
         "sitemap",
       );
     }
-    await persistSitemap(db, crawlId, discovery);
+    // (`sitemap_urls` was written before the evidence, above.)
 
     if (frontierRows === 0) {
       // A crawl with nothing in its frontier is about to report zero pages.
@@ -2977,13 +3019,27 @@ async function runToCompletion(
 
 /**
  * Close a run that was stopped before its page loop (Phase 27d): in the host
- * probe, in the sitemap walk, or as discovery returned. It is the page loop's
- * stopped close — the control settled (a failed poll is raised, and `execute`
- * closes the row failed), the known-404 probe recorded as skipped, then one
- * `closeCrawl('stopped')` whose UPDATE reads the request off the row — less
- * everything that never ran: no discovery evidence is written and nothing is
- * enqueued, so the summary's discovery fields are null, and no writer counted,
- * so the cap-exceeded column is left alone (`refsCapped: null`).
+ * probe, in the sitemap walk, as discovery returned, or while `sitemap_urls`
+ * was being written. It makes the page loop's stopped close — the control
+ * settled (a failed poll is raised, and `execute` closes the row failed), the
+ * known-404 probe recorded as skipped, then one `closeCrawl('stopped')` whose
+ * UPDATE reads the request off the row — less everything that never ran: no
+ * discovery evidence is written and nothing is enqueued, so the summary's
+ * discovery fields are null, and no writer counted, so the cap-exceeded column
+ * is left alone (`refsCapped: null`).
+ *
+ * ONE ORDER DIFFERS, deliberately: the control is settled BEFORE the 404 skip
+ * is written, where the page loop writes the skip first and raises a poll
+ * failure before it. Settling first is what keeps a failed poll from leaving
+ * a "crawl stopped" sentence on a row that then closes `failed`; the page loop
+ * gets the same guarantee from raising the poll failure ahead of its probe.
+ *
+ * `stagingCleared`: the run had cleared the staged sitemap alternates for its
+ * walk. On a crawl whose row already holds an EARLIER run's discovery evidence
+ * (a resume), that evidence no longer describes what is staged, so it is
+ * marked `truncation.interrupted` (ruling R8): the hreflang absence rules
+ * refuse on it and the marker names it, until a complete walk rewrites the
+ * evidence. A fresh crawl has no evidence to mark (the update matches nothing).
  *
  * The page count is the frontier's, as the robots refusal's is: a resume
  * stopped here keeps what its earlier runs crawled.
@@ -2992,9 +3048,18 @@ async function closeStoppedBeforePages(
   db: Db,
   crawlId: string,
   watcher: ControlWatcher,
+  opts: { stagingCleared: boolean },
 ): Promise<CrawlSummary> {
   await settleControl(watcher);
   await writeNotFoundProbe(db, crawlId, { skipped: STOPPED_BEFORE_404_PROBE });
+  if (opts.stagingCleared) {
+    await db
+      .update(crawls)
+      .set({
+        discovery: sql`jsonb_set(${crawls.discovery}, '{truncation,interrupted}', 'true'::jsonb)`,
+      })
+      .where(and(eq(crawls.id, crawlId), isNotNull(crawls.discovery)));
+  }
   const crawled = crawledRows(await frontierCounts(db, crawlId));
   const closed = await closeCrawl(db, crawlId, "stopped", crawled, null, null, watcher.stopReason());
   return summarise(
@@ -3317,9 +3382,14 @@ async function persistSitemap(
   db: Db,
   crawlId: string,
   discovery: DiscoveryResult,
-): Promise<void> {
+  // The run's stop signal (Phase 27d), asked before every batch: true when
+  // every entry was written, false when a stop came first.
+  signal: AbortSignal,
+  onBatch: LoopTestHooks["onSeedingBatch"],
+): Promise<boolean> {
   const entries = discovery.sitemapEntries;
   for (let i = 0; i < entries.length; i += SITEMAP_BATCH) {
+    if (signal.aborted) return false;
     const batch = entries.slice(i, i + SITEMAP_BATCH).map((entry) => {
       const normalised = normalizeUrl(entry.url);
       if (normalised === null) {
@@ -3337,7 +3407,9 @@ async function persistSitemap(
     // the same sitemap. The first read's row stands. `lastmod` is the sitemap's
     // own text, so the batch passes the storability boundary (ruling R10).
     await db.insert(sitemapUrls).values(storableDeep(batch)).onConflictDoNothing();
+    await onBatch?.("sitemap_urls", signal);
   }
+  return true;
 }
 
 /**

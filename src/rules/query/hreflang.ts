@@ -25,7 +25,6 @@ import {
 import type { RuleCaps } from "../registry/types.js";
 import { capsOr, noteAtLeastTruncation, noteTruncation, storedScope } from "./crawl-evidence.js";
 import {
-  cutShort,
   PAGE_IDS,
   PAGE_URLS,
   POSSIBLY_CAPPED_PAGES,
@@ -813,6 +812,7 @@ async function declarationsIncompleteFindings(db: Db, crawlId: string): Promise<
         docLimited: reading?.docLimited ?? null,
         depthLimited: reading?.depthLimited ?? null,
         timeLimited: reading?.timeLimited ?? null,
+        interrupted: reading?.interrupted ?? null,
         sitemapDocsFailed: reading?.sitemapDocsFailed ?? null,
         sitemapDocsOversized: reading?.sitemapDocsOversized ?? null,
         alternatesCapped: reading?.alternatesCapped ?? null,
@@ -823,15 +823,18 @@ async function declarationsIncompleteFindings(db: Db, crawlId: string): Promise<
   ];
 }
 
-/** The time budget is the only reason the sitemaps were cut short. */
-function onlyTimeLimited(reading: SitemapHreflangReading): boolean {
+/**
+ * A size, entry, file-count or nesting limit cut the sitemaps short — the
+ * causes of `cutShort` other than the walk's time budget and an interrupted
+ * re-walk, which each have their own sentence.
+ */
+function limitReached(reading: SitemapHreflangReading): boolean {
   return (
-    reading.timeLimited &&
-    !reading.hreflangLimited &&
-    !reading.entryLimited &&
-    !reading.docLimited &&
-    !reading.depthLimited &&
-    reading.sitemapDocsOversized === 0
+    reading.hreflangLimited ||
+    reading.entryLimited ||
+    reading.docLimited ||
+    reading.depthLimited ||
+    reading.sitemapDocsOversized > 0
   );
 }
 
@@ -852,7 +855,7 @@ function incompleteReason(
   possiblyCappedPages: number,
 ): string {
   const said: string[] = [];
-  if (cutShort(reading) && !(reading !== null && onlyTimeLimited(reading))) {
+  if (reading !== null && limitReached(reading)) {
     said.push(
       "The sitemaps were only partly read because a size, entry, file-count or nesting limit was reached, so missing return links, missing self-references, missing x-default and sets naming only the page itself were not checked.",
     );
@@ -860,6 +863,11 @@ function incompleteReason(
   if (reading !== null && reading.timeLimited) {
     said.push(
       "The sitemaps were only partly read because the sitemap walk ran out of time (timeLimited), so missing return links, missing self-references, missing x-default and sets naming only the page itself were not checked.",
+    );
+  }
+  if (reading !== null && reading.interrupted) {
+    said.push(
+      "The sitemaps were only partly read because the crawl was paused or cancelled while it was reading them again (interrupted), so missing return links, missing self-references, missing x-default and sets naming only the page itself were not checked; resume the crawl to the end to read them in full.",
     );
   }
   if (reading !== null && reading.sitemapDocsFailed > 0) {
@@ -1223,6 +1231,7 @@ export const hreflangRules: QueryRule[] = [
       { key: "docLimited", label: "Sitemap Document Limit Reached" },
       { key: "depthLimited", label: "Sitemap Depth Limit Reached" },
       { key: "timeLimited", label: "Sitemap Time Limit Reached" },
+      { key: "interrupted", label: "Sitemap Walk Interrupted" },
       { key: "sitemapDocsFailed", label: "Sitemaps Not Read" },
       { key: "sitemapDocsOversized", label: `Sitemaps Over ${SITEMAP_MAX_BYTES / (1024 * 1024)} MB` },
       {

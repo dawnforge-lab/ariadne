@@ -994,7 +994,11 @@ const KINDS = ["page", "query", "metric"] as const satisfies readonly AnyRule["k
 //     `hreflang.declarations-incomplete` names it (evidence `timeLimited`, a
 //     column and a sentence in its `reason`). A crawl without the key reads as
 //     false. The sitemap documents' own failure reasons changed wording
-//     ("no headers within 60 s", ...), which `sitemap.invalid` quotes.
+//     ("no headers within 60 s", ...), which `sitemap.invalid` quotes. A
+//     resumed crawl stopped during its re-walk records
+//     `truncation.interrupted` on the evidence it keeps, read the same way
+//     (evidence `interrupted`, a column and a sentence); the next complete
+//     walk clears it, and a crawl without the key reads as false.
 export const RULESET_VERSION = "0.25.0";
 
 /**
