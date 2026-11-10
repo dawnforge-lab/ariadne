@@ -608,9 +608,11 @@ describe("inferPageTemplates — the collapse in SQL (27d)", () => {
     const proto = pg.Client.prototype as unknown as { query: (...args: unknown[]) => unknown };
     type Sent = { text: string; rows: number };
 
-    async function watched(
-      crawlId: string,
-    ): Promise<{ result: Awaited<ReturnType<typeof inferPageTemplates>>; sent: Sent[] }> {
+    async function watched(crawlId: string): Promise<{
+      result: Awaited<ReturnType<typeof inferPageTemplates>>;
+      sent: Sent[];
+      elapsedMs: number;
+    }> {
       const original = proto.query;
       const sent: Sent[] = [];
       const record = (text: string, res: unknown): void => {
@@ -640,7 +642,9 @@ describe("inferPageTemplates — the collapse in SQL (27d)", () => {
         return out;
       };
       try {
-        return { result: await inferPageTemplates(db, crawlId), sent };
+        const started = Date.now();
+        const result = await inferPageTemplates(db, crawlId);
+        return { result, sent, elapsedMs: Date.now() - started };
       } finally {
         proto.query = original;
       }
@@ -676,7 +680,16 @@ describe("inferPageTemplates — the collapse in SQL (27d)", () => {
       expect(touchingPages[0]!.text).toMatch(/update\s+pages/i);
       expect(touchingPages[0]!.text).toMatch(/partition\s+by/i);
       expect(touchingPages[0]!.rows).toBe(1);
+      // THE PLANNER SETTING (ruling R13), sent inside the transaction and
+      // before the collapse: without it, stale statistics at crawl close plan
+      // the retype as a quadratic nested loop.
+      const setting = run.sent.findIndex((s) => /set\s+local\s+enable_nestloop\s*=\s*off/i.test(s.text));
+      expect(setting, "set local enable_nestloop = off was never sent").toBeGreaterThanOrEqual(0);
+      expect(setting).toBeLessThan(run.sent.indexOf(touchingPages[0]!));
     }
+    // A quadratic plan fails here by name, not on the test's 120 s timeout: the
+    // hash join takes ~4-5 s at 40,002 shapes.
+    expect(large.elapsedMs, "inferPageTemplates at 40,002 shapes (ms)").toBeLessThan(30_000);
     // The same statements, in the same order, whatever the number of shapes.
     expect(large.sent.map((s) => s.text)).toEqual(small.sent.map((s) => s.text));
   }, 120_000);
