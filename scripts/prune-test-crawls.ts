@@ -21,7 +21,7 @@
 import { isIPv4, isIPv6 } from "node:net";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { and, eq, gt, inArray, sql } from "drizzle-orm";
+import { and, eq, gt, inArray, notExists, sql } from "drizzle-orm";
 
 import { closeDb, createDb, type Db } from "../src/db/client.js";
 import { crawls, frontier } from "../src/db/schema.js";
@@ -43,6 +43,8 @@ export interface PruneOptions {
   confirm: boolean;
   /** Restrict to these crawl ids (tests share a database with other files). */
   onlyIds?: ReadonlySet<string>;
+  /** Test seam: runs just before each dead crawl's cancel, to take a lease in the check-to-cancel window. */
+  beforeCancel?: (crawlId: string) => Promise<void>;
 }
 
 export interface PruneResult {
@@ -101,14 +103,34 @@ export async function pruneTestCrawls(
   // One crawl at a time, so a failure leaves at most the crawl it names part-way.
   let cancelled = 0;
   let deleted = 0;
+  let liveSkipped = liveRows.length;
   for (const r of targets) {
     try {
       if (isLiveStatus(r.status)) {
+        if (options.beforeCancel !== undefined) await options.beforeCancel(r.id);
+        // The lease check above may be stale by now: the cancel re-checks on the database clock,
+        // and a crawl it does not touch is treated as live (a worker took a lease, or it moved on).
         const done = await db
           .update(crawls)
           .set({ status: "cancelled", controlRequest: null, pauseReason: null, cancelledAt: sql`now()` })
-          .where(and(eq(crawls.id, r.id), inArray(crawls.status, ["queued", "running"])));
-        cancelled += done.rowCount ?? 0;
+          .where(
+            and(
+              eq(crawls.id, r.id),
+              inArray(crawls.status, ["queued", "running"]),
+              notExists(
+                db
+                  .select({ one: sql`1` })
+                  .from(frontier)
+                  .where(and(eq(frontier.crawlId, crawls.id), gt(frontier.leasedUntil, sql`now()`))),
+              ),
+            ),
+          );
+        if ((done.rowCount ?? 0) === 0) {
+          print(`${r.id} ${r.status} ${r.siteUrl} live, skipped`);
+          liveSkipped += 1;
+          continue;
+        }
+        cancelled += 1;
       }
       await service.deleteCrawl(r.id, r.id);
     } catch (error) {
@@ -116,8 +138,8 @@ export async function pruneTestCrawls(
     }
     deleted += 1;
   }
-  print(`deleted ${String(deleted)} crawls (${String(cancelled)} cancelled first); ${String(liveRows.length)} live, skipped`);
-  return { matched: matches.length, pages, liveSkipped: liveRows.length, cancelled, deleted };
+  print(`deleted ${String(deleted)} crawls (${String(cancelled)} cancelled first); ${String(liveSkipped)} live, skipped`);
+  return { matched: matches.length, pages, liveSkipped, cancelled, deleted };
 }
 
 async function main(): Promise<void> {

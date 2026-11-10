@@ -160,4 +160,37 @@ describe("pruneTestCrawls", () => {
     expect(await count(real)).toBe(1);
     expect(await frontierRows(real)).toBe(1);
   });
+
+  it("a lease taken after the up-front check but before the cancel leaves the crawl intact and reported live", async () => {
+    const racing = await seed("http://racing.localhost:3000/", "running");
+    try {
+      const out: string[] = [];
+      const result = await pruneTestCrawls(
+        db,
+        service,
+        {
+          confirm: true,
+          onlyIds: new Set([racing]),
+          beforeCancel: async (id) => {
+            await db.insert(frontier).values({
+              crawlId: id, url: "http://racing.localhost:3000/l", state: "leased", depth: 0, discoveredVia: "seed",
+              leaseId: "w", leasedUntil: new Date(Date.now() + 60_000),
+            });
+          },
+        },
+        (l) => out.push(l),
+      );
+      expect(result.deleted).toBe(0);
+      expect(result.cancelled).toBe(0);
+      expect(result.liveSkipped).toBe(1);
+      expect(out.join("\n")).toContain(`${racing} running http://racing.localhost:3000/ live, skipped`);
+      expect(await count(racing)).toBe(1);
+      expect(await frontierRows(racing)).toBe(2);
+      const [row] = await db.select({ status: crawls.status }).from(crawls).where(eq(crawls.id, racing));
+      expect(row?.status).toBe("running");
+    } finally {
+      await db.delete(frontier).where(eq(frontier.crawlId, racing));
+      await db.delete(crawls).where(eq(crawls.id, racing));
+    }
+  });
 });
