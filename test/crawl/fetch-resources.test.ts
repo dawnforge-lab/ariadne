@@ -1148,17 +1148,17 @@ describe("a cancel stops the pass where it stands", () => {
     });
 
     expect(summary.aborted).toBe(true);
-    expect(summary.fetched).toBe(1);
-    expect(summary.skipped).toBe(1);
+    // The request in flight is aborted, not awaited (27b Ruling 4, 27d): no row, no fetch.
+    expect([summary.fetched, summary.skipped]).toEqual([0, 2]);
     // The next row was never asked — not at the next batch boundary, which at a
     // real crawl's spacing would be an hour of asking after the caller stopped.
     expect(hitsFor(assets, "/abort-2.png")).toEqual([]);
 
     const untouched = await rowFor(crawlId, `${assets.base}/abort-2.png`);
     expect(untouched.fetchClass).toBeNull();
-    // And NO reason: a cap decided something about the row it stopped at, an
-    // abort decided nothing at all.
-    expect(untouched.fetchReason).toBeNull();
+    // And NO reason on either row: a cap decided something about the row it
+    // stopped at, an abort decided nothing at all.
+    expect((await rowsOf(crawlId)).every((r) => r.fetchClass === null && r.fetchReason === null)).toBe(true);
     expect(summary.cappedByResources).toBe(false);
   });
 
@@ -1201,8 +1201,8 @@ describe("a cancel stops the pass where it stands", () => {
 
     const rows = await rowsOf(crawlId);
     const decided = rows.filter((row) => row.fetchClass !== null);
-    // Exactly one row was asked about: the one whose answer fired the signal.
-    expect(decided.length).toBe(1);
+    // None: the request that fired the signal was aborted in flight (27d); nothing after it asked.
+    expect(decided.length).toBe(0);
     // And every row the abort left keeps BOTH nulls. A reason here would be a
     // budget taking credit for a stop the caller made.
     for (const row of rows.filter((r) => r.fetchClass === null)) {

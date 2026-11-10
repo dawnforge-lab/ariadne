@@ -9,7 +9,11 @@
  *  1. THE SITEMAP WALK. Discovery stages a sitemap's alternates up to its row
  *     and byte budgets (`sitemapFacts.hreflangLimited`), and stops reading
  *     documents at the entry, document and depth caps (`truncation.entryLimited`,
- *     `docLimited`, `depthLimited`); an oversized document is read only to the
+ *     `docLimited`, `depthLimited`) and when the walk's time budget runs out
+ *     (`truncation.timeLimited`, Phase 27d), and when a resumed crawl was stopped
+ *     during its re-walk (`truncation.interrupted`, Phase 27d: the staged
+ *     alternates were cleared and only partly re-read, under the earlier walk's
+ *     evidence); an oversized document is read only to the
  *     50 MB limit (`sitemapFacts.oversizedDocs`). In every one of those the
  *     `<loc>`s read before the cut are still crawled, so a page can be fetched
  *     whose sitemap alternates were never read: "B does not name A back" is then
@@ -58,6 +62,19 @@ export interface SitemapHreflangReading {
   entryLimited: boolean;
   docLimited: boolean;
   depthLimited: boolean;
+  /**
+   * `truncation.timeLimited` (Phase 27d): the walk's time budget ran out with
+   * documents unread. A crawl recorded before 27d lacks the key and reads false.
+   */
+  timeLimited: boolean;
+  /**
+   * `truncation.interrupted` (Phase 27d): a pause or cancel stopped a re-walk
+   * of a crawl that already held this evidence, so the staged sitemap
+   * alternates are only what the re-walk read before the stop. Written by the
+   * crawl loop's stopped close, cleared by the next complete walk; a crawl
+   * without the key reads false.
+   */
+  interrupted: boolean;
   /** `truncation.failures`: documents pointed at and not read. */
   sitemapDocsFailed: number;
   /** `truncation.oversizedDocsSkipped`: documents read only to the size limit. */
@@ -78,7 +95,8 @@ export interface SitemapHreflangReading {
  *
  * Throws for a crawl that does not exist (`readSitemapFacts`), and for a 26c
  * crawl whose truncation lacks a cap flag. `docLimited` and `depthLimited` are
- * checked HERE rather than in `parseDiscovery`, which other rules share: the
+ * checked HERE (`timeLimited` and `interrupted` are newer, and their absence is
+ * false) rather than in `parseDiscovery`, which other rules share: the
  * walk has written both since discovery began, but a hand-built row a test or
  * an older tool wrote need not carry them, and only a 26c crawl reaches this
  * check. A missing flag is never read as false (hard rule 7).
@@ -101,11 +119,26 @@ export async function readSitemapHreflang(
     }
     return v;
   };
+  // Written since 27d. A truncation without `timeLimited` predates the budget,
+  // which did not exist; one without `interrupted` was never stopped mid
+  // re-walk (only that stop writes the key). False is what absence means. Any
+  // other non-boolean is corruption.
+  const newerFlag = (key: "timeLimited" | "interrupted"): boolean => {
+    const v = truncation[key];
+    if (v !== undefined && typeof v !== "boolean") {
+      throw new Error(
+        `${ruleId}: crawl '${crawlId}' discovery evidence has a non-boolean truncation.${key}; re-crawl the site`,
+      );
+    }
+    return v === true;
+  };
   return {
     hreflangLimited: facts.hreflangLimited,
     entryLimited: discovery.truncation.entryLimited,
     docLimited: flag("docLimited"),
     depthLimited: flag("depthLimited"),
+    timeLimited: newerFlag("timeLimited"),
+    interrupted: newerFlag("interrupted"),
     sitemapDocsFailed: discovery.truncation.failures.length,
     sitemapDocsOversized: discovery.truncation.oversizedDocsSkipped,
     alternatesCapped: facts.alternatesCapped,
@@ -134,6 +167,8 @@ export function cutShort(reading: SitemapHreflangReading | null): boolean {
     reading.entryLimited ||
     reading.docLimited ||
     reading.depthLimited ||
+    reading.timeLimited ||
+    reading.interrupted ||
     reading.sitemapDocsOversized > 0
   );
 }

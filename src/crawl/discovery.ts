@@ -90,7 +90,6 @@ import {
   describeError,
   headerValue,
   isProgrammerError,
-  isTimeout,
   readCapped,
   sharedAgent,
   type HeaderBag,
@@ -172,8 +171,41 @@ const MAX_OVERSIZED_DOCS_NAMED = 50;
  */
 const MAX_SITEMAP_ENTRIES = 200_000;
 
-const DEFAULT_TIMEOUT_MS = 20_000;
 const MAX_REDIRECT_HOPS = 5;
+
+/**
+ * The three clocks one discovery document runs on (Phase 27d). Each is its own
+ * limit with its own failure reason, so a site that is slow is told apart from
+ * one that is stalled:
+ *
+ * - `headersMs`: from sending a hop's request to its response headers, per hop.
+ *   A cold-cache sitemap generator spends its whole build here.
+ * - `idleMs`: the longest silence between two body chunks, once headers are in.
+ * - `totalMs`: the whole document, every redirect hop together, less the time
+ *   the walk spends flushing the document's rows (ours, not the site's).
+ */
+export interface DocTiming {
+  headersMs: number;
+  idleMs: number;
+  totalMs: number;
+}
+
+/**
+ * Sitemap documents. Hurtigruten generates a cold sitemap in ~33 s; the former
+ * 20 s per document lost every sitemap URL of a first crawl.
+ */
+export const SITEMAP_TIMING: DocTiming = { headersMs: 60_000, idleMs: 30_000, totalMs: 120_000 };
+
+/** robots.txt: a 60-byte text file keeps its 20 s. */
+export const ROBOTS_TIMING: DocTiming = { headersMs: 20_000, idleMs: 20_000, totalMs: 20_000 };
+
+/**
+ * The whole sitemap walk, wall-clock from its first document (flush time
+ * included). Past it the walk stops and the crawl records `timeLimited`: the
+ * entries read so far are kept, and the unread documents are cut short, not
+ * failed.
+ */
+export const DISCOVERY_WALK_BUDGET_MS = 600_000;
 
 /**
  * A robots.txt that is *unreachable* rather than absent gets three tries with
@@ -200,8 +232,50 @@ const UNREACHABLE_CRAWL_DELAY_SEC = 5;
  */
 const MAX_CRAWL_DELAY_MS = 30_000;
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+/**
+ * Thrown (never returned) when the caller's `DiscoveryOpts.signal` aborts
+ * discovery — a pause, a cancel or a shutdown of the crawl (Phase 27d). A stop
+ * is not a fact about the site, so it is never a failed document, never
+ * `timeLimited` (the walk budget is a separate cause) and never a robots
+ * outcome: what discovery had learned is dropped, and the crawl loop closes the
+ * run stopped.
+ */
+export class DiscoveryAbortedError extends Error {
+  /** The document discovery was requesting, or about to request. */
+  readonly url: string;
+  constructor(url: string, options?: { cause?: unknown }) {
+    super(`discovery stopped at ${url}: aborted by the crawl's signal`, options);
+    this.name = "DiscoveryAbortedError";
+    this.url = url;
+  }
+}
+
+/** Throw `DiscoveryAbortedError` naming `url` if the caller has aborted. */
+function throwIfStopped(signal: AbortSignal | undefined, url: string): void {
+  if (signal?.aborted === true) throw new DiscoveryAbortedError(url);
+}
+
+/**
+ * Wait `ms`, or reject with `DiscoveryAbortedError` (naming `url`, the document
+ * the wait comes before) as soon as `signal` aborts: a stop never sits out a
+ * crawl-delay of up to 30 s.
+ */
+function sleep(ms: number, signal: AbortSignal | undefined, url: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted === true) {
+      reject(new DiscoveryAbortedError(url));
+      return;
+    }
+    const onAbort = (): void => {
+      clearTimeout(timer);
+      reject(new DiscoveryAbortedError(url));
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
 }
 
 /** gzip's two magic bytes. Trusted over the headers — see decompress. */
@@ -320,6 +394,12 @@ export interface DiscoveryTruncation {
    * or whose `hreflang` code is over MAX_HREFLANG_CODE_CHARS.
    */
   malformedEntriesSkipped: number;
+  /**
+   * The walk ran past `walkBudgetMs` (DISCOVERY_WALK_BUDGET_MS) with documents
+   * unread or in flight. Those are cut short, not failures: they are not in
+   * `failures`. A crawl recorded before Phase 27d lacks the key.
+   */
+  timeLimited: boolean;
   /**
    * One line per document that was pointed at and could not be read. A
    * sitemap index's child `<loc>` past `LOC_TEXT_MAX` is one too, named by the
@@ -461,8 +541,20 @@ export interface DiscoveryOpts {
    * still reported as declared. Default true.
    */
   walkSitemaps?: boolean;
-  /** Per-document deadline: connect, headers and body together. */
-  timeoutMs?: number;
+  /** Timing of each sitemap document. Default SITEMAP_TIMING. */
+  sitemapTiming?: DocTiming;
+  /** Timing of each robots.txt request. Default ROBOTS_TIMING. */
+  robotsTiming?: DocTiming;
+  /** Wall-clock budget of the whole sitemap walk. Default DISCOVERY_WALK_BUDGET_MS. */
+  walkBudgetMs?: number;
+  /**
+   * The crawl's control signal (Phase 27d). Every request (robots.txt, each
+   * sitemap, every redirect hop) and every wait (the robots retry backoff, the
+   * walk's pacing) honours it, and the walk checks it between documents. An
+   * abort rejects with `DiscoveryAbortedError`: never a failed document, never
+   * `timeLimited`.
+   */
+  signal?: AbortSignal;
   /** Overrides the in-memory entry cap. See MAX_SITEMAP_ENTRIES. */
   maxEntries?: number;
   /**
@@ -593,32 +685,40 @@ async function decompress(bytes: Buffer, maxBytes: number): Promise<Buffer | "ov
   return current;
 }
 
-/**
- * One hop's deadline, which the reader may pause.
- *
- * A sitemap is read while the walk writes its rows: the stream awaits the
- * sink's `flush` after every chunk, and the socket waits meanwhile. That time
- * is ours, not the site's, so it stops the clock — otherwise a 50 MB document
- * with half a million memberships would time out on our own inserts.
- */
-class Deadline {
-  private readonly controller = new AbortController();
+/** A timer the reader may pause, restart (`reset`) or stop. Idle until `start`. */
+class PausableTimer {
   private timer: NodeJS.Timeout | null = null;
   private remainingMs: number;
   private startedAt = 0;
-  private done = false;
-  /** The deadline fired and aborted the request. */
-  hit = false;
+  private stopped = true;
 
-  constructor(ms: number) {
+  constructor(
+    private readonly ms: number,
+    private readonly onFire: () => void,
+  ) {
     this.remainingMs = ms;
-    this.resume();
   }
 
-  get signal(): AbortSignal {
-    return this.controller.signal;
+  start(): void {
+    this.stopped = false;
+    this.remainingMs = this.ms;
+    this.arm();
   }
 
+  private arm(): void {
+    if (this.timer !== null || this.stopped) return;
+    this.startedAt = Date.now();
+    this.timer = setTimeout(
+      () => {
+        this.timer = null;
+        this.stopped = true;
+        this.onFire();
+      },
+      Math.max(this.remainingMs, 0),
+    );
+  }
+
+  /** Stops the clock; `resume` carries on with what was left. */
   pause(): void {
     if (this.timer === null) return;
     clearTimeout(this.timer);
@@ -627,22 +727,128 @@ class Deadline {
   }
 
   resume(): void {
-    if (this.timer !== null || this.done || this.hit) return;
-    this.startedAt = Date.now();
-    this.timer = setTimeout(
-      () => {
-        this.hit = true;
-        this.timer = null;
-        this.controller.abort();
-      },
-      Math.max(this.remainingMs, 0),
-    );
+    this.arm();
+  }
+
+  /** A full interval from now (or from `resume`, if paused). No-op once stopped. */
+  reset(): void {
+    if (this.stopped) return;
+    this.remainingMs = this.ms;
+    if (this.timer !== null) {
+      clearTimeout(this.timer);
+      this.timer = null;
+      this.arm();
+    }
+  }
+
+  stop(): void {
+    this.stopped = true;
+    if (this.timer !== null) clearTimeout(this.timer);
+    this.timer = null;
+  }
+}
+
+/** Which limit ended a document request. */
+type DocLimit = "headers" | "idle" | "total" | "budget";
+
+/**
+ * One document's clocks, created once per `requestDoc` call so `totalMs` spans
+ * the redirect hops. Whichever limit fires first aborts the request and is
+ * recorded in `hit`, which is the source of truth for the failure reason
+ * (undici's own timeouts are only a backstop).
+ *
+ * A sitemap is read while the walk writes its rows: the stream awaits the
+ * sink's `flush` after every chunk, and the socket waits meanwhile. That time
+ * is ours, not the site's, so `pause` stops the total AND the idle clock —
+ * otherwise a 50 MB document with half a million memberships would time out on
+ * our own inserts.
+ */
+class DocTimer {
+  private readonly controller = new AbortController();
+  private readonly headers: PausableTimer;
+  private readonly idle: PausableTimer;
+  private readonly total: PausableTimer;
+  private readonly onWalkAbort = (): void => this.fire("budget");
+  /** The limit that fired and aborted the request, if any. */
+  hit: DocLimit | null = null;
+
+  constructor(
+    timing: DocTiming,
+    private readonly walkSignal: AbortSignal | undefined,
+  ) {
+    this.headers = new PausableTimer(timing.headersMs, () => this.fire("headers"));
+    this.idle = new PausableTimer(timing.idleMs, () => this.fire("idle"));
+    this.total = new PausableTimer(timing.totalMs, () => this.fire("total"));
+    this.total.start();
+    if (walkSignal !== undefined) {
+      if (walkSignal.aborted) this.fire("budget");
+      else walkSignal.addEventListener("abort", this.onWalkAbort, { once: true });
+    }
+  }
+
+  get signal(): AbortSignal {
+    return this.controller.signal;
+  }
+
+  private fire(limit: DocLimit): void {
+    if (this.hit !== null) return;
+    this.hit = limit;
+    this.controller.abort();
+  }
+
+  /** A hop's request is about to go out. */
+  awaitHeaders(): void {
+    this.headers.start();
+  }
+
+  /** A hop's headers are in: the headers clock stops and the idle clock starts. */
+  headersArrived(): void {
+    this.headers.stop();
+    this.idle.start();
+  }
+
+  /** The hop's body is finished with (redirect and error bodies). */
+  bodyDone(): void {
+    this.idle.stop();
+  }
+
+  /** A body chunk arrived. */
+  touch(): void {
+    this.idle.reset();
+  }
+
+  pause(): void {
+    this.total.pause();
+    this.idle.pause();
+  }
+
+  resume(): void {
+    this.total.resume();
+    this.idle.resume();
   }
 
   clear(): void {
-    this.done = true;
-    if (this.timer !== null) clearTimeout(this.timer);
-    this.timer = null;
+    this.headers.stop();
+    this.idle.stop();
+    this.total.stop();
+    this.walkSignal?.removeEventListener("abort", this.onWalkAbort);
+  }
+}
+
+/** `600` -> "0.6", `60_000` -> "60": one decimal at most, no trailing ".0". */
+function seconds(ms: number): string {
+  return (ms / 1000).toFixed(1).replace(/\.0$/, "");
+}
+
+/** The failure reason for a limit that fired, in the timing's own numbers. */
+function limitReason(limit: Exclude<DocLimit, "budget">, timing: DocTiming): string {
+  switch (limit) {
+    case "headers":
+      return `no headers within ${seconds(timing.headersMs)} s`;
+    case "idle":
+      return `no data for ${seconds(timing.idleMs)} s`;
+    case "total":
+      return `over ${seconds(timing.totalMs)} s in total`;
   }
 }
 
@@ -654,7 +860,7 @@ interface DocResponse {
   headers: HeaderBag;
   /** The reader owns it: read it to the end or destroy it. */
   body: Dispatcher.ResponseData["body"];
-  deadline: Deadline;
+  timer: DocTimer;
 }
 
 /**
@@ -679,29 +885,49 @@ class ReaderFault extends Error {
  * about the site's URL graph, and refusing to follow it would lose the
  * sitemap on a large share of real sites.
  *
- * The hop's deadline runs while `read` reads (less any time it pauses it), and
- * whatever `read` throws is classified like a failed request — a reset, a
+ * The document's clocks (`DocTimer`) run while `read` reads, less any time it
+ * pauses them, and the limit that fired names the failure. A walk budget
+ * (`walkSignal`) that runs out mid-request is reported as `budgetHit`, not as
+ * a failure of the document. The caller's `opts.signal` is a separate cause:
+ * its abort is rethrown as `DiscoveryAbortedError` ahead of any classification.
+ * Whatever `read` throws is classified like a failed request — a reset, a
  * timeout, a corrupt gzip — unless it is a programmer error or a `ReaderFault`.
  */
 async function requestDoc<T>(
   startUrl: string,
   opts: DiscoveryOpts,
+  timing: DocTiming,
+  walkSignal: AbortSignal | undefined,
   drainBytes: number,
   read: (response: DocResponse) => Promise<T>,
-): Promise<{ ok: true; value: T } | { ok: false; failure: DocResult }> {
+): Promise<
+  { ok: true; value: T } | { ok: false; failure: DocResult; budgetHit: boolean }
+> {
   const allowPrivate = opts.allowPrivate === true;
-  const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-  const failed = (doc: DocResult) => ({ ok: false as const, failure: doc });
+  const failed = (doc: DocResult, budgetHit = false) => ({
+    ok: false as const,
+    failure: doc,
+    budgetHit,
+  });
   let url = startUrl;
+  // One timer for the whole document, so `totalMs` spans the redirect hops.
+  const timer = new DocTimer(timing, walkSignal);
 
+  // The caller's stop, beside the document's own clocks: either aborts the
+  // request, and the caller's is told apart by asking it, never by `timer.hit`.
+  const stop = opts.signal;
+  const requestSignal = stop === undefined ? timer.signal : AbortSignal.any([timer.signal, stop]);
+
+  try {
   for (let hop = 0; hop <= MAX_REDIRECT_HOPS; hop++) {
+    throwIfStopped(stop, url);
     const verdict = await isUrlAllowed(url, { allowPrivate });
     if (!verdict.allowed) {
       return failed(failedDoc(url, `refused by URL policy: ${verdict.reason}`, null, true));
     }
 
-    const deadline = new Deadline(timeoutMs);
     try {
+      timer.awaitHeaders();
       const response = await request(url, {
         dispatcher: sharedAgent(allowPrivate),
         method: "GET",
@@ -711,10 +937,14 @@ async function requestDoc<T>(
           "user-agent": opts.userAgent,
           accept: "text/plain,application/xml,text/xml,application/gzip;q=0.9,*/*;q=0.8",
         },
-        signal: deadline.signal,
-        headersTimeout: timeoutMs,
-        bodyTimeout: timeoutMs,
+        signal: requestSignal,
+        // Backstops only: our own timers decide, and name, which limit fired.
+        // The headers one is a second wider so ours always fires first; the
+        // body one is the document total, and our idle timer is the real limit.
+        headersTimeout: timing.headersMs + 1_000,
+        bodyTimeout: timing.totalMs,
       });
+      timer.headersArrived();
 
       const headers = response.headers as HeaderBag;
       const status = response.statusCode;
@@ -722,6 +952,7 @@ async function requestDoc<T>(
       if (status >= 300 && status < 400) {
         // Drain so the socket goes back to the pool, then take the hop.
         await readCapped(response.body, drainBytes, false);
+        timer.bodyDone();
         const location = headerValue(headers, "location");
         if (location === null) {
           return failed(failedDoc(url, `HTTP ${status} without a Location header`, status));
@@ -736,26 +967,33 @@ async function requestDoc<T>(
 
       if (status < 200 || status >= 300) {
         await readCapped(response.body, drainBytes, false);
+        timer.bodyDone();
         return failed(failedDoc(url, `HTTP ${status}`, status));
       }
 
-      return { ok: true, value: await read({ url, status, headers, body: response.body, deadline }) };
+      return { ok: true, value: await read({ url, status, headers, body: response.body, timer }) };
     } catch (error) {
       if (error instanceof ReaderFault) throw error.fault;
       // Our bug, not theirs — the same contract fetch-page keeps.
       if (isProgrammerError(error)) throw error;
+      // A stop, ahead of every classification below: whatever the abort did to
+      // the request (an AbortError, a destroyed body mid-stream), it says
+      // nothing about the site, and a document it cut short has not failed.
+      if (stop?.aborted === true) throw new DiscoveryAbortedError(url, { cause: error });
       const refusal = blockedAddressMessage(error);
       if (refusal !== null) {
         return failed(failedDoc(url, `refused at connect: ${refusal}`, null, true));
       }
-      if (deadline.hit || isTimeout(error)) return failed(failedDoc(url, "timed out"));
+      if (timer.hit === "budget") return failed(failedDoc(url, "walk time budget spent"), true);
+      if (timer.hit !== null) return failed(failedDoc(url, limitReason(timer.hit, timing)));
       return failed(failedDoc(url, describeError(error)));
-    } finally {
-      deadline.clear();
     }
   }
 
   return failed(failedDoc(url, `more than ${MAX_REDIRECT_HOPS} redirects`));
+  } finally {
+    timer.clear();
+  }
 }
 
 /** A content-encoding the bytes may arrive in: none, or gzip (sniffed anyway). */
@@ -772,7 +1010,13 @@ async function fetchDoc(
   maxBytes: number,
   opts: DiscoveryOpts,
 ): Promise<DocResult> {
-  const result = await requestDoc(startUrl, opts, maxBytes, async (response): Promise<DocResult> => {
+  const result = await requestDoc(
+    startUrl,
+    opts,
+    opts.robotsTiming ?? ROBOTS_TIMING,
+    undefined,
+    maxBytes,
+    async (response): Promise<DocResult> => {
     const { url, status, headers } = response;
     const read = await readCapped(response.body, maxBytes, true);
     const raw = read.buffer ?? Buffer.alloc(0);
@@ -809,7 +1053,8 @@ async function fetchDoc(
       truncated: read.truncated,
       reason: null,
     };
-  });
+  },
+  );
   return result.ok ? result.value : result.failure;
 }
 
@@ -943,7 +1188,7 @@ export async function fetchRobots(
   while (!doc.ok && classifyRobotsFailure(doc) === "retry" && attempts < ROBOTS_ATTEMPTS) {
     // Linear backoff, deliberately short: this is a 60-byte text file, and the
     // origin is already unhappy. Three tries, ~750ms, then we stop asking.
-    await sleep(backoffMs * attempts);
+    await sleep(backoffMs * attempts, opts.signal, robotsUrl);
     doc = await fetchDoc(robotsUrl, ROBOTS_MAX_BYTES, opts);
     attempts++;
   }
@@ -1017,8 +1262,10 @@ async function* wireCapped(
   body: AsyncIterable<Uint8Array>,
   maxBytes: number,
   wire: { bytes: number; exceeded: boolean },
+  onChunk: () => void,
 ): AsyncGenerator<Uint8Array> {
   for await (const chunk of body) {
+    onChunk();
     wire.bytes += chunk.byteLength;
     yield chunk;
     if (wire.bytes > maxBytes) {
@@ -1045,14 +1292,17 @@ type StreamedDoc =
       result: SitemapStreamResult;
     }
   | { outcome: "oversized-on-wire"; url: string; wireBytes: number }
-  | { outcome: "failed"; reason: string };
+  | { outcome: "failed"; reason: string }
+  /** The walk's time budget ran out while this document was in flight. */
+  | { outcome: "time-limited" };
 
 /**
  * GET one sitemap and stream it through `parseSitemapStream`, which owns the
  * body from there on.
  *
- * The hop's deadline still bounds the read (the stream bounds bytes, not
- * time), paused while `drain` runs: see `Deadline`. A content-encoding other
+ * The document's clocks still bound the read (the stream bounds bytes, not
+ * time): idle is reset by every chunk, and both it and the total are paused
+ * while `drain` runs (see `DocTimer`). A content-encoding other
  * than gzip or identity is refused before a byte is read. A `drain` that throws
  * is the walk's own failure and leaves here as itself (`ReaderFault`); anything
  * the body or the inflater throws is the document's, and becomes `failed`.
@@ -1060,6 +1310,7 @@ type StreamedDoc =
 async function streamSitemap(
   startUrl: string,
   opts: DiscoveryOpts,
+  walkSignal: AbortSignal,
   maxBytes: number,
   handlersFor: (source: string) => SitemapHandlers,
 ): Promise<StreamedDoc> {
@@ -1068,6 +1319,8 @@ async function streamSitemap(
   const result = await requestDoc(
     startUrl,
     opts,
+    opts.sitemapTiming ?? SITEMAP_TIMING,
+    walkSignal,
     maxBytes,
     async (response): Promise<SitemapStreamResult> => {
       source = response.url;
@@ -1077,20 +1330,20 @@ async function streamSitemap(
         return { kind: "refused", reason: `unsupported content-encoding (${encoding})` };
       }
       const handlers = handlersFor(response.url);
-      return parseSitemapStream(wireCapped(response.body, maxBytes, wire), {
+      return parseSitemapStream(wireCapped(response.body, maxBytes, wire, () => response.timer.touch()), {
         maxBytes,
         charset: charsetOf(headerValue(response.headers, "content-type")),
         onUrl: handlers.onUrl,
         onSitemap: handlers.onSitemap,
         onOverlongLoc: handlers.onOverlongLoc,
         drain: async () => {
-          response.deadline.pause();
+          response.timer.pause();
           try {
             await handlers.drain();
           } catch (error) {
             throw new ReaderFault(error);
           } finally {
-            response.deadline.resume();
+            response.timer.resume();
           }
         },
       });
@@ -1100,6 +1353,7 @@ async function streamSitemap(
   if (wire.exceeded && source !== null) {
     return { outcome: "oversized-on-wire", url: source, wireBytes: wire.bytes };
   }
+  if (!result.ok && result.budgetHit) return { outcome: "time-limited" };
   if (!result.ok) return { outcome: "failed", reason: result.failure.reason ?? "no body" };
   if (source === null) throw new Error(`streamSitemap: ${startUrl} was read with no source URL`);
   return { outcome: "read", url: source, result: result.value };
@@ -1143,7 +1397,8 @@ function startingSources(declared: readonly string[], supplied: readonly string[
  * sitemap that 404s, a 200 that is really an HTML error page and a 60MB
  * shard are all recorded facts on the result. It does throw for our own bugs
  * (a malformed user agent), for the same reason fetch-page does — and for a
- * sink that cannot write, which is ours too.
+ * sink that cannot write, which is ours too. A stop on `opts.signal` rejects
+ * with `DiscoveryAbortedError` (Phase 27d), whatever was in flight.
  *
  * Sitemap sources are exactly the ones robots.txt declares plus the caller's
  * `extraSitemaps`; there is no speculative probe of `/sitemap.xml`, because a
@@ -1206,6 +1461,7 @@ export async function discover(
     docLimited: false,
     entryLimited: false,
     malformedEntriesSkipped: 0,
+    timeLimited: false,
     failures: [],
   };
   const sitemapFacts: DiscoverySitemapFacts = {
@@ -1382,9 +1638,22 @@ export async function discover(
   );
   let lastRequestAt = robots.attempts > 0 ? Date.now() : null;
 
+  // The walk's wall-clock budget, from here (its first sitemap request) on.
+  // Checked before each document; a document in flight when it runs out is
+  // aborted by the signal (see `requestDoc`).
+  const walkBudgetMs = opts.walkBudgetMs ?? DISCOVERY_WALK_BUDGET_MS;
+  if (!Number.isFinite(walkBudgetMs) || walkBudgetMs <= 0) {
+    throw new RangeError(`discover: walkBudgetMs must be > 0, got ${walkBudgetMs}`);
+  }
+  const budget = new AbortController();
+  const budgetTimer = setTimeout(() => budget.abort(), walkBudgetMs);
+
+  try {
   while (queue.length > 0) {
     const next = queue.shift();
     if (next === undefined) break;
+    // Between documents: a stop ends the walk before the next one is looked at.
+    throwIfStopped(opts.signal, next.url);
     if (seen.has(next.url)) continue;
     seen.add(next.url);
 
@@ -1413,7 +1682,14 @@ export async function discover(
       // Measured from the end of the previous request, so a slow document
       // never shortens the gap the site asked for.
       const waited = Date.now() - lastRequestAt;
-      if (waited < crawlDelayMs) await sleep(crawlDelayMs - waited);
+      if (waited < crawlDelayMs) await sleep(crawlDelayMs - waited, opts.signal, next.url);
+    }
+    // Documents are still queued, and the budget is spent: cut short, not failed.
+    // A stop is a separate cause, and is never this: it is asked first.
+    throwIfStopped(opts.signal, next.url);
+    if (budget.signal.aborted) {
+      truncation.timeLimited = true;
+      break;
     }
 
     truncation.docsFetched++;
@@ -1430,7 +1706,7 @@ export async function discover(
       await sink.flush();
     };
 
-    const read = await streamSitemap(next.url, opts, maxSitemapBytes, (source) => {
+    const read = await streamSitemap(next.url, opts, budget.signal, maxSitemapBytes, (source) => {
       docSource = source;
       return {
         onUrl: (entry) => {
@@ -1498,6 +1774,10 @@ export async function discover(
     // before it failed; the failure is recorded beside them.
     await drainPending();
 
+    if (read.outcome === "time-limited") {
+      truncation.timeLimited = true;
+      break;
+    }
     if (read.outcome === "failed") {
       truncation.failures.push({ url: next.url, reason: read.reason });
       continue;
@@ -1517,6 +1797,9 @@ export async function discover(
     }
     truncation.malformedEntriesSkipped += result.malformedEntries;
     if (result.oversized) recordOversized(next.url, result.bytes, doc.urlsKept);
+  }
+  } finally {
+    clearTimeout(budgetTimer);
   }
 
   return {

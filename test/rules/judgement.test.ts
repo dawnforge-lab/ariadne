@@ -77,7 +77,7 @@ describe("parseJudgement", () => {
 
   const cases: [string, unknown, string][] = [
     ["severity", { rules: { "title.too-long": { severity: "info" } } }, "rules.title.too-long.severity"],
-    ["an unknown rule id", { rules: { "nope.rule": { disabled: true } } }, "rules.nope.rule"],
+    ["an unknown rule id", { rules: { "nope.rule": { disabled: true } } }, "rules"],
     ["a metric rule id", { rules: { "site.health": { disabled: true } } }, "rules.site.health"],
     ["an empty override", { rules: { "title.too-long": {} } }, "rules.title.too-long"],
     ["disabled: false", { rules: { "title.too-long": { disabled: false } } }, "rules.title.too-long.disabled"],
@@ -85,10 +85,10 @@ describe("parseJudgement", () => {
     ["a threshold below its range", { thresholds: { SLOW_MS: 99 } }, "thresholds.SLOW_MS"],
     ["a threshold above its range", { thresholds: { THIN_WORDS: 10001 } }, "thresholds.THIN_WORDS"],
     ["a non-integer threshold", { thresholds: { SLOW_MS: 1.5 } }, "thresholds.SLOW_MS"],
-    ["a threshold that is not overridable", { thresholds: { NEAR_DUPLICATE_HAMMING: 4 } }, "thresholds.NEAR_DUPLICATE_HAMMING"],
+    ["a threshold that is not overridable", { thresholds: { NEAR_DUPLICATE_HAMMING: 4 } }, "thresholds"],
     ["a findingCap of 0", { findingCap: 0 }, "findingCap"],
     ["a non-integer findingCap", { findingCap: 2.5 }, "findingCap"],
-    ["an unknown top-level key", { extra: 1 }, "extra"],
+    ["an unknown top-level key", { extra: 1 }, ""],
   ];
   for (const [what, raw, path] of cases) {
     it(`refuses ${what}, naming ${path}`, () => {
@@ -494,4 +494,38 @@ describe("runRules stamps what it judged with", () => {
     await expect(runRules(db, crawlId, registry)).rejects.toThrow(/test\.exploding-judgement/);
     expect(await stampOf(crawlId)).toEqual({ at: null, stamp: null });
   });
+});
+
+// 27d spec §4: the three case-table rows above whose path now stops at the
+// parent ("rules", "thresholds", the block). Their sentence names the key by
+// position, never by the text sent.
+describe("parseJudgement names an unknown key or rule id by position, never quoting it", () => {
+  const rows: [string, unknown, string, string][] = [
+    [
+      "an unknown rule id",
+      { rules: { "title.too-long": { disabled: true }, "nope.rule": { disabled: true } } },
+      "nope.rule",
+      `rules: key 2 in the order sent names no rule in ruleset ${RULESET_VERSION}`,
+    ],
+    [
+      "a threshold that is not overridable",
+      { thresholds: { NEAR_DUPLICATE_HAMMING: 4 } },
+      "NEAR_DUPLICATE_HAMMING",
+      "thresholds: unknown field (key 1 in the order sent). Accepted: TITLE_MIN,",
+    ],
+    [
+      "an unknown top-level key",
+      { thresholds: {}, extra: 1 },
+      "extra",
+      "(the block): unknown field (key 2 in the order sent). Accepted: rules, thresholds, findingCap",
+    ],
+  ];
+  for (const [what, raw, sent, says] of rows) {
+    it(`refuses ${what} by position`, () => {
+      const error = refusal(raw);
+      expect(error.message).toContain(says);
+      expect(error.message).not.toContain(sent);
+      expect(error.path).not.toContain(sent);
+    });
+  }
 });

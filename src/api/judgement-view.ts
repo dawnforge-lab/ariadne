@@ -41,6 +41,7 @@ import {
 } from "../rules/judgement.js";
 import { storedFindingCap } from "../rules/query/crawl-evidence.js";
 import { listModeNotMeasured } from "../rules/query/list-mode.js";
+import type { NotMeasured } from "./overview.js";
 import { renderCopy, type IssueCopy } from "../rules/registry/copy/index.js";
 import { RULESET_VERSION, type Registry } from "../rules/registry/registry.js";
 import type { AnyRule, IssueType, Priority } from "../rules/registry/types.js";
@@ -71,7 +72,7 @@ export interface JudgementView {
    * (27c final wave M16). `[]` on a spider crawl, and on a crawl no rules run
    * has judged: no run skipped anything.
    */
-  notMeasured: string[];
+  notMeasured: NotMeasured;
   /**
    * A finding rule's type after the crawl's overrides. `overridden` is true when
    * the block sets the type — whether or not it matches the rule's default.
@@ -166,9 +167,8 @@ export function readJudgementBlock(
     return readStoredJudgement(raw, crawlId, registry);
   } catch (error) {
     if (error instanceof JudgementError && error.reason === "unknown-rule") {
-      const ruleId = error.path.startsWith("rules.")
-        ? error.path.slice("rules.".length)
-        : error.path;
+      const ruleId = error.ruleId;
+      if (ruleId === undefined) throw new Error("judgement: an unknown-rule refusal carries no rule id");
       throw new ServiceError(
         "CONFLICT",
         `crawl ${crawlId}'s stored judgement overrides rule '${clip(ruleId)}', which ruleset ` +
@@ -287,7 +287,7 @@ export function refuseIfDisabled(view: JudgementView, crawlId: string, ruleId: s
  * (27c final wave M16).
  */
 export function refuseIfNotMeasured(view: JudgementView, crawlId: string, ruleId: string): void {
-  if (view.notMeasured.includes(ruleId)) {
+  if (view.notMeasured.some((n) => n.id === ruleId)) {
     throw new ServiceError(
       "CONFLICT",
       `rule '${ruleId}' was not measured on crawl '${crawlId}': it is a list crawl, and this ` +

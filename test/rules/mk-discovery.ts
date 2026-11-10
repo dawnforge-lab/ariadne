@@ -28,6 +28,7 @@ export function mkTruncation(
     docLimited: false,
     entryLimited: false,
     malformedEntriesSkipped: 0,
+    timeLimited: false,
     failures: [],
     ...overrides,
   };

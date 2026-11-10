@@ -1,3 +1,4 @@
+import type { NotMeasured } from "../../api/overview.js";
 import { queryFinding, type RuleIdentity } from "../helpers.js";
 import { copyFor } from "../registry/copy/index.js";
 import {
@@ -9,6 +10,10 @@ import {
 } from "../registry/registry.js";
 
 const LIST_MODE: RuleIdentity = { id: "crawl.list-mode", severity: "info" };
+
+/** Why a list crawl did not measure a rule, as the read surfaces' `notMeasured` states it. */
+const LIST_REASON_SPIDER = "a list crawl follows no links, so this rule's evidence was not gathered";
+const LIST_REASON_SITEMAPS = "a list crawl read no sitemap, so this rule's evidence was not gathered";
 
 /**
  * What a crawl's own row says about list mode: the crawl's mode, and whether a
@@ -63,7 +68,7 @@ export function listModeSkips(rules: readonly AnyRule[], sitemapsRead: boolean):
 }
 
 /**
- * The ids a rules run of this crawl leaves out for list mode, sorted: what
+ * The rules a rules run of this crawl leaves out for list mode, as `{id, reason}` sorted by id: what
  * `runRules` skips and `crawl.list-mode` names, from the same two functions
  * (`readListScope` over the stored row, then `listModeSkips`), so the read
  * surfaces and the run cannot disagree. `[]` on a spider crawl. Throws, as
@@ -75,9 +80,16 @@ export function listModeNotMeasured(
   config: unknown,
   discovery: unknown,
   crawlId: string,
-): string[] {
+): NotMeasured {
   const scope = readListScope(config, discovery, crawlId);
-  return scope.mode === "list" ? listModeSkips(rules, scope.sitemapsRead) : [];
+  if (scope.mode !== "list") return [];
+  return rules
+    .filter((r) => skipsOnList(r, scope.sitemapsRead))
+    .map((r) => ({
+      id: r.id,
+      reason: r.needsSpider === true ? LIST_REASON_SPIDER : LIST_REASON_SITEMAPS,
+    }))
+    .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
 }
 
 /** The ids that run on a list crawl but judge only the targets the list fetched, sorted. */

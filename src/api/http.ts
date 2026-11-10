@@ -160,7 +160,8 @@
  * ## What a caller can never be told
  *
  * A response body carries facts and copy: crawl ids, statuses, counts, the
- * caller's own field names, URL-policy reasons. It never carries a stack, a
+ * accepted field names, URL-policy reasons — never a key the caller sent (27d:
+ * an unknown one is named by its position). It never carries a stack, a
  * file path, a database URL or an internal hostname (Talos obligation 6). An
  * error this file does not recognise becomes `{error: "internal error",
  * correlationId}` and the detail goes to the server log under that id — so an
@@ -172,6 +173,7 @@ import { randomUUID } from "node:crypto";
 import type { Db } from "../db/client.js";
 import type { ApiServerConfig } from "./config.js";
 import { checkBearer } from "./auth.js";
+import { unknownQueryParameterMessage } from "./errors.js";
 import {
   ApiService,
   ServiceError,
@@ -859,24 +861,27 @@ function param(ctx: RequestCtx, name: string): string {
 }
 
 /**
- * A query string this route understands, or a 400 naming the parameter.
+ * A query string this route understands, or a 400 naming the first unknown
+ * parameter's position (and counting the rest).
  *
  * The same argument as `noBody` and as the crawl-start schema's unknown-field
  * refusal, made about the third place a request can carry an instruction. An
  * ignored `?serverity=critical` is worse than an ignored body: the caller gets
  * a 200 full of rows and believes they are the critical ones.
+ *
+ * Named by its POSITION among the parameters as sent (a repeated name counts
+ * each time), never quoted (27d spec §4): a query string is where an API key
+ * pasted as `?sk_live_…` lands.
  */
 function checkQuery(query: URLSearchParams, allowed: readonly string[]): void {
-  for (const name of query.keys()) {
-    if (!allowed.includes(name)) {
-      throw new ServiceError(
-        "VALIDATION",
-        allowed.length === 0
-          ? `unknown query parameter '${clip(name)}': this route takes none`
-          : `unknown query parameter '${clip(name)}' (accepted: ${allowed.join(", ")})`,
-      );
-    }
-  }
+  const names = [...query.keys()];
+  const first = names.findIndex((name) => !allowed.includes(name));
+  if (first === -1) return;
+  const others = names.slice(first + 1).filter((name) => !allowed.includes(name)).length;
+  throw new ServiceError(
+    "VALIDATION",
+    unknownQueryParameterMessage(first + 1, names[first] as string, allowed, others),
+  );
 }
 
 /**

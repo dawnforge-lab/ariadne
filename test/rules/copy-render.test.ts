@@ -19,12 +19,31 @@ const FIXTURE: Record<string, Entry> = JSON.parse(
   readFileSync(new URL("./__fixtures__/issue-copy-0.22.json", import.meta.url), "utf8"),
 );
 
+const OLD_EXPL = "the sitemaps were only partly read because a size, entry, file-count or nesting limit was reached, or a page";
+const NEW_EXPL = "the sitemaps were only partly read because a size, entry, file-count, nesting or time limit was reached or the crawl stopped or failed while re-reading or re-recording them, or a page";
+const OLD_TAIL = "after a sitemap that could not be read those checks did run,";
+const NEW_TAIL = "a time limit means the sitemap walk spent its whole 10-minute budget, usually on sitemaps that are slow to generate; an interruption means the crawl stopped or failed while re-reading or re-recording the sitemaps, and resuming it to the end, or re-crawling, reads them in full; after a sitemap that could not be read those checks did run,";
+const OLD_FIX = "where the sitemaps were only partly read, split any sitemap over 50 MB into smaller files; where a page";
+const NEW_FIX = "where the sitemaps were only partly read, split any sitemap over 50 MB into smaller files; where the sitemap walk ran out of time (Sitemap Time Limit Reached), find the slow sitemaps, make them quicker to serve (cache or pre-generate them) and re-crawl when the site answers faster; where the sitemap walk was interrupted (Sitemap Walk Interrupted), resume the crawl to the end or re-crawl; where a page";
+
 const FIELDS = ["title", "explanation", "howToFix"] as const;
 
 // Rules added after 0.22.0 have no entry in the fixture, which is frozen text.
 // Each is named here, so a rule that is missing from the fixture by accident
 // still fails the key comparison below.
 const ADDED_SINCE_0_22 = ["crawl.list-mode"]; // 0.24.0, Phase 27c
+// Entries whose text was deliberately changed after 0.22.0: the fields that
+// differ from the fixture, spelled out so any other drift still fails.
+const CHANGED_SINCE_0_22: Record<string, Partial<Entry>> = {
+  // 0.25.0, Phase 27d: the sitemap walk's time budget, and a stop during a re-walk, are causes of "partly read".
+  "hreflang.declarations-incomplete": {
+    explanation: FIXTURE["hreflang.declarations-incomplete"]!.explanation
+      .replace(OLD_EXPL, NEW_EXPL)
+      .replace(OLD_TAIL, NEW_TAIL),
+    howToFix: FIXTURE["hreflang.declarations-incomplete"]!.howToFix.replace(OLD_FIX, NEW_FIX),
+  },
+};
+const expected = (id: string): Entry => ({ ...FIXTURE[id]!, ...CHANGED_SINCE_0_22[id] });
 
 describe("copy rendering (27a T4)", () => {
   it("renders every entry at the defaults exactly as 0.22.0 wrote it", () => {
@@ -34,10 +53,12 @@ describe("copy rendering (27a T4)", () => {
       [...Object.keys(FIXTURE), ...ADDED_SINCE_0_22].sort(),
     );
     for (const id of Object.keys(FIXTURE)) {
-      expect(renderCopy(id, DEFAULT_THRESHOLDS), id).toEqual(FIXTURE[id]);
-      expect(copyFor(id), id).toEqual(FIXTURE[id]);
+      expect(renderCopy(id, DEFAULT_THRESHOLDS), id).toEqual(expected(id));
+      expect(copyFor(id), id).toEqual(expected(id));
     }
-    expect(withoutAdded(ISSUE_COPY)).toEqual(FIXTURE);
+    expect(withoutAdded(ISSUE_COPY)).toEqual(
+      Object.fromEntries(Object.keys(FIXTURE).map((id) => [id, expected(id)])),
+    );
   });
 
   it("only names overridable thresholds in placeholders", () => {

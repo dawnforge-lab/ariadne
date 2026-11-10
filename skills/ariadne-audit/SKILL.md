@@ -152,12 +152,14 @@ A crawl is fit to audit when:
   "list"` in `crawl_config_get`, `listUrlCount` beside it) fetched only the URLs it was
   handed and followed no link. It carries one `crawl.list-mode` finding (info, CHECK-83),
   and that finding decides what the crawl can answer:
-  - every rule id in its `notMeasured` evidence did NOT run: the link graph, orphans,
+  - every rule id in its `notMeasured` evidence did NOT run (the listings name them as
+    `{id, reason}`, below): the link graph, orphans,
     click depth, inlinks, sitemap coverage, unlinked canonical and hreflang targets,
     and, when `sitemapsRead` is false, every sitemap rule. Each check those rules claim
     is SKIP, never PASS, however clean its listing looks. The listings name them too:
-    `issues_list`, `issues_overview`, `metrics_get` and the exports carry the same ids
-    in `notMeasured` beside `disabledRules`, `issues_overview` never makes one a zero
+    `issues_list`, `issues_overview`, `metrics_get` and the exports carry the same rules
+    in `notMeasured`, each as `{id, reason}` (the reason says whether it needed the link
+    graph or a sitemap), beside `disabledRules`, `issues_overview` never makes one a zero
     row, `issue_urls` of one is refused (409), and `metric_table`'s `note` says it was
     not measured;
   - every rule id in `partiallyMeasured` ran, but only against targets the list
@@ -260,7 +262,7 @@ check, and the issues sweep is usually one call:
    its `checkIds`, `severity`, `type`, `priority`, `count` and five `sampleUrls`.
    Follow `nextCursor` to the end. Index the rows by check id. Read the answer's
    `disabledRules` too: a rule named there fired and was filtered out by the crawl's
-   judgement, which is not the same as finding nothing. And `notMeasured`: on a list
+   judgement, which is not the same as finding nothing. And `notMeasured` (`{id, reason}` items): on a list
    crawl, a rule named there never ran, so its empty listing is SKIP, not PASS (`[]`
    on a spider crawl). `issues_overview` is the same
    picture in one unpaginated call, one row per rule, ordered by type and then
@@ -790,7 +792,9 @@ now) is NOT MEASURED, never a PASS. The remedy is a re-crawl. By check:
   `hreflang.declarations-incomplete` (info) is a NOT MEASURED marker: some hreflang
   was not read in full. Read its evidence (`reason` says which triggers fired)
   before writing any reciprocity verdict. If
-  `hreflangLimited`, `entryLimited`, `docLimited` or `depthLimited` is `true`, or
+  `hreflangLimited`, `entryLimited`, `docLimited`, `depthLimited`, `timeLimited` (the
+  walk ran out of its 10 minutes) or `interrupted` (a resumed crawl was stopped or
+  failed while re-reading its sitemaps) is `true`, or
   `sitemapDocsOversized` is above zero, the sitemap walk was cut short and
   `hreflang.missing-return-link`, `hreflang.missing-self-reference`,
   `hreflang.missing-x-default` and `hreflang.self-only` did not run: those parts of

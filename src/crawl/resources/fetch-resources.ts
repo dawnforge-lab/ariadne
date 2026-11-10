@@ -95,8 +95,10 @@
  *
  * An ABORT is the same shape, deliberately. `signal` is checked before every
  * request — not once per batch, which at a 30s spacing would be minutes of
- * asking after the caller said stop — and the rows it leaves get NO reason,
- * because nothing decided anything about them. The summary says `aborted: true`
+ * asking after the caller said stop — and the request on the wire is aborted,
+ * not awaited (Phase 27b Ruling 4, shipped in 27d), so a stop costs no fetch
+ * deadline. The rows it leaves get NO reason, because nothing decided anything
+ * about them. The summary says `aborted: true`
  * so the crawl loop can close its row stopped (`paused` or `cancelled`) rather than reporting a
  * finished crawl with a silently incomplete resource census (hard rule 7).
  */
@@ -104,9 +106,19 @@ import { and, asc, eq, gt, isNull, sql } from "drizzle-orm";
 import { request } from "undici";
 import type { Db } from "../../db/client.js";
 import { resources } from "../../db/schema.js";
-import { fetchRobots, type RobotsInfo, type RobotsOutcome } from "../discovery.js";
+import {
+  DiscoveryAbortedError,
+  fetchRobots,
+  type RobotsInfo,
+  type RobotsOutcome,
+} from "../discovery.js";
 import { credentialHeadersOf, type CredentialTarget } from "../credentials.js";
-import { classifyStatus, parseRetryAfter, type FetchClass } from "../fetch-page.js";
+import {
+  classifyStatus,
+  FetchAbortedError,
+  parseRetryAfter,
+  type FetchClass,
+} from "../fetch-page.js";
 import {
   ACCEPT_ENCODING,
   blockedAddressMessage,
@@ -389,9 +401,11 @@ interface HostRecord {
    * host share ONE robots.txt request rather than racing to make several.
    *
    * Null only when the caller's signal aborted while the robots.txt request
-   * waited for its gate slot (Phase 27b): nothing was asked, the pass is
-   * stopping, and every worker that reads the null stops too, leaving its row
-   * unasked. It is never read as "no rules".
+   * waited for its gate slot (Phase 27b) or while it was being read (27d: the
+   * read on the wire and its retry backoff are aborted): nothing was learned,
+   * the pass is stopping, and every worker that reads the null stops too,
+   * leaving its row unasked. It is never read as "no rules". The record lives
+   * for one pass, so a resume asks the host again.
    */
   robots: Promise<RobotsInfo | null>;
   /** Consecutive transport failures. Any answer resets it. */
@@ -487,7 +501,8 @@ export async function fetchCrawlResources(
     // pre-computed class keeps one decision in one place: `admit` answers "may
     // we ask, and on what evidence", `processOne` turns that into a row.
     | { kind: "denied"; reason: string; outcome: RobotsOutcome }
-    // The signal fired while this host's robots.txt waited for its slot.
+    // The signal fired while this host's robots.txt waited for its slot or
+    // was being read.
     | { kind: "aborted" }
     | { kind: "ok" }
   > => {
@@ -506,19 +521,31 @@ export async function fetchCrawlResources(
           ? Promise.resolve(opts.originRobots)
           : (async () => {
               if (!(await gate.acquire(host, opts.signal))) return null;
-              const info = await fetchRobots(
-                new URL(url).origin,
-                {
-                  userAgent: opts.userAgent,
-                  allowPrivate,
-                  timeoutMs,
-                  retryBackoffMs: opts.robotsRetryBackoffMs,
-                  // Decided per hop by discovery: another host's robots.txt
-                  // gets nothing, unless a redirect brings it back home.
-                  credentials: opts.credentials,
-                },
-                "disallow",
-              );
+              let info: RobotsInfo;
+              try {
+                info = await fetchRobots(
+                  new URL(url).origin,
+                  {
+                    userAgent: opts.userAgent,
+                    allowPrivate,
+                    robotsTiming: { headersMs: timeoutMs, idleMs: timeoutMs, totalMs: timeoutMs },
+                    retryBackoffMs: opts.robotsRetryBackoffMs,
+                    // Decided per hop by discovery: another host's robots.txt
+                    // gets nothing, unless a redirect brings it back home.
+                    credentials: opts.credentials,
+                    // A stop aborts the read on the wire and its retry backoff
+                    // (27d): the pass does not sit out a stalled robots.txt.
+                    signal: opts.signal,
+                  },
+                  "disallow",
+                );
+              } catch (error) {
+                // Stopped mid-read: nothing was learned, so the record reads
+                // "aborted" (null, below) and never "no rules". Anything else
+                // is a defect and goes on as itself.
+                if (error instanceof DiscoveryAbortedError) return null;
+                throw error;
+              }
               // Only the first attempt came through the gate; the retries are
               // `fetchRobots`' own short backoff, which is the discipline the
               // crawl origin's robots.txt already gets.
@@ -635,8 +662,9 @@ export async function fetchCrawlResources(
       const host = new URL(url).host;
 
       const admission = await admit(host, url);
-      // Stopped while the host's robots.txt waited for its slot: the row is
-      // left as the per-request check above leaves it, null and unasked.
+      // Stopped while the host's robots.txt waited for its slot or was being
+      // read: the row is left as the per-request check above leaves it, null
+      // and unasked.
       if (admission.kind === "aborted") return;
       if (admission.kind === "capped") {
         // Unfetched, not failed: the null still means "seen, not yet asked".
@@ -677,14 +705,24 @@ export async function fetchCrawlResources(
         return done(unfetchable("fetch_error", note(record.parked)));
       }
 
-      const attempt = await requestResource(url, method, {
-        userAgent: opts.userAgent,
-        allowPrivate,
-        timeoutMs,
-        count: method === "GET",
-        maxCountedBytes,
-        credentials: opts.credentials,
-      });
+      let attempt: Attempt;
+      try {
+        attempt = await requestResource(url, method, {
+          userAgent: opts.userAgent,
+          allowPrivate,
+          timeoutMs,
+          count: method === "GET",
+          maxCountedBytes,
+          credentials: opts.credentials,
+          // A stop reaches the request on the wire (Phase 27b, Ruling 4).
+          signal: opts.signal,
+        });
+      } catch (error) {
+        // Stopped mid-request: the row is left as the per-request check above
+        // leaves it, null and unasked, and the pass reports `aborted`.
+        if (error instanceof FetchAbortedError) return;
+        throw error;
+      }
       spent += 1;
       requests += 1;
       reportToGate(host, url, attempt);
@@ -1073,13 +1111,20 @@ interface RequestOpts {
   count: boolean;
   /** The counter's ceiling. See MAX_COUNTED_BYTES. */
   maxCountedBytes: number;
+  /**
+   * The crawl's control signal (Phase 27b). Aborting it rejects with
+   * `FetchAbortedError`, `fetchPage`'s contract, and never resolves to an
+   * `Attempt`: a stopped request learned nothing, so it is never a row.
+   */
+  signal?: AbortSignal;
   /** Sent only when `url` is in the site family (`credentialHeadersFor`). */
   credentials: CredentialTarget | undefined;
 }
 
 /**
  * One request at one URL. Never throws for the server's behaviour; throws for
- * ours (`isProgrammerError`), exactly as `fetchPage` does.
+ * ours (`isProgrammerError`), exactly as `fetchPage` does, and like it rejects
+ * with `FetchAbortedError` when the caller's signal aborts the request.
  *
  * `accept-encoding: gzip` is sent because a browser sends one: what the weight
  * rules want is the bytes a visitor's connection carries, so a `content-length`
@@ -1091,12 +1136,21 @@ async function requestResource(
   method: "HEAD" | "GET",
   opts: RequestOpts,
 ): Promise<Attempt> {
+  const callerSignal = opts.signal;
+  // Read through a call so the compiler does not narrow the flag to `false`
+  // after the check below: the signal fires while we await.
+  const callerAborted = (): boolean => callerSignal?.aborted === true;
+  if (callerAborted()) throw new FetchAbortedError(url);
   const deadline = new AbortController();
   let deadlineHit = false;
   const timer = setTimeout(() => {
     deadlineHit = true;
     deadline.abort();
   }, opts.timeoutMs);
+  const requestSignal =
+    callerSignal === undefined
+      ? deadline.signal
+      : AbortSignal.any([deadline.signal, callerSignal]);
 
   try {
     const response = await request(url, {
@@ -1111,7 +1165,7 @@ async function requestResource(
       // Manual redirects, like the page path: every hop is re-checked by the
       // URL policy and re-queued behind its own host's gate, which a client
       // following redirects for us would skip.
-      signal: deadline.signal,
+      signal: requestSignal,
       headersTimeout: opts.timeoutMs,
       bodyTimeout: opts.timeoutMs,
     });
@@ -1141,7 +1195,13 @@ async function requestResource(
 
     return { kind: "response", statusCode: response.statusCode, headers, counted, countTruncated };
   } catch (error) {
+    // Our own bug first: a programmer error is rethrown as itself even when a
+    // stop landed in the same tick, so it is never reported as an abort.
     if (isProgrammerError(error)) throw error;
+    // Then the caller's stop, which wins over every classification of the
+    // site's behaviour, including a deadline that fired in the same tick:
+    // nothing aborted is ever written as a row.
+    if (callerAborted()) throw new FetchAbortedError(url);
     const refusal = blockedAddressMessage(error);
     if (refusal !== null) return { kind: "refused", reason: `refused at connect: ${refusal}` };
     if (deadlineHit || isTimeout(error)) {

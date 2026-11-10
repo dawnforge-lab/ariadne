@@ -826,7 +826,7 @@ describe("the tool surface", () => {
   it("refuses an argument nobody allowed, naming it", async () => {
     const answer = await call("issues_list", { crawlId: seededCrawlId, serverity: "critical" });
     expect(answer.isError).toBe(true);
-    expect(answer.text).toContain("serverity");
+    expect(answer.text).toContain("key 2 in the order sent); did you mean 'severity'?");
   });
 
   it("answers with one text block of compact JSON and no prose", async () => {

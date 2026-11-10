@@ -328,6 +328,14 @@ export interface HostGateOptions {
   /** Upper bound on the honoured delay. Default 30s. */
   maxDelayMs?: number;
   /**
+   * TEST ONLY — never wire it to an API field. Told each slot `acquire` hands
+   * out, with the host and the slot's scheduled start (`Date.now()` clock): the
+   * time the gate SPACES, which is what a pacing test must measure. The arrival
+   * at a server adds timer and network jitter that is not the gate's (one late
+   * arrival followed by an on-time one reads short). Observes only.
+   */
+  onGrant?: (host: string, slotAtMs: number) => void;
+  /**
    * The widest spacing an EARLIER RUN OF THIS CRAWL already earned —
    * `crawls.host_spacing_ms` — or null/absent for a crawl that has none.
    *
@@ -478,6 +486,7 @@ export class HostGate {
    */
   private configuredFloorMs: number;
   private readonly maxDelayMs: number;
+  private readonly onGrant: HostGateOptions["onGrant"];
   /** host → everything the gate remembers about it. O(hosts touched). */
   private readonly hosts = new Map<string, HostState>();
   /** The widest spacing any host has reached. Read by the loop's lease sizing. */
@@ -533,6 +542,7 @@ export class HostGate {
     // folds its OWN earned spacing onto it, not onto `delayMs` — which carries
     // the crawl-wide widest and would drag every seeded host up to it.
     this.maxDelayMs = maxDelayMs;
+    this.onGrant = opts.onGrant;
     this.configuredFloorMs = Math.min(
       maxDelayMs,
       Math.max(opts.perHostDelayMs, (opts.robotsCrawlDelaySec ?? 0) * 1000),
@@ -1013,8 +1023,8 @@ export class HostGate {
    * gate from `host_spacing_jsonb`). With no signal this is the old acquire,
    * always `true`.
    *
-   * Overloaded so the callers that pass no signal (the host probe, the
-   * renderer, the 404 probe) keep `Promise<void>` exactly as before; only a
+   * Overloaded so the callers that pass no signal (the renderer, the 404
+   * probe) keep `Promise<void>` exactly as before; only a
    * caller that hands a signal over gets the answer to branch on.
    */
   acquire(host: string): Promise<void>;
@@ -1025,6 +1035,7 @@ export class HostGate {
     const now = Date.now();
     const startAt = Math.max(now, state.nextAllowedAt);
     state.nextAllowedAt = startAt + this.spacingMs(host);
+    this.onGrant?.(host, startAt);
 
     const waitMs = startAt - now;
     if (waitMs <= 0) return true;

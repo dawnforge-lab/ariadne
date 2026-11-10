@@ -50,7 +50,7 @@
  * done and the row was still in a buffer (build plan §7).
  */
 import { randomUUID } from "node:crypto";
-import { and, asc, eq, gt, ne, sql } from "drizzle-orm";
+import { and, asc, eq, gt, isNotNull, ne, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import { crawls, frontier, listUrls, sitemapHreflang, sitemapMemberships, sitemapUrls } from "../db/schema.js";
 // Ruleset provenance for the `crawls` row: the registry owns the number, the
@@ -58,6 +58,7 @@ import { crawls, frontier, listUrls, sitemapHreflang, sitemapMemberships, sitema
 import { RULESET_VERSION } from "../rules/registry/registry.js";
 import {
   discover,
+  DiscoveryAbortedError,
   ROBOTS_BLOCKED_REASON_PREFIX,
   robotsBlockedReason,
   type DiscoveryResult,
@@ -80,7 +81,7 @@ import {
   type FetchClass,
   type FetchResult,
 } from "./fetch-page.js";
-import { probeHostVariants } from "./host-probe.js";
+import { probeHostVariants, type HostProbeResult } from "./host-probe.js";
 import {
   isClassifiableResponse,
   platformProfileRecord,
@@ -469,7 +470,17 @@ export interface DiscoveryEvidence {
    * the wrong shape as a refusal; see `parseDiscovery`).
    */
   suppliedSitemaps: string[];
-  truncation: DiscoveryTruncation;
+  /**
+   * The walk's own truncation, plus `interrupted` (Phase 27d): set to true on
+   * the evidence an EARLIER run wrote by a run about to clear the staged
+   * sitemap alternates for its re-walk (`markEvidenceInterrupted`, written
+   * ahead), and left there when that run ends — stopped, failed, or crashed —
+   * before writing its own; that evidence then no longer describes what is
+   * staged. Never written by a walk that returned: the next complete walk
+   * rewrites this object whole and the key is gone. Absent reads false
+   * (`readSitemapHreflang`).
+   */
+  truncation: DiscoveryTruncation & { interrupted?: boolean };
   /** Sitemap documents attempted. Lifted out of `truncation` for the rules. */
   docsFetched: number;
   /**
@@ -557,17 +568,26 @@ export interface CrawlSummary {
   frontier: FrontierCounts;
   /** What the write path actually wrote, including what it could not. */
   writer: PageWriterStats;
-  robots: { outcome: RobotsInfo["outcome"]; note: string | null };
-  discovery: { sitemapEntries: number; truncation: DiscoveryTruncation };
+  /**
+   * What robots.txt said, or null when this run was stopped (paused or
+   * cancelled) before its discovery was recorded — in the host probe, in the
+   * sitemap walk, or as the walk returned (Phase 27d). Null is not "absent":
+   * nothing was concluded.
+   */
+  robots: { outcome: RobotsInfo["outcome"]; note: string | null } | null;
+  /** What the sitemap walk found; null exactly when `robots` is. */
+  discovery: { sitemapEntries: number; truncation: DiscoveryTruncation } | null;
   /**
    * False when no sitemap document was requested (list mode without
    * `sitemapUrls`): zero entries then means "not read", not "none declared".
+   * Null exactly when `robots` is: the walk was stopped, not skipped.
    */
-  sitemapsRead: boolean;
+  sitemapsRead: boolean | null;
   /**
    * What the crawl-end template inference did (`inferPageTemplates`), or null
    * when it did not run — which today means a crawl that failed before it could
-   * see its own population. Null is not "nothing to collapse": that is
+   * see its own population, or one stopped before its page loop (in the host
+   * probe or the sitemap walk, Phase 27d). Null is not "nothing to collapse": that is
    * `pagesRetyped: 0`, and the two must not be read as the same thing.
    */
   pageTemplates: PageTemplateInference | null;
@@ -698,6 +718,44 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+/**
+ * TEST ONLY — never wire it to an API field. Observation points a suite uses to
+ * measure the loop where it imposes its behaviour, like the renderer's
+ * `RenderTestFaults`.
+ */
+export interface LoopTestHooks {
+  /**
+   * Told each slot the crawl's host gate hands out, with the host and the
+   * slot's scheduled start (`Date.now()`, the clock the gate spaces on). A
+   * pacing test asserts on these rather than on request arrival at the server,
+   * which adds jitter that is not the gate's. Called synchronously as the slot
+   * is claimed, before the wait: the loop ignores what it returns, but a test
+   * may act on it — a shutdown test aborts its run from here to land the stop
+   * at a known point in the page loop.
+   */
+  onGrant?: (host: string, slotAtMs: number) => void;
+  /**
+   * Awaited at the end of every flush of the sitemap row sink — while the
+   * walk's document clocks are paused and the body waits — with the run's stop
+   * signal. A stop test writes its request from here to land a stop inside a
+   * flush (27d Review Focus 2).
+   */
+  onSitemapFlush?: (stop: AbortSignal) => Promise<void>;
+  /**
+   * Awaited as soon as `discover` returns, before the run checks its stop
+   * signal and writes the discovery evidence — the window between discovery
+   * and the first lease (27d Review Focus 1).
+   */
+  afterDiscovery?: (stop: AbortSignal) => Promise<void>;
+  /**
+   * Awaited after each batch of the run's seeding — a batch of `sitemap_urls`
+   * rows, or a chunk of the sitemap or list URLs looked up for the frontier —
+   * with the run's stop signal, so a stop test can land a pause between two
+   * batches (27d ruling R9).
+   */
+  onSeedingBatch?: (stage: "sitemap_urls" | "frontier", stop: AbortSignal) => Promise<void>;
+}
+
 export interface ResumeOpts {
   /**
    * Overrides the config stored on the `crawls` row. Use it to change pacing
@@ -740,6 +798,8 @@ export interface ResumeOpts {
    * worker's URLs to this one.
    */
   reclaimLeases?: boolean;
+  /** TEST ONLY — see `LoopTestHooks`. */
+  testHooks?: LoopTestHooks;
 }
 
 /**
@@ -773,6 +833,7 @@ export async function runCrawl(
   db: Db,
   config: CrawlConfig,
   signal?: AbortSignal,
+  testHooks?: LoopTestHooks,
 ): Promise<CrawlSummary> {
   validateCrawlConfig(config);
   // A list crawl's URLs live in `list_urls`, written by the API's start with
@@ -799,7 +860,7 @@ export async function runCrawl(
     status: "running",
   });
 
-  return execute(db, crawlId, config, signal);
+  return execute(db, crawlId, config, signal, testHooks);
 }
 
 /**
@@ -942,7 +1003,7 @@ export async function resumeCrawl(
     await releaseLeases(db, crawlId, null);
   }
 
-  return execute(db, crawlId, config, opts.signal);
+  return execute(db, crawlId, config, opts.signal, opts.testHooks);
 }
 
 /**
@@ -1393,6 +1454,7 @@ async function execute(
   crawlId: string,
   config: CrawlConfig,
   signal: AbortSignal | undefined,
+  testHooks: LoopTestHooks | undefined,
 ): Promise<CrawlSummary> {
   // THE ONE SIGNAL THE RUN STOPS ON (Phase 27b). It fires on an agent's pause
   // or cancel (polled off `crawls.control_request`), on the process's own
@@ -1425,7 +1487,7 @@ async function execute(
         engineVersion: engineVersion(),
       })
       .where(eq(crawls.id, crawlId));
-    return await runToCompletion(db, crawlId, config, watcher);
+    return await runToCompletion(db, crawlId, config, watcher, testHooks);
   } catch (caught) {
     // A control poll that failed on the way down is surfaced beside whatever
     // ended the run, never lost to it (rule 7). The run's own paths already
@@ -1575,6 +1637,7 @@ async function runToCompletion(
   crawlId: string,
   config: CrawlConfig,
   watcher: ControlWatcher,
+  testHooks: LoopTestHooks | undefined,
 ): Promise<CrawlSummary> {
   const allowPrivate = config.allowPrivate === true;
   const listMode = config.mode === "list";
@@ -1629,23 +1692,35 @@ async function runToCompletion(
   // resume of a profiled crawl that delay is already the profile's floor
   // (`pacingOf`), and on a fresh crawl the hop that names the platform raises
   // the probe's own gate to it for every hop after (the `onResponse` floor).
+  //
+  // A pause or cancel stops it mid-chain (Phase 27d): the probe rejects with
+  // `FetchAbortedError`, records nothing, and the run closes stopped.
   let probePlatform: Platform | null = null;
   if (config.probeHosts !== false) {
-    const hostProbe = await probeHostVariants(config.siteUrl, {
-      userAgent: config.userAgent,
-      allowPrivate,
-      credentials,
-      legacyHosts: config.legacyHosts,
-      perHostDelayMs: pacingOf(config, activeProfile).perHostDelayMs,
-      timeoutMs: FETCH_TIMEOUT_MS,
-      onResponse: (result) => {
-        if (probePlatform !== null) return undefined;
-        probePlatform = classifyPlatform(result);
-        if (probePlatform === null) return undefined;
-        return pacingOf(config, platformProfileRecord(probePlatform, config, new Date()))
-          .perHostDelayMs;
-      },
-    });
+    let hostProbe: HostProbeResult;
+    try {
+      hostProbe = await probeHostVariants(config.siteUrl, {
+        userAgent: config.userAgent,
+        signal,
+        allowPrivate,
+        credentials,
+        legacyHosts: config.legacyHosts,
+        perHostDelayMs: pacingOf(config, activeProfile).perHostDelayMs,
+        timeoutMs: FETCH_TIMEOUT_MS,
+        onResponse: (result) => {
+          if (probePlatform !== null) return undefined;
+          probePlatform = classifyPlatform(result);
+          if (probePlatform === null) return undefined;
+          return pacingOf(config, platformProfileRecord(probePlatform, config, new Date()))
+            .perHostDelayMs;
+        },
+      });
+    } catch (error) {
+      if (error instanceof FetchAbortedError && signal.aborted) {
+        return closeStoppedBeforePages(db, crawlId, watcher);
+      }
+      throw error;
+    }
     // Redirect targets and reasons the site's other spellings answered with:
     // site text, so through the storability boundary (ruling R11).
     await db.update(crawls).set({ hostProbe: storableDeep(hostProbe) }).where(eq(crawls.id, crawlId));
@@ -1661,23 +1736,77 @@ async function runToCompletion(
   // are keyed, so a re-read lands on the rows the first read wrote; the staged
   // alternates have no key (two documents may state one pair), so the earlier
   // read's go first rather than being doubled.
+  //
+  // A pause or cancel stops the walk mid-document (Phase 27d): `discover`
+  // rejects with `DiscoveryAbortedError`, and the run closes stopped with no
+  // discovery evidence and nothing enqueued. A resume walks again from the top.
+  //
+  // THE INTERRUPTED MARK, WRITTEN AHEAD (rulings R8, R10; 27d final). From the
+  // delete below until this run's own evidence is on the row, an earlier run's
+  // evidence (on a resume) no longer describes what is staged. So it is marked
+  // `interrupted` BEFORE the delete, and the evidence write below replaces the
+  // object whole, which clears the key. Whatever ends the run in between — a
+  // stop, a failed poll, a failed sink insert, `persistSitemap`, the evidence
+  // write itself, or the process dying with no catch or close run at all —
+  // leaves the mark on the row, so a `failed` row, which can still be judged,
+  // never pairs complete-looking evidence with a partial staging. A fresh
+  // crawl has no evidence yet, and the mark matches no row.
+  await markEvidenceInterrupted(db, crawlId);
   await db.delete(sitemapHreflang).where(eq(sitemapHreflang.crawlId, crawlId));
-  const discovery = await discover(config.siteUrl, {
-    userAgent: config.userAgent,
-    allowPrivate,
-    credentials,
-    // The sitemap walk's own spacing: the crawl's, floored by a profile already
-    // known (probe or resume). Robots' Crawl-delay is folded in by discover.
-    perHostDelayMs: pacingOf(config, activeProfile).perHostDelayMs,
-    // The documents the client named, walked beside the declared ones. The
-    // engine still probes nothing on its own (see discover's header).
-    extraSitemaps: config.sitemapUrls,
-    // List mode reads no sitemap unless the client named one; then the walk is
-    // the spider's (declared and supplied), and only the entries' enqueue is
-    // skipped below.
-    walkSitemaps: config.mode !== "list" || config.sitemapUrls !== undefined,
-    sink: new SitemapRowSink(db, crawlId),
-  });
+  let discovery: DiscoveryResult;
+  const onSitemapFlush = testHooks?.onSitemapFlush;
+  try {
+    discovery = await discover(config.siteUrl, {
+      userAgent: config.userAgent,
+      signal,
+      allowPrivate,
+      credentials,
+      // The sitemap walk's own spacing: the crawl's, floored by a profile already
+      // known (probe or resume). Robots' Crawl-delay is folded in by discover.
+      perHostDelayMs: pacingOf(config, activeProfile).perHostDelayMs,
+      // The documents the client named, walked beside the declared ones. The
+      // engine still probes nothing on its own (see discover's header).
+      extraSitemaps: config.sitemapUrls,
+      // List mode reads no sitemap unless the client named one; then the walk is
+      // the spider's (declared and supplied), and only the entries' enqueue is
+      // skipped below.
+      walkSitemaps: config.mode !== "list" || config.sitemapUrls !== undefined,
+      sink: new SitemapRowSink(
+        db,
+        crawlId,
+        onSitemapFlush === undefined ? undefined : () => onSitemapFlush(signal),
+      ),
+    });
+  } catch (error) {
+    if (error instanceof DiscoveryAbortedError && signal.aborted) {
+      return closeStoppedBeforePages(db, crawlId, watcher);
+    }
+    throw error;
+  }
+  await testHooks?.afterDiscovery?.(signal);
+  // A stop that landed as the walk finished — after its last request, before
+  // anything below writes evidence or enqueues a URL — closes the run exactly
+  // as one inside the walk does. One that lands later is caught between the
+  // batches of `persistSitemap` and of the seeding enqueue below, and finally
+  // by the page loop's own check before its first lease.
+  //
+  // A failed control poll is not a stop, and discovery is complete: it is left
+  // to the paths below, which raise it beside whatever else they conclude —
+  // the robots refusal keeps its note beside it (27b M7), and the page loop
+  // stops on the signal and raises it before any close.
+  if (signal.aborted && watcher.failure() === null) {
+    return closeStoppedBeforePages(db, crawlId, watcher);
+  }
+
+  // THE SITEMAP'S ENTRIES, ON RECORD BEFORE THE EVIDENCE THAT COUNTS THEM
+  // (Phase 27d). Written in batches, and a stop between two batches closes the
+  // run as a stop in the walk does: no evidence goes on the row over a partial
+  // `sitemap_urls`, so no reader is shown evidence counting entries the table
+  // does not hold. A resume writes them again (the rows are keyed). A failed
+  // poll stops it too; the close then raises it and the row closes failed.
+  if (!(await persistSitemap(db, crawlId, discovery, signal, testHooks?.onSeedingBatch))) {
+    return closeStoppedBeforePages(db, crawlId, watcher);
+  }
 
   // INSERTION 2 — discovery's own findings, written before anything branches on
   // them. A crawl that refuses to run because robots.txt is unreachable is
@@ -1764,6 +1893,7 @@ async function runToCompletion(
     perHostDelayMs,
     robotsCrawlDelaySec: discovery.robots.crawlDelaySec,
     earnedSpacingMs,
+    onGrant: testHooks?.onGrant,
   });
   // The PER-HOST state beside the crawl-wide number: each host re-enters its own
   // earned spacing — and, since Phase 24a, its place on the ratchet — rather than
@@ -2106,6 +2236,8 @@ async function runToCompletion(
     // reported by `robots.blocks-sitemap-urls`; see `CrawlConfig.maxBlockedUrls`.
     // Entries the scope refuses are skipped for the same reason (Deviation 8).
     const recordsBlocked = discoveredVia !== "sitemap";
+    // The run's seeding, which a resume repeats (see the chunk loop).
+    const seeding = discoveredVia === "sitemap" || discoveredVia === "list";
     // The seed is the API's to check against the scope (a seed the scope
     // refuses is a validation error before the row exists); here it is the
     // crawl's starting point, and refusing it would be an empty crawl.
@@ -2132,6 +2264,16 @@ async function runToCompletion(
     // Whether this call is the one that met the cap first (see below).
     let stampCapped = false;
     for (let start = 0; start < urls.length; start += ENQUEUE_LOOKUP_CHUNK) {
+      // THE SEEDING STOPS ON A STOP (Phase 27d, ruling R9): between two chunks
+      // of the sitemap's entries or the listed URLs, a pause or cancel ends the
+      // scan, what is reserved so far is inserted below, and the page loop's
+      // first check closes the run. A resume enqueues them all again. A page's
+      // links never stop here: that page's row is written, and a link cut off
+      // now would never be offered to the frontier again.
+      if (seeding) {
+        if (start > 0) await testHooks?.onSeedingBatch?.("frontier", signal);
+        if (signal.aborted) break;
+      }
       // The sitemap stops at the cap; a page's links are scanned to the end
       // for the robots-blocked ones (see the docblock).
       if (frontierRows >= config.maxPages && frontierCapped === true && !recordsBlocked) break;
@@ -2460,6 +2602,8 @@ async function runToCompletion(
       // pages table, so a URL already fetched is not queued twice.
       let read = 0;
       for (let after = -1; ; ) {
+        // A stop between chunks ends the read (Phase 27d): see `enqueue`.
+        if (signal?.aborted === true) break;
         const chunk = await db
           .select({ position: listUrls.position, url: listUrls.url })
           .from(listUrls)
@@ -2478,7 +2622,9 @@ async function runToCompletion(
       // The table must hold what the start promised, before a page is leased:
       // a short or missing list would otherwise run as a short crawl whose
       // "nothing to crawl" note blames robots.txt (27c final wave M8; rule 7).
-      if (read !== config.listUrlCount) {
+      // A read a stop cut short is not that: the run closes stopped, and its
+      // resume reads the list again from the start.
+      if (signal?.aborted !== true && read !== config.listUrlCount) {
         throw new Error(
           `crawl ${crawlId}: read ${read} list_urls rows, but its config.listUrlCount ` +
             `is ${String(config.listUrlCount)}; the listed URLs are not what the crawl's ` +
@@ -2493,7 +2639,7 @@ async function runToCompletion(
         "sitemap",
       );
     }
-    await persistSitemap(db, crawlId, discovery);
+    // (`sitemap_urls` was written before the evidence, above.)
 
     if (frontierRows === 0) {
       // A crawl with nothing in its frontier is about to report zero pages.
@@ -2622,13 +2768,23 @@ async function runToCompletion(
   // The one thing not on offer is log-and-continue. If the skip cannot be
   // recorded either, the crawl has lost its ability to say what it knows, and
   // both errors go into the same aggregation the loop and the shutdown use.
+  //
+  // A STOP DURING THE PROBE (27d) aborts its request and is not a failure of
+  // it: the run closes stopped, as a stop in the page loop does (the probe
+  // recorded as not run, the recheck and resource passes skipped), and a
+  // resume probes. A failed control poll also fires the signal; it is raised
+  // here, before any "crawl stopped" record, as the page loop raises it above,
+  // and the row closes failed.
+  let probeStopped = false;
   try {
-    await probeKnownMissing(db, crawlId, config, discovery, gate, {
-      allowPrivate,
-      credentials,
-      pagesCrawled,
-      aborted,
-    });
+    probeStopped =
+      (await probeKnownMissing(db, crawlId, config, discovery, gate, {
+        allowPrivate,
+        credentials,
+        pagesCrawled,
+        aborted,
+        signal,
+      })) === "aborted";
   } catch (error) {
     try {
       await writeNotFoundProbe(db, crawlId, {
@@ -2639,6 +2795,12 @@ async function runToCompletion(
     }
   }
   raiseFailures(crawlId, failures, "while probing for a known-404");
+  if (probeStopped) {
+    const pollFailure = watcher.failure();
+    if (pollFailure !== null) throw pollFailure;
+    await writeNotFoundProbe(db, crawlId, { skipped: STOPPED_BEFORE_404_PROBE });
+    aborted = true;
+  }
 
   // INSERTION 3c — the crawl takes a SECOND look at every page that answered
   // "server error", so a finding can say whether the error persists rather than
@@ -2886,6 +3048,73 @@ async function runToCompletion(
 }
 
 /**
+ * Mark the discovery evidence an EARLIER run of this crawl kept as
+ * `truncation.interrupted` (rulings R8, R10). Written AHEAD, just before this
+ * run clears the staged sitemap alternates for its re-walk: from then until
+ * its own evidence is written, the kept evidence no longer describes what is
+ * staged, and a run that ends in between — however, a crash included — leaves
+ * the mark. The hreflang absence rules refuse on it and the marker names it,
+ * until a complete walk rewrites the evidence (which drops the key). A crawl
+ * with no evidence yet — a fresh one — has nothing to mark: the update matches
+ * no row. Idempotent.
+ */
+async function markEvidenceInterrupted(db: Db, crawlId: string): Promise<void> {
+  await db
+    .update(crawls)
+    .set({
+      discovery: sql`jsonb_set(${crawls.discovery}, '{truncation,interrupted}', 'true'::jsonb)`,
+    })
+    .where(and(eq(crawls.id, crawlId), isNotNull(crawls.discovery)));
+}
+
+/**
+ * Close a run that was stopped before its page loop (Phase 27d): in the host
+ * probe, in the sitemap walk, as discovery returned, or while `sitemap_urls`
+ * was being written. It makes the page loop's stopped close — the control
+ * settled (a failed poll is raised, and `execute` closes the row failed), the
+ * known-404 probe recorded as skipped, then one `closeCrawl('stopped')` whose
+ * UPDATE reads the request off the row — less everything that never ran: no
+ * discovery evidence is written and nothing is enqueued, so the summary's
+ * discovery fields are null, and no writer counted, so the cap-exceeded column
+ * is left alone (`refsCapped: null`).
+ *
+ * ONE ORDER DIFFERS, deliberately: the control is settled BEFORE the 404 skip
+ * is written, where the page loop writes the skip first and raises a poll
+ * failure before it. Settling first is what keeps a failed poll from leaving
+ * a "crawl stopped" sentence on a row that then closes `failed`; the page loop
+ * gets the same guarantee from raising the poll failure ahead of its probe.
+ *
+ * A stop after the run cleared the staged sitemap alternates finds evidence an
+ * EARLIER run kept already marked `interrupted`: `runToCompletion` writes the
+ * mark ahead of the clear (rulings R8, R10), so this close has nothing to add.
+ *
+ * The page count is the frontier's, as the robots refusal's is: a resume
+ * stopped here keeps what its earlier runs crawled.
+ */
+async function closeStoppedBeforePages(
+  db: Db,
+  crawlId: string,
+  watcher: ControlWatcher,
+): Promise<CrawlSummary> {
+  await settleControl(watcher);
+  await writeNotFoundProbe(db, crawlId, { skipped: STOPPED_BEFORE_404_PROBE });
+  const crawled = crawledRows(await frontierCounts(db, crawlId));
+  const closed = await closeCrawl(db, crawlId, "stopped", crawled, null, null, watcher.stopReason());
+  return summarise(
+    db,
+    crawlId,
+    closed,
+    crawled,
+    emptyWriterStats(),
+    null,
+    null,
+    null,
+    null,
+    stoppedNote(closed),
+  );
+}
+
+/**
  * The summary's sentence for a stopped run, from the frontier as the close
  * left it. A function of the counts because `summarise` reads them once.
  */
@@ -2995,6 +3224,13 @@ function discoveryEvidence(
   };
 }
 
+/**
+ * The known-404 probe's record on a stopped run — written by the page loop's
+ * stopped close (`probeKnownMissing`) and by a stop in the host probe or the
+ * sitemap walk (`closeStoppedBeforePages`) alike.
+ */
+const STOPPED_BEFORE_404_PROBE = "crawl stopped (paused or cancelled) before the known-404 probe";
+
 async function writeNotFoundProbe(
   db: Db,
   crawlId: string,
@@ -3026,6 +3262,10 @@ async function writeNotFoundProbe(
  * Every reason not to probe is written down instead of leaving the column null
  * (hard rule 7): a null means "this crawl predates the probe", and a reader
  * cannot be left guessing which of the two it is looking at.
+ *
+ * Answers `"aborted"`, having written nothing, when `opts.signal` fires while
+ * the probe waits for its slot or is on the wire (27d): the caller records the
+ * stop, or raises the failed poll that fired it.
  */
 async function probeKnownMissing(
   db: Db,
@@ -3038,22 +3278,21 @@ async function probeKnownMissing(
     credentials: CredentialTarget | undefined;
     pagesCrawled: number;
     aborted: boolean;
+    signal: AbortSignal;
   },
-): Promise<void> {
+): Promise<"recorded" | "aborted"> {
   if (opts.aborted) {
     // The crawl was told to stop (paused or cancelled). Issuing another
     // request would be the one thing a stop is meant to prevent; a resume will
     // take the sample.
-    await writeNotFoundProbe(db, crawlId, {
-      skipped: "crawl stopped (paused or cancelled) before the known-404 probe",
-    });
-    return;
+    await writeNotFoundProbe(db, crawlId, { skipped: STOPPED_BEFORE_404_PROBE });
+    return "recorded";
   }
   if (opts.pagesCrawled === 0) {
     await writeNotFoundProbe(db, crawlId, {
       skipped: "no pages crawled: nothing to compare a 404 template against",
     });
-    return;
+    return "recorded";
   }
 
   const probeUrl = `${new URL(config.siteUrl).origin}/__ariadne-404-probe-${randomUUID()}`;
@@ -3061,17 +3300,28 @@ async function probeKnownMissing(
     await writeNotFoundProbe(db, crawlId, {
       skipped: `robots.txt disallows the probe path (${probeUrl})`,
     });
-    return;
+    return "recorded";
   }
 
-  await gate.acquire(new URL(probeUrl).host);
-  const result = await fetchPage(probeUrl, {
-    userAgent: config.userAgent,
-    allowPrivate: opts.allowPrivate,
-    credentials: opts.credentials,
-    maxUrlLength: config.maxUrlLength ?? CRAWL_DEFAULTS.maxUrlLength,
-    timeoutMs: FETCH_TIMEOUT_MS,
-  });
+  // A stop wakes the slot wait and aborts the request on the wire (27d): the
+  // probe is a request to the site like any other, and a stop is honoured in
+  // whatever phase it lands. Nothing is written for it here; the caller decides
+  // what the stop means (a stopped close, or a failed poll raised).
+  if (!(await gate.acquire(new URL(probeUrl).host, opts.signal))) return "aborted";
+  let result: FetchResult;
+  try {
+    result = await fetchPage(probeUrl, {
+      userAgent: config.userAgent,
+      allowPrivate: opts.allowPrivate,
+      credentials: opts.credentials,
+      maxUrlLength: config.maxUrlLength ?? CRAWL_DEFAULTS.maxUrlLength,
+      timeoutMs: FETCH_TIMEOUT_MS,
+      signal: opts.signal,
+    });
+  } catch (error) {
+    if (error instanceof FetchAbortedError && opts.signal.aborted) return "aborted";
+    throw error;
+  }
   // Only a 200 with HTML carries a template. Everything else — the 404 we
   // hoped for, a redirect, a block — is recorded as the class it was.
   const analysis =
@@ -3086,6 +3336,7 @@ async function probeKnownMissing(
     wordCount: analysis?.wordCount ?? null,
     simhash: analysis === null ? null : String(BigInt.asIntN(64, analysis.simhash)),
   });
+  return "recorded";
 }
 
 /**
@@ -3186,9 +3437,14 @@ async function persistSitemap(
   db: Db,
   crawlId: string,
   discovery: DiscoveryResult,
-): Promise<void> {
+  // The run's stop signal (Phase 27d), asked before every batch: true when
+  // every entry was written, false when a stop came first.
+  signal: AbortSignal,
+  onBatch: LoopTestHooks["onSeedingBatch"],
+): Promise<boolean> {
   const entries = discovery.sitemapEntries;
   for (let i = 0; i < entries.length; i += SITEMAP_BATCH) {
+    if (signal.aborted) return false;
     const batch = entries.slice(i, i + SITEMAP_BATCH).map((entry) => {
       const normalised = normalizeUrl(entry.url);
       if (normalised === null) {
@@ -3206,7 +3462,9 @@ async function persistSitemap(
     // the same sitemap. The first read's row stands. `lastmod` is the sitemap's
     // own text, so the batch passes the storability boundary (ruling R10).
     await db.insert(sitemapUrls).values(storableDeep(batch)).onConflictDoNothing();
+    await onBatch?.("sitemap_urls", signal);
   }
+  return true;
 }
 
 /**
@@ -3236,6 +3494,8 @@ export class SitemapRowSink implements SitemapSink {
   constructor(
     private readonly db: Db,
     private readonly crawlId: string,
+    /** TEST ONLY: `LoopTestHooks.onSitemapFlush`, awaited after each flush. */
+    private readonly onFlush?: () => Promise<void>,
   ) {}
 
   private normalised(url: string): string {
@@ -3275,6 +3535,7 @@ export class SitemapRowSink implements SitemapSink {
       const batch = this.alternates.splice(0, SITEMAP_BATCH);
       await this.db.insert(sitemapHreflang).values(storableDeep(batch));
     }
+    await this.onFlush?.();
   }
 }
 
@@ -3819,7 +4080,8 @@ async function summarise(
   closed: ClosedAs,
   pagesCrawled: number,
   writerStats: PageWriterStats,
-  discovery: DiscoveryResult,
+  /** Null when the run was stopped before its discovery was recorded. */
+  discovery: DiscoveryResult | null,
   pageTemplates: PageTemplateInference | null,
   resources: ResourcePassSummary | null,
   recheck: RecheckPassSummary | null,
@@ -3833,12 +4095,18 @@ async function summarise(
     pagesCrawled,
     frontier,
     writer: writerStats,
-    robots: { outcome: discovery.robots.outcome, note: discovery.robots.note },
-    discovery: {
-      sitemapEntries: discovery.sitemapEntries.length,
-      truncation: discovery.truncation,
-    },
-    sitemapsRead: discovery.sitemapsRead,
+    robots:
+      discovery === null
+        ? null
+        : { outcome: discovery.robots.outcome, note: discovery.robots.note },
+    discovery:
+      discovery === null
+        ? null
+        : {
+            sitemapEntries: discovery.sitemapEntries.length,
+            truncation: discovery.truncation,
+          },
+    sitemapsRead: discovery === null ? null : discovery.sitemapsRead,
     pageTemplates,
     resources,
     recheck,

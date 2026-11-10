@@ -27,8 +27,9 @@
  */
 import { z } from "zod";
 
+import { nearestAccepted, positionOf, unknownKeyDetail } from "../api/errors.js";
 import { resolveRuleCaps } from "./query/crawl-evidence.js";
-import type { Registry } from "./registry/registry.js";
+import { RULESET_VERSION, type Registry } from "./registry/registry.js";
 import type { IssueType, Priority } from "./registry/types.js";
 import {
   DEFAULT_THRESHOLDS,
@@ -74,22 +75,42 @@ export interface JudgementBlock {
  *  - `unknown-rule`: it names a rule id the registry does not have — on a stored
  *    block, a rule a later ruleset removed (the API maps this to CONFLICT, as it
  *    does a stored finding of a removed rule);
+ *  - `unknown-key`: an object in it carries a key it may not — `severity` on a
+ *    rule's override among them (VALIDATION; `unknown_field` in a config check);
  *  - `invalid`: anything else about the block's shape or values (VALIDATION).
  */
-export type JudgementErrorReason = "unknown-rule" | "invalid";
+export type JudgementErrorReason = "unknown-rule" | "unknown-key" | "invalid";
 
-/** A refused judgement block, naming the offending dotted path. */
+/**
+ * A refused judgement block, naming the offending dotted path.
+ *
+ * Neither `path` nor `message` ever holds a key the caller SENT that is not
+ * ours (27d spec §4): an unknown key or rule id is named by its position, and
+ * `path` stops at its parent. `ruleId` is the one exception, and it never
+ * reaches a request's error: on an `unknown-rule` refusal it holds the id, for
+ * `readStoredJudgement` — whose block was validated when it was stored, so the
+ * id is one an earlier ruleset defined — to name the override to remove.
+ */
 export class JudgementError extends Error {
+  readonly ruleId: string | undefined;
+
   constructor(
     readonly path: string,
     message: string,
     readonly reason: JudgementErrorReason,
-    options?: ErrorOptions,
+    options?: ErrorOptions & { ruleId?: string },
   ) {
     super(message, options);
     this.name = "JudgementError";
+    this.ruleId = options?.ruleId;
   }
 }
+
+/** The keys a judgement block may carry, in the order a refusal lists them. */
+export const JUDGEMENT_BLOCK_KEYS: readonly string[] = ["rules", "thresholds", "findingCap"];
+
+/** The keys one rule's override may carry. */
+export const RULE_OVERRIDE_KEYS: readonly string[] = ["disabled", "type", "priority"];
 
 /**
  * The sentences a refused block's detail is written in. Exported because the
@@ -102,9 +123,19 @@ export const JUDGEMENT_DETAIL = {
   severity:
     "severity cannot be overridden: it is the engine's fact about the rule; " +
     "change its priority or disable it instead",
-  unknownKey: "unknown key",
-  notOverridableThreshold: `not an overridable threshold (overridable: ${THRESHOLD_NAMES.join(", ")})`,
-  unknownRule: (id: string): string => `no rule '${id}' in ruleset`,
+  /**
+   * An unknown key, by position (27d spec §4): `container` is the object it
+   * was sent in, `accepted` the keys that object may carry.
+   */
+  unknownKey: (container: unknown, key: string, accepted: readonly string[], others = 0): string =>
+    unknownKeyDetail(positionOf(container, key), key, accepted, others),
+  /**
+   * A rule id this ruleset does not define, by position, with the finding
+   * rule's id it most likely meant. Never the id as sent.
+   */
+  unknownRule: (position: number, nearest: string | null): string =>
+    `key ${position} in the order sent names no rule in ruleset ${RULESET_VERSION}` +
+    (nearest === null ? "" : `; did you mean '${nearest}'?`),
   metricRule: (id: string): string =>
     `'${id}' is a metric rule; it produces no findings, so it cannot be ` +
     "disabled, retyped or reprioritised",
@@ -148,11 +179,47 @@ const thresholdsSchema = z.strictObject(
 
 const findingCapSchema = z.number().int().min(1).nullable();
 
+/**
+ * The block's outer shape. `rules` is a record of `unknown` here, and each
+ * entry is checked by `parseJudgement` AFTER its id: a zod issue inside a
+ * record entry carries the entry's key in its path, and an id this ruleset
+ * does not define is a key the caller sent, never to be repeated (27d).
+ */
 const blockSchema = z.strictObject({
-  rules: z.record(z.string(), ruleOverrideSchema).optional(),
+  rules: z.record(z.string(), z.unknown()).optional(),
   thresholds: thresholdsSchema.optional(),
   findingCap: findingCapSchema.optional(),
 });
+
+/** What the object at `parent` (a path in the block) may carry, for an unknown key's "Accepted:". */
+function acceptedInBlock(parent: readonly string[]): readonly string[] {
+  if (parent.length === 0) return JUDGEMENT_BLOCK_KEYS;
+  if (parent.length === 1 && parent[0] === "thresholds") return THRESHOLD_NAMES;
+  if (parent.length === 2 && parent[0] === "rules") return RULE_OVERRIDE_KEYS;
+  throw new Error(`judgement: no object at '${parent.join(".")}' takes keys`);
+}
+
+/** What the object at `parent` in a stamp may carry. */
+function acceptedInStamp(parent: readonly string[]): readonly string[] {
+  if (parent.length === 0) return ["disabledRules", "thresholds", "findingCap"];
+  if (parent.length === 1 && parent[0] === "thresholds") return THRESHOLD_NAMES;
+  throw new Error(`judgement stamp: no object at '${parent.join(".")}' takes keys`);
+}
+
+/** The value at `segments` under `root`, or undefined where the path leaves the objects. */
+function valueAt(root: unknown, segments: readonly string[]): unknown {
+  let node = root;
+  for (const segment of segments) {
+    if (node === null || typeof node !== "object" || !Object.hasOwn(node, segment)) return undefined;
+    node = (node as Record<string, unknown>)[segment];
+  }
+  return node;
+}
+
+/** Whether `container` is an object that has `key` as its own key. */
+function hasOwnKey(container: unknown, key: string): boolean {
+  return container !== null && typeof container === "object" && Object.hasOwn(container, key);
+}
 
 /**
  * A stamp's thresholds: EVERY overridable threshold, each the effective value
@@ -172,27 +239,50 @@ const stampSchema = z.strictObject({
   findingCap: findingCapSchema.optional(),
 });
 
-/** The first zod issue, as a dotted path and a sentence that names it. */
-function firstIssue(error: z.ZodError): { path: string; message: string } {
+/**
+ * The first zod issue, as a dotted path and a sentence that names it.
+ *
+ * `base` is where the parsed value sits in the block (a rule's override is
+ * parsed on its own, at `["rules", id]` — an id this ruleset defines). An
+ * unknown key is named by its position in the object it was found in — in
+ * `sent` when the caller sent that object, else in `raw` — and the path stops
+ * at that object: the key itself is never repeated (27d spec §4). `severity`,
+ * the one unknown key with its own sentence, is our word, not the caller's.
+ */
+function firstIssue(
+  error: z.ZodError,
+  raw: unknown,
+  sent: unknown,
+  accepted: (parent: readonly string[]) => readonly string[],
+  base: readonly string[] = [],
+): { path: string; message: string; unknownKey: boolean } {
   const issue = error.issues[0];
   if (issue === undefined) throw new Error("zod reported a failure with no issue");
-  const segments = issue.path.map(String);
+  const segments = [...base, ...issue.path.map(String)];
   let detail = issue.message;
   if (issue.code === "unrecognized_keys") {
     const key = issue.keys[0];
     if (key === undefined) throw new Error("zod reported unrecognized keys with no key");
-    segments.push(key);
-    const parent = issue.path.map(String);
-    if (key === "severity" && parent[0] === "rules" && parent.length === 2) {
+    if (key === "severity" && segments[0] === "rules" && segments.length === 2) {
+      segments.push(key);
       detail = JUDGEMENT_DETAIL.severity;
-    } else if (parent.length === 1 && parent[0] === "thresholds") {
-      detail = JUDGEMENT_DETAIL.notOverridableThreshold;
     } else {
-      detail = JUDGEMENT_DETAIL.unknownKey;
+      const inSent = valueAt(sent, segments);
+      const container = hasOwnKey(inSent, key) ? inSent : valueAt(raw, segments);
+      detail = JUDGEMENT_DETAIL.unknownKey(container, key, accepted(segments), issue.keys.length - 1);
     }
   }
   const path = segments.join(".");
-  return { path, message: `${path === "" ? "(the block)" : path}: ${detail}` };
+  return {
+    path,
+    message: `${path === "" ? "(the block)" : path}: ${detail}`,
+    unknownKey: issue.code === "unrecognized_keys",
+  };
+}
+
+/** A zod refusal of the block, or of one rule's override, as a `JudgementError`. */
+function refusalOf(issue: { path: string; message: string; unknownKey: boolean }): JudgementError {
+  return new JudgementError(issue.path, issue.message, issue.unknownKey ? "unknown-key" : "invalid");
 }
 
 /**
@@ -201,28 +291,64 @@ function firstIssue(error: z.ZodError): { path: string; message: string } {
  * override, `disabled: false`, an out-of-range or non-integer threshold, a
  * crossed pair and a findingCap that is neither a positive integer nor null are
  * all refused, each as a `JudgementError` naming a dotted path.
+ *
+ * No refusal repeats a key the caller sent that is not ours (27d spec §4): an
+ * unknown key or rule id is named by its position, and each rule's id is
+ * checked BEFORE its override, so an unknown id's path never reaches past
+ * `rules`. `sent` is the object the caller actually sent, when `raw` is not
+ * it: `crawl_config_set` parses the stored block merged with its patch, and a
+ * position is counted in the patch. An unknown rule id that is NOT in `sent`
+ * came from the stored block — an override a later ruleset orphaned, an id
+ * that was ours when it was stored — and is named, so it can be removed.
  */
-export function parseJudgement(raw: unknown, registry: Registry): JudgementBlock {
+export function parseJudgement(raw: unknown, registry: Registry, sent: unknown = raw): JudgementBlock {
   const parsed = blockSchema.safeParse(raw);
   if (!parsed.success) {
-    const { path, message } = firstIssue(parsed.error);
-    throw new JudgementError(path, message, "invalid");
+    throw refusalOf(firstIssue(parsed.error, raw, sent, acceptedInBlock));
   }
-  const block = parsed.data as JudgementBlock;
+  const { rules: rawRules, ...rest } = parsed.data;
+  let rules: Record<string, RuleOverride> | undefined = undefined;
 
-  if (block.rules !== undefined) {
+  if (rawRules !== undefined) {
+    // The entries as sent, in the order sent (zod's record copy drops a
+    // `__proto__` key without a word; this sees it, and refuses it as an id).
+    const entries = raw as { rules: Record<string, unknown> };
+    const findingIds = registry
+      .all()
+      .filter((r) => r.kind !== "metric")
+      .map((r) => r.id);
     const kinds = new Map(registry.all().map((r) => [r.id, r.kind]));
-    for (const id of Object.keys(block.rules)) {
-      const path = `rules.${id}`;
+    const overrides: Record<string, RuleOverride> = {};
+    for (const id of Object.keys(entries.rules)) {
       const kind = kinds.get(id);
       if (kind === undefined) {
-        throw new JudgementError(path, `${path}: ${JUDGEMENT_DETAIL.unknownRule(id)}`, "unknown-rule");
+        const sentRules = valueAt(sent, ["rules"]);
+        if (hasOwnKey(sentRules, id)) {
+          const detail = JUDGEMENT_DETAIL.unknownRule(positionOf(sentRules, id), nearestAccepted(id, findingIds));
+          throw new JudgementError("rules", `rules: ${detail}`, "unknown-rule", { ruleId: id });
+        }
+        throw new JudgementError(
+          `rules.${id}`,
+          `rules.${id}: the stored override of rule '${id}' names no rule in ruleset ` +
+            `${RULESET_VERSION}; remove it by sending it as null`,
+          "unknown-rule",
+          { ruleId: id },
+        );
       }
+      const path = `rules.${id}`;
       if (kind === "metric") {
         throw new JudgementError(path, `${path}: ${JUDGEMENT_DETAIL.metricRule(id)}`, "invalid");
       }
+      const override = ruleOverrideSchema.safeParse(entries.rules[id]);
+      if (!override.success) {
+        throw refusalOf(firstIssue(override.error, raw, sent, acceptedInBlock, ["rules", id]));
+      }
+      overrides[id] = override.data as RuleOverride;
     }
+    rules = overrides;
   }
+  // In the shape's key order, as the zod parse of the whole block used to give it.
+  const block: JudgementBlock = rules === undefined ? rest : { rules, ...rest };
 
   if (block.thresholds !== undefined) {
     const given = block.thresholds;
@@ -328,14 +454,16 @@ export function readStoredJudgement(
   if (raw === null) return null;
   let block: JudgementBlock;
   try {
-    block = parseJudgement(raw, registry);
+    // Nothing here was sent by this request: an id the ruleset lacks is an
+    // orphaned stored override, named so it can be removed.
+    block = parseJudgement(raw, registry, {});
   } catch (error) {
     if (!(error instanceof JudgementError)) throw error;
     throw new JudgementError(
       error.path,
       `crawl ${crawlId}: stored judgement block is refused: ${error.message}`,
       error.reason,
-      { cause: error },
+      { cause: error, ...(error.ruleId === undefined ? {} : { ruleId: error.ruleId }) },
     );
   }
   if (block.findingCap !== undefined) {
@@ -364,7 +492,7 @@ export function readStamp(raw: unknown, crawlId: string): JudgedWith {
   }
   const parsed = stampSchema.safeParse(raw);
   if (!parsed.success) {
-    const { message } = firstIssue(parsed.error);
+    const { message } = firstIssue(parsed.error, raw, raw, acceptedInStamp);
     throw new Error(`crawl ${crawlId}: stored rules_judged_with_jsonb is malformed at ${message}`);
   }
   return parsed.data as JudgedWith;

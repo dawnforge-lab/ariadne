@@ -1651,7 +1651,7 @@ describe("POST /crawls/:id/render with a named list", () => {
       body: { pages: [`${site}/a`] },
     });
     expect(res.status).toBe(400);
-    expect(String(res.body["error"])).toContain("unknown field 'pages'");
+    expect(String(res.body["error"])).toContain("body has an unknown field (key 1 in the order sent)");
   });
 
   it("400s urls that is not an array of strings", async () => {

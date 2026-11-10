@@ -747,11 +747,20 @@ describe("a robots-unreachable close while the control poll has failed (27b fina
   });
 
   it("keeps the robots note in the failure reason beside the poll failure", async () => {
-    const run = runCrawl(db, stallConfig({ siteUrl: `${robotsDownBase}/` }));
+    // The poll fails once discovery has concluded robots.txt unreachable: a
+    // poll that fails DURING the walk stops it (27d), and no note exists then.
+    let known!: (crawlId: string) => void;
+    const crawlIdKnown = new Promise<string>((resolve) => (known = resolve));
+    const run = runCrawl(db, stallConfig({ siteUrl: `${robotsDownBase}/` }), undefined, {
+      afterDiscovery: async (stop) => {
+        // A value this engine never writes: the watcher's next poll fails on it.
+        await db.update(crawls).set({ controlRequest: "stop" }).where(eq(crawls.id, await crawlIdKnown));
+        await until("the failed poll to stop the run", () => stop.aborted, 10_000);
+      },
+    });
     run.catch(() => undefined); // asserted below; never left unhandled
     const id = await newCrawlOf(`${robotsDownBase}/`);
-    // A value this engine never writes: the watcher's next poll fails on it.
-    await db.update(crawls).set({ controlRequest: "stop" }).where(eq(crawls.id, id));
+    known(id);
 
     const error = await run.then(
       () => {

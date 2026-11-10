@@ -182,6 +182,9 @@ skill states the measured figure instead of promising a second.
    abort applies to the page crawl only. If wrong, nothing is lost but a stop during those
    passes can take up to one fetch deadline (20 s); the alternative is parked as
    `docs/gates/phase-27b-ruling4-inflight.patch` (committed in 27c).
+   *Note, 2026-11-10: Phase 27d implemented the alternative. The recheck and resource
+   passes now abort the in-flight request on a stop (`docs/gates/phase-27d.md` §3). The
+   text above is the record of 27b and is left as it was.*
 5. **`crawl_resume` refuses (409) while `control_request` is non-null**, naming the request
    and pointing at `crawl_mark_failed` for a crawl whose worker is gone. If wrong, an orphan
    with a pending request needs two calls (mark failed, then resume), where the alternative
@@ -269,6 +272,10 @@ From the spec text (owner to see in review):
     resource passes keep their contract (no new request after a stop; the one in flight
     settles and is recorded), so a stop during them can take up to one fetch deadline, 20 s.
     Discovery is not interrupted either (Deviation 2).
+    *Note, 2026-11-10: superseded by Phase 27d. Discovery (the host probe, the sitemap walk,
+    the post-discovery seeding), the recheck pass and the resource pass are all stopped
+    within about 1 s (bound 2 s); see `docs/gates/phase-27d.md` §3. Deviation 2 stays the
+    27b record.*
 
 Added by the gate run:
 

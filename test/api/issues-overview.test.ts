@@ -309,3 +309,46 @@ describe("issues_overview CSV", () => {
     for (const line of lines.slice(1)) expect(line).toMatch(/,\d+,,/);
   });
 });
+
+describe("a list crawl names what it did not measure as {id, reason} (27d)", () => {
+  const listId = `crawl_issues_overview_list_${runId}`;
+  const SPIDER_REASON = "a list crawl follows no links, so this rule's evidence was not gathered";
+  const SITEMAP_REASON = "a list crawl read no sitemap, so this rule's evidence was not gathered";
+
+  it("reads one shape on issues_list, issues_overview, metrics and the issues export", async () => {
+    extraCrawls.push(listId);
+    await db.insert(crawls).values({
+      id: listId,
+      siteUrl: `${SITE}/`,
+      config: { siteUrl: `${SITE}/`, maxPages: 100, userAgent: "AriadneBot-test", mode: "list" },
+      discovery: { ...mkDiscovery(), sitemapsRead: false },
+      rulesetVersion: "test",
+      status: "finished",
+      pagesCrawled: 1,
+    });
+    await db.insert(pages).values(
+      mkPage({
+        id: `page_${randomUUID()}`,
+        crawlId: listId,
+        url: `${SITE}/`,
+        urlNormalised: `${SITE}/`,
+        depth: 0,
+        clickDepth: 0,
+        discoveredVia: "seed",
+      }),
+    );
+    await service.runRulesForCrawl(listId);
+
+    const overview = await service.issuesOverview(listId, { includeZero: true });
+    const nm = overview.notMeasured;
+    expect(nm.find((n) => n.id === "links.orphan")).toEqual({ id: "links.orphan", reason: SPIDER_REASON });
+    expect(nm.find((n) => n.id === "sitemap.invalid")).toEqual({ id: "sitemap.invalid", reason: SITEMAP_REASON });
+    expect(nm.map((n) => n.id)).toEqual(nm.map((n) => n.id).sort());
+    for (const n of nm) expect(Object.keys(n).sort()).toEqual(["id", "reason"]);
+
+    expect((await service.listIssues(listId, {})).notMeasured).toEqual(nm);
+    expect((await service.listMetrics(listId, {})).notMeasured).toEqual(nm);
+    const exported = await service.exportCrawl(listId, { dataset: "issues" });
+    expect(exported.notMeasured).toEqual(nm);
+  });
+});

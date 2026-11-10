@@ -79,6 +79,16 @@ export interface ServiceConfig {
    */
   resolveAddress?: AddressResolver;
   /**
+   * TEST ONLY, like `resolveAddress` and `RenderTestFaults`: awaited inside
+   * `crawl_config_set` at two points, `"written"` (the row is updated, the
+   * transaction not yet committed; a throw rolls it back) and `"committed"`
+   * (the transaction has committed, the credential store has not yet settled).
+   * A suite holds the second to dequeue a crawl inside that window (27c M9).
+   * `loadApiConfig` does not read it, the entrypoints never set it, and no
+   * request field may ever map to it.
+   */
+  afterConfigWrite?: (phase: "written" | "committed") => Promise<void>;
+  /**
    * Where `GET /crawls/:id/export` (and the MCP `export_crawl` tool) writes its
    * files. Defaults to `exports/` under the process's working directory, and the
    * `api:serve` / `mcp:serve` entrypoints let an operator move it with

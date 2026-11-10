@@ -516,12 +516,16 @@ alone and on the next full run:
   on a resume without asking again". It asserts a paced gap of at least 985 ms and saw
   982 ms once (Task 13).
 - The same describe, "clamps mid-crawl off the seed fetch when the host probe is off,
-  and records when" (`loop.test.ts:2220`, the same `minGap() >= 1000 - SLACK_MS`
+  and records when" (`loop.test.ts:2233`, the same `minGap() >= 1000 - SLACK_MS`
   assertion). It saw 981 ms in this gate's first full run on `7ddab87`, 104 files /
   2,803 tests with 1 failed and 0 skipped. All 10 "platform profile" tests then passed
   run alone (`-t "platform profile"`, 43 s).
 - `test/crawl/renderer.test.ts:1321`, inside "never predicts a URL twice once a prediction
   for it was wrong" (Task 10, and once unidentified in Task 11).
+  *Note, 2026-11-10: Phase 27d rewrote this test to assert the releases themselves
+  rather than a paced count (it now starts at `renderer.test.ts:1304`), and the
+  `minGap() >= 1000 - SLACK_MS` assertions above were replaced by slot-gap checks
+  (`docs/gates/phase-27d.md` §1).*
 
 Evidence that 26a did not cause them:
 

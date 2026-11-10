@@ -166,7 +166,12 @@ import { and, eq, inArray, isNull, sql } from "drizzle-orm";
 import type { Db } from "../../db/client.js";
 import { pages } from "../../db/schema.js";
 import type { RobotsInfo } from "../discovery.js";
-import { fetchPage, type FetchClass } from "../fetch-page.js";
+import {
+  FetchAbortedError,
+  fetchPage,
+  type FetchClass,
+  type FetchResult,
+} from "../fetch-page.js";
 import type { CredentialTarget } from "../credentials.js";
 import type { HostGate } from "../politeness.js";
 import { isUrlAllowed } from "../url-policy.js";
@@ -654,12 +659,22 @@ export async function recheckServerErrors(
         // spacing is noticed now, not when the slot comes due. Aborted, the row
         // is left exactly as it was, and the pass reports `aborted`.
         if (!(await gate.acquire(gateHost, opts.signal))) return false;
-        const result = await fetchPage(item.url, {
-          userAgent: opts.userAgent,
-          allowPrivate,
-          timeoutMs,
-          credentials: opts.credentials,
-        });
+        let result: FetchResult;
+        try {
+          result = await fetchPage(item.url, {
+            userAgent: opts.userAgent,
+            allowPrivate,
+            timeoutMs,
+            credentials: opts.credentials,
+            // A stop reaches the request on the wire (Phase 27b, Ruling 4).
+            signal: opts.signal,
+          });
+        } catch (error) {
+          // Stopped mid-request: the row keeps both nulls (nothing was
+          // decided), the gate hears nothing, and the pass reports `aborted`.
+          if (error instanceof FetchAbortedError) return false;
+          throw error;
+        }
         // The gate hears about it before anything else does, so a 503 on recheck
         // escalates this host for whatever comes next — the rest of this pass, and
         // the resource pass that shares this gate.

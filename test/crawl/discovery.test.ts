@@ -1176,7 +1176,7 @@ describe("discover: memberships, alternates and sitemapFacts", () => {
     const d = await discover(bare, {
       ...OPTS,
       sink: slow,
-      timeoutMs: 1_000,
+      sitemapTiming: { headersMs: 1_000, idleMs: 1_000, totalMs: 1_000 },
       extraSitemaps: [`${bare}/cut.xml`],
     });
     // Several flushes, each longer than the whole deadline.
@@ -1296,5 +1296,176 @@ describe("robotsRulesOf: the line that decided", () => {
   it("prefixes the stored reason so url-policy refusals stay distinguishable", () => {
     expect(ROBOTS_BLOCKED_REASON_PREFIX).toBe("robots.txt: ");
     expect(robotsBlockedReason("Disallow: /private/")).toBe("robots.txt: Disallow: /private/");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Phase 27d: sitemap timing (headers / idle / document total) and walk budget.
+// Appended at the end: docs cite this file's tests by line number.
+// ---------------------------------------------------------------------------
+import {
+  DISCOVERY_WALK_BUDGET_MS,
+  ROBOTS_TIMING,
+  SITEMAP_TIMING,
+  type DocTiming,
+} from "../../src/crawl/discovery.js";
+
+describe("discover: sitemap timing and walk budget (27d)", () => {
+  /**
+   * Scaled, so the suite does not sleep minutes. Ruling R7: every fixture delay
+   * sits at least 300 ms from the limit it must (or must not) trip, because the
+   * fixture server and the client share one event loop.
+   */
+  const SCALED: DocTiming = { headersMs: 1_000, idleMs: 300, totalMs: 1_200 };
+  const HEADERS: DocTiming = { headersMs: 900, idleMs: 1_000, totalMs: 3_000 };
+  const IDLE: DocTiming = { headersMs: 2_000, idleMs: 300, totalMs: 5_000 };
+  const FLUSH: DocTiming = { headersMs: 1_000, idleMs: 900, totalMs: 1_200 };
+  let timingServer: Server;
+  let t: string;
+
+  const wait = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+  const page = (n: number) => `${t}/p/${n}`;
+
+  beforeAll(async () => {
+    timingServer = createServer((req, res) => {
+      const path = (req.url ?? "").split("?")[0] ?? "";
+      void (async () => {
+        if (path === "/robots.txt") {
+          res.statusCode = 404;
+          res.end();
+        } else if (path === "/headers-450.xml") {
+          await wait(450);
+          xml(res, urlset([{ loc: page(1) }]));
+        } else if (path === "/headers-1300.xml") {
+          await wait(1_300);
+          xml(res, urlset([{ loc: page(1) }]));
+        } else if (path === "/idle.xml") {
+          const body = urlset([{ loc: page(1) }, { loc: page(2) }, { loc: page(3) }]);
+          res.setHeader("content-type", "application/xml");
+          res.write(body.slice(0, Math.floor(body.length / 2)));
+          await wait(800);
+          res.end(body.slice(Math.floor(body.length / 2)));
+        } else if (/^\/hop\/[12]$/.test(path)) {
+          // Each hop answers in 500 ms (< headers 600); three of them pass 1.2 s.
+          await wait(500);
+          res.statusCode = 302;
+          res.setHeader("location", path === "/hop/1" ? `${t}/hop/2` : `${t}/hop/3`);
+          res.end();
+        } else if (path === "/hop/3") {
+          await wait(500);
+          xml(res, urlset([{ loc: page(1) }]));
+        } else if (path === "/chunked.xml") {
+          // Three chunks, each arriving on its own.
+          res.setHeader("content-type", "application/xml");
+          res.write(
+            '<?xml version="1.0" encoding="UTF-8"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">',
+          );
+          for (let i = 1; i <= 3; i++) {
+            await wait(100);
+            res.write(`<url><loc>${page(i)}</loc></url>`);
+          }
+          await wait(100);
+          res.end("</urlset>");
+        } else if (path === "/index.xml") {
+          xml(res, sitemapIndex([1, 2, 3, 4, 5].map((n) => `${t}/child/${n}.xml`)));
+        } else if (/^\/child\/\d\.xml$/.test(path)) {
+          await wait(400);
+          const n = Number(path.slice(7, 8));
+          xml(res, urlset([{ loc: page(n) }]));
+        } else {
+          res.statusCode = 404;
+          res.end();
+        }
+      })();
+    });
+    t = await listen(timingServer);
+  });
+
+  afterAll(async () => {
+    timingServer.closeAllConnections();
+    await new Promise<void>((r) => timingServer.close(() => r()));
+  });
+
+  const walk = (sitemap: string, extra: object = {}) =>
+    discover(t, {
+      ...OPTS,
+      sink: recordingSink(),
+      extraSitemaps: [`${t}${sitemap}`],
+      sitemapTiming: SCALED,
+      ...extra,
+    });
+
+  it("pins the defaults to the spec values", () => {
+    expect(SITEMAP_TIMING).toEqual({ headersMs: 60_000, idleMs: 30_000, totalMs: 120_000 });
+    expect(ROBOTS_TIMING).toEqual({ headersMs: 20_000, idleMs: 20_000, totalMs: 20_000 });
+    expect(DISCOVERY_WALK_BUDGET_MS).toBe(600_000);
+  });
+
+  it("reads a document whose headers are late but within the limit", async () => {
+    const d = await walk("/headers-450.xml", { sitemapTiming: HEADERS });
+    expect(d.truncation.failures).toEqual([]);
+    expect(d.sitemapEntries.map((e) => e.url)).toEqual([page(1)]);
+    expect(d.truncation.timeLimited).toBe(false);
+  });
+
+  it("fails a document whose headers come too late, naming the headers limit", async () => {
+    const d = await walk("/headers-1300.xml", { sitemapTiming: HEADERS });
+    expect(d.truncation.failures).toEqual([
+      { url: `${t}/headers-1300.xml`, reason: "no headers within 0.9 s" },
+    ]);
+    expect(d.truncation.timeLimited).toBe(false);
+  });
+
+  it("fails a body that goes silent, naming the idle limit", async () => {
+    const d = await walk("/idle.xml", { sitemapTiming: IDLE });
+    expect(d.truncation.failures).toEqual([
+      { url: `${t}/idle.xml`, reason: "no data for 0.3 s" },
+    ]);
+  });
+
+  it("adds the hops up: three 500 ms hops fail the 1.2 s total (Review Focus 3)", async () => {
+    const d = await walk("/hop/1");
+    expect(d.truncation.failures).toEqual([
+      { url: `${t}/hop/1`, reason: "over 1.2 s in total" },
+    ]);
+  });
+
+  it("does not count flush time toward the total, the idle limit or the headers limit", async () => {
+    let flushes = 0;
+    const slow: SitemapSink = {
+      membership() {},
+      alternate() {},
+      async flush() {
+        flushes++;
+        await wait(1_500);
+      },
+    };
+    const d = await walk("/chunked.xml", { sink: slow, sitemapTiming: FLUSH });
+    expect(flushes).toBeGreaterThanOrEqual(3);
+    expect(d.truncation.failures).toEqual([]);
+    expect(d.sitemapEntries.map((e) => e.url)).toEqual([page(1), page(2), page(3)]);
+  });
+
+  it("stops a walk past its budget: entries read so far are kept, the rest is cut short, not failed", async () => {
+    const d = await walk("/index.xml", {
+      walkBudgetMs: 1_000,
+      // Per-document limits well above the budget: only the budget can fire.
+      sitemapTiming: { headersMs: 5_000, idleMs: 5_000, totalMs: 5_000 },
+    });
+    expect(d.truncation.timeLimited).toBe(true);
+    expect(d.truncation.failures).toEqual([]);
+    const urls = d.sitemapEntries.map((e) => e.url);
+    expect(urls).toContain(page(1));
+    expect(urls).not.toContain(page(5));
+    expect(urls.length).toBeLessThan(5);
+  });
+
+  it("a walk inside its budget is not time limited", async () => {
+    const d = await walk("/index.xml", {
+      walkBudgetMs: 10_000,
+      sitemapTiming: { headersMs: 5_000, idleMs: 5_000, totalMs: 5_000 },
+    });
+    expect(d.truncation.timeLimited).toBe(false);
+    expect(d.sitemapEntries).toHaveLength(5);
   });
 });

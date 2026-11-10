@@ -72,6 +72,7 @@ import { METRIC_SCOPES } from "../rules/registry/types.js";
 import type { ServiceConfig } from "./config.js";
 import { credentialInputSchemas } from "./config-schema.js";
 import { CSV_VIEWS, EXPORT_FORMATS } from "./csv.js";
+import { strictInput } from "./mcp-input.js";
 import {
   ApiService,
   COMPARE_SETS,
@@ -527,7 +528,7 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "once their own budget (default maxPages) was full — discoveries, not " +
         "distinct URLs, and non-zero means that rule's list is incomplete. " +
         "dropped null is a crawl from before this was counted, not zero.",
-      inputSchema: z.strictObject({ crawlId: crawlIdField() }),
+      inputSchema: strictInput({ crawlId: crawlIdField() }),
     },
     async ({ crawlId }) => run("crawl_status", () => service.getCrawl(crawlId)),
   );
@@ -550,7 +551,7 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "rather than treated as no filter.\n\n" +
         `Paginated: {items, nextCursor}; limit defaults to ${PAGE_SIZE_DEFAULT}, ` +
         `maximum ${PAGE_SIZE_MAX}. Pass nextCursor back as cursor to continue.`,
-      inputSchema: z.strictObject({
+      inputSchema: strictInput({
         siteUrl: z
           .string()
           .describe(
@@ -638,7 +639,7 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "pending URLs they now refuse become 'excluded' rows, and 'excluded' rows they " +
         "now admit go back into the frontier within maxPages. Pages already fetched " +
         "stay as they are.",
-      inputSchema: z.strictObject({ crawlId: crawlIdField(), ...credentialInputSchemas() }),
+      inputSchema: strictInput({ crawlId: crawlIdField(), ...credentialInputSchemas() }),
     },
     async ({ crawlId, ...credentials }) =>
       run("crawl_resume", () => service.resumeCrawl(crawlId, defined(credentials))),
@@ -672,7 +673,7 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "Asking again while a pause is pending answers the same and changes " +
         "nothing. REFUSED: a crawl with a cancel pending (the cancel wins); a crawl " +
         "already paused; a finished, failed or cancelled crawl, naming its status.",
-      inputSchema: z.strictObject({ crawlId: crawlIdField() }),
+      inputSchema: strictInput({ crawlId: crawlIdField() }),
     },
     async ({ crawlId }) => run("crawl_pause", () => service.pauseCrawl(crawlId)),
   );
@@ -704,7 +705,7 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "status; and a crawl a render pass or a rules run is working on in this " +
         "server — neither can be interrupted, so wait for crawl_render or " +
         "crawl_rules to answer and ask again.",
-      inputSchema: z.strictObject({ crawlId: crawlIdField() }),
+      inputSchema: strictInput({ crawlId: crawlIdField() }),
     },
     async ({ crawlId }) => run("crawl_cancel", () => service.cancelCrawl(crawlId)),
   );
@@ -725,7 +726,7 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "queued or running crawl (409 — pause or cancel it, wait until it stops); a " +
         "crawl with a pause or cancel pending; a crawl a render pass or rules run is " +
         "working on in this server; a crawl a worker still holds leases on.",
-      inputSchema: z.strictObject({
+      inputSchema: strictInput({
         crawlId: crawlIdField(),
         confirm: z.string().describe("The crawl id again, exactly as in crawlId."),
       }),
@@ -799,7 +800,7 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "crawl_config_get shows. A crawl started without credentials cannot be " +
         "rendered with them: set them with crawl_config_set while it is paused, or " +
         "start a new crawl.",
-      inputSchema: z.strictObject({
+      inputSchema: strictInput({
         crawlId: crawlIdField(),
         ...credentialInputSchemas(),
         urls: z
@@ -835,7 +836,7 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "Refused too for a crawl that never ran — paused or cancelled while still " +
         "queued, so it has no discovery evidence and nothing to judge. " +
         "Running it a second time re-judges the crawl with the current ruleset.",
-      inputSchema: z.strictObject({ crawlId: crawlIdField() }),
+      inputSchema: strictInput({ crawlId: crawlIdField() }),
     },
     async ({ crawlId }) => run("crawl_rules", () => service.runRulesForCrawl(crawlId)),
   );
@@ -857,7 +858,7 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "It is also not the only move on an abandoned crawl. crawl_resume takes " +
         "the same rows and CONTINUES them instead of retiring them, and it is the " +
         "better answer whenever the pages already fetched are worth keeping.",
-      inputSchema: z.strictObject({ crawlId: crawlIdField() }),
+      inputSchema: strictInput({ crawlId: crawlIdField() }),
     },
     async ({ crawlId }) => run("crawl_mark_failed", () => service.markCrawlFailed(crawlId)),
   );
@@ -897,7 +898,7 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "or null on a crawl nobody has " +
         "judged. judgementStale {stale, reasons} compares it with the current block " +
         "(reasons: overrides | thresholds | findingCap).",
-      inputSchema: z.strictObject({ crawlId: crawlIdField() }),
+      inputSchema: strictInput({ crawlId: crawlIdField() }),
     },
     async ({ crawlId }) => run("crawl_config_get", () => service.getCrawlConfig(crawlId)),
   );
@@ -959,7 +960,7 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "names the path, e.g. rules.title.too-long.severity); and any change while " +
         "crawl_rules is running over the crawl — wait for it to answer, then set it. " +
         "Nothing is written when a change is refused.",
-      inputSchema: z.strictObject({
+      inputSchema: strictInput({
         crawlId: crawlIdField(),
         crawl: z
           .record(z.string(), z.unknown())
@@ -1004,7 +1005,7 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "A default is what the ENGINE uses when the field is absent. The server's " +
         "operator may set their own defaults over it, so read config_validate's " +
         "effective config, not this, for what a crawl would actually run with.",
-      inputSchema: z.strictObject({}),
+      inputSchema: strictInput({}),
     },
     async () => run("config_schema", () => Promise.resolve(service.configSchema())),
   );
@@ -1025,7 +1026,7 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "effective, on a valid config, is what the crawl would be stored with: " +
         "the engine's defaults, then the server operator's, then yours, plus the " +
         "parsed judgement (null when none was given). It is null when invalid.",
-      inputSchema: z.strictObject({
+      inputSchema: strictInput({
         config: z
           .unknown()
           .describe(
@@ -1056,8 +1057,8 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "ran and its findings are stored, but its group is left out here — the " +
         "answer's disabledRules names every such rule, so 'filtered out' and 'did " +
         "not fire' stay distinguishable. " +
-        "On a LIST crawl, notMeasured names the rules its rules run did not run " +
-        "(the crawl.list-mode marker's own list; [] on a spider crawl): an empty " +
+        "On a LIST crawl, notMeasured names the rules its rules run did not run, as " +
+        "{id, reason} (the crawl.list-mode marker's own list; [] on a spider crawl): an empty " +
         "answer for one of them is NOT MEASURED, never clean. " +
         "judgementStale {stale, reasons} says " +
         "whether the crawl's judgement has changed since its last rules run " +
@@ -1085,7 +1086,7 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "rule is refused rather than answered with an empty page.\n\n" +
         `Paginated: {items, nextCursor, disabledRules, notMeasured, judgementStale}; limit ` +
         `defaults to ${PAGE_SIZE_DEFAULT}, maximum ${PAGE_SIZE_MAX}.`,
-      inputSchema: z.strictObject({
+      inputSchema: strictInput({
         crawlId: crawlIdField(),
         severity: z
           .string()
@@ -1144,14 +1145,14 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "are null when the crawl has no site.health row (and percentOfJudged when " +
         "pagesJudged is 0). Rules the crawl's judgement disables are left out and " +
         "named in disabledRules; rules a list crawl did not run are never a row, not " +
-        "even a zero, and are named in notMeasured; metric rules never appear. Not " +
+        "even a zero, and are named in notMeasured as {id, reason}; metric rules never appear. Not " +
         "paginated: one row per " +
         "rule, at most the ruleset's rule count.\n\n" +
         "A crawl no rules run has judged is refused (409): an empty overview would " +
         "read as a clean site. The same rows are a spreadsheet through export_crawl " +
         "(format=csv, view=issues_overview). issues_list is the grouped triage view " +
         "with sample URLs; this is the one-line-per-rule summary.",
-      inputSchema: z.strictObject({
+      inputSchema: strictInput({
         crawlId: crawlIdField(),
         includeZero: z
           .boolean()
@@ -1176,10 +1177,13 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "{id, entries: [{label, value, percent}]}; percent is value over the section's " +
         "total to one decimal place, null when that total is 0. Sections, in order:\n" +
         "  urls: Encountered, Fetched, Not fetched (frontier), Blocked by robots.txt " +
-        "(stored), Blocked by robots.txt (dropped), each taken from crawl_status's own " +
+        "(stored), Blocked by robots.txt (dropped), and on a crawl with exclude or " +
+        "include patterns Excluded by scope (stored) and Excluded by scope (dropped), " +
+        "each taken from crawl_status's own " +
         "fields. Encountered is every frontier row (pending + leased + done + failed + " +
-        "renderPending) plus robotsBlocked.recorded, and the percents are against it. " +
-        "The dropped entry counts DISCOVERIES turned away, is not a subset of " +
+        "renderPending) plus robotsBlocked.recorded plus the stored excluded rows, and " +
+        "the percents are against it. " +
+        "Each dropped entry counts DISCOVERIES turned away, is not a subset of " +
         "Encountered, and its percent is null. The entries do not sum.\n" +
         "  fetch-class, status-class (2xx, 3xx, 4xx, 5xx, No response; Other status " +
         "only when a code outside 200-599 was stored), indexability (Indexable, then " +
@@ -1209,7 +1213,7 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "(a crawl that predates the counter). An unjudged crawl is answered, not " +
         "refused. The same answer is a spreadsheet through export_crawl (format=csv, " +
         "view=crawl_overview).",
-      inputSchema: z.strictObject({
+      inputSchema: strictInput({
         crawlId: crawlIdField(),
       }),
     },
@@ -1268,7 +1272,7 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         `Paginated: {items, nextCursor}; limit defaults to ${PAGE_SIZE_DEFAULT}, ` +
         `maximum ${PAGE_SIZE_MAX}. A large rule can have thousands of rows — ` +
         "follow the cursors, or use export_crawl if you want all of them at once.",
-      inputSchema: z.strictObject({
+      inputSchema: strictInput({
         crawlId: crawlIdField(),
         ruleId: z
           .string()
@@ -1315,7 +1319,7 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         `maximum ${PAGE_SIZE_MAX}. A site with many broken links has thousands ` +
         "of rows — follow the cursors, or export the links_to_4xx / links_to_5xx " +
         "CSV views for all of them at once.",
-      inputSchema: z.strictObject({
+      inputSchema: strictInput({
         crawlId: crawlIdField(),
         ruleId: z
           .string()
@@ -1350,7 +1354,7 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "record (never judged, being judged now, or a run that died part-way). " +
         "Read it before you quote a number that is not there. " +
         "On a LIST crawl, notMeasured names the metrics (and rules) its rules run " +
-        "did not run — an empty answer for one is NOT MEASURED; [] on a spider " +
+        "did not run, as {id, reason} — an empty answer for one is NOT MEASURED; [] on a spider " +
         "crawl.\n\n" +
         "Filters, each refused by name if it names nothing this crawl measured:\n" +
         `  metricId   — a single metric, e.g. redirect.volume\n` +
@@ -1363,7 +1367,7 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "predate the crawl's current settings.\n\n" +
         `Paginated: {items, nextCursor, notMeasured, judgementStale}; limit defaults to ` +
         `${PAGE_SIZE_DEFAULT}, maximum ${PAGE_SIZE_MAX}.`,
-      inputSchema: z.strictObject({
+      inputSchema: strictInput({
         crawlId: crawlIdField(),
         metricId: z
           .string()
@@ -1430,7 +1434,7 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "a spreadsheet through export_crawl (format=csv, view=metric_table, " +
         "metricId), and its header — the same labels — is on rules_catalog's " +
         "`table` field so it can be laid out before the rows are asked for.",
-      inputSchema: z.strictObject({
+      inputSchema: strictInput({
         crawlId: crawlIdField(),
         metricId: z
           .string()
@@ -1554,7 +1558,7 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         `${PAGE_SIZE_DEFAULT}, maximum ${PAGE_SIZE_MAX}. This is not an export — a ` +
         "whole 50k-page crawl belongs in a file, not in your context; see " +
         "export_crawl.",
-      inputSchema: z.strictObject({
+      inputSchema: strictInput({
         crawlId: crawlIdField(),
         pageType: z
           .string()
@@ -1621,7 +1625,7 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "Refused for a crawl that never completed discovery: there is no stored " +
         "copy, and 'we have no record' must not be served as 'the site has no " +
         "robots.txt'.",
-      inputSchema: z.strictObject({ crawlId: crawlIdField() }),
+      inputSchema: strictInput({ crawlId: crawlIdField() }),
     },
     async ({ crawlId }) => run("robots_get", () => service.getRobots(crawlId)),
   );
@@ -1712,7 +1716,7 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "(about 200KB, roughly 50k tokens, at this ruleset), so spend the context " +
         "deliberately: if you only need the rules that FOUND something, " +
         "issues_list is a fraction of the size.",
-      inputSchema: z.strictObject({
+      inputSchema: strictInput({
         crawlId: z
           .string()
           .describe(
@@ -1799,7 +1803,7 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "that did not complete, and diffing them would report the other crawl's " +
         "whole findings list as new.\n\n" +
         "The URLs are NOT here. Use compare_urls for the list behind any count.",
-      inputSchema: z.strictObject({
+      inputSchema: strictInput({
         baseCrawlId: compareIdField("base", "the earlier crawl — what the site was"),
         headCrawlId: compareIdField("head", "the later crawl — what the site is now"),
       }),
@@ -1833,7 +1837,7 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         `Paginated: {items, nextCursor}; limit defaults to ${PAGE_SIZE_DEFAULT}, ` +
         `maximum ${PAGE_SIZE_MAX}. Pass nextCursor back as cursor, with the SAME ` +
         "baseCrawlId, headCrawlId, ruleId and set, until nextCursor is null.",
-      inputSchema: z.strictObject({
+      inputSchema: strictInput({
         baseCrawlId: compareIdField("base", "the earlier crawl — what the site was"),
         headCrawlId: compareIdField("head", "the later crawl — what the site is now"),
         ruleId: z
@@ -1879,7 +1883,7 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "on the issues dataset: the rules the crawl's judgement disables, whose " +
         "findings the file leaves out (the issues and issue_urls CSV views leave " +
         "them out too, and issue_urls of a disabled rule is refused), and beside it " +
-        "notMeasured, the rules a list crawl did not run.\n" +
+        "notMeasured, the rules a list crawl did not run, as {id, reason}.\n" +
         `  format=csv writes a spreadsheet of one VIEW: ${CSV_VIEWS.join(", ")} ` +
         "(default issues). issue_urls is one rule's findings and needs a ruleId; " +
         "metric_table is one metric's table and needs a metricId; issues_overview is " +
@@ -1942,7 +1946,7 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "nowhere to stream to. The file is named for the crawl, the format and the " +
         "view, and a re-export replaces it rather than piling up copies. The server " +
         "chooses the directory; there is no way to name a destination.",
-      inputSchema: z.strictObject({
+      inputSchema: strictInput({
         crawlId: crawlIdField(),
         format: z
           .string()

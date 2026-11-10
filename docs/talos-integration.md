@@ -101,7 +101,9 @@ crawler inside Talos. The intended shape:
    server shutdown leaves its running crawls `paused` (reason `shutdown`) and a restart
    starts none of them: Talos resumes a paused crawl with `crawl_resume`, same id, same
    pages, same earned spacing. `cancelled` now means one thing, an agent's
-   `crawl_cancel`, and it is final. A pause or cancel never makes a crawl faster than
+   `crawl_cancel`, and it is final. Since Phase 27d a stop lands within about a second in
+   every phase (host probe, sitemap walk, seeding, page crawl, 404 probe, recheck, resource pass),
+   so Talos need not budget a fetch deadline for it. A pause or cancel never makes a crawl faster than
    the spacing it earned (obligation 4), and `crawl_delete` is the one call that
    destroys a crawl, guarded only by its confirm echo until Phase 28's tenant key
    (`docs/talos-surface.md` §4.1c and §9).

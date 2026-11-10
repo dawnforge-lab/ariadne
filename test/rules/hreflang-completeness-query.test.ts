@@ -67,6 +67,8 @@ describe("hreflang.declarations-incomplete metadata", () => {
       "entryLimited",
       "docLimited",
       "depthLimited",
+      "timeLimited",
+      "interrupted",
       "sitemapDocsFailed",
       "sitemapDocsOversized",
       "alternatesCapped",
@@ -224,6 +226,8 @@ describe("hreflang.declarations-incomplete against the database", () => {
     entryLimited: false,
     docLimited: false,
     depthLimited: false,
+    timeLimited: false,
+    interrupted: false,
     sitemapDocsFailed: 0,
     sitemapDocsOversized: 0,
     alternatesCapped: 0,
@@ -576,6 +580,8 @@ describe("hreflang.declarations-incomplete against the database", () => {
       entryLimited: null,
       docLimited: null,
       depthLimited: null,
+      timeLimited: null,
+      interrupted: null,
       sitemapDocsFailed: null,
       sitemapDocsOversized: null,
       alternatesCapped: null,
@@ -615,5 +621,80 @@ describe("hreflang.declarations-incomplete against the database", () => {
     });
     await expect(run(MARKER, crawlId)).rejects.toThrow(/docLimited/);
     await expect(run(RETURN_LINK, crawlId)).rejects.toThrow(/docLimited/);
+  });
+
+  // Phase 27d: the walk's time budget.
+  it("(27d) a walk cut short by its time budget refuses the four rules and the marker names timeLimited", async () => {
+    const crawlId = await newCrawl(mkDiscovery({ truncation: { timeLimited: true } }));
+    await seedAbsences(crawlId);
+    expect(await absenceCounts(crawlId)).toEqual(NONE_FIRE);
+    const found = await run(MARKER, crawlId);
+    expect(found).toHaveLength(1);
+    expect(withoutReason(found[0]!)).toEqual({ ...CLEAN, timeLimited: true });
+    const reason = String(found[0]!.evidence.reason);
+    expect(reason).toMatch(/timeLimited/);
+    // Only the time budget fired: the size / entry / nesting sentence is not said.
+    expect(reason).not.toMatch(/size, entry, file-count or nesting limit/);
+  });
+
+  it("(27d) a pre-27d truncation without timeLimited reads as false", async () => {
+    const discovery = mkDiscovery();
+    const { timeLimited: _dropped, ...truncation } = discovery.truncation;
+    const crawlId = await newCrawl({
+      ...discovery,
+      truncation: truncation as DiscoveryEvidence["truncation"],
+    });
+    await seedAbsences(crawlId);
+    expect(await run(MARKER, crawlId)).toEqual([]);
+    expect(await absenceCounts(crawlId)).toEqual(ALL_FIRE);
+  });
+
+  it("(27d) a non-boolean timeLimited is a loud error, not false", async () => {
+    const discovery = mkDiscovery();
+    const crawlId = await newCrawl({
+      ...discovery,
+      truncation: { ...discovery.truncation, timeLimited: "yes" } as unknown as DiscoveryEvidence["truncation"],
+    });
+    await expect(run(MARKER, crawlId)).rejects.toThrow(/timeLimited/);
+  });
+
+  // Phase 27d ruling R8: a resumed crawl stopped during its re-walk.
+  it("(27d) an interrupted re-walk refuses the four rules and the marker names interrupted", async () => {
+    const discovery = mkDiscovery();
+    const crawlId = await newCrawl({
+      ...discovery,
+      truncation: { ...discovery.truncation, interrupted: true },
+    });
+    await seedAbsences(crawlId);
+    expect(await absenceCounts(crawlId)).toEqual(NONE_FIRE);
+    const found = await run(MARKER, crawlId);
+    expect(found).toHaveLength(1);
+    expect(withoutReason(found[0]!)).toEqual({ ...CLEAN, interrupted: true });
+    const reason = String(found[0]!.evidence.reason);
+    expect(reason).toMatch(/stopped or failed.*\(interrupted\)/);
+    // Only the interruption fired: neither the limit nor the time sentence is said.
+    expect(reason).not.toMatch(/size, entry, file-count or nesting limit/);
+    expect(reason).not.toMatch(/timeLimited/);
+  });
+
+  it("(27d) interrupted: false, or no key at all, is not cut short", async () => {
+    const discovery = mkDiscovery();
+    const crawlId = await newCrawl({
+      ...discovery,
+      truncation: { ...discovery.truncation, interrupted: false },
+    });
+    await seedAbsences(crawlId);
+    expect(await run(MARKER, crawlId)).toEqual([]);
+    expect(await absenceCounts(crawlId)).toEqual(ALL_FIRE);
+  });
+
+  it("(27d) a non-boolean interrupted is a loud error, not false", async () => {
+    const discovery = mkDiscovery();
+    const crawlId = await newCrawl({
+      ...discovery,
+      truncation: { ...discovery.truncation, interrupted: 1 } as unknown as DiscoveryEvidence["truncation"],
+    });
+    await expect(run(MARKER, crawlId)).rejects.toThrow(/interrupted/);
+    await expect(run(RETURN_LINK, crawlId)).rejects.toThrow(/interrupted/);
   });
 });

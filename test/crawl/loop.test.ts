@@ -10,7 +10,7 @@ import {
   runCrawl,
   resumeCrawl,
   parseStoredConfig,
-  type CrawlConfig,
+  type CrawlConfig, type LoopTestHooks,
   type DiscoveryEvidence,
   type NotFoundProbeSample,
 } from "../../src/crawl/loop.js";
@@ -209,8 +209,8 @@ async function listen(server: Server): Promise<string> {
 let db: Db;
 const createdCrawls: string[] = [];
 
-async function crawl(config: CrawlConfig, signal?: AbortSignal) {
-  const summary = await runCrawl(db, config, signal);
+async function crawl(config: CrawlConfig, signal?: AbortSignal, testHooks?: LoopTestHooks) {
+  const summary = await runCrawl(db, config, signal, testHooks);
   createdCrawls.push(summary.crawlId);
   return summary;
 }
@@ -633,7 +633,7 @@ describe("runCrawl", () => {
     // is asserted is that the column is written at all, never left at its
     // pre-Phase-4 default.
     expect(rows.map((r) => r.urlNormalised).sort()).toEqual([`${base}/`, `${base}/d`]);
-    expect(summary.discovery.sitemapEntries).toBe(2);
+    expect(summary.discovery?.sitemapEntries).toBe(2);
   });
 
   /**
@@ -675,9 +675,9 @@ describe("runCrawl", () => {
     const summary = await crawl(
       config({ sitemapUrls: [`${base}/sitemap.xml#gid=0`] }),
     );
-    expect(summary.discovery.truncation.docsFetched).toBe(1);
-    expect(summary.discovery.sitemapEntries).toBe(2);
-    expect(summary.discovery.truncation.failures).toEqual([]);
+    expect(summary.discovery?.truncation.docsFetched).toBe(1);
+    expect(summary.discovery?.sitemapEntries).toBe(2);
+    expect(summary.discovery?.truncation.failures).toEqual([]);
   });
 
   it("respects maxPages", async () => {
@@ -691,13 +691,13 @@ describe("runCrawl", () => {
 
   it("abort signal stops the loop and releases nothing into limbo", async () => {
     const ac = new AbortController();
-    setTimeout(() => ac.abort(), 50);
+    let grants = 0; // aborted at slot 5, past the 4-URL opening batch: pages on record, work left (27d)
     // Paced so the abort lands mid-crawl rather than after it.
-    const summary = await crawl(config({ perHostDelayMs: 40 }), ac.signal);
+    const summary = await crawl(config({ perHostDelayMs: 40 }), ac.signal, { onGrant: () => void (++grants === 5 && ac.abort()) });
 
     const counts = await frontierCounts(db, summary.crawlId);
     expect(counts.leased).toBe(0); // graceful shutdown released leases
-    expect(counts.pending).toBeGreaterThan(0); // and left work to resume
+    expect(counts.pending).toBeGreaterThan(0); expect(summary.pagesCrawled).toBeGreaterThan(0); // mid-crawl: work done and left
     expect([summary.status, summary.pauseReason]).toEqual(["paused", "shutdown"]);
 
     const crawlRow = await db.select().from(crawls).where(eq(crawls.id, summary.crawlId));
@@ -723,10 +723,10 @@ describe("runCrawl", () => {
     const ac = new AbortController();
     boomHits = 0;
     // A 5xx is not in the loop's `RETRYABLE` set, so the page crawl asks each of
-    // the two broken pages exactly once: hit 3 is the RECHECK's first request,
-    // and the abort lands between the row it is settling and the row after it.
+    // the two broken pages once each: hit 3 is the RECHECK's first request, which settles;
+    // hit 4 is its second, cut in flight (27b Ruling 4, 27d), so that row stays unwritten.
     onBoomHit = (n) => {
-      if (n === 3) ac.abort();
+      if (n === 4) ac.abort();
     };
     let summary;
     try {
@@ -740,8 +740,8 @@ describe("runCrawl", () => {
       onBoomHit = null;
     }
 
-    // Two by the crawl, one by the pass, and nothing after the signal fired.
-    expect(boomHits).toBe(3);
+    // Two by the crawl, two by the pass (the second cut in flight), none after the signal.
+    expect(boomHits).toBe(4);
     expect([summary.status, summary.pauseReason]).toEqual(["paused", "shutdown"]);
     // The pass RAN, unlike the case above, and says what it settled before it
     // was stopped.
@@ -779,7 +779,7 @@ describe("runCrawl", () => {
     expect(summary.status).toBe("failed");
     expect(summary.pagesCrawled).toBe(0);
     expect(summary.note).toMatch(/robots\.txt unreachable/);
-    expect(summary.robots.outcome).toBe("unreachable");
+    expect(summary.robots?.outcome).toBe("unreachable");
 
     const crawlRow = await db.select().from(crawls).where(eq(crawls.id, summary.crawlId));
     expect(crawlRow[0]?.status).toBe("failed");
@@ -930,7 +930,7 @@ describe("runCrawl", () => {
     const summary = await crawl(config({ siteUrl: closed }));
     expect(summary.status).toBe("finished");
     expect(summary.pagesCrawled).toBe(0);
-    expect(summary.robots.outcome).toBe("read");
+    expect(summary.robots?.outcome).toBe("read");
     expect(summary.note).toMatch(/nothing to crawl/);
     expect(summary.frontier).toEqual({
       pending: 0, leased: 0, done: 0, failed: 0, renderPending: 0,
@@ -1554,10 +1554,10 @@ describe("crawl-level evidence", () => {
 describe("resumeCrawl", () => {
   it("continues a cancelled crawl instead of restarting it", async () => {
     const ac = new AbortController();
-    setTimeout(() => ac.abort(), 50);
-    const first = await crawl(config({ perHostDelayMs: 40 }), ac.signal);
+    let grants = 0; // aborted at slot 5, past the 4-URL opening batch: pages on record, work left (27d)
+    const first = await crawl(config({ perHostDelayMs: 40 }), ac.signal, { onGrant: () => void (++grants === 5 && ac.abort()) });
     expect([first.status, first.pauseReason]).toEqual(["paused", "shutdown"]);
-    expect(first.pagesCrawled).toBeLessThan(6);
+    expect(first.pagesCrawled).toBeGreaterThan(0); expect(first.pagesCrawled).toBeLessThan(6);
 
     const resumed = await resumeCrawl(db, first.crawlId, {
       config: config({ perHostDelayMs: 0 }),
@@ -1589,8 +1589,8 @@ describe("resumeCrawl", () => {
   // which is the same defect `renderPaceMs` fixed for the render pass in Phase 6.
   it("resumes at the spacing the crawl earned, not the one it was configured with", async () => {
     const ac = new AbortController();
-    setTimeout(() => ac.abort(), 50);
-    const first = await crawl(config({ perHostDelayMs: 40 }), ac.signal);
+    let grants = 0; // aborted at slot 5, past the 4-URL opening batch: pages on record, work left (27d)
+    const first = await crawl(config({ perHostDelayMs: 40 }), ac.signal, { onGrant: () => void (++grants === 5 && ac.abort()) });
     expect([first.status, first.pauseReason]).toEqual(["paused", "shutdown"]);
 
     // What the first run would have written had the site refused it: the column
@@ -1621,8 +1621,8 @@ describe("resumeCrawl", () => {
   // "re-enters each host at ITS OWN earned spacing".
   it("resumes each host at its own earned spacing from the per-host map", async () => {
     const ac = new AbortController();
-    setTimeout(() => ac.abort(), 50);
-    const first = await crawl(config({ perHostDelayMs: 40 }), ac.signal);
+    let grants = 0; // aborted at slot 5, past the 4-URL opening batch: pages on record, work left (27d)
+    const first = await crawl(config({ perHostDelayMs: 40 }), ac.signal, { onGrant: () => void (++grants === 5 && ac.abort()) });
     expect([first.status, first.pauseReason]).toEqual(["paused", "shutdown"]);
 
     const host = new URL(base).host;
@@ -1721,8 +1721,8 @@ describe("resumeCrawl", () => {
   // honest degradation, never a fabricated split.
   it("falls back to the crawl-wide spacing when the per-host map is null (pre-0015)", async () => {
     const ac = new AbortController();
-    setTimeout(() => ac.abort(), 50);
-    const first = await crawl(config({ perHostDelayMs: 40 }), ac.signal);
+    let grants = 0; // aborted at slot 5, past the 4-URL opening batch: pages on record, work left (27d)
+    const first = await crawl(config({ perHostDelayMs: 40 }), ac.signal, { onGrant: () => void (++grants === 5 && ac.abort()) });
     expect([first.status, first.pauseReason]).toEqual(["paused", "shutdown"]);
 
     // The crawl-wide number only — no map, as a row written before 0015 carries.
@@ -1752,7 +1752,7 @@ describe("resumeCrawl", () => {
   it("re-persists a non-widest host's escalation mid-crawl, not only at close", async () => {
     const originHost = new URL(throttle).host;
 
-    // A paused (shutdown) first run, only to mint a resumable crawl row + frontier.
+    // A paused (shutdown) first run, only to mint a resumable row: stopped before its walk (27d), so the resume seeds the frontier.
     const preAborted = new AbortController();
     preAborted.abort();
     const first = await crawl(
@@ -1806,8 +1806,8 @@ describe("resumeCrawl", () => {
 
   it("re-fetches a URL whose page row a hard kill left in the buffer", async () => {
     const ac = new AbortController();
-    setTimeout(() => ac.abort(), 50);
-    const first = await crawl(config({ perHostDelayMs: 40 }), ac.signal);
+    let grants = 0; // aborted at slot 5, past the 4-URL opening batch: pages on record, work left (27d)
+    const first = await crawl(config({ perHostDelayMs: 40 }), ac.signal, { onGrant: () => void (++grants === 5 && ac.abort()) });
     expect([first.status, first.pauseReason]).toEqual(["paused", "shutdown"]);
 
     // The worker that gets killed: it leases a URL, fetches it, buffers the
@@ -2028,8 +2028,8 @@ describe("the test-only config fields are not persisted", () => {
 
   it("comes back when the caller re-asserts it in the resume config", async () => {
     const ac = new AbortController();
-    setTimeout(() => ac.abort(), 50);
-    const first = await crawl(config({ perHostDelayMs: 40 }), ac.signal);
+    let grants = 0; // aborted at slot 5, past the 4-URL opening batch: pages on record, work left (27d)
+    const first = await crawl(config({ perHostDelayMs: 40 }), ac.signal, { onGrant: () => void (++grants === 5 && ac.abort()) });
     expect([first.status, first.pauseReason]).toEqual(["paused", "shutdown"]);
 
     // The same resume, with the hatch re-stated at the call site — explicit,
@@ -2078,6 +2078,13 @@ describe("platform profile", () => {
   let maxInFlight = 0;
   /** Start times of every page request, robots.txt and the sitemap excluded. */
   let starts: number[] = [];
+  /**
+   * The slots the crawl's host gate scheduled for the storefront host, through
+   * `LoopTestHooks.onGrant`. Pacing is asserted here, where the gate imposes it,
+   * not on `starts`: an arrival adds timer and network jitter, so one late
+   * arrival followed by an on-time one reads short while the slots are exact.
+   */
+  let slots: number[] = [];
   /** Every request the site saw, robots.txt and the sitemap included. */
   let hits: { path: string; start: number; end: number | null }[] = [];
   /** When true, `/` answers 301 -> `/home` (a two-hop probe chain on one host). */
@@ -2151,8 +2158,15 @@ describe("platform profile", () => {
     inFlight = 0;
     maxInFlight = 0;
     starts = [];
+    slots = [];
     hits = [];
     rootRedirects = false;
+  }
+
+  /** Hooks that record the gate's slots for the storefront host only. */
+  function slotHooks(): LoopTestHooks {
+    const host = new URL(storefrontBase).host;
+    return { onGrant: (h, slotAtMs) => void (h === host && slots.push(slotAtMs)) };
   }
 
   async function rowOf(crawlId: string) {
@@ -2161,16 +2175,18 @@ describe("platform profile", () => {
     return row;
   }
 
-  /** The smallest gap between two consecutive page-request starts. */
-  function minGap(): number {
+  /** The smallest gap between two consecutive scheduled slots. */
+  function minSlotGap(): number {
     let gap = Infinity;
-    for (let i = 1; i < starts.length; i += 1) {
-      gap = Math.min(gap, (starts[i] as number) - (starts[i - 1] as number));
+    for (let i = 1; i < slots.length; i += 1) {
+      gap = Math.min(gap, (slots[i] as number) - (slots[i - 1] as number));
     }
     return gap;
   }
 
-  // Timer slack: setTimeout may fire a few ms early relative to Date.now().
+  // Slack for the tests below that still measure arrivals at the server (the
+  // in-flight and robots/sitemap/redirect-hop ones): arrival jitter, not the
+  // gate's slots, which `minSlotGap` measures exactly.
   const SLACK_MS = 15;
 
   it(
@@ -2180,6 +2196,8 @@ describe("platform profile", () => {
       const before = Date.now();
       const summary = await crawl(
         config({ siteUrl: storefrontBase, maxConcurrency: 4, perHostDelayMs: 0 }),
+        undefined,
+        slotHooks(),
       );
       expect(summary.status).toBe("finished");
       expect(summary.pagesCrawled).toBe(5);
@@ -2202,11 +2220,11 @@ describe("platform profile", () => {
       expect(row.hostSpacingMs).toBeGreaterThanOrEqual(1000);
 
       expect(maxInFlight).toBe(1);
-      // The probe's own hops ran at the configured 0 ms (they precede the
-      // verdict), so the gap is measured over the crawl's requests only: the
-      // last six (five pages and the known-404 probe).
-      starts = starts.slice(-6);
-      expect(minGap()).toBeGreaterThanOrEqual(1000 - SLACK_MS);
+      // The probe's own hops ran at the configured 0 ms on the probe's own gate
+      // (they precede the verdict), so the slots are the crawl gate's only: five
+      // pages and the known-404 probe. Scheduled, so the bound is exact.
+      expect(slots.length).toBeGreaterThanOrEqual(6);
+      expect(minSlotGap()).toBeGreaterThanOrEqual(1000);
     },
     30_000,
   );
@@ -2223,6 +2241,8 @@ describe("platform profile", () => {
           perHostDelayMs: 0,
           probeHosts: false,
         }),
+        undefined,
+        slotHooks(),
       );
       expect(summary.status).toBe("finished");
       const row = await rowOf(summary.crawlId);
@@ -2238,7 +2258,8 @@ describe("platform profile", () => {
       // The seed was the only URL in the first batch, so nothing was in flight
       // beside it when the clamp landed: the whole crawl is one at a time.
       expect(maxInFlight).toBe(1);
-      expect(minGap()).toBeGreaterThanOrEqual(1000 - SLACK_MS);
+      expect(slots.length).toBeGreaterThanOrEqual(2);
+      expect(minSlotGap()).toBeGreaterThanOrEqual(1000);
     },
     30_000,
   );
@@ -2255,11 +2276,14 @@ describe("platform profile", () => {
           probeHosts: false,
           maxPages: 2,
         }),
+        undefined,
+        slotHooks(),
       );
       const row = await rowOf(summary.crawlId);
       expect(row.platformProfile?.applied?.perHostDelayMs).toBe(3000);
       expect(row.hostSpacingMs).toBe(3000);
-      expect(minGap()).toBeGreaterThanOrEqual(3000 - SLACK_MS);
+      expect(slots.length).toBeGreaterThanOrEqual(2);
+      expect(minSlotGap()).toBeGreaterThanOrEqual(3000);
     },
     30_000,
   );
@@ -2329,6 +2353,7 @@ describe("platform profile", () => {
       const first = await crawl(
         config({ siteUrl: storefrontBase, maxConcurrency: 4, perHostDelayMs: 0 }),
         ac.signal,
+        slotHooks(),
       );
       expect([first.status, first.pauseReason]).toEqual(["paused", "shutdown"]);
       const recorded = (await rowOf(first.crawlId)).platformProfile;
@@ -2345,10 +2370,13 @@ describe("platform profile", () => {
           probeHosts: false,
         }),
         reclaimLeases: true,
+        testHooks: slotHooks(),
       });
       expect(resumed.status).toBe("finished");
       expect(maxInFlight).toBe(1);
-      expect(minGap()).toBeGreaterThanOrEqual(1000 - SLACK_MS);
+      // `reset` above cleared `slots`: this is the resumed run alone.
+      expect(slots.length).toBeGreaterThanOrEqual(2);
+      expect(minSlotGap()).toBeGreaterThanOrEqual(1000);
       // Unchanged: the record is when the profile was applied, not re-stamped.
       expect((await rowOf(first.crawlId)).platformProfile).toEqual(recorded);
     },

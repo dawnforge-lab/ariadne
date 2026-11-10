@@ -93,6 +93,7 @@ import {
   type CrawlCredentials,
   type CredentialShape,
 } from "../crawl/credentials.js";
+import { CredentialStore } from "./credential-store.js";
 import {
   matchesPattern,
   patternFamilyError,
@@ -193,6 +194,7 @@ import { isHostAllowed, type ServiceConfig } from "./config.js";
 import {
   API_CRAWL_DEFAULTS,
   CRAWL_FIELDS,
+  CRAWL_PATCH_FIELDS,
   MAX_SUPPLIED_SITEMAPS,
   OPERATOR_ONLY_FIELDS,
   parseStartBody,
@@ -221,12 +223,14 @@ import {
   type CsvViewName,
   type ExportFormat,
 } from "./csv.js";
-import { ServiceError, clip } from "./errors.js";
+import { ServiceError, clip, unknownKeysMessage } from "./errors.js";
 import {
   buildCrawlOverview,
   buildIssuesOverview,
   type CrawlOverview,
+  type CrawlOverviewDetail,
   type IssuesOverview,
+  type NotMeasured,
   type SnapshotReader,
 } from "./overview.js";
 import {
@@ -377,6 +381,9 @@ export const RENDER_CRAWL_FIELDS: Record<keyof RenderCrawlInput, FieldKind> = {
   cookies: "credential",
 };
 
+/** The keys a `crawl_config_set` body (`PATCH /crawls/:id/config`) may carry. */
+const CONFIG_SET_FIELDS: readonly string[] = ["crawl", "judgement"];
+
 /**
  * Validate a `POST /crawls/:id/resume` body (27c): absent is a resume with
  * nothing sent; otherwise only the three credential fields, each checked as
@@ -390,14 +397,14 @@ export function parseResumeCrawlInput(raw: unknown): CrawlCredentials {
   if (!isPlainObject(raw)) {
     throw new ServiceError("VALIDATION", "request body must be a JSON object");
   }
+  // The first unknown key by position, the rest counted, never quoted (27d
+  // spec §4) — one refusal however many there are.
+  const unknown = Object.keys(raw).filter((key) => !(CREDENTIAL_FIELDS as readonly string[]).includes(key));
+  if (unknown.length > 0) {
+    throw new ServiceError("VALIDATION", unknownKeysMessage("body", raw, unknown, CREDENTIAL_FIELDS));
+  }
   const input: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(raw)) {
-    if (!(CREDENTIAL_FIELDS as readonly string[]).includes(key)) {
-      throw new ServiceError(
-        "VALIDATION",
-        `unknown field '${clip(key)}' (accepted: ${CREDENTIAL_FIELDS.join(", ")})`,
-      );
-    }
     if (value === undefined) continue;
     const why = credentialInputError(key as CredentialField, value);
     if (why !== null) throw new ServiceError("VALIDATION", why);
@@ -433,15 +440,18 @@ export function parseRenderCrawlInput(raw: unknown): RenderCrawlInput {
   }
   const body = raw as Record<string, unknown>;
 
+  // The first unknown key by position, the rest counted, never quoted (27d
+  // spec §4) — one refusal however many there are.
+  const unknown = Object.keys(body).filter((key) => !Object.hasOwn(RENDER_CRAWL_FIELDS, key));
+  if (unknown.length > 0) {
+    throw new ServiceError(
+      "VALIDATION",
+      unknownKeysMessage("body", body, unknown, Object.keys(RENDER_CRAWL_FIELDS)),
+    );
+  }
   const input: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(body)) {
     const kind = RENDER_CRAWL_FIELDS[key as keyof RenderCrawlInput];
-    if (kind === undefined) {
-      throw new ServiceError(
-        "VALIDATION",
-        `unknown field '${clip(key)}' (accepted: ${Object.keys(RENDER_CRAWL_FIELDS).join(", ")})`,
-      );
-    }
     if (value === undefined) continue;
     assertKind(key, value, kind);
     input[key] = value;
@@ -1987,7 +1997,7 @@ export interface ExportResult {
    * absence from the file is "not measured", never "clean"; `[]` on a spider
    * crawl (27c final wave M16).
    */
-  notMeasured?: string[];
+  notMeasured?: NotMeasured;
 }
 
 /**
@@ -2017,7 +2027,7 @@ export interface CsvExportResult {
    */
   disabledRules?: string[];
   /** Beside `disabledRules`, always together (`ExportResult.notMeasured`). */
-  notMeasured?: string[];
+  notMeasured?: NotMeasured;
 }
 
 /** A prepared CSV stream: validated, not yet read. */
@@ -2034,7 +2044,7 @@ export interface CsvStream {
    */
   disabledRules: string[] | null;
   /** Beside `disabledRules`, null with it (`ExportResult.notMeasured`). */
-  notMeasured: string[] | null;
+  notMeasured: NotMeasured | null;
   /**
    * The file, record by record, header first.
    *
@@ -2470,7 +2480,7 @@ export class ApiService {
    * rather than run without them (`requireCredentials`, the crawl loop).
    * Bounded by the crawls this process accepted with credentials.
    */
-  private readonly credentials = new Map<string, CrawlCredentials>();
+  private readonly credentials = new CredentialStore();
 
   /** Crawls accepted by this process and not yet started, in FIFO order. */
   private readonly waiting: QueueEntry[] = [];
@@ -4148,8 +4158,8 @@ export class ApiService {
       return supplied === null ? undefined : sent;
     }
     if (required === null) return undefined;
-    const held = this.credentials.get(crawlId);
-    if (held === undefined) {
+    const held = this.credentials.get(crawlId, required);
+    if (held === undefined && !this.credentials.has(crawlId)) {
       throw new ServiceError(
         "CREDENTIALS_REQUIRED",
         `crawl ${crawlId} needs credentials this server does not hold: ${describeShape(required)}. ` +
@@ -4158,7 +4168,7 @@ export class ApiService {
           "never run without them",
       );
     }
-    if (!sameShape(required, shapeOf(held))) {
+    if (held === undefined) {
       throw new ServiceError(
         "CREDENTIALS_REQUIRED",
         `crawl ${crawlId} needs ${describeShape(required)}, and the credentials this server ` +
@@ -4621,10 +4631,9 @@ export class ApiService {
     }
     const others = Object.keys(patch).filter((key) => key !== "crawl" && key !== "judgement");
     if (others.length > 0) {
-      throw new ServiceError(
-        "VALIDATION",
-        `only \`crawl\` and \`judgement\` can be set (refused: ${others.map(clip).join(", ")})`,
-      );
+      // The first refused key by position and a count of the rest, never a
+      // key as sent (27d spec §4).
+      throw new ServiceError("VALIDATION", unknownKeysMessage("body", patch, others, CONFIG_SET_FIELDS));
     }
     const crawlPatch = patch["crawl"];
     const judgementPatch = patch["judgement"];
@@ -4647,12 +4656,15 @@ export class ApiService {
 
     const { findingCap: capPatch, ...blockPatch } = judgementPatch ?? {};
     /**
-     * The credentials this process holds for the crawl once the transaction has
-     * COMMITTED (27c): `entry` set to the new values, or null to drop them; no
-     * `entry` key leaves the map alone. Applied after the commit, so a refused
-     * or rolled-back patch never changes what is held.
+     * The new credentials are STAGED beside the held ones as soon as they are
+     * known, before the transaction can commit (27d, closing 27c M9), and
+     * settled on its outcome: a committed change keeps only the new entry, a
+     * refused or rolled-back one drops it and the old values stay usable. A
+     * queue runner that dequeues in the gap between the commit and the settle
+     * asks by the shape its row states (`CredentialStore.get`) and finds
+     * whichever entry belongs to the row it read.
      */
-    const holdAfter: { entry?: CrawlCredentials | null } = {};
+    const staged: { settle: ((committed: boolean) => void) | null } = { settle: null };
     await this.db.transaction(async (tx) => {
       const rows = await tx
         .select({
@@ -4769,7 +4781,7 @@ export class ApiService {
           const { credentialShape: _previous, ...rest } = merged;
           const shape = next === null ? null : shapeOf(next);
           merged = shape === null ? rest : { ...rest, credentialShape: shape };
-          holdAfter.entry = shape === null ? null : next;
+          staged.settle = this.credentials.stage(crawlId, shape === null ? null : next);
         }
         // The merged config is validated as a stored one is read — with the
         // operator's `allowPrivate`, which is never stored — and written back
@@ -4830,6 +4842,7 @@ export class ApiService {
         const merged = mergePatch(row.judgement ?? {}, blockPatch) as Record<string, unknown>;
         const block = this.parseJudgementInput(
           capPatch === undefined ? merged : { ...merged, findingCap: capPatch },
+          judgementPatch,
         );
 
         if (block.findingCap !== undefined) {
@@ -4863,9 +4876,20 @@ export class ApiService {
           ...(scopeChanged ? { scopeChangedAt: new Date() } : {}),
         })
         .where(eq(crawls.id, crawlId));
+      await this.config.afterConfigWrite?.("written");
+    }).catch((error: unknown) => {
+      staged.settle?.(false);
+      throw error;
     });
-    if (holdAfter.entry === null) this.credentials.delete(crawlId);
-    else if (holdAfter.entry !== undefined) this.credentials.set(crawlId, holdAfter.entry);
+    // Committed: the row states the new shape from here, and the staged entry
+    // is still beside the old one until the settle below.
+    try {
+      await this.config.afterConfigWrite?.("committed");
+    } catch (error) {
+      staged.settle?.(true);
+      throw error;
+    }
+    staged.settle?.(true);
     return await this.getCrawlConfig(crawlId);
   }
 
@@ -4892,7 +4916,7 @@ export class ApiService {
     } catch (error) {
       throw new ServiceError("CONFLICT", messageOf(error));
     }
-    const held = this.credentials.get(crawlId);
+    const held = this.credentials.get(crawlId, required);
     if (held === undefined && required !== null) {
       const missing: CredentialShape = {
         requestHeaderNames: Object.hasOwn(replace, "requestHeaders") ? [] : required.requestHeaderNames,
@@ -4947,6 +4971,19 @@ export class ApiService {
     const operatorOnly: Record<string, unknown> = {};
     const reported: Record<string, unknown> = {};
     const secrets: Partial<Record<CredentialField, unknown>> = {};
+    // The first unknown key by position, the rest counted, never quoted (27d
+    // spec §4) — one refusal however many there are.
+    const keys = Object.keys(raw);
+    const unknown = keys.filter(
+      (key) => !OPERATOR_ONLY_FIELDS.includes(key) && !REPORTED_CRAWL_KEYS.includes(key) && !Object.hasOwn(wire, key),
+    );
+    const first = unknown[0];
+    if (first !== undefined) {
+      throw new ServiceError(
+        "VALIDATION",
+        unknownField(first, keys.indexOf(first) + 1, "crawl", CRAWL_PATCH_FIELDS, unknown.length - 1),
+      );
+    }
     for (const [key, value] of Object.entries(raw)) {
       if (OPERATOR_ONLY_FIELDS.includes(key)) {
         // Decided against the stored value in the transaction (Ruling 12): an
@@ -4967,7 +5004,7 @@ export class ApiService {
       }
       const field = wire[key];
       if (field === undefined) {
-        throw new ServiceError("VALIDATION", unknownField(key));
+        throw new Error(`api: crawl patch key at ${keys.indexOf(key) + 1} passed the unknown-key check`);
       }
       // `httpAuth: null` removes Basic auth (27c T9 fix 1, controller ruling):
       // the one credential kind with no empty form, so null is its "none" —
@@ -5290,7 +5327,7 @@ export class ApiService {
   ): Promise<
     Page<IssueGroup> & {
       disabledRules: string[];
-      notMeasured: string[];
+      notMeasured: NotMeasured;
       judgementStale: JudgementStale;
     }
   > {
@@ -5426,6 +5463,32 @@ export class ApiService {
     return (await this.crawlOverviewRead(crawlId)).overview;
   }
 
+  /**
+   * `crawlDetailOn` plus the scope-excluded counts, read on the same reader so
+   * they share the overview's snapshot (27a Ruling 14). Null when the crawl's
+   * config has neither `exclude` nor `include`.
+   */
+  private async overviewDetailOn(db: SnapshotReader, crawlId: string): Promise<CrawlOverviewDetail> {
+    const detail = await this.crawlDetailOn(db, crawlId);
+    const scoped = await db.execute<{ scoped: boolean }>(sql`
+      select (jsonb_array_length(coalesce(config_jsonb->'exclude', '[]'::jsonb)) > 0
+           or jsonb_array_length(coalesce(config_jsonb->'include', '[]'::jsonb)) > 0) as scoped
+        from crawls where id = ${crawlId}`);
+    const isScoped = scoped.rows[0]?.scoped;
+    if (typeof isScoped !== "boolean") {
+      throw new Error(`overviewDetailOn: scoped came back as ${typeof isScoped}, not a boolean`);
+    }
+    if (!isScoped) return { ...detail, excluded: null };
+    const rows = await db.execute<{ n: number }>(sql`
+      select count(*)::int as n from pages p
+       where p.crawl_id = ${crawlId} and p.fetch_class = 'excluded'`);
+    const n = rows.rows[0]?.n;
+    if (typeof n !== "number") {
+      throw new Error(`overviewDetailOn: excluded count came back as ${typeof n}, not a number`);
+    }
+    return { ...detail, excluded: { recorded: n, dropped: detail.excludedDropped } };
+  }
+
   /** `crawlOverview` with the judgement view it was built under (one snapshot). */
   private async crawlOverviewRead(
     crawlId: string,
@@ -5434,7 +5497,7 @@ export class ApiService {
       this.db,
       crawlId,
       this.registry,
-      (reader) => this.crawlDetailOn(reader, crawlId),
+      (reader) => this.overviewDetailOn(reader, crawlId),
       (id) => this.ruleFor(id, crawlId, "issues"),
     );
   }
@@ -5942,7 +6005,7 @@ export class ApiService {
   async listMetrics(
     crawlId: string,
     opts: MetricQuery = {},
-  ): Promise<Page<MetricRow> & { notMeasured: string[]; judgementStale: JudgementStale }> {
+  ): Promise<Page<MetricRow> & { notMeasured: NotMeasured; judgementStale: JudgementStale }> {
     // The crawl's judgement, for `judgementStale` and `notMeasured` only: a
     // metric is a stored measurement of the run that wrote it (`site.health`
     // counted the rules that run left enabled), so the flag says whether the
@@ -6120,7 +6183,7 @@ export class ApiService {
     // A metric a list crawl's run left out wrote nothing because it did not
     // run: the note says THAT, never "nothing to measure" (27c final wave M16).
     const note =
-      stored.length === 0 && notMeasured.includes(metricId)
+      stored.length === 0 && notMeasured.some((n) => n.id === metricId)
         ? `crawl ${crawlId} is a list crawl and metric '${metricId}' was not measured: it ` +
           "needs the whole site or a sitemap read the crawl did not make (crawl.list-mode " +
           "names it), so it did not run — the table is empty because nobody looked"
@@ -6577,7 +6640,8 @@ export class ApiService {
       filename: csvFilename(slug(crawlId), "crawl_overview", null),
       // Its issues grid leaves the disabled rules' findings out.
       disabledRules: view.disabledRules,
-      notMeasured: view.notMeasured,
+      // The overview's own, so the export answer equals `crawl_overview`'s.
+      notMeasured: overview.notMeasured,
       async *records(): AsyncGenerator<string> {
         yield csvRecord(CRAWL_OVERVIEW_HEADER);
         for (const cells of crawlOverviewRecords(overview)) yield csvRecord(cells);
@@ -6739,9 +6803,12 @@ export class ApiService {
       // Nothing is set when the map has no entry; a crawl whose row has a
       // shape is then refused by the loop (`requireCredentials`), never run
       // without them.
-      const credentials = this.credentials.get(entry.crawlId);
+      // Asked by the shape the row ITS read states (27d M9): a change in
+      // flight holds both shapes, and this finds the one that belongs to the row.
+      const parsed = parseStoredConfig(row.config, entry.crawlId);
+      const credentials = this.credentials.get(entry.crawlId, parsed.credentialShape ?? null);
       const config: CrawlConfig = {
-        ...parseStoredConfig(row.config, entry.crawlId),
+        ...parsed,
         ...this.processTrustConfig(),
         ...(credentials === undefined ? {} : { credentials }),
       };
@@ -7177,9 +7244,9 @@ export class ApiService {
    * included, which on a REQUEST is the caller's mistake rather than a stored
    * row's drift — is a 400 carrying `parseJudgement`'s "<path>: <reason>".
    */
-  private parseJudgementInput(raw: unknown): JudgementBlock {
+  private parseJudgementInput(raw: unknown, sent: unknown = raw): JudgementBlock {
     try {
-      return parseJudgement(raw, this.registry);
+      return parseJudgement(raw, this.registry, sent);
     } catch (error) {
       if (error instanceof JudgementError) throw new ServiceError("VALIDATION", error.message);
       throw error;

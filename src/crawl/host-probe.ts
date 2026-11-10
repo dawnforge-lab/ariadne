@@ -26,7 +26,8 @@
  *    its variant, with the class fetch-page gave it. That IS the evidence
  *    (hard rule 7) — an exception here would lose the other three variants
  *    along with it. Our own bugs still throw: `fetchPage` rethrows a malformed
- *    user agent, and this module does not catch it.
+ *    user agent, and this module does not catch it. So does a stop: the
+ *    crawl's signal rejects the probe with `FetchAbortedError` (Phase 27d).
  *
  *  - **The probe is cheap, finite and paced.** Four chains (plus legacy
  *    hosts), up to five hops each, origin roots only, run one at a time behind
@@ -43,7 +44,7 @@
  *    governs the site is precisely what the probe exists to find out, and no
  *    host can be asked for its rules before we know whether it is the site.
  */
-import { fetchPage, type FetchClass, type FetchResult } from "./fetch-page.js";
+import { FetchAbortedError, fetchPage, type FetchClass, type FetchResult } from "./fetch-page.js";
 import type { CredentialTarget } from "./credentials.js";
 import type { DnsLookupFn } from "./http.js";
 import { hostProbeStarts } from "./parse/url-utils.js";
@@ -101,6 +102,13 @@ export interface HostProbeOpts {
   /** Per-hop deadline, passed straight to fetch-page. */
   timeoutMs?: number;
   /**
+   * The crawl's control signal (Phase 27d), passed to every hop's `fetchPage`
+   * and to the gate's wait. An abort rejects the probe with
+   * `FetchAbortedError` — it is a stop, not a variant's answer, so it is never
+   * recorded as a hop and the probe returns nothing.
+   */
+  signal?: AbortSignal;
+  /**
    * TEST ONLY, threaded to fetch-page (and through it to url-policy) so the
    * suite can probe a 127.0.0.1 fixture server. Never wire this to config, an
    * API field or an env var.
@@ -150,9 +158,11 @@ async function followChain(
   for (let hop = 0; hop < MAX_HOST_PROBE_HOPS; hop += 1) {
     // Per hop, keyed by that hop's host: a chain that crosses from www to the
     // apex is two names, and each of them keeps its own spacing.
-    await gate.acquire(new URL(url).host);
+    // A stop wakes the wait at once and is never a slot: nothing is sent.
+    if (!(await gate.acquire(new URL(url).host, opts.signal))) throw new FetchAbortedError(url);
     const result = await fetchPage(url, {
       userAgent: opts.userAgent,
+      signal: opts.signal,
       allowPrivate: opts.allowPrivate,
       lookup: opts.lookup,
       timeoutMs: opts.timeoutMs,
