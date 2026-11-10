@@ -1094,3 +1094,93 @@ describe("a stop during the render pass", () => {
     await rendering;
   }, 90_000);
 });
+
+/**
+ * 27d final fix F1: the resource pass reads a third-party asset host's
+ * robots.txt before asking it for anything, and that read honours the stop
+ * like every other request of the pass. The host's robots.txt stalls 15 s, far
+ * past the stop target, so no test can pass by the fixture answering.
+ */
+describe("a stop while the resource pass reads a third-party robots.txt", () => {
+  let assetHost: Site;
+  let pageSite: Site;
+  /** While set, the asset host's robots.txt hangs 15 s. */
+  let robotsHang = true;
+
+  beforeAll(async () => {
+    assetHost = await site((req, res) => {
+      const p = path(req);
+      if (p === "/robots.txt") {
+        const answer = (): void => robots(res, []);
+        if (robotsHang) return answerLater(res, 15_000, answer);
+        return answer();
+      }
+      res.writeHead(200, { "content-type": "image/png", "content-length": "3" });
+      res.end("png");
+    });
+
+    pageSite = await site((req, res) => {
+      const p = path(req);
+      if (p === "/robots.txt") return robots(res, []);
+      if (p === "/") {
+        res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+        res.end(
+          `<!doctype html><html><head><title>home</title></head><body>` +
+            `<img src="${assetHost.base}/far.png" alt="x"></body></html>`,
+        );
+        return;
+      }
+      html(res, `page ${p}`);
+    });
+  });
+
+  async function assetRows(id: string) {
+    return db.select().from(resources).where(eq(resources.crawlId, id));
+  }
+
+  /** Start a crawl of the page site; wait until the asset host's robots.txt is in flight. */
+  async function stalledAtThirdPartyRobots(): Promise<{ id: string; run: Promise<CrawlSummary> }> {
+    robotsHang = true;
+    const before = hits(assetHost, (p) => p === "/robots.txt");
+    const run = start(config(pageSite, { fetchResources: true }));
+    const id = await newCrawlOf(`${pageSite.base}/`);
+    await until("the third-party robots.txt in flight", () => hits(assetHost, (p) => p === "/robots.txt") > before);
+    return { id, run };
+  }
+
+  it("pause: paused within the stop target, the asset left unasked, and a resume reads the robots.txt again", async () => {
+    const { id, run } = await stalledAtThirdPartyRobots();
+    expect(await measureStop("pause during third-party robots.txt", id, "pause")).toBeLessThanOrEqual(
+      STOP_TARGET_MS,
+    );
+    expect((await run).status).toBe("paused");
+
+    const unasked = await assetRows(id);
+    expect(unasked).toHaveLength(1);
+    expect(unasked[0]!.fetchClass).toBeNull();
+    expect(unasked[0]!.statusCode).toBeNull();
+    expect(hits(assetHost, (p) => p === "/far.png")).toBe(0);
+
+    robotsHang = false;
+    const robotsBefore = hits(assetHost, (p) => p === "/robots.txt");
+    const resumed = await resumeCrawl(db, id, { config: config(pageSite, { fetchResources: true }) });
+    expect(resumed.status).toBe("finished");
+    expect(hits(assetHost, (p) => p === "/robots.txt")).toBeGreaterThan(robotsBefore);
+    const fetched = await assetRows(id);
+    expect(fetched[0]!.fetchClass).toBe("ok");
+    expect(fetched[0]!.statusCode).toBe(200);
+  }, 60_000);
+
+  it("cancel: cancelled within the stop target, the asset left unasked", async () => {
+    const { id, run } = await stalledAtThirdPartyRobots();
+    expect(await measureStop("cancel during third-party robots.txt", id, "cancel")).toBeLessThanOrEqual(
+      STOP_TARGET_MS,
+    );
+    expect((await run).status).toBe("cancelled");
+
+    const unasked = await assetRows(id);
+    expect(unasked).toHaveLength(1);
+    expect(unasked[0]!.fetchClass).toBeNull();
+    robotsHang = false;
+  }, 60_000);
+});

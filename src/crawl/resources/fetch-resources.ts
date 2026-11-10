@@ -106,7 +106,12 @@ import { and, asc, eq, gt, isNull, sql } from "drizzle-orm";
 import { request } from "undici";
 import type { Db } from "../../db/client.js";
 import { resources } from "../../db/schema.js";
-import { fetchRobots, type RobotsInfo, type RobotsOutcome } from "../discovery.js";
+import {
+  DiscoveryAbortedError,
+  fetchRobots,
+  type RobotsInfo,
+  type RobotsOutcome,
+} from "../discovery.js";
 import { credentialHeadersOf, type CredentialTarget } from "../credentials.js";
 import {
   classifyStatus,
@@ -396,9 +401,11 @@ interface HostRecord {
    * host share ONE robots.txt request rather than racing to make several.
    *
    * Null only when the caller's signal aborted while the robots.txt request
-   * waited for its gate slot (Phase 27b): nothing was asked, the pass is
-   * stopping, and every worker that reads the null stops too, leaving its row
-   * unasked. It is never read as "no rules".
+   * waited for its gate slot (Phase 27b) or while it was being read (27d: the
+   * read on the wire and its retry backoff are aborted): nothing was learned,
+   * the pass is stopping, and every worker that reads the null stops too,
+   * leaving its row unasked. It is never read as "no rules". The record lives
+   * for one pass, so a resume asks the host again.
    */
   robots: Promise<RobotsInfo | null>;
   /** Consecutive transport failures. Any answer resets it. */
@@ -494,7 +501,8 @@ export async function fetchCrawlResources(
     // pre-computed class keeps one decision in one place: `admit` answers "may
     // we ask, and on what evidence", `processOne` turns that into a row.
     | { kind: "denied"; reason: string; outcome: RobotsOutcome }
-    // The signal fired while this host's robots.txt waited for its slot.
+    // The signal fired while this host's robots.txt waited for its slot or
+    // was being read.
     | { kind: "aborted" }
     | { kind: "ok" }
   > => {
@@ -513,19 +521,31 @@ export async function fetchCrawlResources(
           ? Promise.resolve(opts.originRobots)
           : (async () => {
               if (!(await gate.acquire(host, opts.signal))) return null;
-              const info = await fetchRobots(
-                new URL(url).origin,
-                {
-                  userAgent: opts.userAgent,
-                  allowPrivate,
-                  robotsTiming: { headersMs: timeoutMs, idleMs: timeoutMs, totalMs: timeoutMs },
-                  retryBackoffMs: opts.robotsRetryBackoffMs,
-                  // Decided per hop by discovery: another host's robots.txt
-                  // gets nothing, unless a redirect brings it back home.
-                  credentials: opts.credentials,
-                },
-                "disallow",
-              );
+              let info: RobotsInfo;
+              try {
+                info = await fetchRobots(
+                  new URL(url).origin,
+                  {
+                    userAgent: opts.userAgent,
+                    allowPrivate,
+                    robotsTiming: { headersMs: timeoutMs, idleMs: timeoutMs, totalMs: timeoutMs },
+                    retryBackoffMs: opts.robotsRetryBackoffMs,
+                    // Decided per hop by discovery: another host's robots.txt
+                    // gets nothing, unless a redirect brings it back home.
+                    credentials: opts.credentials,
+                    // A stop aborts the read on the wire and its retry backoff
+                    // (27d): the pass does not sit out a stalled robots.txt.
+                    signal: opts.signal,
+                  },
+                  "disallow",
+                );
+              } catch (error) {
+                // Stopped mid-read: nothing was learned, so the record reads
+                // "aborted" (null, below) and never "no rules". Anything else
+                // is a defect and goes on as itself.
+                if (error instanceof DiscoveryAbortedError) return null;
+                throw error;
+              }
               // Only the first attempt came through the gate; the retries are
               // `fetchRobots`' own short backoff, which is the discipline the
               // crawl origin's robots.txt already gets.
@@ -642,8 +662,9 @@ export async function fetchCrawlResources(
       const host = new URL(url).host;
 
       const admission = await admit(host, url);
-      // Stopped while the host's robots.txt waited for its slot: the row is
-      // left as the per-request check above leaves it, null and unasked.
+      // Stopped while the host's robots.txt waited for its slot or was being
+      // read: the row is left as the per-request check above leaves it, null
+      // and unasked.
       if (admission.kind === "aborted") return;
       if (admission.kind === "capped") {
         // Unfetched, not failed: the null still means "seen, not yet asked".
