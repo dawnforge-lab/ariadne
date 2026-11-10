@@ -174,6 +174,11 @@ function familyOf(pageType: string): string | null {
  * family has exactly one member type, which fails the two-member test. Running
  * this over its own output changes nothing, which is what makes it safe on the
  * resume path.
+ *
+ * **The specification, not the hot path** (27d). `inferPageTemplates` runs this
+ * rule as SQL so the population never enters this process; this function is
+ * the oracle that SQL is tested against, type by type, in
+ * test/crawl/page-templates.test.ts.
  */
 export function collapseTemplates(
   members: readonly TemplateMember[],
@@ -213,27 +218,28 @@ export interface PageTemplateInference {
 }
 
 /**
- * How many `old -> new` pairs go into one UPDATE. It bounds the SQL text and
- * the `sql` fragments alive at once: they are built per batch (gate 27c).
+ * The one row the collapse statement returns. A type alias rather than an
+ * interface for the reason `deriveFieldPresence`'s `BlockRow` is one:
+ * `db.execute<T>` constrains T to `Record<string, unknown>`, and only an alias
+ * of an object literal carries the implicit index signature that satisfies it.
  */
-const RETYPE_BATCH = 500;
-
-/**
- * A row of the population query. A type alias rather than an interface for the
- * reason `deriveFieldPresence`'s `BlockRow` is one: `db.execute<T>` constrains T
- * to `Record<string, unknown>`, and only an alias of an object literal carries
- * the implicit index signature that satisfies it.
- */
-type PopulationRow = { page_type: string; paths: number };
+type CollapseCountsRow = { types_before: number; types_after: number; pages_retyped: number };
 
 /**
  * Collapse one crawl's singleton page types into the templates they belong to.
  *
- * **Memory.** O(distinct page types), never O(URLs) — the grouping is SQL's,
- * and what comes back is one row per type. The worst case a 50k-page crawl can
- * present is 50k distinct types (every URL its own shape), which is a set of
- * strings rather than a set of page rows; the normal case is the few hundred
- * the group-by actually returns. Nothing here reads `pages` row by row.
+ * **Memory: O(1) in this process** (hard rule 6, 27d). The population, the
+ * families, the collapse and the retype are ONE data-modifying SQL statement,
+ * and what comes back is one row of three counts, whatever the number of URL
+ * shapes. Before 27d the population came back one row per type and the mapping
+ * was built here: 4.1 MB + 2.1 MB at the 50k gate's 40,002 singleton shapes
+ * (every product URL its own shape), which is O(URLs) in all but name.
+ *
+ * **The SQL is a twin of `collapseTemplates`**, which stays as its oracle: the
+ * family test is `familyOf`'s, and the collapse test is the same two-member,
+ * `MIN_COHORT`-path rule. `test/crawl/page-templates.test.ts` pins the two
+ * together over a fixture of every way a type can enter or miss a family. A
+ * change to either is a change to both.
  *
  * **Idempotent** by recomputation over the population — see `collapseTemplates`
  * for why its output is a fixed point. A resume runs it again over a larger
@@ -245,9 +251,9 @@ type PopulationRow = { page_type: string; paths: number };
  *
  * **It writes one column of its own**, since migration 0012:
  * `crawls.template_inference_jsonb`, the record that this pass ran and what it
- * did (`recordInference`). Both exits write it — a crawl with nothing to
- * collapse is a crawl this ran over, not a crawl this never reached — and the
- * collapsing exit writes it inside the retype transaction.
+ * did (`recordInference`). It is written whether or not anything collapsed — a
+ * crawl with nothing to collapse is a crawl this ran over, not a crawl this
+ * never reached — and always inside the retype's transaction.
  */
 export async function inferPageTemplates(
   db: Db,
@@ -265,82 +271,132 @@ export async function inferPageTemplates(
   // so this is the whole of the parsing needed — and it is done in SQL because
   // the alternative is pulling every URL of the crawl into this process.
   const path = sql`split_part(regexp_replace(p.url, '^[a-zA-Z][a-zA-Z0-9+.-]*://[^/]*', ''), '?', 1)`;
-  const population = await db.execute<PopulationRow>(sql`
-    select p.page_type as page_type, count(distinct ${path})::int as paths
-    from pages p
-    where p.crawl_id = ${crawlId}
-      and p.page_type is not null
-      and p.page_type <> ''
-    group by p.page_type`);
-
-  const members = population.rows.map((row) => ({ pageType: row.page_type, paths: row.paths }));
-  const mapping = collapseTemplates(members);
-  const typesBefore = members.length;
-  const typesAfter = new Set(
-    members.map((m) => mapping.get(m.pageType) ?? m.pageType),
-  ).size;
-  if (mapping.size === 0) {
-    // Nothing to collapse — but the pass RAN, and that is the fact migration
-    // 0012 added the column to hold. A crawl whose types were already templates
-    // and a crawl this pass never reached are different things, and before the
-    // column the only difference was a log line (hard rule 7; the ambiguity
-    // docs/gates/phase-8.md §7.2 warns about). No transaction here because
-    // there is no batch to be atomic with: this single statement is the whole
-    // of what this path writes.
-    const result = { typesBefore, typesAfter, pagesRetyped: 0 };
-    await recordInference(db, crawlId, result);
-    return result;
-  }
-
-  // The fragments are built ONE BATCH AT A TIME, inside the loop. A drizzle
-  // `sql` fragment costs ~600 bytes against the ~50 of the two strings it wraps,
-  // so building every pair first held 23.5 MB at once on the 50k gate's 40,000
-  // singleton shapes and set the crawl's RSS peak (gate 27c). `entries` holds
-  // only references to the mapping's strings.
-  const entries = [...mapping];
-  // ALL THE BATCHES OR NONE OF THEM, which is what the three sibling
-  // derivations do (`deriveUrlParams`, `deriveFieldPresence`,
-  // `deriveClickDepth`) and for the same reason. A hard kill between two
-  // batches would leave half the population collapsed and half of it not, under
-  // a `crawls` row still saying `running` — and a reader cannot tell that from a
-  // crawl whose types legitimately had nothing to collapse (hard rule 7). The
-  // batching bounds the SQL text and the fragments alive at once, and committing
-  // between batches would change neither; the transaction costs one line.
+  // ONE STATEMENT, read top to bottom:
   //
-  // The second line of defence, not the first: because the pass is idempotent
-  // over the population, a resume re-runs it and a half-collapsed crawl would
-  // heal. That is a repair, and it only happens if somebody resumes. The
-  // transaction is what makes the row never wrong in the first place.
-  let pagesRetyped = 0;
-  await db.transaction(async (tx) => {
-    for (let i = 0; i < entries.length; i += RETYPE_BATCH) {
-      const batch = entries
-        .slice(i, i + RETYPE_BATCH)
-        .map(([from, to]) => sql`(${from}::text, ${to}::text)`);
-      const written = await tx.execute(sql`
-        update pages p
-        set page_type = v.new_type
-        from (values ${sql.join(batch, sql`, `)}) as v(old_type, new_type)
-        where p.crawl_id = ${crawlId}
-          and p.page_type = v.old_type`);
-      if (written.rowCount === null) {
-        throw new Error(
-          `inferPageTemplates: crawl '${crawlId}' — the update reported no row count, ` +
-            "so how many pages were retyped is unknown",
-        );
-      }
-      pagesRetyped += written.rowCount;
+  //  - `population`: one row per non-empty page type and its distinct PATHS
+  //    (`TemplateMember`). Null and '' are `(untyped)` and never enter.
+  //  - `segmented`: the type's segments, `filter(Boolean)` spelled
+  //    `array_remove(string_to_array(...), '')`.
+  //  - `membered`: `familyOf`, verbatim. A type has a family only when it is
+  //    its own `detectUrlTemplate` output — its segments re-join to it (a
+  //    leading slash, no trailing or doubled one) and no segment is one the
+  //    detector rewrites — and has at least two segments. A segment is
+  //    rewritten when it is all ASCII digits or has two or more hyphens, which
+  //    also covers the UUID (four) and the date (two) rules. `[0-9]`, never
+  //    `\d`: JS's `\d` is ASCII and the twin must not depend on a locale — and
+  //    a `\d` typed into this template literal would reach Postgres as a bare
+  //    `d`. The family is the prefix plus `:slug`.
+  //  - `decided`: every type and the type it ends up with. Per family, the
+  //    member types and the paths they cover; each population row is a distinct
+  //    type, so `count(*)` counts types. The family name, when it is itself a
+  //    member, counts toward both and maps to itself, as in JS. Types with no
+  //    family share the null partition, whose counts are never read.
+  //  - `mapping`: the types that move.
+  //  - `retyped`: the UPDATE, a hash join of the crawl's pages with `mapping`.
+  //
+  // Every sub-statement of a data-modifying WITH sees ONE snapshot, so
+  // `decided` and `mapping` describe the crawl BEFORE the update — which is
+  // what `typesBefore` and `typesAfter` are defined over — and the UPDATE's own
+  // row count comes back through `retyped`. One statement is also atomic on its
+  // own: a hard kill cannot leave half the population collapsed under a
+  // `crawls` row still saying `running`, the defect the 27c batches needed a
+  // transaction to rule out.
+  const collapse = sql`
+    with population as (
+      select p.page_type, count(distinct ${path})::int as paths
+      from pages p
+      where p.crawl_id = ${crawlId}
+        and p.page_type is not null
+        and p.page_type <> ''
+      group by p.page_type
+    ),
+    segmented as (
+      select page_type, paths, array_remove(string_to_array(page_type, '/'), '') as segs
+      from population
+    ),
+    membered as (
+      select page_type, paths,
+        case
+          when '/' || array_to_string(segs, '/') = page_type
+            and cardinality(segs) >= 2
+            and not exists (
+              select 1 from unnest(segs) as seg
+              where seg ~ '^[0-9]+$'
+                 or length(seg) - length(replace(seg, '-', '')) >= 2
+            )
+          then '/' || array_to_string(segs[1:cardinality(segs) - 1], '/') || '/' || ${SLUG}::text
+        end as family
+      from segmented
+    ),
+    decided as (
+      select page_type,
+        case
+          when family is not null
+            and count(*) over cohort >= 2
+            and sum(paths) over cohort >= ${MIN_COHORT}::int
+          then family
+          else page_type
+        end as after_type
+      from membered
+      window cohort as (partition by family)
+    ),
+    mapping as (
+      select page_type as old_type, after_type as new_type
+      from decided
+      where after_type <> page_type
+    ),
+    retyped as (
+      update pages p
+      set page_type = mapping.new_type
+      from mapping
+      where p.crawl_id = ${crawlId}
+        and p.page_type = mapping.old_type
+      returning 1
+    )
+    select
+      (select count(*) from decided)::int as types_before,
+      (select count(distinct after_type) from decided)::int as types_after,
+      (select count(*) from retyped)::int as pages_retyped`;
+
+  return db.transaction(async (tx) => {
+    // NO NESTED LOOPS for this one statement, and the reason is the planner's
+    // row estimates, not taste. At crawl close the crawl's pages are usually
+    // newer than `pages`' statistics, so the planner sees a handful of rows
+    // for this `crawl_id` (measured: 2 estimated against 40,002 real) and the
+    // CTEs inherit that guess. On that guess it joins the UPDATE as a nested
+    // loop with the mapping scanned once per page: 40,002 x 40,002 string
+    // comparisons, minutes long, which is what the first version of this
+    // statement did under the full test suite. With nested loops off it is a
+    // hash join whatever the estimate — 4.4 s at 40,002 shapes, linear. The
+    // batched UPDATE it replaces never met this because a VALUES list states
+    // its own size. `set local` ends with this transaction.
+    await tx.execute(sql`set local enable_nestloop = off`);
+    const counts = await tx.execute<CollapseCountsRow>(collapse);
+    const [row] = counts.rows;
+    if (row === undefined || counts.rows.length !== 1) {
+      throw new Error(
+        `inferPageTemplates: crawl '${crawlId}' — the collapse returned ${counts.rows.length} ` +
+          "count rows, not one, so what it did is unknown",
+      );
     }
-    // IN THE SAME TRANSACTION AS THE BATCHES, and that is the whole point of
+    const result: PageTemplateInference = {
+      typesBefore: row.types_before,
+      typesAfter: row.types_after,
+      pagesRetyped: row.pages_retyped,
+    };
+    // IN THE SAME TRANSACTION AS THE RETYPE, and that is the whole point of
     // writing it here rather than at the call site: the marker is a claim about
-    // the population the batches just retyped. Committed without them it would
-    // describe a collapse that rolled back; committed after them, out of band,
-    // a crash between the two would leave the row silent about a crawl whose
+    // the population the statement just retyped. Committed without it it would
+    // describe a collapse that rolled back; committed after it, out of band, a
+    // crash between the two would leave the row silent about a crawl whose
     // types HAD moved — the pre-0012 ambiguity, reintroduced at a narrower
-    // window. One transaction, one truth.
-    await recordInference(tx, crawlId, { typesBefore, typesAfter, pagesRetyped });
+    // window. One transaction, one truth. A crawl with nothing to collapse
+    // writes it too: the pass RAN, and a crawl whose types were already
+    // templates is not a crawl this pass never reached (hard rule 7;
+    // docs/gates/phase-8.md §7.2).
+    await recordInference(tx, crawlId, result);
+    return result;
   });
-  return { typesBefore, typesAfter, pagesRetyped };
 }
 
 /**
