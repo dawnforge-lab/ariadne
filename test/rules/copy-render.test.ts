@@ -20,11 +20,11 @@ const FIXTURE: Record<string, Entry> = JSON.parse(
 );
 
 const OLD_EXPL = "the sitemaps were only partly read because a size, entry, file-count or nesting limit was reached, or a page";
-const NEW_EXPL = "the sitemaps were only partly read because a size, entry, file-count, nesting or time limit was reached or the crawl was stopped while reading them, or a page";
+const NEW_EXPL = "the sitemaps were only partly read because a size, entry, file-count, nesting or time limit was reached or the crawl stopped or failed while re-reading or re-recording them, or a page";
 const OLD_TAIL = "after a sitemap that could not be read those checks did run,";
-const NEW_TAIL = "a time limit means the sitemap walk spent its whole 10-minute budget, usually on sitemaps that are slow to generate; a stop means the crawl was paused or cancelled while it was reading the sitemaps again, and resuming it to the end reads them in full; after a sitemap that could not be read those checks did run,";
+const NEW_TAIL = "a time limit means the sitemap walk spent its whole 10-minute budget, usually on sitemaps that are slow to generate; an interruption means the crawl stopped or failed while re-reading or re-recording the sitemaps, and resuming it to the end, or re-crawling, reads them in full; after a sitemap that could not be read those checks did run,";
 const OLD_FIX = "where the sitemaps were only partly read, split any sitemap over 50 MB into smaller files; where a page";
-const NEW_FIX = "where the sitemaps were only partly read, split any sitemap over 50 MB into smaller files; where the sitemap walk ran out of time (Sitemap Time Limit Reached), find the slow sitemaps, make them quicker to serve (cache or pre-generate them) and re-crawl when the site answers faster; where the sitemap walk was interrupted (Sitemap Walk Interrupted), resume the crawl to the end; where a page";
+const NEW_FIX = "where the sitemaps were only partly read, split any sitemap over 50 MB into smaller files; where the sitemap walk ran out of time (Sitemap Time Limit Reached), find the slow sitemaps, make them quicker to serve (cache or pre-generate them) and re-crawl when the site answers faster; where the sitemap walk was interrupted (Sitemap Walk Interrupted), resume the crawl to the end or re-crawl; where a page";
 
 const FIELDS = ["title", "explanation", "howToFix"] as const;
 

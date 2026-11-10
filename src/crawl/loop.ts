@@ -471,10 +471,11 @@ export interface DiscoveryEvidence {
    */
   suppliedSitemaps: string[];
   /**
-   * The walk's own truncation, plus `interrupted` (Phase 27d): set to true by
-   * the stopped close of a run that was stopped after it had cleared the
-   * staged sitemap alternates for its re-walk, on the evidence an EARLIER run
-   * wrote — which then no longer describes what is staged. Never written by a
+   * The walk's own truncation, plus `interrupted` (Phase 27d): set to true on
+   * the evidence an EARLIER run wrote by a run that cleared the staged sitemap
+   * alternates for its re-walk and then ended — stopped, or failed — before
+   * writing its own (`markEvidenceInterrupted`); that evidence then no longer
+   * describes what is staged. Never written by a
    * walk that returned: the next complete walk rewrites this object whole and
    * the key is gone. Absent reads false (`readSitemapHreflang`).
    */
@@ -1739,8 +1740,18 @@ async function runToCompletion(
   // rejects with `DiscoveryAbortedError`, and the run closes stopped with no
   // discovery evidence and nothing enqueued. A resume walks again from the top.
   await db.delete(sitemapHreflang).where(eq(sitemapHreflang.crawlId, crawlId));
-  const onSitemapFlush = testHooks?.onSitemapFlush;
+  // THE STAGING GUARD (ruling R10). From the delete above until this run's own
+  // evidence is on the row, an earlier run's evidence (on a resume) no longer
+  // describes what is staged. A stop marks it `interrupted` in its close
+  // (`closeStoppedBeforePages`); ANY throw out of this stretch — a failed poll
+  // that cut the walk short, a sink insert that failed, `persistSitemap`, the
+  // evidence write itself — marks it here before the error goes on, so a
+  // `failed` row, which can still be judged, never pairs complete-looking
+  // evidence with a partial staging. The body is not re-indented, as in
+  // `discover`.
   let discovery: DiscoveryResult;
+  try {
+  const onSitemapFlush = testHooks?.onSitemapFlush;
   try {
     discovery = await discover(config.siteUrl, {
       userAgent: config.userAgent,
@@ -1804,6 +1815,20 @@ async function runToCompletion(
     // a NUL in robots.txt must not fail the crawl before any page is fetched.
     .set({ discovery: storableDeep(discoveryEvidence(discovery, config)) })
     .where(eq(crawls.id, crawlId));
+  } catch (error) {
+    // The original error stays the one reported; a mark that fails too is
+    // surfaced beside it, never in its place (rule 7).
+    try {
+      await markEvidenceInterrupted(db, crawlId);
+    } catch (markError) {
+      throw new AggregateError(
+        [error, markError],
+        `${failureReasonOf(error)}; and marking crawl ${crawlId}'s kept discovery evidence ` +
+          `interrupted failed too`,
+      );
+    }
+    throw error;
+  }
 
   // Complete disallow: robots.txt could not be read, which is not permission
   // (RFC 9309 §2.3.1.4). The crawl fails loudly rather than reporting a clean
@@ -3018,6 +3043,24 @@ async function runToCompletion(
 }
 
 /**
+ * Mark the discovery evidence an EARLIER run of this crawl kept as
+ * `truncation.interrupted` (rulings R8, R10): this run cleared the staged
+ * sitemap alternates and did not get as far as writing its own evidence, so
+ * the kept evidence no longer describes what is staged. The hreflang absence
+ * rules refuse on it and the marker names it, until a complete walk rewrites
+ * the evidence (which drops the key). A crawl with no evidence yet — a fresh
+ * one — has nothing to mark: the update matches no row. Idempotent.
+ */
+async function markEvidenceInterrupted(db: Db, crawlId: string): Promise<void> {
+  await db
+    .update(crawls)
+    .set({
+      discovery: sql`jsonb_set(${crawls.discovery}, '{truncation,interrupted}', 'true'::jsonb)`,
+    })
+    .where(and(eq(crawls.id, crawlId), isNotNull(crawls.discovery)));
+}
+
+/**
  * Close a run that was stopped before its page loop (Phase 27d): in the host
  * probe, in the sitemap walk, as discovery returned, or while `sitemap_urls`
  * was being written. It makes the page loop's stopped close — the control
@@ -3035,11 +3078,11 @@ async function runToCompletion(
  * gets the same guarantee from raising the poll failure ahead of its probe.
  *
  * `stagingCleared`: the run had cleared the staged sitemap alternates for its
- * walk. On a crawl whose row already holds an EARLIER run's discovery evidence
- * (a resume), that evidence no longer describes what is staged, so it is
- * marked `truncation.interrupted` (ruling R8): the hreflang absence rules
- * refuse on it and the marker names it, until a complete walk rewrites the
- * evidence. A fresh crawl has no evidence to mark (the update matches nothing).
+ * walk, so evidence an EARLIER run kept is marked `interrupted`
+ * (`markEvidenceInterrupted`) — FIRST, before anything that can throw: the
+ * mark describes the staging, not how the run ends, and a failed poll raised
+ * by the settle must find it already written. (The staging guard in
+ * `runToCompletion` marks again on that throw; the mark is idempotent.)
  *
  * The page count is the frontier's, as the robots refusal's is: a resume
  * stopped here keeps what its earlier runs crawled.
@@ -3050,16 +3093,9 @@ async function closeStoppedBeforePages(
   watcher: ControlWatcher,
   opts: { stagingCleared: boolean },
 ): Promise<CrawlSummary> {
+  if (opts.stagingCleared) await markEvidenceInterrupted(db, crawlId);
   await settleControl(watcher);
   await writeNotFoundProbe(db, crawlId, { skipped: STOPPED_BEFORE_404_PROBE });
-  if (opts.stagingCleared) {
-    await db
-      .update(crawls)
-      .set({
-        discovery: sql`jsonb_set(${crawls.discovery}, '{truncation,interrupted}', 'true'::jsonb)`,
-      })
-      .where(and(eq(crawls.id, crawlId), isNotNull(crawls.discovery)));
-  }
   const crawled = crawledRows(await frontierCounts(db, crawlId));
   const closed = await closeCrawl(db, crawlId, "stopped", crawled, null, null, watcher.stopReason());
   return summarise(

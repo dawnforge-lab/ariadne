@@ -867,7 +867,7 @@ function incompleteReason(
   }
   if (reading !== null && reading.interrupted) {
     said.push(
-      "The sitemaps were only partly read because the crawl was paused or cancelled while it was reading them again (interrupted), so missing return links, missing self-references, missing x-default and sets naming only the page itself were not checked; resume the crawl to the end to read them in full.",
+      "The sitemaps' hreflang may be incomplete because the crawl stopped or failed while it was re-reading or re-recording its sitemaps (interrupted), so missing return links, missing self-references, missing x-default and sets naming only the page itself were not checked; resume the crawl to the end, or re-crawl, to read them in full.",
     );
   }
   if (reading !== null && reading.sitemapDocsFailed > 0) {

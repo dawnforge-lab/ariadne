@@ -671,7 +671,7 @@ describe("hreflang.declarations-incomplete against the database", () => {
     expect(found).toHaveLength(1);
     expect(withoutReason(found[0]!)).toEqual({ ...CLEAN, interrupted: true });
     const reason = String(found[0]!.evidence.reason);
-    expect(reason).toMatch(/paused or cancelled.*\(interrupted\)/);
+    expect(reason).toMatch(/stopped or failed.*\(interrupted\)/);
     // Only the interruption fired: neither the limit nor the time sentence is said.
     expect(reason).not.toMatch(/size, entry, file-count or nesting limit/);
     expect(reason).not.toMatch(/timeLimited/);

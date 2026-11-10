@@ -802,6 +802,75 @@ describe("a resumed crawl stopped during its re-walk (ruling R8)", () => {
     expect(again[RETURN_LINK]!.length).toBe(whole[RETURN_LINK]!.length);
     expect(again[MARKER]).toEqual([]);
   }, 60_000);
+
+  /** A finished crawl of the hreflang site, whose evidence a resume will keep. */
+  async function finishedHreflangCrawl(cfg: CrawlConfig): Promise<string> {
+    hreflangSlow = false;
+    const first = await runCrawl(db, cfg);
+    createdCrawls.push(first.crawlId);
+    expect(first.status).toBe("finished");
+    expect((await evidenceOf(first.crawlId)).truncation.interrupted).toBeUndefined();
+    return first.crawlId;
+  }
+
+  /** The rejection `run` settles with; a resolution is the test failing. */
+  async function rejectionOf(run: Promise<unknown>): Promise<Error> {
+    return run.then(
+      () => {
+        throw new Error("the run resolved");
+      },
+      (e: unknown) => e as Error,
+    );
+  }
+
+  it("(R10) a control poll that fails mid re-walk: the row closes failed, and the kept evidence is marked interrupted", async () => {
+    const cfg = config(hreflangSite, { maxPages: 10 });
+    const id = await finishedHreflangCrawl(cfg);
+
+    hreflangSlow = true;
+    const before = hits(hreflangSite, (p) => p === "/sitemap-2.xml");
+    const resumed = resumeCrawl(db, id, { config: cfg });
+    resumed.catch(() => undefined);
+    await until("the second sitemap in flight", () => hits(hreflangSite, (p) => p === "/sitemap-2.xml") > before);
+    // A value this engine never writes: the watcher's next poll fails on it.
+    await db.update(crawls).set({ controlRequest: "stop" }).where(eq(crawls.id, id));
+
+    const error = await rejectionOf(resumed);
+    expect(error.message).toMatch(/"stop"/);
+    const row = await crawlRow(id);
+    expect(row.status).toBe("failed");
+    expect(row.failureReason).toMatch(/"stop"/);
+    expect((await evidenceOf(id)).truncation.interrupted).toBe(true);
+    // Failed and still judgeable: the absence rules refuse on the mark.
+    const cut = await judge(id);
+    for (const ruleId of ABSENCE_RULES) expect(cut[ruleId], ruleId).toEqual([]);
+    expect(cut[MARKER]![0]!.evidence.interrupted).toBe(true);
+    hreflangSlow = false;
+  }, 60_000);
+
+  it("(R10) a non-abort error out of the re-walk: the original error is the failure, and the kept evidence is marked interrupted", async () => {
+    const cfg = config(hreflangSite, { maxPages: 10 });
+    const id = await finishedHreflangCrawl(cfg);
+
+    // The sink's flush fails on the re-walk's first document: discovery's own
+    // failure (a `ReaderFault`), thrown out of `discover` as itself.
+    const resumed = resumeCrawl(db, id, {
+      config: cfg,
+      testHooks: {
+        onSitemapFlush: async () => {
+          throw new Error("injected sitemap sink failure");
+        },
+      },
+    });
+    resumed.catch(() => undefined);
+
+    const error = await rejectionOf(resumed);
+    expect(error.message).toBe("injected sitemap sink failure");
+    const row = await crawlRow(id);
+    expect(row.status).toBe("failed");
+    expect(row.failureReason).toBe("injected sitemap sink failure");
+    expect((await evidenceOf(id)).truncation.interrupted).toBe(true);
+  }, 60_000);
 });
 
 describe("discover honours the caller's signal", () => {
