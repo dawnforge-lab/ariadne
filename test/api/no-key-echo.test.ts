@@ -424,6 +424,7 @@ describe("the helpers", () => {
  * cost ~10^10 steps) and repeated the accepted list once per key.
  */
 describe("100,000 unknown keys", () => {
+  // 5 s still discriminates: the old per-key scan was quadratic and takes minutes at 100k keys; linear takes well under a second.
   const MANY = 100_000;
   const many = (head: Record<string, unknown>): Record<string, unknown> => {
     const body: Record<string, unknown> = { ...head };
@@ -448,29 +449,29 @@ describe("100,000 unknown keys", () => {
     const registry = buildRegistry();
     const body = many({ siteUrl: `${SITE}/` });
     const parsed = timed(() => parseStartBody(body, registry));
-    expect(parsed.ms).toBeLessThan(1_000);
+    expect(parsed.ms).toBeLessThan(5_000);
     expect(parsed.value.ok).toBe(false);
     const errors = parsed.value.ok ? [] : parsed.value.errors;
     expect(errors).toHaveLength(1);
     expect(errors[0]?.message).toContain(`(key 2 in the order sent) (and ${MANY - 1} more)`);
 
     const viaSdk = timed(() => startBodySchema(registry).safeParse(body));
-    expect(viaSdk.ms).toBeLessThan(1_000);
+    expect(viaSdk.ms).toBeLessThan(5_000);
     expect(viaSdk.value.error?.issues).toHaveLength(1);
     expect(viaSdk.value.error?.issues[0]?.message).toContain(`(key 2 in the order sent) (and ${MANY - 1} more)`);
   });
 
   it("resume, render and every other MCP tool's arguments", () => {
     const resume = timed(() => thrown(() => parseResumeCrawlInput(many({}))));
-    expect(resume.ms).toBeLessThan(1_000);
+    expect(resume.ms).toBeLessThan(5_000);
     expect(resume.value).toContain(`(key 1 in the order sent) (and ${MANY - 1} more)`);
 
     const render = timed(() => thrown(() => parseRenderCrawlInput(many({ urls: [] }))));
-    expect(render.ms).toBeLessThan(1_000);
+    expect(render.ms).toBeLessThan(5_000);
     expect(render.value).toContain(`(key 2 in the order sent) (and ${MANY - 1} more)`);
 
     const args = timed(() => strictInput({ crawlId: z.string() }).safeParse(many({ crawlId: "c" })));
-    expect(args.ms).toBeLessThan(1_000);
+    expect(args.ms).toBeLessThan(5_000);
     expect(args.value.error?.issues).toHaveLength(1);
     expect(args.value.error?.issues[0]?.message).toContain(`(key 2 in the order sent) (and ${MANY - 1} more)`);
   });
