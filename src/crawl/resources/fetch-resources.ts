@@ -1174,10 +1174,13 @@ async function requestResource(
 
     return { kind: "response", statusCode: response.statusCode, headers, counted, countTruncated };
   } catch (error) {
-    // The caller's stop wins over every classification, including a deadline
-    // that fired in the same tick: nothing aborted is ever written as a row.
-    if (callerAborted()) throw new FetchAbortedError(url);
+    // Our own bug first: a programmer error is rethrown as itself even when a
+    // stop landed in the same tick, so it is never reported as an abort.
     if (isProgrammerError(error)) throw error;
+    // Then the caller's stop, which wins over every classification of the
+    // site's behaviour, including a deadline that fired in the same tick:
+    // nothing aborted is ever written as a row.
+    if (callerAborted()) throw new FetchAbortedError(url);
     const refusal = blockedAddressMessage(error);
     if (refusal !== null) return { kind: "refused", reason: `refused at connect: ${refusal}` };
     if (deadlineHit || isTimeout(error)) {
