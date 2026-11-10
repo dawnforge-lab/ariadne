@@ -1311,8 +1311,15 @@ import {
 } from "../../src/crawl/discovery.js";
 
 describe("discover: sitemap timing and walk budget (27d)", () => {
-  /** Scaled: the suite does not sleep 40 s. Headers 0.6 s, idle 0.3 s, total 1.2 s. */
-  const SCALED: DocTiming = { headersMs: 600, idleMs: 300, totalMs: 1200 };
+  /**
+   * Scaled, so the suite does not sleep minutes. Ruling R7: every fixture delay
+   * sits at least 300 ms from the limit it must (or must not) trip, because the
+   * fixture server and the client share one event loop.
+   */
+  const SCALED: DocTiming = { headersMs: 1_000, idleMs: 300, totalMs: 1_200 };
+  const HEADERS: DocTiming = { headersMs: 900, idleMs: 1_000, totalMs: 3_000 };
+  const IDLE: DocTiming = { headersMs: 2_000, idleMs: 300, totalMs: 5_000 };
+  const FLUSH: DocTiming = { headersMs: 1_000, idleMs: 900, totalMs: 1_200 };
   let timingServer: Server;
   let t: string;
 
@@ -1329,14 +1336,14 @@ describe("discover: sitemap timing and walk budget (27d)", () => {
         } else if (path === "/headers-450.xml") {
           await wait(450);
           xml(res, urlset([{ loc: page(1) }]));
-        } else if (path === "/headers-800.xml") {
-          await wait(800);
+        } else if (path === "/headers-1300.xml") {
+          await wait(1_300);
           xml(res, urlset([{ loc: page(1) }]));
         } else if (path === "/idle.xml") {
           const body = urlset([{ loc: page(1) }, { loc: page(2) }, { loc: page(3) }]);
           res.setHeader("content-type", "application/xml");
           res.write(body.slice(0, Math.floor(body.length / 2)));
-          await wait(450);
+          await wait(800);
           res.end(body.slice(Math.floor(body.length / 2)));
         } else if (/^\/hop\/[12]$/.test(path)) {
           // Each hop answers in 500 ms (< headers 600); three of them pass 1.2 s.
@@ -1395,22 +1402,22 @@ describe("discover: sitemap timing and walk budget (27d)", () => {
   });
 
   it("reads a document whose headers are late but within the limit", async () => {
-    const d = await walk("/headers-450.xml");
+    const d = await walk("/headers-450.xml", { sitemapTiming: HEADERS });
     expect(d.truncation.failures).toEqual([]);
     expect(d.sitemapEntries.map((e) => e.url)).toEqual([page(1)]);
     expect(d.truncation.timeLimited).toBe(false);
   });
 
   it("fails a document whose headers come too late, naming the headers limit", async () => {
-    const d = await walk("/headers-800.xml");
+    const d = await walk("/headers-1300.xml", { sitemapTiming: HEADERS });
     expect(d.truncation.failures).toEqual([
-      { url: `${t}/headers-800.xml`, reason: "no headers within 0.6 s" },
+      { url: `${t}/headers-1300.xml`, reason: "no headers within 0.9 s" },
     ]);
     expect(d.truncation.timeLimited).toBe(false);
   });
 
   it("fails a body that goes silent, naming the idle limit", async () => {
-    const d = await walk("/idle.xml");
+    const d = await walk("/idle.xml", { sitemapTiming: IDLE });
     expect(d.truncation.failures).toEqual([
       { url: `${t}/idle.xml`, reason: "no data for 0.3 s" },
     ]);
@@ -1433,7 +1440,7 @@ describe("discover: sitemap timing and walk budget (27d)", () => {
         await wait(1_500);
       },
     };
-    const d = await walk("/chunked.xml", { sink: slow });
+    const d = await walk("/chunked.xml", { sink: slow, sitemapTiming: FLUSH });
     expect(flushes).toBeGreaterThanOrEqual(3);
     expect(d.truncation.failures).toEqual([]);
     expect(d.sitemapEntries.map((e) => e.url)).toEqual([page(1), page(2), page(3)]);
