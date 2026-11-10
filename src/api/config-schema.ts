@@ -643,16 +643,34 @@ export const OPERATOR_ONLY_FIELDS: readonly string[] = [
  * field by name (an exact match of our own vocabulary, not the caller's
  * text), or an unknown field by its POSITION. An unknown key is never
  * repeated (27d spec §4): a key can be a secret pasted into the wrong place.
+ * `others` counts the unknown keys sent after it: a refusal names the first
+ * and counts the rest, so a body of 100,000 unknown keys is one sentence, not
+ * 100,000 (each repeating the accepted list).
  */
 export function unknownField(
   key: string,
   position: number,
   path = "body",
   accepted: readonly string[] = ACCEPTED_FIELDS,
+  others = 0,
 ): string {
-  if (Object.hasOwn(FORBIDDEN_FIELDS, key)) return FORBIDDEN_FIELDS[key] as string;
-  if (OPERATOR_ONLY_FIELDS.includes(key)) return `field '${key}' is set by the operator, not over the API`;
-  return unknownKeyMessage(path, position, key, accepted);
+  const more = others > 0 ? ` (and ${others} more unknown ${others === 1 ? "field" : "fields"})` : "";
+  if (Object.hasOwn(FORBIDDEN_FIELDS, key)) return `${FORBIDDEN_FIELDS[key] as string}${more}`;
+  if (OPERATOR_ONLY_FIELDS.includes(key)) {
+    return `field '${key}' is set by the operator, not over the API${more}`;
+  }
+  return unknownKeyMessage(path, position, key, accepted, others);
+}
+
+/**
+ * The start body's unknown keys — `keys`, in the order sent, as zod found them
+ * in `input` — as ONE refusal: the first by position (one scan of `input`'s
+ * keys), the rest counted.
+ */
+function unknownFieldsMessage(input: unknown, keys: readonly string[]): string {
+  const first = keys[0];
+  if (first === undefined) throw new Error("config schema: unrecognized keys with no key");
+  return unknownField(first, positionOf(input, first), "body", ACCEPTED_FIELDS, keys.length - 1);
 }
 
 /**
@@ -850,7 +868,7 @@ function buildStartBodySchema(registry: Registry) {
       // `parseStartBody` answers these two itself, before the schema runs.
       error: (issue) =>
         issue.code === "unrecognized_keys"
-          ? issue.keys.map((key) => unknownField(key, positionOf(issue.input, key))).join("; ")
+          ? unknownFieldsMessage(issue.input, issue.keys)
           : BODY_NOT_OBJECT,
     },
   );
@@ -912,19 +930,17 @@ function codeOf(issue: z.core.$ZodIssue): ConfigErrorCode {
  * names the field itself (`field 'maxPages' must be …`); inside the judgement
  * block the message leads with its dotted path, as `parseJudgement`'s do.
  *
- * An unknown key is named by its position in `raw`, the body as sent, and its
- * `path` is the object it was found in ("" for the body): neither the path nor
- * the message repeats the key (27d spec §4).
+ * An unknown key is named by its position in the object it was sent in (the
+ * schemas' error maps, which see that object), and the error's `path` is that
+ * object ("" for the body): neither the path nor the message repeats the key
+ * (27d spec §4). However many unknown keys an object has, it is ONE refusal —
+ * the first by position, the rest counted (`unknownFieldsMessage`).
  */
-function configErrorsOf(issue: z.core.$ZodIssue, raw: object): ConfigError[] {
+function configErrorsOf(issue: z.core.$ZodIssue): ConfigError[] {
   const segments = issue.path.map(String);
   if (issue.code === "unrecognized_keys") {
     if (segments.length === 0) {
-      return issue.keys.map((key) => ({
-        path: "",
-        code: "unknown_field",
-        message: unknownField(key, positionOf(raw, key)),
-      }));
+      return [{ path: "", code: "unknown_field", message: issue.message }];
     }
     // The block's own sentence is about its first unknown key, as
     // `parseJudgement` reports the first issue (the schema's error map).
@@ -954,9 +970,7 @@ export function parseStartBody(
   if (forbidden.length > 0) return { ok: false, errors: forbidden };
 
   const parsed = startBodySchema(registry).safeParse(raw);
-  if (!parsed.success) {
-    return { ok: false, errors: parsed.error.issues.flatMap((issue) => configErrorsOf(issue, raw)) };
-  }
+  if (!parsed.success) return { ok: false, errors: parsed.error.issues.flatMap(configErrorsOf) };
   const { judgement, ...crawl } = parsed.data;
   // The schema's `.superRefine` accepted the block; this is the same parse,
   // for its typed result (the schema's `rules` is `unknown`, see there).

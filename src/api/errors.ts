@@ -150,10 +150,16 @@ export function unknownKeyDetail(position: number, sent: string, accepted: reado
 }
 
 /** An unknown query parameter, named by its position among the parameters sent. */
-export function unknownQueryParameterMessage(position: number, sent: string, accepted: readonly string[]): string {
+export function unknownQueryParameterMessage(
+  position: number,
+  sent: string,
+  accepted: readonly string[],
+  others = 0,
+): string {
+  const more = others > 0 ? ` (and ${others} more)` : "";
   return accepted.length === 0
-    ? `unknown query parameter (key ${position} in the order sent): this route takes none`
-    : `unknown query parameter ${positionalClause(position, sent, accepted, 0)}`;
+    ? `unknown query parameter (key ${position} in the order sent)${more}: this route takes none`
+    : `unknown query parameter ${positionalClause(position, sent, accepted, others)}`;
 }
 
 /**

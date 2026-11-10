@@ -495,3 +495,37 @@ describe("runRules stamps what it judged with", () => {
     expect(await stampOf(crawlId)).toEqual({ at: null, stamp: null });
   });
 });
+
+// 27d spec §4: the three case-table rows above whose path now stops at the
+// parent ("rules", "thresholds", the block). Their sentence names the key by
+// position, never by the text sent.
+describe("parseJudgement names an unknown key or rule id by position, never quoting it", () => {
+  const rows: [string, unknown, string, string][] = [
+    [
+      "an unknown rule id",
+      { rules: { "title.too-long": { disabled: true }, "nope.rule": { disabled: true } } },
+      "nope.rule",
+      `rules: key 2 in the order sent names no rule in ruleset ${RULESET_VERSION}`,
+    ],
+    [
+      "a threshold that is not overridable",
+      { thresholds: { NEAR_DUPLICATE_HAMMING: 4 } },
+      "NEAR_DUPLICATE_HAMMING",
+      "thresholds: unknown field (key 1 in the order sent). Accepted: TITLE_MIN,",
+    ],
+    [
+      "an unknown top-level key",
+      { thresholds: {}, extra: 1 },
+      "extra",
+      "(the block): unknown field (key 2 in the order sent). Accepted: rules, thresholds, findingCap",
+    ],
+  ];
+  for (const [what, raw, sent, says] of rows) {
+    it(`refuses ${what} by position`, () => {
+      const error = refusal(raw);
+      expect(error.message).toContain(says);
+      expect(error.message).not.toContain(sent);
+      expect(error.path).not.toContain(sent);
+    });
+  }
+});

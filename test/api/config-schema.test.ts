@@ -205,8 +205,8 @@ describe("parseStartBody: the refusals the transport suites used to pin", () => 
     expect(error.message).toContain("Accepted: siteUrl, maxPages,");
   });
 
-  it("names every unknown field, one error each", () => {
-    expect(refused({ siteUrl: SITE, a: 1, b: 2 }).map((e) => /key (\d+) in the order sent/.exec(e.message)?.[1])).toEqual(["2", "3"]);
+  it("names the first unknown field by position and counts the rest, in one error", () => {
+    expect(refused({ siteUrl: SITE, a: 1, b: 2 }).map((e) => e.message.includes("(key 2 in the order sent) (and 1 more)"))).toEqual([true]);
   });
 
   // http.test.ts "refuses a field of the wrong type".

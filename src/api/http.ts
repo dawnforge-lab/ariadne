@@ -861,7 +861,8 @@ function param(ctx: RequestCtx, name: string): string {
 }
 
 /**
- * A query string this route understands, or a 400 naming the parameter.
+ * A query string this route understands, or a 400 naming the first unknown
+ * parameter's position (and counting the rest).
  *
  * The same argument as `noBody` and as the crawl-start schema's unknown-field
  * refusal, made about the third place a request can carry an instruction. An
@@ -873,11 +874,14 @@ function param(ctx: RequestCtx, name: string): string {
  * pasted as `?sk_live_…` lands.
  */
 function checkQuery(query: URLSearchParams, allowed: readonly string[]): void {
-  for (const [index, name] of [...query.keys()].entries()) {
-    if (!allowed.includes(name)) {
-      throw new ServiceError("VALIDATION", unknownQueryParameterMessage(index + 1, name, allowed));
-    }
-  }
+  const names = [...query.keys()];
+  const first = names.findIndex((name) => !allowed.includes(name));
+  if (first === -1) return;
+  const others = names.slice(first + 1).filter((name) => !allowed.includes(name)).length;
+  throw new ServiceError(
+    "VALIDATION",
+    unknownQueryParameterMessage(first + 1, names[first] as string, allowed, others),
+  );
 }
 
 /**

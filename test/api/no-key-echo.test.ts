@@ -23,7 +23,7 @@ import { randomUUID } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi, type MockInstance } from "vitest";
 import { inArray } from "drizzle-orm";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
@@ -35,7 +35,11 @@ import { closeFetchAgents } from "../../src/crawl/http.js";
 import { createApiServer, type ApiServer } from "../../src/api/http.js";
 import { createMcpServer, type AriadneMcpServer } from "../../src/api/mcp.js";
 import type { ServiceConfig } from "../../src/api/config.js";
+import { z } from "zod";
+import { parseStartBody, startBodySchema } from "../../src/api/config-schema.js";
 import { nearestAccepted, unknownKeyMessage } from "../../src/api/errors.js";
+import { strictInput } from "../../src/api/mcp-input.js";
+import { parseRenderCrawlInput, parseResumeCrawlInput } from "../../src/api/service.js";
 import { buildRegistry } from "../../src/rules/index.js";
 import { JudgementError, parseJudgement, readStoredJudgement } from "../../src/rules/judgement.js";
 import { RULESET_VERSION } from "../../src/rules/registry/registry.js";
@@ -60,8 +64,19 @@ let api: ApiServer;
 let base: string;
 let mcp: AriadneMcpServer;
 let client: Client;
+/** `ServiceConfig.log`: the one sink the service and both transports write to. */
 const logLines: string[] = [];
+/** Anything that reached the console instead, while this file ran — expected none. */
+const consoleLines: string[] = [];
+const consoleSpies: MockInstance[] = [];
 const crawlId = `crawl_no_key_echo_${randomUUID()}`;
+/**
+ * A crawl whose STORED judgement block carries SENTINEL as an unknown
+ * threshold — a row no request could write today. Reading it is a defect
+ * (500), which the transports log: so the log assertion below is about a
+ * sink that demonstrably received a line carrying the refusal.
+ */
+const brokenId = `crawl_no_key_echo_broken_${randomUUID()}`;
 
 /** The whole answer as text: status line plus the body, exactly as sent. */
 async function http(method: string, path: string, body?: unknown): Promise<{ status: number; text: string }> {
@@ -143,6 +158,23 @@ beforeAll(async () => {
     status: "finished",
     pagesCrawled: 0,
   });
+  await db.insert(crawls).values({
+    id: brokenId,
+    siteUrl: `${SITE}/`,
+    config: { siteUrl: `${SITE}/`, maxPages: 100, userAgent: "AriadneBot-test" },
+    discovery: mkDiscovery(),
+    judgement: { thresholds: { [SENTINEL]: 3 } },
+    rulesetVersion: "test",
+    status: "finished",
+    pagesCrawled: 0,
+  });
+  for (const method of ["error", "warn", "log", "info"] as const) {
+    consoleSpies.push(
+      vi.spyOn(console, method).mockImplementation((...args: unknown[]) => {
+        consoleLines.push(args.map(String).join(" "));
+      }),
+    );
+  }
 
   const config: ServiceConfig = {
     allowedDomains: [],
@@ -166,12 +198,37 @@ afterAll(async () => {
   await mcp.close();
   await api.close();
   await closeFetchAgents();
-  await db.delete(crawls).where(inArray(crawls.id, [crawlId]));
+  await db.delete(crawls).where(inArray(crawls.id, [crawlId, brokenId]));
   await closeDb(db);
   await rm(exportDir, { recursive: true, force: true });
   await rm(renderDir, { recursive: true, force: true });
-  // Nothing the test sent reached the log, on any path.
+  for (const spy of consoleSpies) spy.mockRestore();
+  // Nothing the test sent reached the log, on any path — and the log is live:
+  // the stored-block reads below wrote to it.
+  expect(logLines.length).toBeGreaterThanOrEqual(2);
   expect(logLines.join("\n")).not.toContain(SENTINEL);
+  expect(consoleLines.join("\n")).not.toContain(SENTINEL);
+});
+
+describe("the log: a refusal that IS logged does not carry the key", () => {
+  it("a stored block with an unknown key is a logged 500 on both transports, positional in the log", async () => {
+    const before = logLines.length;
+    const res = await http("GET", `/crawls/${brokenId}/config`);
+    expect(res.status, res.text).toBe(500);
+    expect(res.text).not.toContain(SENTINEL);
+
+    const answer = await tool("crawl_config_get", { crawlId: brokenId });
+    expect(answer.isError, answer.text).toBe(true);
+    expect(answer.text).not.toContain(SENTINEL);
+
+    const logged = logLines.slice(before).join("\n");
+    expect(logLines.length - before).toBe(2);
+    // The lines carry the refusal itself — the crawl and the key's position —
+    // so this is a sink the sentence reached, not an empty one.
+    expect(logged).toContain(`crawl ${brokenId}: stored judgement block is refused`);
+    expect(logged).toContain("thresholds: unknown field (key 1 in the order sent)");
+    expect(logged).not.toContain(SENTINEL);
+  });
 });
 
 describe("HTTP: no route quotes a key it was sent", () => {
@@ -357,5 +414,64 @@ describe("the helpers", () => {
       "crawl crawl_z: stored judgement block is refused: rules.gone.rule: the stored override of rule " +
         `'gone.rule' names no rule in ruleset ${RULESET_VERSION}; remove it by sending it as null`,
     );
+  });
+});
+
+/**
+ * Many unknown keys are ONE refusal — the first by position, the rest counted —
+ * built in time linear in the keys: a refusal per key, each finding its key's
+ * position by scanning the object, was quadratic (a 1 MiB body of short keys
+ * cost ~10^10 steps) and repeated the accepted list once per key.
+ */
+describe("100,000 unknown keys", () => {
+  const MANY = 100_000;
+  const many = (head: Record<string, unknown>): Record<string, unknown> => {
+    const body: Record<string, unknown> = { ...head };
+    for (let i = 0; i < MANY; i++) body[`k${i}`] = 1;
+    return body;
+  };
+  const timed = <T>(fn: () => T): { value: T; ms: number } => {
+    const started = performance.now();
+    const value = fn();
+    return { value, ms: performance.now() - started };
+  };
+  const thrown = (fn: () => unknown): string => {
+    try {
+      fn();
+    } catch (error) {
+      return (error as Error).message;
+    }
+    throw new Error("expected a refusal");
+  };
+
+  it("crawl_start / config_validate (parseStartBody) and the MCP start schema", () => {
+    const registry = buildRegistry();
+    const body = many({ siteUrl: `${SITE}/` });
+    const parsed = timed(() => parseStartBody(body, registry));
+    expect(parsed.ms).toBeLessThan(1_000);
+    expect(parsed.value.ok).toBe(false);
+    const errors = parsed.value.ok ? [] : parsed.value.errors;
+    expect(errors).toHaveLength(1);
+    expect(errors[0]?.message).toContain(`(key 2 in the order sent) (and ${MANY - 1} more)`);
+
+    const viaSdk = timed(() => startBodySchema(registry).safeParse(body));
+    expect(viaSdk.ms).toBeLessThan(1_000);
+    expect(viaSdk.value.error?.issues).toHaveLength(1);
+    expect(viaSdk.value.error?.issues[0]?.message).toContain(`(key 2 in the order sent) (and ${MANY - 1} more)`);
+  });
+
+  it("resume, render and every other MCP tool's arguments", () => {
+    const resume = timed(() => thrown(() => parseResumeCrawlInput(many({}))));
+    expect(resume.ms).toBeLessThan(1_000);
+    expect(resume.value).toContain(`(key 1 in the order sent) (and ${MANY - 1} more)`);
+
+    const render = timed(() => thrown(() => parseRenderCrawlInput(many({ urls: [] }))));
+    expect(render.ms).toBeLessThan(1_000);
+    expect(render.value).toContain(`(key 2 in the order sent) (and ${MANY - 1} more)`);
+
+    const args = timed(() => strictInput({ crawlId: z.string() }).safeParse(many({ crawlId: "c" })));
+    expect(args.ms).toBeLessThan(1_000);
+    expect(args.value.error?.issues).toHaveLength(1);
+    expect(args.value.error?.issues[0]?.message).toContain(`(key 2 in the order sent) (and ${MANY - 1} more)`);
   });
 });

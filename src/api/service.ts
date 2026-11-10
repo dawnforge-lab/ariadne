@@ -222,7 +222,7 @@ import {
   type CsvViewName,
   type ExportFormat,
 } from "./csv.js";
-import { ServiceError, clip, unknownKeyMessage, unknownKeysMessage } from "./errors.js";
+import { ServiceError, clip, unknownKeysMessage } from "./errors.js";
 import {
   buildCrawlOverview,
   buildIssuesOverview,
@@ -394,12 +394,14 @@ export function parseResumeCrawlInput(raw: unknown): CrawlCredentials {
   if (!isPlainObject(raw)) {
     throw new ServiceError("VALIDATION", "request body must be a JSON object");
   }
+  // The first unknown key by position, the rest counted, never quoted (27d
+  // spec §4) — one refusal however many there are.
+  const unknown = Object.keys(raw).filter((key) => !(CREDENTIAL_FIELDS as readonly string[]).includes(key));
+  if (unknown.length > 0) {
+    throw new ServiceError("VALIDATION", unknownKeysMessage("body", raw, unknown, CREDENTIAL_FIELDS));
+  }
   const input: Record<string, unknown> = {};
-  for (const [index, [key, value]] of Object.entries(raw).entries()) {
-    if (!(CREDENTIAL_FIELDS as readonly string[]).includes(key)) {
-      // By position, never quoted (27d spec §4).
-      throw new ServiceError("VALIDATION", unknownKeyMessage("body", index + 1, key, CREDENTIAL_FIELDS));
-    }
+  for (const [key, value] of Object.entries(raw)) {
     if (value === undefined) continue;
     const why = credentialInputError(key as CredentialField, value);
     if (why !== null) throw new ServiceError("VALIDATION", why);
@@ -435,15 +437,17 @@ export function parseRenderCrawlInput(raw: unknown): RenderCrawlInput {
   }
   const body = raw as Record<string, unknown>;
 
+  // The first unknown key by position, the rest counted, never quoted (27d
+  // spec §4) — one refusal however many there are.
+  const unknown = Object.keys(body).filter((key) => !Object.hasOwn(RENDER_CRAWL_FIELDS, key));
+  if (unknown.length > 0) {
+    throw new ServiceError(
+      "VALIDATION",
+      unknownKeysMessage("body", body, unknown, Object.keys(RENDER_CRAWL_FIELDS)),
+    );
+  }
   const input: Record<string, unknown> = {};
-  for (const [index, [key, value]] of Object.entries(body).entries()) {
-    if (!Object.hasOwn(RENDER_CRAWL_FIELDS, key)) {
-      // By position, never quoted (27d spec §4).
-      throw new ServiceError(
-        "VALIDATION",
-        unknownKeyMessage("body", index + 1, key, Object.keys(RENDER_CRAWL_FIELDS)),
-      );
-    }
+  for (const [key, value] of Object.entries(body)) {
     const kind = RENDER_CRAWL_FIELDS[key as keyof RenderCrawlInput];
     if (value === undefined) continue;
     assertKind(key, value, kind);
@@ -4950,7 +4954,20 @@ export class ApiService {
     const operatorOnly: Record<string, unknown> = {};
     const reported: Record<string, unknown> = {};
     const secrets: Partial<Record<CredentialField, unknown>> = {};
-    for (const [index, [key, value]] of Object.entries(raw).entries()) {
+    // The first unknown key by position, the rest counted, never quoted (27d
+    // spec §4) — one refusal however many there are.
+    const keys = Object.keys(raw);
+    const unknown = keys.filter(
+      (key) => !OPERATOR_ONLY_FIELDS.includes(key) && !REPORTED_CRAWL_KEYS.includes(key) && !Object.hasOwn(wire, key),
+    );
+    const first = unknown[0];
+    if (first !== undefined) {
+      throw new ServiceError(
+        "VALIDATION",
+        unknownField(first, keys.indexOf(first) + 1, "crawl", CRAWL_PATCH_FIELDS, unknown.length - 1),
+      );
+    }
+    for (const [key, value] of Object.entries(raw)) {
       if (OPERATOR_ONLY_FIELDS.includes(key)) {
         // Decided against the stored value in the transaction (Ruling 12): an
         // unchanged one is no change, a changed one is refused there.
@@ -4968,9 +4985,9 @@ export class ApiService {
           "findingCap belongs to the judgement: set it as judgement.findingCap",
         );
       }
-      const field = Object.hasOwn(wire, key) ? wire[key] : undefined;
+      const field = wire[key];
       if (field === undefined) {
-        throw new ServiceError("VALIDATION", unknownField(key, index + 1, "crawl", CRAWL_PATCH_FIELDS));
+        throw new Error(`api: crawl patch key at ${keys.indexOf(key) + 1} passed the unknown-key check`);
       }
       // `httpAuth: null` removes Basic auth (27c T9 fix 1, controller ruling):
       // the one credential kind with no empty form, so null is its "none" —
