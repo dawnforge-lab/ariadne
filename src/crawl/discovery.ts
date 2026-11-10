@@ -90,7 +90,6 @@ import {
   describeError,
   headerValue,
   isProgrammerError,
-  isTimeout,
   readCapped,
   sharedAgent,
   type HeaderBag,
