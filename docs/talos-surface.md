@@ -1,6 +1,6 @@
 # The Ariadne surface Talos codes against
 
-**Status:** the contract as of Phase 27c (ruleset 0.24.0, migrations 0000–0036,
+**Status:** the contract as of Phase 27d (ruleset 0.25.0, migrations 0000–0036,
 27 MCP tools / 27 HTTP routes; every column label in this document is served
 under the ruleset version the engine reports — `rules_catalog`'s
 `rulesetVersion`, which the metric-table pass moves).
@@ -14,6 +14,32 @@ crawl's URLs, keyed `(crawl_id, position)`, removed by `crawl_delete` with the r
 `frontier.redirect_hops`, `crawls.excluded_dropped` and `crawls.scope_changed_at`. No
 tool or route is added (27 / 27); every change is a new field, value or refusal on an
 existing one. The gate evidence is `docs/gates/phase-27c.md`.
+
+**What Phase 27d changed here: nothing new to call, a good deal to know.** Ruleset
+0.25.0, no migration, still 27 tools / 27 routes. The gate evidence is
+`docs/gates/phase-27d.md`.
+
+- **A slow sitemap is waited for, and a stop is honoured.** A sitemap document gets
+  60 s for its headers, 30 s of silence mid-body and 120 s in total across every
+  redirect hop; the whole walk is capped at 10 min. A walk the cap cut records
+  `discovery.truncation.timeLimited`. A pause or cancel lands within about a second
+  (bound 2 s) in the host probe, the sitemap walk, the post-discovery seeding, the
+  recheck pass and the resource pass (§4.1c).
+- **`hreflang.declarations-incomplete` has two new causes**, `timeLimited` and
+  `interrupted` (a resumed crawl whose sitemap re-walk was cut by any exit), each an
+  evidence key, a column and a sentence (the Phase 26c block below, and "Sitemap timing" there).
+- **An unknown key is named by position, never quoted**, on every route, every query
+  string and every tool: "key N in the order sent", the rest counted, a "did you
+  mean" where one name is close (§4.1).
+- **`notMeasured` is `[{id, reason}]` everywhere** it is carried (§4.3), and the
+  `crawl_overview` `urls` section gains two "Excluded by scope" entries on a crawl
+  that has `exclude` or `include` (§4.3b).
+- **Two 27c known limits are gone**: a `crawl_config_set` on a queued crawl can no
+  longer hand its runner the new credential shape with the old values, and
+  `crawl_overview` now counts the `excluded` rows (§13).
+- `performance.slow-response` now maps to Screaming Frog's `PageSpeed: Document
+  Request Latency`. `scripts/prune-test-crawls.ts` removes test-host crawls from a
+  development database (dry run by default; an operator tool, not part of the surface).
 - **Nine `crawl_start` fields** (§4.1), all in `config_schema` with their bounds:
 
   | field | default | bounds | mutability | secret |
@@ -103,7 +129,7 @@ existing one. The gate evidence is `docs/gates/phase-27c.md`.
   names and two prefixes. A refusal names a header or cookie name that is an HTTP
   token; one that is not, and an unknown key, it names by position only
   (`requestHeaders entry 2`, `cookies[0].name`, `httpAuth has an unknown field (key
-  3 …)`), so a value pasted into a name is never echoed. `Set-Cookie` from
+  3 in the order sent; …)`), so a value pasted into a name is never echoed. `Set-Cookie` from
   the site is ignored. **They are held only in this server's memory**: never in
   `config_jsonb`, a log line, an error or a response, and dropped on `crawl_cancel`
   and `crawl_delete`. What is stored is which kinds were given and the header and
@@ -241,10 +267,12 @@ info counting the fourteen metric rules). The new ids:
 - `hreflang.declarations-incomplete` (info, CHECK-24, a NOT MEASURED marker;
   added in the PR #24 review): hreflang declarations this crawl did not read in
   full. One site finding, `{reason, hreflangLimited, entryLimited, docLimited,
-  depthLimited, sitemapDocsFailed, sitemapDocsOversized, alternatesCapped,
-  possiblyCappedPages}`; `reason` is a sentence per trigger that fired, and
-  names nothing that did not. When the sitemap walk was cut short (a staging, entry,
-  document or depth limit, or a sitemap over 50 MB),
+  depthLimited, timeLimited, interrupted, sitemapDocsFailed, sitemapDocsOversized,
+  alternatesCapped, possiblyCappedPages}`; `reason` is a sentence per trigger that
+  fired, and names nothing that did not. When the sitemap walk was cut short (a
+  staging, entry, document or depth limit, the walk's time budget (`timeLimited`,
+  Phase 27d), a resumed crawl's re-walk cut by a stop or a failure (`interrupted`,
+  Phase 27d), or a sitemap over 50 MB),
   `hreflang.missing-return-link`, `hreflang.missing-self-reference`,
   `hreflang.missing-x-default` and `hreflang.self-only` answer nothing on that
   crawl and this marker speaks for them; a sitemap that could not be read, or a
@@ -254,7 +282,28 @@ info counting the fourteen metric rules). The new ids:
   hreflang targets, or 200 staged sitemap alternates — (`possiblyCappedPages`,
   on any crawl, any status) is never judged by those rules as missing a
   self-reference, x-default or alternate, nor reported as not returning a link.
-  The seven keys after `reason` are `null` on a crawl from before Phase 26c.
+  The nine keys after `reason` are `null` on a crawl from before Phase 26c; since
+  27d, `timeLimited` and `interrupted` read `false` on a crawl whose evidence predates
+  them. The marker's finding table (`issue_urls`, the CSV) gains the columns
+  `Sitemap Time Limit Reached` and `Sitemap Walk Interrupted`.
+
+  **Sitemap timing (Phase 27d).** A sitemap document is given 60 s to send its
+  headers, 30 s of silence between body chunks (a stall, not a slow transfer), and 120 s
+  in total counted across every redirect hop (`SITEMAP_TIMING`); time spent flushing
+  the entries already read does not count against it. The whole walk has a 10 min
+  budget (`DISCOVERY_WALK_BUDGET_MS`). `robots.txt` keeps its own 20 s
+  (`ROBOTS_TIMING`). A document that fails says which limit in its `reason`, in the
+  `sitemap.structure` `Failures` column and the sitemap findings that read it: `no
+  headers within 60 s`, `no data for 30 s` or `over 120 s in total` (before 27d every
+  one read "timed out"; Hurtigruten's cold sitemaps take about 33 s). A walk the
+  budget cut records `discovery_jsonb.truncation.timeLimited: true`: the entries read so
+  far are kept and the unread documents are cut short, not failed, so they are in no
+  `Failures` row. A pause or cancel during the walk is not a failure and not
+  `timeLimited`; it drops what the walk learned, and a resume re-walks.
+  `interrupted` marks the one case where a re-walk's evidence is stale: a resumed
+  crawl cleared its staged sitemap rows, and then any exit (stop, failed poll, error)
+  came before the walk's evidence was rewritten. The next completed walk rewrites the
+  evidence and clears it.
 
 What changed under existing ids. **Hreflang is read from all three sources**: the
 page's HTML, its HTTP `Link` header (read whole at fetch, on every classified
@@ -1109,7 +1158,7 @@ against the service's own `RENDER_CRAWL_FIELDS` table.
 (403, naming it), a legacy host or supplied sitemap off the allowlist (403), a
 `siteUrl` that is not http(s) (400), `perHostDelayMs` under the floor (400,
 naming the floor), `allowPrivate` at any value (400 — it is not a wire field),
-an unknown field (400, naming it). **A body with several faults gets the schema's
+an unknown field (400, naming it **by position**, below). **A body with several faults gets the schema's
 400 before the allowlist's 403** (since 27b the schema runs first, so a body that
 is both off-allowlist and malformed is a 400 naming the malformed field; fix it and
 the 403 follows). The body is parsed by ONE schema for both
@@ -1121,6 +1170,25 @@ starting anything, with the same first message
 /crawls refuses"). The body refusals themselves are pinned in
 `test/api/config-schema.test.ts:241` ("refuses a perHostDelayMs under the
 politeness floor rather than raising it").
+
+**An unknown key is named by its position, never quoted** (Phase 27d). A key can be a
+secret pasted into the wrong place, so no refusal hands back what the client sent. The
+message names the FIRST unknown key in an object by its place among the keys as sent
+(`body has an unknown field (key 3 in the order sent)`), counts the rest
+(`(and 4 more)`), and, when one accepted name is close to what was sent, suggests it
+(`; did you mean 'maxPages'?`), then lists the accepted names. That covers `POST
+/crawls`, `config_validate`, `crawl_resume`, `crawl_render`, `PATCH /crawls/:id/config`,
+every route's query string (`unknown query parameter (key 1 in the order sent)`) and
+every MCP tool's arguments. `crawl_start` and `config_validate` answer ONE
+`unknown_field` error per object, not one per key, so a body of a hundred thousand
+unknown keys is one short refusal, read in linear time. Rule ids in `judgement` are
+positional too, with the ruleset version (`key 2 in the order sent names no rule in
+ruleset 0.25.0`). Two things are still named: a credential header or cookie name that
+is a valid HTTP token (27c), and a rule id already **stored** in a crawl's judgement
+that the ruleset no longer has, because that is the repair path (`crawl_config_set`,
+§4.9). "In the order sent" is `Object.keys` order, so an integer-like key counts first.
+Pinned by `test/api/no-key-echo.test.ts`, which sends a sentinel key through every
+transport and nested position and asserts it appears in no response and no log line.
 
 **`judgement`** (Phase 27a) sets how the crawl is judged from its first rules
 run: the block §4.9 describes, `{rules?, thresholds?, findingCap?}`. It is
@@ -1365,18 +1433,26 @@ over the crawl; neither can be interrupted, so wait for it to answer. A pause
 cannot meet one, because those runs never start on a `queued` or `running` crawl.
 
 **How fast a stop lands.** The loop reads the request once a second
-(`CONTROL_POLL_MS`) and aborts in-flight page fetches, which go back to the
-frontier and are never written as failures (an aborted fetch refunds its attempt).
-A stop during the page crawl of a small site flips the status in about a second
-(806 to 932 ms measured); on a deep crawl it takes longer, and the 50k-page gate crawl
-(16 workers, 20,000 pages done) flipped `paused` **5.3 s** after the request
-(`docs/gates/phase-27b.md` §7). Poll `crawl_status`; do not assume one second. Two things
-take longer still, both disclosed: the **sitemap
-walk and the host probe are not interrupted** (the stop lands when they return, since a
-walk cut part-way would leave a sitemap the rules judge as whole), and **the recheck
-and resource passes keep their contract** (no new request after a stop, the one
-in flight settles and is recorded), so a stop during them can take up to one fetch
-deadline, 20 s.
+(`CONTROL_POLL_MS`) and, since Phase 27d, a stop is honoured in every phase of the
+crawl within about a second (bound 2 s on an idle machine):
+
+| phase | what a stop does |
+|---|---|
+| host probe | the probe's requests are aborted; the crawl closes at once |
+| sitemap walk | the in-flight document is aborted, including while its rows are being flushed; what the walk had learned is dropped and a resume re-walks |
+| post-discovery seeding | the sitemap-entry enqueue and the `sitemap_urls` write check the request between batches; the frontier is partial and a resume re-enqueues to the same set |
+| page crawl | in-flight page fetches go back to the frontier and are never written as failures (an aborted fetch refunds its attempt) |
+| 5xx recheck, resource pass | the in-flight request is aborted and its row left unwritten, so a resume asks it again |
+| render pass | none to land: a crawl that renders is already `finished`, so `crawl_pause` and `crawl_cancel` answer 409, as before (27b) |
+
+On a deep crawl the status flip waits for the close, which runs template inference over
+every page: the 50k-page gate crawl (16 workers, 20,000 pages done) flipped `paused`
+**5.3 s** after the request (`docs/gates/phase-27b.md` §7). Poll `crawl_status`; do
+not assume one second. A **cancel during discovery** leaves a crawl that never ran
+(below); a **pause during discovery** keeps whatever the evidence held. A stop that
+lands in the walk of a **resumed** crawl, after the staged sitemap rows were cleared
+for the re-walk, marks the evidence it keeps `truncation.interrupted` (the 26c block's `hreflang.declarations-incomplete`), because
+the staged hreflang is now partial.
 
 **What a stop keeps.** A pause keeps the frontier, the per-host spacing the crawl
 earned and its throttle record; it survives a server restart, and nothing starts the
@@ -1384,7 +1460,7 @@ crawl but `crawl_resume`. A paused crawl that has run can be rendered and judged
 (looking at partial results is a reason to pause). A cancel keeps the pages crawled,
 which stay judgeable and exportable. A stop skips whatever epilogue work had not
 started: the 404 probe if it came during the page crawl; otherwise the rest of the
-5xx recheck and the resource pass. The skipped checks read as not measured, never as
+5xx recheck and the resource pass (a request in flight is aborted, not awaited). The skipped checks read as not measured, never as
 a pass. `crawl_status.neverFetched` says how many URLs the crawl never asked for.
 
 **A crawl paused or cancelled while still queued never ran** (Phase 27b ruling 11).
@@ -1757,17 +1833,24 @@ listing so a dashboard drawing it needs no second call. Pinned:
 `test/api/judgement-surfaces.test.ts:139` "issues_list drops the disabled rule,
 names it, and carries the overrides".
 
-**`notMeasured` (27c final wave)** sits beside `disabledRules` on every listing
-that carries it — `issues_list`, `issues_overview`, the `issues` export and the
-CSV views that read findings — and on `metrics_get`: the rule ids the stored
-rules run left out because this is a **list crawl** (the `crawl.list-mode`
-marker's own `notMeasured`, decided by the same registry flags, the crawl's
-mode and its stored `sitemapsRead`), sorted. A listing filtered to one of them
+**`notMeasured` (27c final wave; `{id, reason}` since 27d)** sits beside `disabledRules`
+on every listing that carries it — `issues_list`, `issues_overview`, the `issues`
+export and the CSV views that read findings — and on `metrics_get`: **`[{id, reason}]`**,
+the rules the stored rules run left out because this is a **list crawl** (decided by
+the same registry flags as the `crawl.list-mode` marker, the crawl's mode and its
+stored `sitemapsRead`), sorted by id. The `reason` is a sentence, as in
+`crawl_overview`'s: `a list crawl follows no links, so this rule's evidence was not
+gathered` for a rule that needs the link graph, and `a list crawl read no sitemap, so
+this rule's evidence was not gathered` for a sitemap rule on a list crawl that read none.
+The marker's OWN `notMeasured` evidence stays a plain list of rule ids (it is finding
+evidence, not a surface field). A listing filtered to one of them
 is empty because **nobody measured it, not because the site is clean** (hard
 rule 1). `[]` on a spider crawl and on a crawl no rules run has judged. Mirroring
 a disabled rule: `issues_overview` never makes one a zero row, `issue_urls` (and
 the `issue_urls` CSV view) of one is refused 409 naming `crawl.list-mode`, and
-`metric_table` of a skipped metric says in its `note` that it was not measured.
+`metric_table` of a skipped metric says in its `note` that it was not measured (its
+JSON carries no `notMeasured`). The MCP answer of an `export_csv` over a findings view
+carries the same `{id, reason}` list. Before 27d every one of these was a bare list of ids.
 Pinned: `test/api/scope-start.test.ts:579` "issues_list and metrics_get name a
 skipped rule in notMeasured, on HTTP and MCP, and never read it as clean".
 
@@ -1871,11 +1954,18 @@ Its ten sections, in this order: `urls`, `fetch-class`, `status-class`,
   `robotsBlocked.dropped`. Percents are against Encountered, except the dropped
   count: it counts DISCOVERIES turned away, is not a subset of Encountered, and
   has a null percent. **The entries are not a partition and are never asserted
-  to sum**, because a resume reseeds `pagesCrawled`. **Phase 27c's `excluded` rows
-  are not in this section**: Encountered counts the frontier and the robots-blocked
-  rows only, and `excludedDropped` has no entry. They are `pages` rows, so they are in
-  the `fetch-class` and `indexability` partitions below (`excluded`, `Excluded by crawl
-  settings`); read their dropped count off `crawl_status.excludedDropped`.
+  to sum**, because a resume reseeds `pagesCrawled`.
+  **Excluded by scope (Phase 27d), only on a crawl whose config has `exclude` or
+  `include`** (an unscoped crawl excludes nothing and shows neither entry):
+  `Excluded by scope (stored)` is the crawl's stored `excluded` rows, which are
+  `pages` rows like the robots-blocked ones, so they are INCLUDED in Encountered and
+  carry a percent of it; `Excluded by scope (dropped)` is `crawl_status.excludedDropped`,
+  the discoveries turned away past the stored-row budget, a count of discoveries, not
+  a subset of Encountered, with a null percent. The dropped entry is left out (not
+  zero) on a crawl whose counter is null. The stored rows are also in the `fetch-class`
+  and `indexability` partitions below (`excluded`, `Excluded by crawl settings`). Before
+  27d this section did not count them at all, and a scoped crawl's Encountered read
+  low. Pinned in `test/api/crawl-overview.test.ts` (the scoped-crawl cases).
 - `fetch-class`, `status-class`, `indexability`, `click-depth`, `discovery` and
   `response-time` are each a partition of the crawl's `pages` rows (each summed
   to the gate crawl's 602), with percents against that count. `status-class` is
@@ -2200,8 +2290,8 @@ after its re-judge. Pinned with `metrics_get`'s below.
 `{metricId, scope, scopeValue, value, title, explanation, checkIds, category}`
 per row, and since Phase 27a `judgementStale` beside `items` and `nextCursor`
 (`crawl_status`'s flag, §4.2). Since the 27c final wave, `notMeasured` (§4.3):
-the metrics (and rules) a list crawl's rules run left out, so an empty page for
-one reads "not measured", never "nothing to measure". A metric is a measurement the last rules run
+the metrics (and rules) a list crawl's rules run left out, as `{id, reason}`, so an
+empty page for one reads "not measured", never "nothing to measure". A metric is a measurement the last rules run
 stored, and `site.health` counted only the findings of the rules that run left
 enabled, so a stale judgement means these numbers predate the crawl's current
 settings: a rule disabled since is still in `site.health`'s counts, and a rule
@@ -2931,7 +3021,8 @@ rather than reading it as null", `test/api/issues-overview.test.ts:258` "refuses
 an unjudged crawl with CONFLICT", `test/api/issues-overview.test.ts:305` "writes
 an empty % of Judged cell when pagesJudged is null".
 
-**`crawl_overview`: `notMeasured`.** A section the crawl could not measure is
+**`crawl_overview`: `notMeasured`.** (The listings' `notMeasured`, §4.3, has the same
+`{id, reason}` shape.) A section the crawl could not measure is
 ABSENT from `sections` and named in `notMeasured` as `{id, reason}`; an entry
 of a measured section can be named the same way. Never a section of zeros. The
 reasons, verbatim (`NOT_MEASURED_REASONS` in `src/api/overview.ts`):
@@ -3436,7 +3527,7 @@ Six postures a Talos integrator should know about rather than discover:
 
 ## 11. Versioning, and what a ruleset change does to a served crawl
 
-`RULESET_VERSION` (**0.24.0** as of Phase 27c) stamps **judgement**: bump it when
+`RULESET_VERSION` (**0.25.0** as of Phase 27d) stamps **judgement**: bump it when
 a rule's verdict or copy changes. Adding a rule or a metric family adds rows
 without changing a verdict — `metrics` rows carry no version column at all —
 which is the argument Phase 10 held 0.7.0 on.
@@ -3707,11 +3798,12 @@ Three consequences a consumer must plan for:
 `GET /crawls/:id/export?format=csv&view=<view>` streams `text/csv; charset=utf-8`,
 chunked, with no `Content-Length` and a `Content-Disposition` filename. The MCP
 tool writes the same bytes to a file under the server's export directory and
-answers `{format, view, ruleId?, metricId?, path, rows, bytes, disabledRules?, notMeasured?}`.
+answers `{format, view, ruleId?, metricId?, path, rows, bytes, disabledRules?, notMeasured?}`
+(`notMeasured` as `{id, reason}[]`, §4.3).
 `rows` counts **data rows**; the header is always written and never counted.
 `disabledRules` is on the answer of the four views that read findings
 (`issues`, `issue_urls`, `issues_overview`, `crawl_overview`), with `notMeasured`
-(§4.3: what a list crawl did not measure) beside it, and both are absent on the
+(§4.3: what a list crawl did not measure, with a reason each) beside it, and both are absent on the
 rest.
 
 | view | columns | one row is | measured on `crawl_02ff6f7a` |
@@ -3970,12 +4062,12 @@ byte for byte, as it writes it".
 - **Credentials live in ONE server process's memory** (Phase 27c). A second Ariadne
   process pointed at the same database does not hold them, so a crawl that needs them
   is `CREDENTIALS_REQUIRED` there exactly as after a restart; Talos, which holds the
-  secrets, re-supplies them to whichever process it asks. A `crawl_config_set` that
-  replaces a queued crawl's credentials in the instant a runner dequeues it can leave
-  the runner with the new shape and the old values; the loop then refuses loudly and
-  the crawl fails, never running unauthenticated (re-run it).
-- **`crawl_overview`'s `urls` section does not count `excluded` rows** (§4.3b); read
-  them from the `fetch-class` partition and `crawl_status.excludedDropped`.
+  secrets, re-supplies them to whichever process it asks. (Until 27d a `crawl_config_set`
+  that replaced a queued crawl's credentials in the instant a runner dequeued it could
+  leave the runner with the new shape and the old values; the store is now keyed by
+  shape, a runner reads the values of the shape its row states, and a failed
+  `crawl_config_set` leaves the old credentials usable and the new ones gone. The
+  known limit is removed.)
 - **A list crawl measures the listed pages, not the site.** `crawl.list-mode` names
   the 18 site-wide rules that did not run (plus the 13 sitemap rules when no sitemap
   was read) and the 11 target rules judged only against what the list fetched; their

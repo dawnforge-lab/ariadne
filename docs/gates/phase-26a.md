@@ -522,6 +522,10 @@ alone and on the next full run:
   run alone (`-t "platform profile"`, 43 s).
 - `test/crawl/renderer.test.ts:1321`, inside "never predicts a URL twice once a prediction
   for it was wrong" (Task 10, and once unidentified in Task 11).
+  *Note, 2026-11-10: Phase 27d rewrote this test to assert the releases themselves
+  rather than a paced count (it now starts at `renderer.test.ts:1304`), and the
+  `minGap() >= 1000 - SLACK_MS` assertions above were replaced by slot-gap checks
+  (`docs/gates/phase-27d.md` §1).*
 
 Evidence that 26a did not cause them:
 

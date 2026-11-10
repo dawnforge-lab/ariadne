@@ -154,6 +154,14 @@ like any other. Full http(s) URLs, absolute — a relative path is a 400 naming 
 entry, and a host outside the site's own spellings (apex/www × http/https) must be on
 the allowlist in its own right, because the walk fetches every document it is handed.
 
+A slow sitemap is waited for: a document gets 60 s for its headers, 30 s of silence
+mid-body and 120 s in total across its redirects, and the whole walk 10 minutes. A
+document that breaks a limit is a failed sitemap and says which one (`no headers
+within 60 s`, `no data for 30 s`, `over 120 s in total`; read them in `sitemap.structure`'s
+Failures column). A walk that ran out of its 10 minutes is `timeLimited` in
+`hreflang.declarations-incomplete`: the entries read are kept, the rest unread, so the
+hreflang rules that need the whole sitemap did not run (NOT MEASURED, never a pass).
+
 **There is no third path: the engine never probes for a sitemap URL on spec.** A
 document nobody pointed at is a request somebody has to decide to make, and reporting
 whatever comes back as the site's published sitemap would be a fact the crawl made
@@ -843,11 +851,13 @@ block, or to look at the partial data first. Cancel when the crawl is wrong or n
 longer wanted. `crawl_pause` and `crawl_cancel` answer 200 when the change happened
 now (a `queued` or `paused` crawl) and 202 when it was requested of a `running`
 crawl; read `controlRequested` in `crawl_status` until the status changes (about a
-second on a small crawl; longer on a deep one, because the close runs template
-inference over every page before the status flips — the 50k-page gate crawl,
-paused with 20,000 pages done, flipped 5.3 s after the request; longer during
-discovery, and up to one fetch deadline of 20 s if the crawl is already in its
-recheck or resource pass). A cancel outranks a pause. `crawl_delete`
+second on a small crawl, in every phase since 27d: the host probe, the sitemap walk,
+the seeding after it, the page crawl, the recheck and the resource pass each stop within
+about a second; longer on a deep one, because the close runs template inference over
+every page before the status flips — the 50k-page gate crawl, paused with 20,000 pages
+done, flipped 5.3 s after the request. A crawl that is rendering is already `finished`:
+pause and cancel answer 409 there. A cancel during discovery leaves a crawl that never
+ran). A cancel outranks a pause. `crawl_delete`
 (with `confirm` echoing the crawl id) removes a closed or paused crawl's rows and
 files for good.
 
