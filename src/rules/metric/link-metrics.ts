@@ -409,6 +409,7 @@ export const linkMetrics: MetricRule[] = [
     LINKS,
     perScope("Template", DISTRIBUTION_COLUMNS, 4),
     async (db, crawlId, self) => distribution(db, crawlId, self, inlinkCohort(crawlId)),
+    { needsSpider: true },
   ),
 
   // THE TWO ENDS AS ONE LIST. The value carries `top` and `bottom` — two arrays
@@ -435,6 +436,7 @@ export const linkMetrics: MetricRule[] = [
       5,
     ),
     async (db, crawlId, self) => extremes(db, crawlId, self),
+    { needsSpider: true },
   ),
 
   // The one map shape in the ruleset: the source templates are the SITE's own
@@ -446,6 +448,7 @@ export const linkMetrics: MetricRule[] = [
     LINKS,
     expandMap("sources", "Destination Template", "Source Template", "Links", 6),
     async (db, crawlId, self) => sourcesByType(db, crawlId, self),
+    { needsSpider: true },
   ),
 
   // DISCOVERY depth: how the crawler first arrived at each page, which is a
@@ -487,6 +490,7 @@ export const linkMetrics: MetricRule[] = [
           from pages p
           where ${cohortFilter(crawlId)}`,
       ),
+    { needsSpider: true },
   ),
 
   // CLICK depth, and the metric CHECK-31 has always meant: the shortest chain of
@@ -519,5 +523,6 @@ export const linkMetrics: MetricRule[] = [
             where ${cohortFilter(crawlId)}`,
         true,
       ),
+    { needsSpider: true },
   ),
 ];

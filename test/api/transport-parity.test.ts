@@ -185,10 +185,18 @@ function validValue(field: string, spec: JsonSchema): unknown {
     legacyHosts: ["localhost"],
     sitemapUrls: [`${site}/sitemap.xml`],
     judgement: { rules: { "title.too-long": { priority: "low" } }, thresholds: { SLOW_MS: 800 } },
+    // Phase 27c. `urls` is only valid beside `mode: "list"` (`COMPANIONS`).
+    urls: [`${site}/p/1`, `${site}/p/2`],
+    requestHeaders: { "x-parity": "parity-header-value" },
+    httpAuth: { username: "parity-user", password: "parity-password" },
+    cookies: [{ name: "sid", value: "parity-cookie" }],
   };
   if (!(field in fixtures)) throw new Error(`no fixture for '${field}', which has no default`);
   return fixtures[field];
 }
+
+/** The fields a valid value of one field needs beside it: a list is a list crawl's. */
+const COMPANIONS: Record<string, Record<string, unknown>> = { urls: { mode: "list" } };
 
 /**
  * The table, built by walking the published schema. A field gets one valid
@@ -218,7 +226,11 @@ async function buildCases(): Promise<{ valid: Case[]; invalid: Case[] }> {
   };
 
   for (const [field, spec] of Object.entries(props)) {
-    valid.push({ name: `${field}: valid`, body: { siteUrl: seed, [field]: validValue(field, spec) }, field });
+    valid.push({
+      name: `${field}: valid`,
+      body: { siteUrl: seed, ...COMPANIONS[field], [field]: validValue(field, spec) },
+      field,
+    });
     invalid.push({
       name: `${field}: wrong type`,
       body: { siteUrl: seed, [field]: wrongType(spec) },
@@ -337,7 +349,7 @@ afterAll(async () => {
 describe("contract clause 1: both transports accept and refuse the same fields", () => {
   it("walks the published schema and drives every body through POST /crawls and crawl_start", async () => {
     const { valid, invalid } = await buildCases();
-    expect(valid.length).toBe(15);
+    expect(valid.length).toBe(24);
 
     for (const c of valid) {
       const viaHttp = await call("POST", "/crawls", c.body);
@@ -454,5 +466,40 @@ describe("contract clause 2: config_validate and crawl_start agree on every refu
     const schema = await tool("config_schema", {});
     expect(schema.isError, schema.text).toBe(false);
     expect(schema.body).toEqual((await call("GET", "/config/schema")).body);
+  });
+});
+
+describe("a list crawl over both transports (27c)", () => {
+  it("accepts the same list body on both, with equal effective", async () => {
+    const body = {
+      siteUrl: `${site}/`,
+      mode: "list",
+      urls: [`${site}/p/1`, `${site}/p/2?b=2&a=1`, `${site}/p/2?a=1&b=2#x`, `${site}/p/3`],
+      exclude: ["*/private/*"],
+      maxRedirectHops: 5,
+    };
+    const viaHttp = await call("POST", "/config/validate", body);
+    const viaMcp = await tool("config_validate", { config: body });
+    expect(viaMcp.isError, viaMcp.text).toBe(false);
+    expect(viaHttp.body["valid"], JSON.stringify(viaHttp.body["errors"])).toBe(true);
+    expect(viaMcp.body?.["effective"]).toEqual(viaHttp.body["effective"]);
+    expect(viaHttp.body["effective"]).toMatchObject({
+      mode: "list",
+      listUrlCount: 3,
+      listDuplicates: 1,
+      maxPages: 6,
+      exclude: ["*/private/*"],
+      maxRedirectHops: 5,
+    });
+    expect(viaHttp.body["effective"]).not.toHaveProperty("urls");
+
+    const startedHttp = await call("POST", "/crawls", body);
+    expect(startedHttp.status, JSON.stringify(startedHttp.body)).toBe(202);
+    expect(startedHttp.body).toMatchObject({ listUrlCount: 3, listDuplicates: 1 });
+    await cancelQueuedHttp(String(startedHttp.body["crawlId"]));
+    const startedMcp = await tool("crawl_start", body);
+    expect(startedMcp.isError, startedMcp.text).toBe(false);
+    expect(startedMcp.body).toMatchObject({ listUrlCount: 3, listDuplicates: 1 });
+    await cancelQueuedMcp(String(startedMcp.body?.["crawlId"]));
   });
 });

@@ -106,7 +106,9 @@
  * URL the crawl has a row for, and a blocked URL is exactly that — on record,
  * not judged, and reported by `robots.blocks-internal-urls`. The censuses of
  * what was FETCHED (`redirect.volume`'s denominator, `render.coverage`'s
- * `pagesCrawled`, the render budget) exclude them instead (`ROBOTS_BLOCKED`).
+ * `pagesCrawled`, the render budget) exclude them instead (`NEVER_REQUESTED`,
+ * which also covers the crawl's scope-`excluded` rows — Phase 27c — and those
+ * land in `pagesNotAuditable` here for the same reason).
  *
  * Those pages are excluded from every bucket here, and `pagesNotAuditable` is
  * the column that says how many, so the exclusion is a number a reader can see

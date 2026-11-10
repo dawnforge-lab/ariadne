@@ -167,6 +167,7 @@ import type { Db } from "../../db/client.js";
 import { pages } from "../../db/schema.js";
 import type { RobotsInfo } from "../discovery.js";
 import { fetchPage, type FetchClass } from "../fetch-page.js";
+import type { CredentialTarget } from "../credentials.js";
 import type { HostGate } from "../politeness.js";
 import { isUrlAllowed } from "../url-policy.js";
 import { storableCap } from "../storable-text.js";
@@ -276,6 +277,12 @@ export interface RecheckPassOpts {
    * IS the claim the evidence makes about the gap.
    */
   minGapMs?: number;
+  /**
+   * The crawl's credentials (Phase 27c), threaded to fetch-page, which decides
+   * per URL (`credentialHeadersFor`). A recheck asks the site what the crawl
+   * asked it, with the same credentials.
+   */
+  credentials?: CredentialTarget;
   /** TEST ONLY override of `MAX_RECHECKS`, so a cap can be provoked with two rows. */
   maxRechecks?: number;
   /** TEST ONLY override of `NO_RESPONSE_RECHECK_CAP`. */
@@ -404,6 +411,7 @@ export function serverErrorOutcome(fetchClass: FetchClass): "confirmed" | "clear
     case "timeout":
     case "network_error":
     case "disallowed":
+    case "excluded":
       return "inconclusive";
   }
 }
@@ -433,6 +441,7 @@ export function noResponseOutcome(fetchClass: FetchClass): "confirmed" | "cleare
     case "blocked":
       return "cleared";
     case "disallowed":
+    case "excluded":
       return "inconclusive";
   }
 }
@@ -649,6 +658,7 @@ export async function recheckServerErrors(
           userAgent: opts.userAgent,
           allowPrivate,
           timeoutMs,
+          credentials: opts.credentials,
         });
         // The gate hears about it before anything else does, so a 503 on recheck
         // escalates this host for whatever comes next — the rest of this pass, and

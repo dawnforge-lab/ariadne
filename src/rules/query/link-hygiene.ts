@@ -684,6 +684,7 @@ export const linkHygieneRules: QueryRule[] = [
   defineRule<QueryRule>({
     kind: "query",
     id: NON_INDEXABLE_ONLY.id,
+    needsSpider: true,
     checkIds: ["CHECK-32"],
     category: CATEGORY,
     severity: NON_INDEXABLE_ONLY.severity,

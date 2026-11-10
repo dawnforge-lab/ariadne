@@ -68,6 +68,15 @@ export const ROBOTS_BLOCKED = (alias: string): SQL =>
   );
 
 /**
+ * A row the crawl RECORDED and NEVER REQUESTED, whichever side refused it:
+ * robots.txt (`ROBOTS_BLOCKED`) or the crawl's own scope patterns
+ * (`fetch_class = 'excluded'`, Phase 27c). Readers that count what the crawl
+ * FETCHED use this, so neither kind of row is read as a fetched page.
+ */
+export const NEVER_REQUESTED = (alias: string): SQL =>
+  sql`(${ROBOTS_BLOCKED(alias)} or ${sql.raw(`${alias}.fetch_class = 'excluded'`)})`;
+
+/**
  * Whether a stored string actually declares something. A tag that reached the
  * database as `""` or `"   "` — `<title> </title>`, `<link rel=canonical
  * href="">`, an empty robots meta — declares nothing, and reading it as a
@@ -782,6 +791,7 @@ export type IndexabilityStatus =
   | "Client Error"
   | "Server Error"
   | "Blocked by robots.txt"
+  | "Excluded by crawl settings"
   | "Blocked by bot protection"
   | "No Response"
   | "Not HTML";
@@ -889,6 +899,8 @@ export function indexabilityOf(page: IndexabilityInput): {
       return nonIndexable("Blocked by bot protection");
     case "disallowed":
       return nonIndexable("Blocked by robots.txt");
+    case "excluded":
+      return nonIndexable("Excluded by crawl settings");
     case "timeout":
     case "network_error":
       return nonIndexable("No Response");
@@ -990,6 +1002,7 @@ export const INDEXABILITY_STATUS_SQL = (alias: string): SQL =>
       ` when 'server_error' then 'Server Error'` +
       ` when 'blocked' then 'Blocked by bot protection'` +
       ` when 'disallowed' then 'Blocked by robots.txt'` +
+      ` when 'excluded' then 'Excluded by crawl settings'` +
       ` when 'timeout' then 'No Response'` +
       ` when 'network_error' then 'No Response'` +
       ` when 'non_html' then 'Not HTML'` +
@@ -1190,6 +1203,8 @@ export function metricRule(
     self: MetricIdentity,
     judgement: JudgementContext,
   ) => Promise<Metric[]>,
+  /** List-mode flags (Phase 27c), see `RuleMeta.needsSpider` / `needsSitemaps`. */
+  listMode: { needsSpider?: true; needsSitemaps?: true } = {},
 ): MetricRule {
   const self: MetricIdentity = { id };
   return defineRule<MetricRule>({
@@ -1201,6 +1216,7 @@ export function metricRule(
     ...copyFor(id),
     rulesetVersion: RULESET_VERSION,
     table,
+    ...listMode,
     run: (db, crawlId, ctx) => run(db, crawlId, self, judgementOr(ctx)),
   });
 }

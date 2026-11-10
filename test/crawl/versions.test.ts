@@ -30,3 +30,14 @@ describe("engineVersion", () => {
     expect(engineVersion({ ARIADNE_GIT_SHA: "" })).toBe(`${pkg.version}+sha-unknown`);
   });
 });
+
+describe("redactRequestHeaders with a crawl's own credential header names", () => {
+  it("redacts a custom header named in the shape, case-insensitively, and leaves the rest alone", () => {
+    expect(redactRequestHeaders({ "x-tenant": "s3cret" }, ["X-Tenant"])).toEqual({
+      "x-tenant": "[redacted]",
+    });
+    expect(
+      redactRequestHeaders({ "X-Tenant": "s3cret", "user-agent": "AriadneBot-test" }, ["x-tenant"]),
+    ).toEqual({ "X-Tenant": "[redacted]", "user-agent": "AriadneBot-test" });
+  });
+});

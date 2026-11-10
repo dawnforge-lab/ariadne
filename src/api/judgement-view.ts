@@ -40,6 +40,7 @@ import {
   type Thresholds,
 } from "../rules/judgement.js";
 import { storedFindingCap } from "../rules/query/crawl-evidence.js";
+import { listModeNotMeasured } from "../rules/query/list-mode.js";
 import { renderCopy, type IssueCopy } from "../rules/registry/copy/index.js";
 import { RULESET_VERSION, type Registry } from "../rules/registry/registry.js";
 import type { AnyRule, IssueType, Priority } from "../rules/registry/types.js";
@@ -61,6 +62,16 @@ export interface JudgementView {
   block: JudgementBlock | null;
   /** The rules the CURRENT block disables, sorted ascending. */
   disabledRules: string[];
+  /**
+   * The rules the stored rules run left out because this is a LIST crawl
+   * (27c): the `crawl.list-mode` marker's `notMeasured`, from the same
+   * functions the run decides with (`listModeNotMeasured`), sorted. An empty
+   * listing for one of them is "not measured", never "clean" (hard rule 1),
+   * so every listing that carries `disabledRules` carries this beside it
+   * (27c final wave M16). `[]` on a spider crawl, and on a crawl no rules run
+   * has judged: no run skipped anything.
+   */
+  notMeasured: string[];
   /**
    * A finding rule's type after the crawl's overrides. `overridden` is true when
    * the block sets the type — whether or not it matches the rule's default.
@@ -91,6 +102,8 @@ export interface JudgementView {
 /** The columns of a `crawls` row a judgement view is built from. */
 export interface JudgementRow {
   config: unknown;
+  /** `discovery_jsonb`: a list crawl's `sitemapsRead` decides `notMeasured`. */
+  discovery: unknown;
   judgement: unknown;
   rulesJudgedWith: unknown;
   rulesRunAt: Date | null;
@@ -122,6 +135,7 @@ export async function loadJudgementView(
   const rows = await db
     .select({
       config: crawls.config,
+      discovery: crawls.discovery,
       judgement: crawls.judgement,
       rulesJudgedWith: crawls.rulesJudgedWith,
       rulesRunAt: crawls.rulesRunAt,
@@ -216,6 +230,10 @@ export function judgementViewOf(
   return {
     block,
     disabledRules: judgedWithOf(block, undefined).disabledRules,
+    notMeasured:
+      row.rulesRunAt === null
+        ? []
+        : listModeNotMeasured(registry.all(), row.config, row.discovery, crawlId),
     typeOf(ruleId) {
       const rule = findingRule(ruleId);
       const set = overrides[ruleId]?.type;
@@ -258,6 +276,23 @@ export function refuseIfDisabled(view: JudgementView, crawlId: string, ruleId: s
       "CONFLICT",
       `rule '${ruleId}' is disabled on crawl '${crawlId}'; re-enable it with crawl_config_set ` +
         "to list its findings",
+    );
+  }
+}
+
+/**
+ * The refusal a rule-scoped listing gives a rule the stored run left out for
+ * list mode (`JudgementView.notMeasured`): `refuseIfDisabled`'s reason — an
+ * empty listing would read as "this rule found nothing", where nobody looked
+ * (27c final wave M16).
+ */
+export function refuseIfNotMeasured(view: JudgementView, crawlId: string, ruleId: string): void {
+  if (view.notMeasured.includes(ruleId)) {
+    throw new ServiceError(
+      "CONFLICT",
+      `rule '${ruleId}' was not measured on crawl '${crawlId}': it is a list crawl, and this ` +
+        "rule needs the whole site or a sitemap read the crawl did not make (crawl.list-mode " +
+        "names it), so it did not run — crawl the site to measure it",
     );
   }
 }

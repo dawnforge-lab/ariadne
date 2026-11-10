@@ -22,7 +22,8 @@ import {
 } from "../registry/registry.js";
 import type { RuleCaps } from "../registry/types.js";
 import { PAGINATION_WALK_MAX } from "../thresholds.js";
-import { cappedListing, capsOr, limitTo, noteTruncation } from "./crawl-evidence.js";
+import { fencedOffSql } from "../../crawl/url-scope.js";
+import { cappedListing, capsOr, limitTo, noteTruncation, storedScope } from "./crawl-evidence.js";
 
 export { PAGINATION_WALK_MAX };
 
@@ -84,6 +85,12 @@ interface PaginatedPage {
   resolvedPrev: string | null;
   /** The `pages` row for `resolvedPrev`, or null when the crawl never fetched it. */
   prevTarget: PageTarget | null;
+  /**
+   * `resolvedNext` is a URL the crawl's CURRENT scope refuses (27c), decided in
+   * SQL by the same patterns the frontier used. Not crawling it was our
+   * decision, so `next-target-uncrawled` leaves it out.
+   */
+  nextFenced: boolean;
 }
 
 /**
@@ -112,6 +119,7 @@ async function eachPaginatedPage(
   crawlId: string,
   visit: (p: PaginatedPage) => void,
 ): Promise<void> {
+  const scope = await storedScope(db, crawlId);
   let cursor = "";
   for (;;) {
     const batch = await db
@@ -143,6 +151,7 @@ async function eachPaginatedPage(
       ),
     ];
     const targets = new Map<string, PageTarget>();
+    const fencedOff = new Set<string>();
     if (wanted.length > 0) {
       // One array parameter rather than one placeholder per URL, so the
       // statement's shape stays constant across batches (the link-targets
@@ -180,7 +189,14 @@ async function eachPaginatedPage(
           -- the next page crawled" it answers no, exactly as the absence of a
           -- row did before such rows existed, so it is not a target any rule
           -- here judges as fetched (non-indexable-target, next-not-linked).
-          and p.fetch_class <> 'disallowed'`);
+          -- An 'excluded' row (the crawl's scope, 27c) is the same: never asked.
+          and p.fetch_class not in ('disallowed', 'excluded')`);
+      const fenced = await db.execute<{ url: string }>(sql`
+        select u.url
+        from unnest(${sql.param(wanted)}::text[]) as u(url)
+        -- u.url is never NULL: the array holds only non-null resolved URLs.
+        where ${fencedOffSql(sql`u.url`, scope, scope.siteUrl)}`);
+      for (const row of fenced.rows) fencedOff.add(String(row.url));
       for (const row of rows.rows) {
         targets.set(String(row.url), {
           url: String(row.url),
@@ -206,6 +222,7 @@ async function eachPaginatedPage(
         nextTarget: next === null ? null : (targets.get(next) ?? null),
         resolvedPrev: prev,
         prevTarget: prev === null ? null : (targets.get(prev) ?? null),
+        nextFenced: next !== null && fencedOff.has(next),
       });
     }
   }
@@ -518,6 +535,7 @@ export const paginationRules: QueryRule[] = [
   defineRule<QueryRule>({
     kind: "query",
     id: NEXT_UNCRAWLED.id,
+    needsSpider: true,
     checkIds: ["CHECK-22"],
     category: CATEGORY,
     severity: NEXT_UNCRAWLED.severity,
@@ -538,7 +556,8 @@ export const paginationRules: QueryRule[] = [
           if (p.resolvedNext === null) {
             return { relNext: p.relNext, resolvedTo: null, unparseable: true };
           }
-          return p.nextTarget === null
+          // A target the crawl's scope fences off was not crawled by choice (27c).
+          return p.nextTarget === null && !p.nextFenced
             ? { relNext: p.relNext, resolvedTo: p.resolvedNext }
             : null;
         },
@@ -553,6 +572,7 @@ export const paginationRules: QueryRule[] = [
   defineRule<QueryRule>({
     kind: "query",
     id: NEXT_NOT_LINKED.id,
+    needsSpider: true,
     checkIds: ["CHECK-22"],
     category: CATEGORY,
     severity: NEXT_NOT_LINKED.severity,
@@ -624,6 +644,7 @@ export const paginationRules: QueryRule[] = [
   defineRule<QueryRule>({
     kind: "query",
     id: NON_INDEXABLE_TARGET.id,
+    listPartial: true,
     checkIds: ["CHECK-22", "CHECK-23"],
     category: CATEGORY,
     severity: NON_INDEXABLE_TARGET.severity,
@@ -646,6 +667,7 @@ export const paginationRules: QueryRule[] = [
   defineRule<QueryRule>({
     kind: "query",
     id: LOOP.id,
+    listPartial: true,
     checkIds: ["CHECK-22"],
     category: CATEGORY,
     severity: LOOP.severity,
@@ -665,6 +687,7 @@ export const paginationRules: QueryRule[] = [
   defineRule<QueryRule>({
     kind: "query",
     id: SEQUENCE_ERROR.id,
+    listPartial: true,
     checkIds: ["CHECK-22"],
     category: CATEGORY,
     severity: SEQUENCE_ERROR.severity,

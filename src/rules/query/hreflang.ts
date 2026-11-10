@@ -5,13 +5,14 @@ import type { Db } from "../../db/client.js";
 import { MAX_HREFLANG_PAIRS } from "../../crawl/parse/page-analyzer.js";
 import { normalizeUrl } from "../../crawl/parse/url-utils.js";
 import { SITEMAP_MAX_BYTES } from "../../crawl/sitemap-stream.js";
+import { fencedOffSql } from "../../crawl/url-scope.js";
 import {
   CANONICALISED_ELSEWHERE,
   FETCHED_OK,
   isAuditable,
   isCanonicalisedElsewhere,
   queryFinding,
-  ROBOTS_BLOCKED,
+  NEVER_REQUESTED,
   type RuleIdentity,
 } from "../helpers.js";
 import { copyFor } from "../registry/copy/index.js";
@@ -22,7 +23,7 @@ import {
   type QueryRule,
 } from "../registry/registry.js";
 import type { RuleCaps } from "../registry/types.js";
-import { capsOr, noteAtLeastTruncation, noteTruncation } from "./crawl-evidence.js";
+import { capsOr, noteAtLeastTruncation, noteTruncation, storedScope } from "./crawl-evidence.js";
 import {
   cutShort,
   PAGE_IDS,
@@ -367,10 +368,10 @@ async function targetContext(
            p.id in (${POSSIBLY_CAPPED_PAGES(crawlId, PAGE_URLS(wanted))}) as possibly_capped
     from pages p
     where p.crawl_id = ${crawlId} and p.url = any(${sql.param(wanted)}::text[])
-      -- A robots-blocked row (Phase 23 T3) was recorded and NEVER REQUESTED,
+      -- A robots-blocked or scope-excluded row (Phase 23 T3, 27c) was recorded and NEVER REQUESTED,
       -- so it is read the way an alternate nobody fetched always was: absent
       -- from this map, and counted by hreflang.alternates-not-crawled.
-      and not ${ROBOTS_BLOCKED("p")}`);
+      and not ${NEVER_REQUESTED("p")}`);
   const byUrl = new Map<string, TargetPage>();
   /** Crawled targets whose own set may have filled the pair cap in one source. */
   const atCap = new Set<string>();
@@ -681,6 +682,7 @@ async function missingSelfReferenceFindings(
  * too many, never a silence.
  */
 async function alternatesNotCrawledFindings(db: Db, crawlId: string): Promise<Finding[]> {
+  const scope = await storedScope(db, crawlId);
   const rows = await db.execute<{
     host: string;
     alternates: number;
@@ -695,12 +697,16 @@ async function alternatesNotCrawledFindings(db: Db, crawlId: string): Promise<Fi
       where h.crawl_id = ${crawlId}
         and ${FETCHED_OK("p")}
         and not ${CANONICALISED_ELSEWHERE("p")}
+        -- An alternate the crawl's CURRENT scope fences off is our decision,
+        -- not the site's gap (27c). hreflang.target_url is NOT NULL.
+        and not ${fencedOffSql(sql`h.target_url`, scope, scope.siteUrl)}
         and not exists (
           select 1 from pages t
           where t.crawl_id = ${crawlId} and t.url = h.target_url
-            -- Recorded but never requested (robots.txt, Phase 23 T3) is still
-            -- "not requested by this crawl": the marker's own words.
-            and not ${ROBOTS_BLOCKED("t")})
+            -- Recorded but never requested (robots.txt, Phase 23 T3; the
+            -- crawl's scope, 27c) is still "not requested by this crawl": the
+            -- marker's own words.
+            and not ${NEVER_REQUESTED("t")})
     ),
     by_host as (
       select
@@ -788,7 +794,7 @@ async function declarationsIncompleteFindings(db: Db, crawlId: string): Promise<
     select count(*)::int as n
     from (${POSSIBLY_CAPPED_PAGES(
       crawlId,
-      (p) => sql`not ${ROBOTS_BLOCKED(p)} and not ${CANONICALISED_ELSEWHERE(p)}`,
+      (p) => sql`not ${NEVER_REQUESTED(p)} and not ${CANONICALISED_ELSEWHERE(p)}`,
     )}) x`);
   // A count with no `group by` always answers one row (hard rule 7).
   const row = capped.rows[0];
@@ -1049,6 +1055,7 @@ export const hreflangRules: QueryRule[] = [
   defineRule<QueryRule>({
     kind: "query",
     id: RETURN_LINK.id,
+    listPartial: true,
     checkIds: ["CHECK-24"],
     category: CATEGORY,
     severity: RETURN_LINK.severity,
@@ -1100,6 +1107,7 @@ export const hreflangRules: QueryRule[] = [
   defineRule<QueryRule>({
     kind: "query",
     id: NON_INDEXABLE.id,
+    listPartial: true,
     checkIds: ["CHECK-26"],
     category: CATEGORY,
     severity: NON_INDEXABLE.severity,
@@ -1157,6 +1165,7 @@ export const hreflangRules: QueryRule[] = [
   defineRule<QueryRule>({
     kind: "query",
     id: NOT_CRAWLED.id,
+    needsSpider: true,
     checkIds: ["CHECK-24", "CHECK-26"],
     category: CATEGORY,
     severity: NOT_CRAWLED.severity,

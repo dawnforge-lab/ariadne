@@ -216,6 +216,13 @@ export const COPY_TEMPLATES: Record<string, IssueCopy> = {
     howToFix:
       "Check the server or CDN compression settings for these URLs and serve them gzip-compressed or uncompressed when gzip is the only format requested.",
   },
+  "crawl.list-mode": {
+    title: "Crawl: List crawl, site-wide checks not run",
+    explanation:
+      "This crawl fetched only the URLs it was given and followed no link, so the checks that need the whole site were not run: orphan pages, click depth, inlink counts, and the sitemap and pagination checks that compare against crawled pages, plus the sitemap checks when no sitemap was read. The Not Measured column lists every check left out; the Partially Measured column lists the target checks, judged only against URLs the list itself fetched (listed URLs and their redirect targets), so their silence about any other URL is not a clean result.",
+    howToFix:
+      "Crawl the whole site to measure the checks listed, or give the list crawl sitemap URLs so the sitemap checks can run.",
+  },
   "http.no-response": {
     title: "Response codes: Internal no response",
     explanation:

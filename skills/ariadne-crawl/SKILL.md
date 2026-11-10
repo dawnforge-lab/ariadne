@@ -177,6 +177,69 @@ robots.txt's own `crawl-delay` wins over `perHostDelayMs` when it is longer. The
 direction you may ever move the other two is **slower**, and the platform table below
 is when to do it.
 
+### List mode, scope patterns and credentials
+
+Three things a crawl can be told since Phase 27c. Each is checked at start, and
+`config_validate` answers every refusal without starting anything: run it first.
+
+**List mode — check a known set of URLs, not the site.** `mode: "list"` with `urls`
+(1 to 10,000, every one on the site's own hosts: its host or the www/apex twin, http or
+https) fetches exactly those URLs at depth 0, follows each one's redirects to a
+classified row (within `maxRedirectHops`), records links without following them,
+obeys robots.txt, and reads no sitemap unless you pass `sitemapUrls` (never `[]`:
+omit the key to read none). Beside the list it also requests the host probe (the site
+root on up to four spellings; `probeHosts: false` turns it off) and the known-404 probe
+(one random path), and the 5xx recheck, the resource pass and the render pass run as
+configured: re-checking five URLs on a fragile site, turn off what it should not see.
+`maxPages` defaults to twice the distinct list. The answer
+adds `listUrlCount` and `listDuplicates`; two spellings of one URL are crawled once
+and counted. Use it to re-check the URLs a previous audit flagged, a migration's
+redirect map, or a client's priority pages. **It is not an audit of the site**: the
+rules that need the whole site (orphans, click depth, inlinks, sitemap coverage) do
+not run, and `crawl.list-mode` names them — see the audit skill before quoting any
+list-crawl finding, or the absence of one.
+
+**Scope — fence part of the site off.** `exclude` and `include` are URL patterns
+matched against the whole URL, `*` for any run of characters and nothing else
+special: `*/cart*` and `*?sort=*` are path and parameter rules,
+`https://example.com/blog/*` a host-and-path rule. The match starts at the URL's first
+character, so **a path rule needs its leading `*`**: `/cart*` can never match and is
+refused. Exclude wins; a non-empty `include` admits only what matches it. A refused
+URL is never fetched: it is a page row of fetch class `excluded` whose `fetchReason`
+names the pattern, and past the shared budget it is counted in
+`crawl_status.excludedDropped`. A seed or listed URL the scope refuses, and a pattern
+that can never match (no leading `*` and no `http://`/`https://`, a host that is not
+the site's, or `http://` on an https site), are refused at start and by
+`crawl_config_set` (an empty crawl is not an answer). Fence off only what the brief
+says to: every excluded URL is a part of the site the audit does not see, and the
+findings file must say so.
+
+**Credentials — staging sites and gated pages.** `requestHeaders` (up to 20; not
+`host`, `user-agent`, `accept`, `accept-encoding`, `content-length`, `connection`,
+`transfer-encoding`, `te`, `upgrade`, `expect`, `keep-alive`, `cookie`,
+`authorization`, or any name starting `proxy-` or `sec-`), `httpAuth`
+(`{username, password}`, Basic) and `cookies` (up to 50 `{name, value}`). A
+refusal never quotes a name that is not an HTTP token (it names its position): a
+value pasted into a name is not echoed back. They go only to the site's own hosts, never to a
+CDN, another host or a redirect that leaves the site, and an https site never sends
+them over http. They cannot change the user agent, the delay floor or robots.txt.
+**The engine never stores them**: they live in the server's memory, `crawl_config_get`
+shows the names with every value `"[redacted]"`, and a cancel or delete drops them.
+**The restart rule:** after the server restarts it no longer holds them, so
+`crawl_resume` and `crawl_render` refuse with code `CREDENTIALS_REQUIRED` (409) until
+you send the same kinds and names again on that call. Keep the values where you got
+them for as long as the crawl may be resumed or rendered. A gated page fetched without
+its credential is a `blocked` row (401 or 403), never a silent gap. Credentials cannot
+be added on a resume or a render to a crawl that started without any: set them with
+`crawl_config_set` while the crawl is paused.
+
+**Changing them while paused.** `exclude`, `include`, `maxRedirectHops` and the three
+credential fields are `whenPaused`: pause, `crawl_config_set`, resume. A changed scope
+stamps `scopeChangedAt`, and the resumed run re-files before its first fetch, both
+ways: pending URLs the new lists refuse become `excluded` rows, and `excluded` rows
+they now admit are queued again within `maxPages`. Pages already fetched stay. `mode`,
+`urls` and `maxUrlLength` never change after the start.
+
 ### Pacing by platform
 
 Most e-commerce sites sit behind a WAF running a token bucket: it is not counting your
@@ -238,7 +301,7 @@ target is not something this skill can crawl.
  frontier: {pending, leased, done, failed, renderPending},
  queuePosition, liveLeases, blockedPages, hostSpacingMs, throttle,
  platform, platformProfile,
- robotsBlocked: {recorded, dropped},
+ robotsBlocked: {recorded, dropped}, excludedDropped,
  rulesRunAt, judgementStale, findingsCount, pagesScanned, fetchResources,
  resourceRefsCappedPages,
  resources: {seen, fetched, failed, skipped, robotsDenied, robotsUnreachable,
@@ -315,6 +378,10 @@ What the fields mean when you are waiting:
   config's `maxBlockedUrls`; `crawl_start` does not accept it, so every crawl you
   start gets the default, and a site whose robots.txt blocks more internal URLs than
   `maxPages` will report `dropped > 0`.
+- **`excludedDropped`** — discoveries the crawl's own URL scope patterns (`exclude` /
+  `include`) turned away once the excluded-row budget was full; a count of
+  discoveries, not distinct URLs. `null` is a crawl from before this was counted,
+  not zero. Our decision, not the site's: it is not a block.
 - **`hostSpacingMs`** — how far the engine has already backed off: the widest gap it
   is enforcing between two requests to one host, in milliseconds. It starts at the
   crawl's `perHostDelayMs` and rises when a host pushes back; since Phase 24a it can
@@ -817,6 +884,12 @@ Three things to know before you call it:
   about to grow and a timestamp over a smaller crawl is the one thing this surface
   must never say. **Re-run `crawl_rules` after the resumed crawl finishes**, before
   reading any findings.
+- **A credentialed crawl may need its credentials again.** If the server restarted
+  since the crawl started, the resume answers 409 with `code: "CREDENTIALS_REQUIRED"`
+  naming the kinds and the header and cookie names; call `crawl_resume` again with
+  `requestHeaders` / `httpAuth` / `cookies` of exactly those names. Read the `code`,
+  not the sentence. `crawl_render` behaves the same. Never start a fresh crawl
+  without them to "get around" it: the gated pages would come back as `blocked` rows.
 
 It is refused when: there is no such crawl; this server is already holding it; the
 crawl still holds an unexpired lease (a worker is on it — **wait**, a dead worker's

@@ -456,3 +456,27 @@ describe("resolveApprovedAddress", () => {
     ).rejects.toThrow(/blocked/);
   });
 });
+
+// Phase 27c: the crawl's own URL length limit, below the index ceiling.
+describe("isUrlAllowed maxUrlLength", () => {
+  it("refuses 301 characters under maxUrlLength 300 with the too_long reason naming 300, and admits 300", async () => {
+    const base = "https://example.com/";
+    const at = base + "a".repeat(300 - base.length);
+    expect(at).toHaveLength(300);
+    expect(await isUrlAllowed(at, { maxUrlLength: 300 })).toEqual({ allowed: true, reason: null });
+    expect(await isUrlAllowed(`${at}b`, { maxUrlLength: 300 })).toEqual({
+      allowed: false,
+      reason: "too_long (301 characters; the limit is 300)",
+    });
+  });
+
+  it("keeps the limit at 2,500 when maxUrlLength is absent, and a larger maxUrlLength never lifts it", async () => {
+    const base = "https://example.com/";
+    const over = base + "a".repeat(INDEXED_URL_MAX + 1 - base.length);
+    expect(INDEXED_URL_MAX).toBe(2500);
+    const absent = await isUrlAllowed(over);
+    expect(absent.reason).toBe("too_long (2501 characters; the limit is 2500)");
+    const lifted = await isUrlAllowed(over, { maxUrlLength: 5000 });
+    expect(lifted.reason).toBe("too_long (2501 characters; the limit is 2500)");
+  });
+});

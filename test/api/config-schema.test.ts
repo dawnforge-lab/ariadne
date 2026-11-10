@@ -18,6 +18,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   CRAWL_FIELDS,
+  LIST_MAX_URLS,
   parseStartBody,
   publishedSchema,
   type ConfigError,
@@ -85,6 +86,16 @@ describe("the published schema", () => {
       renderSamplePerType: "whenPaused",
       findingCap: "always",
       judgement: "always",
+      // Phase 27c.
+      mode: "never",
+      urls: "never",
+      maxUrlLength: "never",
+      exclude: "whenPaused",
+      include: "whenPaused",
+      maxRedirectHops: "whenPaused",
+      requestHeaders: "whenPaused",
+      httpAuth: "whenPaused",
+      cookies: "whenPaused",
     };
     expect(Object.keys(props).sort()).toEqual(Object.keys(expected).sort());
     expect(Object.keys(CRAWL_FIELDS).sort()).toEqual(
@@ -122,7 +133,7 @@ describe("the published schema", () => {
       .filter((rule) => rule.kind !== "metric")
       .map((rule) => rule.id);
     expect([...names].sort()).toEqual([...findingRules].sort());
-    expect(names).toHaveLength(174);
+    expect(names).toHaveLength(175);
     for (const metric of registry.byKind("metric")) {
       expect(names, metric.id).not.toContain(metric.id);
     }
@@ -389,5 +400,99 @@ describe("a positive integer too large to be one (27b final M11)", () => {
       // The ceiling itself is accepted.
       expect(parseStartBody({ siteUrl: SITE, [field]: Number.MAX_SAFE_INTEGER }, registry).ok, field).toBe(true);
     }
+  });
+});
+
+interface WideSchema extends JsonSchema {
+  "x-ariadne-secret"?: boolean;
+  enum?: string[];
+  maxItems?: number;
+  items?: JsonSchema & { maxLength?: number };
+}
+
+describe("the 27c fields (list mode, scope, credentials, limits)", () => {
+  const wide = props as Record<string, WideSchema>;
+
+  it("publishes the nine fields with their x-ariadne-mutable, and exactly the three credential fields as secret", () => {
+    const nine: Record<string, string> = {
+      mode: "never",
+      urls: "never",
+      maxUrlLength: "never",
+      exclude: "whenPaused",
+      include: "whenPaused",
+      maxRedirectHops: "whenPaused",
+      requestHeaders: "whenPaused",
+      httpAuth: "whenPaused",
+      cookies: "whenPaused",
+    };
+    for (const [field, mutable] of Object.entries(nine)) {
+      expect(wide[field]?.["x-ariadne-mutable"], field).toBe(mutable);
+      expect(wide[field]?.description ?? "", `${field} is undescribed`).not.toBe("");
+    }
+    const secret = Object.entries(wide)
+      .filter(([, spec]) => spec["x-ariadne-secret"] === true)
+      .map(([field]) => field)
+      .sort();
+    expect(secret).toEqual(["cookies", "httpAuth", "requestHeaders"]);
+    const fields = CRAWL_FIELDS as Record<string, { secret?: true }>;
+    expect(Object.keys(fields).filter((f) => fields[f]?.secret === true).sort()).toEqual([
+      "cookies",
+      "httpAuth",
+      "requestHeaders",
+    ]);
+  });
+
+  it("publishes the limits' ranges and defaults, the list cap and the pattern bounds", () => {
+    expect(wide["mode"]?.enum).toEqual(["spider", "list"]);
+    expect(wide["mode"]?.default).toBe("spider");
+    expect(wide["urls"]?.maxItems).toBe(LIST_MAX_URLS);
+    expect(LIST_MAX_URLS).toBe(10_000);
+    expect(wide["maxRedirectHops"]).toMatchObject({ minimum: 1, maximum: 20, default: 10 });
+    expect(wide["maxUrlLength"]).toMatchObject({ minimum: 256, maximum: 2500, default: 2500 });
+    for (const field of ["exclude", "include"]) {
+      expect(wide[field]?.maxItems, field).toBe(100);
+      expect(wide[field]?.items?.maxLength, field).toBe(512);
+    }
+    expect(wide["cookies"]?.maxItems).toBe(50);
+  });
+
+  it("refuses a credential field's value without ever quoting it", () => {
+    const secret = "v-s3cret-value";
+    const cases: Array<[Record<string, unknown>, string]> = [
+      [{ requestHeaders: { "X-Tenant": `${secret}\r\nX-Injected: 1` } }, "requestHeaders"],
+      [{ requestHeaders: { "User-Agent": secret } }, "requestHeaders"],
+      [{ requestHeaders: { "x-a": 7 } }, "requestHeaders"],
+      [{ httpAuth: { username: `${secret}:x`, password: secret } }, "httpAuth"],
+      [{ httpAuth: { username: secret } }, "httpAuth"],
+      [{ cookies: [{ name: "sid", value: `${secret};x` }] }, "cookies"],
+      [{ cookies: secret }, "cookies"],
+    ];
+    for (const [extra, path] of cases) {
+      const errors = refused({ siteUrl: SITE, ...extra });
+      expect(errors[0]?.path, JSON.stringify(extra)).toBe(path);
+      expect(JSON.stringify(errors), path).not.toContain("s3cret");
+    }
+  });
+
+  it("keeps a header named __proto__ as a header rather than dropping it", () => {
+    const raw = JSON.parse(
+      `{"siteUrl": "${SITE}", "requestHeaders": {"__proto__": "v", "x-a": "b"}}`,
+    ) as unknown;
+    const result = parseStartBody(raw, registry);
+    if (!result.ok) throw new Error(JSON.stringify(result.errors));
+    expect(Object.getOwnPropertyNames(result.value.requestHeaders).sort()).toEqual(["__proto__", "x-a"]);
+  });
+
+  it("refuses an empty, an over-long and a 101st pattern, a list over LIST_MAX_URLS and an unknown mode", () => {
+    expect(first({ siteUrl: SITE, exclude: [""] }).path).toBe("exclude.0");
+    expect(first({ siteUrl: SITE, include: ["x".repeat(513)] }).code).toBe("out_of_range");
+    const many = first({ siteUrl: SITE, exclude: Array.from({ length: 101 }, (_u, i) => `*/p${i}/*`) });
+    expect(many).toMatchObject({ path: "exclude", code: "out_of_range" });
+    expect(many.message).toContain("100");
+    const urls = Array.from({ length: LIST_MAX_URLS + 1 }, (_u, i) => `${SITE}p/${i}`);
+    const list = first({ siteUrl: SITE, mode: "list", urls });
+    expect(list).toMatchObject({ path: "urls", code: "out_of_range" });
+    expect(list.message).toContain("10000");
+    expect(first({ siteUrl: SITE, mode: "crawl" })).toMatchObject({ path: "mode", code: "invalid" });
   });
 });

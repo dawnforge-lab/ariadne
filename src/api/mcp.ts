@@ -70,6 +70,7 @@ import { DISCOVERED_VIA } from "../crawl/frontier.js";
 import { RENDER_PASS_EVIDENCE } from "../rules/metric/render-metrics.js";
 import { METRIC_SCOPES } from "../rules/registry/types.js";
 import type { ServiceConfig } from "./config.js";
+import { credentialInputSchemas } from "./config-schema.js";
 import { CSV_VIEWS, EXPORT_FORMATS } from "./csv.js";
 import {
   ApiService,
@@ -78,6 +79,7 @@ import {
   PAGE_SIZE_DEFAULT,
   PAGE_SIZE_MAX,
   ServiceError,
+  type ServiceErrorCode,
 } from "./service.js";
 
 /** The metric scopes, as a tool description says them. */
@@ -223,7 +225,9 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
     try {
       return json(await fn());
     } catch (error) {
-      if (error instanceof ServiceError) return jsonError({ error: error.message });
+      if (error instanceof ServiceError) {
+        return jsonError({ error: error.message, code: error.code });
+      }
       const correlationId = randomUUID();
       log(`mcp: internal error ${correlationId} ${tool} — ${stackOf(error)}`);
       return jsonError({ error: "internal error", correlationId });
@@ -262,7 +266,39 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "asked for something specific.\n\n" +
         "judgement sets how this crawl is JUDGED from the start — the same block " +
         "crawl_config_set changes later (see there for its shape). It is checked " +
-        "against the ruleset before the crawl is accepted.",
+        "against the ruleset before the crawl is accepted.\n\n" +
+        "LIST MODE. mode 'list' with urls (1 to 10,000, all on siteUrl's own site: its " +
+        "host or the www/apex twin, http or https) fetches exactly those URLs at depth 0, " +
+        "follows their redirects (within maxRedirectHops) so each ends in a classified " +
+        "row, records links without following them, obeys robots.txt and reads no " +
+        "sitemap unless sitemapUrls is given. Beside the list it also requests the " +
+        "host probe (the site root on up to four spellings; probeHosts: false turns " +
+        "it off) and the known-404 probe (one random path), and the 5xx recheck, the " +
+        "resource pass and the render pass run as configured — on a fragile site, " +
+        "turn off what it should not see. maxPages defaults to twice the distinct " +
+        "list. The answer adds listUrlCount and listDuplicates (two spellings of one URL " +
+        "are collapsed and counted). Rules that need the whole site do not run on a list " +
+        "crawl: the crawl.list-mode finding names them (notMeasured) and the target " +
+        "checks judged only against what the list fetched (partiallyMeasured) — their " +
+        "silence is 'not measured', never 'clean'. Use it to check a known set of pages, " +
+        "not to audit a site.\n\n" +
+        "SCOPE. exclude and include are URL patterns matched against the whole URL, '*' " +
+        "for any run of characters ('*/cart*', 'https://example.com/blog/*'), anchored " +
+        "at the URL's first character — a path rule needs its leading '*' ('/cart*' " +
+        "can never match and is refused); exclude " +
+        "wins, and a non-empty include admits only what matches. A refused URL is " +
+        "recorded as a page row of fetch class 'excluded' naming the pattern, never " +
+        "fetched; past the shared never-requested budget it is counted in " +
+        "crawl_status.excludedDropped. A seed or listed URL the scope refuses, and a " +
+        "pattern that can never match (a path with no leading '*', a host that is not " +
+        "this site's, http:// on an https site), are refused at start and by " +
+        "crawl_config_set.\n\n" +
+        "CREDENTIALS. requestHeaders, httpAuth (Basic) and cookies reach only the site's " +
+        "own hosts (never a CDN or another host, never https credentials over http), " +
+        "are held in this server's memory only — never stored, logged or answered — and " +
+        "after a server restart must be sent again on crawl_resume / crawl_render " +
+        "(refused with code CREDENTIALS_REQUIRED until they are). They cannot change the " +
+        "user agent, the pacing floor or robots.txt.",
       // The crawl-start body schema itself: one declaration for both
       // transports, so an argument this refuses is a body POST /crawls refuses.
       inputSchema: service.startBodySchema(),
@@ -432,7 +468,8 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "paused is a stop that crawl_resume continues, with pauseReason 'request' " +
         "(crawl_pause) or 'shutdown' (the server stopped mid-run). cancelled is " +
         "final — crawl_resume refuses it; cancelledAt says when, and neverFetched " +
-        "counts the URLs it never asked for. controlRequested is a pause or cancel " +
+        "counts the URLs it never asked for (null on a crawl cancelled before it ran: " +
+        "nothing was seen, which is not zero). controlRequested is a pause or cancel " +
         "asked of a running crawl and not yet acted on (null otherwise). Two fields answer the " +
         "question 'is anybody actually working on this': queuePosition is a " +
         "number only while THIS server holds the crawl (null otherwise), and " +
@@ -586,10 +623,25 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "epilogue work had not started — the known-404 probe if the stop came " +
         "during the page crawl; otherwise the rest of the 5xx recheck and the " +
         "resource pass — and a paused crawl may owe that work with no row " +
-        "counting it, so the resume runs to find out.",
-      inputSchema: z.strictObject({ crawlId: crawlIdField() }),
+        "counting it, so the resume runs to find out.\n\n" +
+        "CREDENTIALS. A crawl started with requestHeaders, httpAuth or cookies keeps " +
+        "them only in the server's memory. After a server restart they are gone, and " +
+        "this tool refuses with code CREDENTIALS_REQUIRED (409), naming the fields and " +
+        "header/cookie names it needs, until you send them again here — exactly those " +
+        "kinds and names (crawl_config_get shows them, values [redacted]); another " +
+        "shape is a VALIDATION refusal. A crawl that needed them never runs without " +
+        "them. Values sent are never stored, logged or answered. A crawl started " +
+        "without credentials cannot be given them here: set them with " +
+        "crawl_config_set while it is paused.\n\n" +
+        "SCOPE. Before its first fetch the resumed run re-applies the crawl's current " +
+        "exclude and include (changed with crawl_config_set while paused), both ways: " +
+        "pending URLs they now refuse become 'excluded' rows, and 'excluded' rows they " +
+        "now admit go back into the frontier within maxPages. Pages already fetched " +
+        "stay as they are.",
+      inputSchema: z.strictObject({ crawlId: crawlIdField(), ...credentialInputSchemas() }),
     },
-    async ({ crawlId }) => run("crawl_resume", () => service.resumeCrawl(crawlId)),
+    async ({ crawlId, ...credentials }) =>
+      run("crawl_resume", () => service.resumeCrawl(crawlId, defined(credentials))),
   );
 
   server.registerTool(
@@ -739,9 +791,17 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "spelling of the site (www. or bare) that could not be approved when the " +
         "pass started, with the reason: the pass still ran, and pages on that " +
         "spelling come back as 'policy refusal' render errors. '<host> has no A or " +
-        "AAAA record' for www. is normal on a site with no www record.",
+        "AAAA record' for www. is normal on a site with no www record.\n\n" +
+        "CREDENTIALS. A crawl started with requestHeaders, httpAuth or cookies renders " +
+        "with them, sent only to the site's own hosts. After a server restart (or a " +
+        "cancel) the server no longer holds them: this tool refuses with code " +
+        "CREDENTIALS_REQUIRED (409) until you send them here, of exactly the shape " +
+        "crawl_config_get shows. A crawl started without credentials cannot be " +
+        "rendered with them: set them with crawl_config_set while it is paused, or " +
+        "start a new crawl.",
       inputSchema: z.strictObject({
         crawlId: crawlIdField(),
+        ...credentialInputSchemas(),
         urls: z
           .array(z.string())
           .describe(
@@ -751,10 +811,8 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
           .optional(),
       }),
     },
-    async ({ crawlId, urls }) =>
-      run("crawl_render", () =>
-        service.renderCrawl(crawlId, urls === undefined ? {} : { urls }),
-      ),
+    async ({ crawlId, ...input }) =>
+      run("crawl_render", () => service.renderCrawl(crawlId, defined(input))),
   );
 
   server.registerTool(
@@ -815,7 +873,13 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "judgementStale}.\n\n" +
         "crawl is every setting the crawl was stored with, at its effective value " +
         "(findingCap is in judgement, not here); it is what config_validate " +
-        "answered as effective for the body that started it. mutability says, per " +
+        "answered as effective for the body that started it, except that " +
+        "credentials are shown, never their values: requestHeaders {name: " +
+        "'[redacted]'}, httpAuth '[redacted]' and cookies [{name, value: " +
+        "'[redacted]'}] appear when the crawl was given them. listUrlCount and " +
+        "listDuplicates (a list crawl) and scopeChangedAt (when exclude or include " +
+        "last changed through crawl_config_set, ISO, or null) are facts, never " +
+        "set. mutability says, per " +
         "crawl key, whether it can change after the crawl starts: never, " +
         "whenPaused (only while the crawl is queued or paused) or always; the " +
         "operator's own budgets (maxResources, maxResourceHosts, maxBlockedUrls, " +
@@ -849,15 +913,26 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "crawl_start validates it, and null is refused — a crawl field has no " +
         "unset. Only the fields crawl_config_get marks whenPaused can be changed " +
         "(maxPages, maxDepth, perHostDelayMs, maxConcurrency, renderBudgetPct, " +
-        "renderMaxPages, renderSamplePerType), and only while the crawl is queued " +
+        "renderMaxPages, renderSamplePerType, exclude, include, maxRedirectHops, " +
+        "requestHeaders, httpAuth, cookies), and only while the crawl is queued " +
         "or paused: pause a running crawl with crawl_pause, set, then " +
         "crawl_resume. A never field (siteUrl, userAgent, the host lists, " +
-        "fetchResources) is refused 409 when its value changes; sent with the " +
-        "value already stored it is no change, so you may send back the whole " +
-        "crawl object crawl_config_get gave you with one field edited. A queued " +
+        "fetchResources, mode, urls, maxUrlLength) is refused 409 when its value " +
+        "changes. ANY field sent with the value crawl_config_get shows is no " +
+        "change, on any status — a credential sent back as '[redacted]' included — " +
+        "so you may send back the whole crawl object crawl_config_get gave you " +
+        "with one field edited. A changed exclude or include stamps scopeChangedAt, " +
+        "and the resumed run files the pending URLs the new lists refuse as " +
+        "excluded rows; pages already fetched stay. Credentials sent here replace " +
+        "the ones this server holds (each field whole; an empty requestHeaders or " +
+        "cookies, or httpAuth null — the one null accepted here — drops that kind) " +
+        "and are never stored, logged or answered; after a " +
+        "server restart a change must send every credential the crawl needs, or it " +
+        "is refused CREDENTIALS_REQUIRED (409). A queued " +
         "crawl this server is already starting is refused 409 (pause it first). " +
         "maxPages cannot go below the pages " +
-        "already crawled; perHostDelayMs keeps its floor, and a resumed crawl " +
+        "already crawled, nor, on a list crawl, below its distinct list; " +
+        "perHostDelayMs keeps its floor, and a resumed crawl " +
         "never runs faster than the spacing it earned. A crawl change is also " +
         "refused while a render pass or crawl_rules is running over the crawl. " +
         "A refused request writes nothing, crawl and judgement alike.\n\n" +
@@ -980,7 +1055,11 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "crawl's judgement sets that value. A rule the judgement disables still " +
         "ran and its findings are stored, but its group is left out here — the " +
         "answer's disabledRules names every such rule, so 'filtered out' and 'did " +
-        "not fire' stay distinguishable. judgementStale {stale, reasons} says " +
+        "not fire' stay distinguishable. " +
+        "On a LIST crawl, notMeasured names the rules its rules run did not run " +
+        "(the crawl.list-mode marker's own list; [] on a spider crawl): an empty " +
+        "answer for one of them is NOT MEASURED, never clean. " +
+        "judgementStale {stale, reasons} says " +
         "whether the crawl's judgement has changed since its last rules run " +
         "(reasons: overrides | thresholds | findingCap); re-run crawl_rules to " +
         "clear it.\n\n" +
@@ -1004,7 +1083,7 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "findings belong to no cohort and are excluded by this filter.\n" +
         "ruleId, checkId and category intersect; a combination that can select no " +
         "rule is refused rather than answered with an empty page.\n\n" +
-        `Paginated: {items, nextCursor, disabledRules, judgementStale}; limit ` +
+        `Paginated: {items, nextCursor, disabledRules, notMeasured, judgementStale}; limit ` +
         `defaults to ${PAGE_SIZE_DEFAULT}, maximum ${PAGE_SIZE_MAX}.`,
       inputSchema: z.strictObject({
         crawlId: crawlIdField(),
@@ -1048,7 +1127,8 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
       title: "Issues Overview: one row per rule",
       description:
         "THE ISSUES OVERVIEW of a judged crawl, with its judgement applied: " +
-        "{crawlId, rulesetVersion, pagesJudged, rows, disabledRules, judgementStale}. " +
+        "{crawlId, rulesetVersion, pagesJudged, rows, disabledRules, notMeasured, " +
+        "judgementStale}. " +
         "One row per rule that found something — {ruleId, title, type, priority, " +
         "severity, category, checkIds, urls, percentOfJudged, marker?} — ordered by " +
         "type (issue, warning, opportunity), then priority (high, medium, low), then " +
@@ -1063,7 +1143,9 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "sitemap.uncrawled, which lists sitemap URLs the crawl never fetched); both " +
         "are null when the crawl has no site.health row (and percentOfJudged when " +
         "pagesJudged is 0). Rules the crawl's judgement disables are left out and " +
-        "named in disabledRules; metric rules never appear. Not paginated: one row per " +
+        "named in disabledRules; rules a list crawl did not run are never a row, not " +
+        "even a zero, and are named in notMeasured; metric rules never appear. Not " +
+        "paginated: one row per " +
         "rule, at most the ruleset's rule count.\n\n" +
         "A crawl no rules run has judged is refused (409): an empty overview would " +
         "read as a clean site. The same rows are a spreadsheet through export_crawl " +
@@ -1181,7 +1263,8 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "A rule the crawl's judgement disables is refused (409) rather than " +
         "answered with an empty page: its findings are stored, and an empty page " +
         "would read as 'this rule found nothing'. issues_list's disabledRules " +
-        "names them.\n\n" +
+        "names them. So is a rule a list crawl did not run (issues_list's " +
+        "notMeasured): its empty page would read as clean where nobody looked.\n\n" +
         `Paginated: {items, nextCursor}; limit defaults to ${PAGE_SIZE_DEFAULT}, ` +
         `maximum ${PAGE_SIZE_MAX}. A large rule can have thousands of rows — ` +
         "follow the cursors, or use export_crawl if you want all of them at once.",
@@ -1265,7 +1348,10 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "measuring'. The check is one field: crawl_status's rulesRunAt is the " +
         "timestamp of the last COMPLETED rules pass, and null means none is on " +
         "record (never judged, being judged now, or a run that died part-way). " +
-        "Read it before you quote a number that is not there.\n\n" +
+        "Read it before you quote a number that is not there. " +
+        "On a LIST crawl, notMeasured names the metrics (and rules) its rules run " +
+        "did not run — an empty answer for one is NOT MEASURED; [] on a spider " +
+        "crawl.\n\n" +
         "Filters, each refused by name if it names nothing this crawl measured:\n" +
         `  metricId   — a single metric, e.g. redirect.volume\n` +
         `  scope      — the cohort kind: ${METRIC_SCOPES_HINT}\n` +
@@ -1275,7 +1361,7 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "metric is a measurement the last rules run stored — site.health counted " +
         "the rules that run left enabled — so a stale judgement means these numbers " +
         "predate the crawl's current settings.\n\n" +
-        `Paginated: {items, nextCursor, judgementStale}; limit defaults to ` +
+        `Paginated: {items, nextCursor, notMeasured, judgementStale}; limit defaults to ` +
         `${PAGE_SIZE_DEFAULT}, maximum ${PAGE_SIZE_MAX}.`,
       inputSchema: z.strictObject({
         crawlId: crawlIdField(),
@@ -1792,7 +1878,8 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "bytes}, plus disabledRules " +
         "on the issues dataset: the rules the crawl's judgement disables, whose " +
         "findings the file leaves out (the issues and issue_urls CSV views leave " +
-        "them out too, and issue_urls of a disabled rule is refused).\n" +
+        "them out too, and issue_urls of a disabled rule is refused), and beside it " +
+        "notMeasured, the rules a list crawl did not run.\n" +
         `  format=csv writes a spreadsheet of one VIEW: ${CSV_VIEWS.join(", ")} ` +
         "(default issues). issue_urls is one rule's findings and needs a ruleId; " +
         "metric_table is one metric's table and needs a metricId; issues_overview is " +
@@ -1801,7 +1888,7 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "seven, like the two overviews, refuse both. Answers {format, view, path, rows, " +
         "bytes}, plus disabledRules on the four views that read findings (issues, " +
         "issue_urls, issues_overview, crawl_overview): the rules the crawl's judgement " +
-        "disables, whose findings the file leaves out.\n" +
+        "disables, whose findings the file leaves out, with notMeasured beside it.\n" +
         "  metric_table is the spreadsheet of the metric_table tool's table: the " +
         "header is the column LABELS, one row per table row, and the metric's " +
         "summary scalars lead every row as extra columns — a CSV has no place " +
@@ -1985,8 +2072,15 @@ function json(value: unknown): CallToolResult {
   return { content: [{ type: "text", text: JSON.stringify(value) }] };
 }
 
-/** The refusal shape: the same `{error}` body the HTTP transport sends. */
-function jsonError(body: { error: string; correlationId?: string }): CallToolResult {
+/**
+ * The refusal shape: the same body the HTTP transport sends — `{error, code}`
+ * for a `ServiceError` (27c Deviation 10), `{error, correlationId}` for a defect.
+ */
+function jsonError(body: {
+  error: string;
+  code?: ServiceErrorCode;
+  correlationId?: string;
+}): CallToolResult {
   return { content: [{ type: "text", text: JSON.stringify(body) }], isError: true };
 }
 

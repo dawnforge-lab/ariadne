@@ -111,6 +111,7 @@ describe("frontier", () => {
       depth: 0,
       discoveredVia: "seed",
       attempts: 1,
+      redirectHops: 0,
     });
     expect((await frontierCounts(db, crawlId)).leased).toBe(1);
   });
@@ -255,5 +256,34 @@ describe("frontier", () => {
     expect((await frontierCounts(db, b)).pending).toBe(0);
     // The same URL is a separate row under a separate crawl.
     expect(await enqueueUrls(db, b, [seed(`${SITE}/x`)])).toBe(1);
+  });
+});
+
+describe("frontier redirect hops (27c T1)", () => {
+  let db: Db;
+  const created: string[] = [];
+
+  beforeAll(async () => {
+    db = createDb(databaseUrl());
+    await runMigrations(db);
+  });
+
+  afterAll(async () => {
+    for (const id of created) await db.delete(crawls).where(eq(crawls.id, id));
+    await closeDb(db);
+  });
+
+  it("leases an item enqueued with redirectHops 3 at 3, and one enqueued without it at 0", async () => {
+    const id = `crawl_${randomUUID()}`;
+    await db.insert(crawls).values({ id, siteUrl: SITE, config: {}, rulesetVersion: "test" });
+    created.push(id);
+    await enqueueUrls(db, id, [
+      { url: `${SITE}/hopped`, depth: 0, discoveredVia: "redirect", redirectHops: 3 },
+      seed(`${SITE}/plain`, 1),
+    ]);
+    const leased = await leaseBatch(db, id, "w1", 10, 60);
+    const hops = new Map(leased.map((l) => [l.url, l.redirectHops]));
+    expect(hops.get(`${SITE}/hopped`)).toBe(3);
+    expect(hops.get(`${SITE}/plain`)).toBe(0);
   });
 });

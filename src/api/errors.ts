@@ -6,11 +6,23 @@
  */
 
 /**
- * The four ways a request can be refused for a reason the caller can act on.
- * A transport maps these; nothing else in this module knows they become 400,
- * 403, 404 and 409.
+ * The ways a request can be refused for a reason the caller can act on. A
+ * transport maps these; nothing else in this module knows they become 400,
+ * 403, 404 and 409 (`CREDENTIALS_REQUIRED` is a 409 too).
+ *
+ * The code travels beside the sentence on both transports — `{error, code}`
+ * over HTTP and in MCP's JSON error (27c Deviation 10) — so an agent tells
+ * `CREDENTIALS_REQUIRED` from any other 409 without parsing the sentence.
+ * `CREDENTIALS_REQUIRED`: a crawl whose stored shape says it needs credentials
+ * was asked to run without them (after a restart the in-memory credentials
+ * are gone); re-supply them.
  */
-export type ServiceErrorCode = "VALIDATION" | "FORBIDDEN" | "NOT_FOUND" | "CONFLICT";
+export type ServiceErrorCode =
+  | "VALIDATION"
+  | "FORBIDDEN"
+  | "NOT_FOUND"
+  | "CONFLICT"
+  | "CREDENTIALS_REQUIRED";
 
 /**
  * A refusal with a reason the caller may be shown.

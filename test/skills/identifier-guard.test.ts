@@ -104,7 +104,7 @@ import { fileURLToPath } from "node:url";
 
 import { describe, expect, it } from "vitest";
 
-import { PAGE_FIELDS } from "../../src/api/service.js";
+import { PAGE_FIELDS, REPORTED_CRAWL_KEYS } from "../../src/api/service.js";
 import { CRAWL_FIELDS } from "../../src/api/config-schema.js";
 import { TOOL_NAMES } from "../../src/api/mcp.js";
 import { METRIC_SCOPES } from "../../src/rules/registry/types.js";
@@ -195,7 +195,27 @@ const API_FIELDS = new Set<string>([
   ]),
   ...declaredFields(join(ROOT, "src/rules/run.ts"), ["RunSummary"]),
   ...declaredFields(join(ROOT, "src/rules/registry/types.ts"), ["Finding", "Metric"]),
+  // Phase 27c: the facts `crawl_config_get.crawl` reports beside the settings
+  // (`scopeChangedAt` …), and the `mutability` values it answers per key
+  // (`whenPaused` …), read off the field table that publishes them.
+  ...REPORTED_CRAWL_KEYS,
+  ...Object.values(CRAWL_FIELDS).map((field) => field.mutable),
 ]);
+
+/**
+ * The refusal codes every error body carries (`{error, code}`, Phase 27c),
+ * read out of the `ServiceErrorCode` union in `src/api/errors.ts`. A union
+ * this cannot find or read is a throw, not an empty set: a renamed type would
+ * otherwise let a stale `CREDENTIALS_REQUIRED` through.
+ */
+const SERVICE_ERROR_CODES = (() => {
+  const source = readFileSync(join(ROOT, "src/api/errors.ts"), "utf8");
+  const union = /export type ServiceErrorCode =([^;]+);/.exec(source)?.[1];
+  if (union === undefined) throw new Error("src/api/errors.ts declares no ServiceErrorCode union");
+  const codes = [...union.matchAll(/"([A-Z][A-Z_]*)"/g)].map((m) => m[1]!);
+  if (codes.length === 0) throw new Error("ServiceErrorCode's union names no code");
+  return new Set(codes);
+})();
 
 /** The findings file's own shape, read out of the audit skill's Phase 4 example. */
 const FINDINGS = findingsExample();
@@ -401,10 +421,12 @@ function classify(token: string): Verdict {
       : missing("environment variable", "nothing under src/ reads this variable");
   }
   if (/^[A-Z][A-Z0-9]*(_[A-Z0-9]+)+$/.test(token)) {
-    // The judgement block's threshold names (`crawl_config_set`), Phase 27a.
+    // The judgement block's threshold names (`crawl_config_set`), Phase 27a;
+    // and the refusal codes an error body carries (`CREDENTIALS_REQUIRED`), 27c.
+    if (SERVICE_ERROR_CODES.has(token)) return found("error code");
     return (THRESHOLD_NAMES as readonly string[]).includes(token)
       ? found("overridable threshold")
-      : missing("overridable threshold", "not one of the thresholds crawl_config_set accepts");
+      : missing("overridable threshold", "not one of the thresholds crawl_config_set accepts, nor an error code");
   }
   if (/^[a-z][a-z0-9]*(_[a-z0-9]+)+$/.test(token)) {
     return TOOL_VOCABULARY.has(token)

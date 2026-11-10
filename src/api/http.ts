@@ -28,7 +28,11 @@
  *                                      queued again. Answers `crawl_start`'s
  *                                      `{crawlId, status, queuePosition}` -> 202.
  *                                      A paused crawl resumes; a cancelled one
- *                                      is final and 409s
+ *                                      is final and 409s. Optional body: the
+ *                                      crawl's `requestHeaders` / `httpAuth` /
+ *                                      `cookies`, which a crawl that needed
+ *                                      them must be sent again after a restart
+ *                                      (409 `CREDENTIALS_REQUIRED` until then)
  *   POST /crawls/:id/pause             pause a crawl. Queued: paused now -> 200.
  *                                      Running: requested of its loop -> 202.
  *                                      `{crawlId, status, controlRequested,
@@ -43,7 +47,9 @@
  *   POST /crawls/:id/render            run the render pass. No body: the engine
  *                                      selects. `{"urls": [...]}`: those pages
  *                                      instead, replacing the automatic
- *                                      selection for that pass
+ *                                      selection for that pass. The crawl's
+ *                                      credentials ride the same body, as on
+ *                                      resume
  *   POST /crawls/:id/rules             run the rules
  *   GET  /crawls/:id/config            `{crawl, mutability, judgement, ...}`:
  *                                      the crawl's stored settings with each
@@ -170,24 +176,38 @@ import {
   ApiService,
   ServiceError,
   parseRenderCrawlInput,
+  parseResumeCrawlInput,
   type CsvStream,
   type ServiceErrorCode,
 } from "./service.js";
 
 /**
- * Largest request body this server will read.
+ * Largest request body this server will read, on every route but two.
  *
- * Every route's body is a small JSON object — the crawl-start body is a dozen
- * scalars — so this is two orders of magnitude of headroom and still a bound.
- * It is enforced while reading and nothing past it is ever held: an
- * authenticated caller must not be able to make the server buffer megabytes
- * (the same discipline as the fetch layer's `MAX_BODY`).
+ * Every other route's body is a small JSON object, so this is two orders of
+ * magnitude of headroom and still a bound. It is enforced while reading and
+ * nothing past it is ever held: an authenticated caller must not be able to
+ * make the server buffer megabytes (the same discipline as the fetch layer's
+ * `MAX_BODY`).
  */
 const MAX_BODY_BYTES = 64 * 1024;
 
 /**
+ * The cap on `POST /crawls` and `POST /config/validate` (Phase 27c): a list
+ * crawl carries up to `LIST_MAX_URLS` (10,000) URLs, which is up to about
+ * 1 MiB of JSON. Also on the three routes that re-supply a crawl's
+ * credentials — `POST /crawls/:id/resume`, `POST /crawls/:id/render` and
+ * `PATCH /crawls/:id/config` (27c T9 fix 1): a maximal set (20 headers and 50
+ * cookies of up to 1 KiB each, plus Basic auth) is about 74 KB, past
+ * `MAX_BODY_BYTES`, and a crawl started with one must be resumable over HTTP
+ * after a restart. A route opts in with `Route.maxBodyBytes`; every other
+ * route keeps `MAX_BODY_BYTES`.
+ */
+export const LARGE_BODY_BYTES = 1024 * 1024;
+
+/**
  * How much of an oversized body is drained — read and thrown away — so the
- * caller can be TOLD it was too large.
+ * caller can be TOLD it was too large: this many times the route's own cap.
  *
  * Destroying the socket the moment the cap trips is the tempting version and it
  * is wrong: the client is still writing, so it sees a reset instead of the 413
@@ -196,13 +216,16 @@ const MAX_BODY_BYTES = 64 * 1024;
  * buffered. Past this ceiling the caller is not making a mistake, and the
  * socket goes.
  */
-const MAX_DRAIN_BYTES = 16 * MAX_BODY_BYTES;
+const DRAIN_FACTOR = 16;
 
 const STATUS_FOR: Record<ServiceErrorCode, number> = {
   VALIDATION: 400,
   FORBIDDEN: 403,
   NOT_FOUND: 404,
   CONFLICT: 409,
+  // A conflict with the crawl's state like any other 409; the body's `code`
+  // is what tells the two apart (27c Deviation 10).
+  CREDENTIALS_REQUIRED: 409,
 };
 
 export interface CreateApiServerOpts {
@@ -260,6 +283,8 @@ interface Route {
    * names the accepted set so the typo is one round trip from fixed.
    */
   query: readonly string[];
+  /** This route's body cap, when it is not `MAX_BODY_BYTES` (`LARGE_BODY_BYTES`, 27c). */
+  maxBodyBytes?: number;
   handler: (service: ApiService, ctx: RequestCtx) => Promise<Reply>;
 }
 
@@ -322,6 +347,8 @@ function buildRoutes(): Route[] {
       method: "POST",
       pattern: ["crawls"],
       query: [],
+      // A list crawl's URLs (27c).
+      maxBodyBytes: LARGE_BODY_BYTES,
       // The body as it arrived: `startCrawl` parses it with the one schema
       // both transports share (src/api/config-schema.ts).
       handler: async (service, ctx) => ({
@@ -342,6 +369,8 @@ function buildRoutes(): Route[] {
       method: "POST",
       pattern: ["config", "validate"],
       query: [],
+      // The dry run of `POST /crawls` takes the same bodies.
+      maxBodyBytes: LARGE_BODY_BYTES,
       // ALWAYS 200: an invalid body is the answer this route exists to give,
       // `{valid: false, errors}`, not a refusal of the request. Only a body
       // that is not JSON at all is a 400, and that is `handle`'s, before here.
@@ -385,12 +414,16 @@ function buildRoutes(): Route[] {
       method: "POST",
       pattern: ["crawls", id, "resume"],
       query: [],
+      // The crawl's credentials ride this body (see `LARGE_BODY_BYTES`).
+      maxBodyBytes: LARGE_BODY_BYTES,
       // 202, not 200, and for `POST /crawls`'s reason: the crawl is ACCEPTED
-      // here and runs later. A 200 would say the work is done.
-      handler: async (service, ctx) => {
-        noBody(ctx);
-        return { status: 202, body: await service.resumeCrawl(param(ctx, "id")) };
-      },
+      // here and runs later. A 200 would say the work is done. The body is
+      // optional: the crawl's credentials, re-supplied after a restart (27c);
+      // `parseResumeCrawlInput` refuses any other field rather than ignoring it.
+      handler: async (service, ctx) => ({
+        status: 202,
+        body: await service.resumeCrawl(param(ctx, "id"), parseResumeCrawlInput(ctx.body)),
+      }),
     },
     {
       method: "POST",
@@ -431,6 +464,8 @@ function buildRoutes(): Route[] {
       method: "POST",
       pattern: ["crawls", id, "render"],
       query: [],
+      // The crawl's credentials ride this body (see `LARGE_BODY_BYTES`).
+      maxBodyBytes: LARGE_BODY_BYTES,
       // The one POST here that takes an OPTIONAL body: no body is the automatic
       // pass this route has always run, `{"urls": [...]}` names the pages
       // instead. `parseRenderCrawlInput` refuses an unknown field rather than
@@ -463,6 +498,8 @@ function buildRoutes(): Route[] {
       method: "PATCH",
       pattern: ["crawls", id, "config"],
       query: [],
+      // The crawl's credentials ride this body (see `LARGE_BODY_BYTES`).
+      maxBodyBytes: LARGE_BODY_BYTES,
       // The body is the patch, validated whole by the service: a missing body,
       // a key other than `crawl` and `judgement`, or a block the ruleset cannot apply is a
       // 400 naming what was wrong, and nothing is written.
@@ -702,7 +739,7 @@ async function handle(
     // Discard whatever body came with it. `resume()` reads and drops — it never
     // buffers — so a refused request costs no memory, and the connection stays
     // usable rather than being reset under a client that is still writing.
-    // This is the same reasoning as the 413 drain; see `MAX_DRAIN_BYTES`.
+    // This is the same reasoning as the 413 drain; see `DRAIN_FACTOR`.
     req.resume();
     return;
   }
@@ -750,15 +787,16 @@ async function handle(
   }
 
   let body: unknown;
+  const maxBodyBytes = chosen.route.maxBodyBytes ?? MAX_BODY_BYTES;
   try {
-    body = await readJsonBody(req);
+    body = await readJsonBody(req, maxBodyBytes);
   } catch (error) {
     if (error instanceof BodyTooLarge) {
       // The socket is gone only in the abusive case (past the drain ceiling);
       // there is nobody left to tell, and saying so into a dead socket would
       // be an unhandled write error rather than a message.
       if (!res.destroyed) {
-        sendJson(res, 413, { error: `request body exceeds ${MAX_BODY_BYTES} bytes` });
+        sendJson(res, 413, { error: `request body exceeds ${maxBodyBytes} bytes` });
       }
       return;
     }
@@ -780,7 +818,7 @@ async function handle(
     else sendJson(res, reply.status, reply.body);
   } catch (error) {
     if (error instanceof ServiceError) {
-      sendJson(res, STATUS_FOR[error.code], { error: error.message });
+      sendJson(res, STATUS_FOR[error.code], { error: error.message, code: error.code });
       return;
     }
     // Everything else is a defect of ours. The caller gets an id; the log gets
@@ -914,21 +952,21 @@ class BadJson extends Error {}
  * caller who literally sent `null` gets "must be a JSON object", not silence).
  * The cap is enforced as bytes arrive: past it the buffer is released and the
  * rest is drained rather than held, so the refusal costs a count and not the
- * memory it refuses. See `MAX_DRAIN_BYTES` for where even that stops.
+ * memory it refuses. See `DRAIN_FACTOR` for where even that stops.
  */
-async function readJsonBody(req: IncomingMessage): Promise<unknown> {
+async function readJsonBody(req: IncomingMessage, maxBytes: number): Promise<unknown> {
   let chunks: Buffer[] = [];
   let size = 0;
   let tooLarge = false;
   for await (const chunk of req) {
     const buf = chunk as Buffer;
     size += buf.length;
-    if (size > MAX_BODY_BYTES) {
+    if (size > maxBytes) {
       if (!tooLarge) {
         tooLarge = true;
         chunks = []; // release what was buffered before the cap tripped
       }
-      if (size > MAX_DRAIN_BYTES) {
+      if (size > DRAIN_FACTOR * maxBytes) {
         req.destroy();
         throw new BodyTooLarge();
       }

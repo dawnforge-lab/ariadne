@@ -92,7 +92,7 @@ type NonKeysetView = "metric_table" | "issues_overview" | "crawl_overview";
  *
  * `metric_table`, `issues_overview` and `crawl_overview` are the exceptions and
  * they are a different KIND of view. `issues_overview` is one `GROUP BY rule_id`
- * aggregate (one row per rule, at most 174, ordered by type, priority, count),
+ * aggregate (one row per rule, at most 175, ordered by type, priority, count),
  * built by `buildIssuesOverview` — the same function the JSON tool calls, so the
  * two cannot disagree — and an aggregate has no keyset. `crawl_overview` is the
  * same kind: a fixed set of sectioned aggregates (`buildCrawlOverview`, shared

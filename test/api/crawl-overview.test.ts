@@ -643,3 +643,37 @@ describe("crawl_overview on one pg client", () => {
     expect(warnings.filter((w) => w.includes("already executing a query"))).toEqual([]);
   });
 });
+
+describe("crawl_overview render section on a scoped crawl (27c)", () => {
+  it("leaves scope-excluded rows out of the render percent, as render.coverage does", async () => {
+    const id = `crawl_crawl_overview_scoped_${runId}`;
+    allCrawls.push(id);
+    // One rendered page, one fetched page, two `excluded` rows nobody requested.
+    // The denominator is the two fetched pages, so both rows read 50%.
+    await seedCrawl(
+      id,
+      [
+        RENDERED("/"),
+        { path: "/x" },
+        ...["/fenced/1", "/fenced/2"].map((path) =>
+          NOT_JUDGED({
+            path,
+            fetchClass: "excluded",
+            fetchReason: "crawl scope: matches exclude '*/fenced/*'",
+            statusCode: null,
+            contentType: null,
+            responseTimeMs: null,
+            title: null,
+          }),
+        ),
+      ],
+      { renderPassCount: 1, pagesCrawled: 2 },
+    );
+    await service.runRulesForCrawl(id);
+    const o = await overview(id);
+    expect(section(o, "render").entries).toEqual([
+      { label: "Pages rendered", value: 1, percent: 50 },
+      { label: "Render coverage (ran)", value: 1, percent: 50 },
+    ]);
+  });
+});

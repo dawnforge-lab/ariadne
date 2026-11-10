@@ -88,6 +88,7 @@ export const TRIAGE: Readonly<Record<string, Readonly<TriageRow>>> = {
   "content.thin": { type: "opportunity", priority: "medium", sfIssue: "Content: Low Content Pages" },
   "content.thin-skipped": MARKER,
   "crawl.blocked": MARKER,
+  "crawl.list-mode": MARKER,
   "crawl.unreadable-encoding": MARKER,
   "directive.canonical-noindex-conflict": { type: "issue", priority: "high" },
   "directives.bot-conflict": { type: "warning", priority: "high" },

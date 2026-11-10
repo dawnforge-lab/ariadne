@@ -1,0 +1,155 @@
+diff --git a/src/crawl/recheck/recheck-server-errors.ts b/src/crawl/recheck/recheck-server-errors.ts
+index 0b1eb00..ba0a51c 100644
+--- a/src/crawl/recheck/recheck-server-errors.ts
++++ b/src/crawl/recheck/recheck-server-errors.ts
+@@ -166,7 +166,12 @@ import { and, eq, inArray, isNull, sql } from "drizzle-orm";
+ import type { Db } from "../../db/client.js";
+ import { pages } from "../../db/schema.js";
+ import type { RobotsInfo } from "../discovery.js";
+-import { fetchPage, type FetchClass } from "../fetch-page.js";
++import {
++  FetchAbortedError,
++  fetchPage,
++  type FetchClass,
++  type FetchResult,
++} from "../fetch-page.js";
+ import type { HostGate } from "../politeness.js";
+ import { isUrlAllowed } from "../url-policy.js";
+ import { storableCap } from "../storable-text.js";
+@@ -645,11 +650,21 @@ export async function recheckServerErrors(
+         // spacing is noticed now, not when the slot comes due. Aborted, the row
+         // is left exactly as it was, and the pass reports `aborted`.
+         if (!(await gate.acquire(gateHost, opts.signal))) return false;
+-        const result = await fetchPage(item.url, {
+-          userAgent: opts.userAgent,
+-          allowPrivate,
+-          timeoutMs,
+-        });
++        let result: FetchResult;
++        try {
++          result = await fetchPage(item.url, {
++            userAgent: opts.userAgent,
++            allowPrivate,
++            timeoutMs,
++            // A stop reaches the request on the wire (Phase 27b, Ruling 4).
++            signal: opts.signal,
++          });
++        } catch (error) {
++          // Stopped mid-request: the row keeps both nulls (nothing was
++          // decided), the gate hears nothing, and the pass reports `aborted`.
++          if (error instanceof FetchAbortedError) return false;
++          throw error;
++        }
+         // The gate hears about it before anything else does, so a 503 on recheck
+         // escalates this host for whatever comes next — the rest of this pass, and
+         // the resource pass that shares this gate.
+diff --git a/src/crawl/resources/fetch-resources.ts b/src/crawl/resources/fetch-resources.ts
+index 85968f5..34ae5b5 100644
+--- a/src/crawl/resources/fetch-resources.ts
++++ b/src/crawl/resources/fetch-resources.ts
+@@ -105,7 +105,12 @@ import { request } from "undici";
+ import type { Db } from "../../db/client.js";
+ import { resources } from "../../db/schema.js";
+ import { fetchRobots, type RobotsInfo, type RobotsOutcome } from "../discovery.js";
+-import { classifyStatus, parseRetryAfter, type FetchClass } from "../fetch-page.js";
++import {
++  classifyStatus,
++  FetchAbortedError,
++  parseRetryAfter,
++  type FetchClass,
++} from "../fetch-page.js";
+ import {
+   ACCEPT_ENCODING,
+   blockedAddressMessage,
+@@ -667,13 +672,23 @@ export async function fetchCrawlResources(
+         return done(unfetchable("fetch_error", note(record.parked)));
+       }
+ 
+-      const attempt = await requestResource(url, method, {
+-        userAgent: opts.userAgent,
+-        allowPrivate,
+-        timeoutMs,
+-        count: method === "GET",
+-        maxCountedBytes,
+-      });
++      let attempt: Attempt;
++      try {
++        attempt = await requestResource(url, method, {
++          userAgent: opts.userAgent,
++          allowPrivate,
++          timeoutMs,
++          count: method === "GET",
++          maxCountedBytes,
++          // A stop reaches the request on the wire (Phase 27b, Ruling 4).
++          signal: opts.signal,
++        });
++      } catch (error) {
++        // Stopped mid-request: the row is left as the per-request check above
++        // leaves it, null and unasked, and the pass reports `aborted`.
++        if (error instanceof FetchAbortedError) return;
++        throw error;
++      }
+       spent += 1;
+       requests += 1;
+       reportToGate(host, url, attempt);
+@@ -1062,11 +1077,18 @@ interface RequestOpts {
+   count: boolean;
+   /** The counter's ceiling. See MAX_COUNTED_BYTES. */
+   maxCountedBytes: number;
++  /**
++   * The crawl's control signal (Phase 27b). Aborting it rejects with
++   * `FetchAbortedError`, `fetchPage`'s contract, and never resolves to an
++   * `Attempt`: a stopped request learned nothing, so it is never a row.
++   */
++  signal?: AbortSignal;
+ }
+ 
+ /**
+  * One request at one URL. Never throws for the server's behaviour; throws for
+- * ours (`isProgrammerError`), exactly as `fetchPage` does.
++ * ours (`isProgrammerError`), exactly as `fetchPage` does, and like it rejects
++ * with `FetchAbortedError` when the caller's signal aborts the request.
+  *
+  * `accept-encoding: gzip` is sent because a browser sends one: what the weight
+  * rules want is the bytes a visitor's connection carries, so a `content-length`
+@@ -1078,12 +1100,21 @@ async function requestResource(
+   method: "HEAD" | "GET",
+   opts: RequestOpts,
+ ): Promise<Attempt> {
++  const callerSignal = opts.signal;
++  // Read through a call so the compiler does not narrow the flag to `false`
++  // after the check below: the signal fires while we await.
++  const callerAborted = (): boolean => callerSignal?.aborted === true;
++  if (callerAborted()) throw new FetchAbortedError(url);
+   const deadline = new AbortController();
+   let deadlineHit = false;
+   const timer = setTimeout(() => {
+     deadlineHit = true;
+     deadline.abort();
+   }, opts.timeoutMs);
++  const requestSignal =
++    callerSignal === undefined
++      ? deadline.signal
++      : AbortSignal.any([deadline.signal, callerSignal]);
+ 
+   try {
+     const response = await request(url, {
+@@ -1097,7 +1128,7 @@ async function requestResource(
+       // Manual redirects, like the page path: every hop is re-checked by the
+       // URL policy and re-queued behind its own host's gate, which a client
+       // following redirects for us would skip.
+-      signal: deadline.signal,
++      signal: requestSignal,
+       headersTimeout: opts.timeoutMs,
+       bodyTimeout: opts.timeoutMs,
+     });
+@@ -1127,6 +1158,9 @@ async function requestResource(
+ 
+     return { kind: "response", statusCode: response.statusCode, headers, counted, countTruncated };
+   } catch (error) {
++    // The caller's stop wins over every classification, including a deadline
++    // that fired in the same tick: nothing aborted is ever written as a row.
++    if (callerAborted()) throw new FetchAbortedError(url);
+     if (isProgrammerError(error)) throw error;
+     const refusal = blockedAddressMessage(error);
+     if (refusal !== null) return { kind: "refused", reason: `refused at connect: ${refusal}` };

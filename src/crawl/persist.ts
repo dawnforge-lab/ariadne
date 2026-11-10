@@ -585,9 +585,36 @@ export class PageWriter {
   async insertRobotsBlocked(
     blocked: ReadonlyArray<{ item: PageWriterItem; reason: string }>,
   ): Promise<number> {
+    return this.insertNeverRequested("disallowed", blocked, this.db);
+  }
+
+  /**
+   * `insertRobotsBlocked`'s twin for URLs the crawl's SCOPE refused (Phase
+   * 27c): `fetch_class = 'excluded'`, `fetch_reason` naming the pattern
+   * (`scopeVerdict`). Everything said above holds — never requested, written
+   * at once, the count returned is what landed and is what the shared budget
+   * spends. Not counted in `stats().pages`; the overflow is
+   * `crawls.excluded_dropped`.
+   *
+   * `into` is the connection to write through, `this.db` when absent. The
+   * resume re-filter (`refileOutOfScope`) passes its transaction, so the rows
+   * and the frontier deletes that retire their URLs commit together.
+   */
+  async insertExcluded(
+    excluded: ReadonlyArray<{ item: PageWriterItem; reason: string }>,
+    into: Pick<Db, "insert"> = this.db,
+  ): Promise<number> {
+    return this.insertNeverRequested("excluded", excluded, into);
+  }
+
+  private async insertNeverRequested(
+    fetchClass: "disallowed" | "excluded",
+    blocked: ReadonlyArray<{ item: PageWriterItem; reason: string }>,
+    into: Pick<Db, "insert">,
+  ): Promise<number> {
     if (blocked.length === 0) return 0;
     // Through the storability boundary like every buffered row (see `push`):
-    // the reason quotes the site's robots.txt line.
+    // the reason quotes the site's robots.txt line, or an agent's pattern.
     const rows = blocked.map(({ item, reason }) => storableDeep({
       ...this.pageRow(
         `page_${randomUUID()}`,
@@ -595,7 +622,7 @@ export class PageWriter {
         {
           url: item.url,
           statusCode: null,
-          fetchClass: "disallowed",
+          fetchClass,
           contentType: null,
           redirectUrl: null,
           body: null,
@@ -623,7 +650,7 @@ export class PageWriter {
     // under the conflict target, and the count returned is what landed.
     let count = 0;
     for (let i = 0; i < rows.length; i += BLOCKED_INSERT_CHUNK_ROWS) {
-      const inserted = await this.db
+      const inserted = await into
         .insert(pages)
         .values(rows.slice(i, i + BLOCKED_INSERT_CHUNK_ROWS))
         .onConflictDoNothing({ target: [pages.crawlId, pages.url] })

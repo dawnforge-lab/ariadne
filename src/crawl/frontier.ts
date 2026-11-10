@@ -71,7 +71,7 @@ import { frontier } from "../db/schema.js";
  * `string`): what the column holds is a fact about a row that already exists,
  * and narrowing it on read would be a cast rather than a check.
  */
-export const DISCOVERED_VIA = ["seed", "link", "sitemap", "redirect"] as const;
+export const DISCOVERED_VIA = ["seed", "link", "sitemap", "redirect", "list"] as const;
 
 export type DiscoveredVia = (typeof DISCOVERED_VIA)[number];
 
@@ -82,6 +82,8 @@ export interface LeasedUrl {
   discoveredVia: string;
   /** Attempts *including* this one — `leaseBatch` increments as it leases. */
   attempts: number;
+  /** Redirect hops already taken to reach this URL; 0 unless it is a redirect target. */
+  redirectHops: number;
 }
 
 export interface FrontierCounts {
@@ -131,6 +133,8 @@ export interface EnqueueItem {
   url: string;
   depth: number;
   discoveredVia: string;
+  /** Redirect hops already taken to reach this URL; absent = 0. */
+  redirectHops?: number;
 }
 
 /**
@@ -187,6 +191,7 @@ export async function enqueueUrls(
           url: item.url,
           depth: item.depth,
           discoveredVia: item.discoveredVia,
+          redirectHops: item.redirectHops ?? 0,
         })),
       )
       // Duplicates *within* one batch collapse here too: DO NOTHING tolerates a
@@ -241,7 +246,8 @@ export async function leaseBatch(
       attempts = attempts + 1
     from picked
     where frontier.crawl_id = picked.crawl_id and frontier.url = picked.url
-    returning frontier.url, frontier.depth, frontier.discovered_via, frontier.attempts`);
+    returning frontier.url, frontier.depth, frontier.discovered_via, frontier.attempts,
+      frontier.redirect_hops`);
 
   return toLeased(res.rows);
 }
@@ -262,6 +268,7 @@ function toLeased(rows: readonly Record<string, unknown>[]): LeasedUrl[] {
     depth: Number(r["depth"]),
     discoveredVia: r["discovered_via"] as string,
     attempts: Number(r["attempts"]),
+    redirectHops: Number(r["redirect_hops"]),
   }));
 }
 
@@ -317,7 +324,8 @@ export async function leaseRenderUrls(
       attempts = attempts + 1
     from picked
     where frontier.crawl_id = picked.crawl_id and frontier.url = picked.url
-    returning frontier.url, frontier.depth, frontier.discovered_via, frontier.attempts`);
+    returning frontier.url, frontier.depth, frontier.discovered_via, frontier.attempts,
+      frontier.redirect_hops`);
 
   return toLeased(res.rows).sort((a, b) => (a.url < b.url ? -1 : a.url > b.url ? 1 : 0));
 }

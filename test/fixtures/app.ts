@@ -53,8 +53,40 @@ export interface FixtureApp {
    * site used to live on and never redirected away.
    */
   legacyBase: string;
+  /**
+   * Every request the gated areas (below) received, in arrival order: the Host
+   * it asked for, its path, and the three request-borne credentials as sent
+   * (`null` when absent). Phase 27c's no-crossing proof reads it.
+   */
+  gatedRequests: GatedRequest[];
   close(): Promise<void>;
 }
+
+export interface GatedRequest {
+  host: string;
+  path: string;
+  authorization: string | null;
+  cookie: string | null;
+  headerKey: string | null;
+}
+
+/**
+ * The credentials the gated areas accept (Phase 27c). A test that scans storage
+ * for them passes values of its own, distinctive enough not to match page text.
+ */
+export interface GateSecrets {
+  /** HTTP Basic `username:password` for `/auth/*`. */
+  basic: string;
+  /** The `session` cookie's value for `/cookie-gated`. */
+  cookie: string;
+  /** The `x-fixture-key` header's value for `/header-gated`. */
+  header: string;
+}
+
+export const DEFAULT_GATE_SECRETS: GateSecrets = { basic: "ariadne:fixture", cookie: "ok", header: "k1" };
+
+/** `/chain/0` … `/chain/12` each 301 to the next; `/chain/12` goes to `/chain/end`. */
+export const CHAIN_LENGTH = 12;
 
 /**
  * The prefix robots.txt disallows. One fixture lives under it,
@@ -215,7 +247,12 @@ function send(res: ServerResponse, status: number, contentType: string, body: st
  * shadowing each other silently — two fixtures on one path would make the
  * harness assert against a page that is not the one it thinks it is.
  */
-export async function startFixtureApp(fixtures: readonly Fixture[]): Promise<FixtureApp> {
+export async function startFixtureApp(
+  fixtures: readonly Fixture[],
+  secrets: GateSecrets = DEFAULT_GATE_SECRETS,
+): Promise<FixtureApp> {
+  const gatedRequests: GatedRequest[] = [];
+  const legacyPortHolder: { port: number } = { port: 0 };
   const byPath = new Map<string, Fixture>();
   for (const fixture of fixtures) {
     if (!fixture.path.startsWith("/")) {
@@ -227,6 +264,70 @@ export async function startFixtureApp(fixtures: readonly Fixture[]): Promise<Fix
     byPath.set(fixture.path, fixture);
   }
 
+  const page = (title: string): string =>
+    `<!doctype html><html lang="en"><head><title>${title}</title></head><body><h1>${title}</h1></body></html>`;
+  const header = (req: IncomingMessage, name: string): string | null => {
+    const v = req.headers[name];
+    return typeof v === "string" ? v : null;
+  };
+
+  function serveGated(req: IncomingMessage, res: ServerResponse, path: string): void {
+    gatedRequests.push({
+      host: req.headers.host ?? "",
+      path,
+      authorization: header(req, "authorization"),
+      cookie: header(req, "cookie"),
+      headerKey: header(req, "x-fixture-key"),
+    });
+    const html = "text/html; charset=utf-8";
+    if (path.startsWith("/auth/")) {
+      if (path === "/auth/to-legacy") {
+        // Always a redirect, credentials or not: the proof is what the crawler
+        // sends to the target, not whether the source accepted it.
+        res.writeHead(302, { location: `http://localhost:${legacyPortHolder.port}/auth/to-legacy-target` });
+        res.end();
+        return;
+      }
+      const expected = `Basic ${Buffer.from(secrets.basic, "utf8").toString("base64")}`;
+      if (header(req, "authorization") !== expected) {
+        res.writeHead(401, { "content-type": "text/plain", "www-authenticate": 'Basic realm="fixture"' });
+        res.end("credentials required");
+        return;
+      }
+      send(res, 200, html, page(`Gated ${path}`));
+      return;
+    }
+    if (path === "/cookie-gated") {
+      const cookies = (header(req, "cookie") ?? "").split(";").map((c) => c.trim());
+      if (!cookies.includes(`session=${secrets.cookie}`)) {
+        send(res, 403, "text/plain", "cookie required");
+        return;
+      }
+      send(res, 200, html, page("Cookie gated"));
+      return;
+    }
+    if (path === "/header-gated") {
+      if (header(req, "x-fixture-key") !== secrets.header) {
+        send(res, 403, "text/plain", "header required");
+        return;
+      }
+      send(res, 200, html, page("Header gated"));
+      return;
+    }
+    if (path === "/chain/end") {
+      send(res, 200, html, page("End of the chain"));
+      return;
+    }
+    const hop = /^\/chain\/(\d+)$/.exec(path);
+    if (hop !== null && Number(hop[1]) <= CHAIN_LENGTH) {
+      const n = Number(hop[1]);
+      res.writeHead(301, { location: n === CHAIN_LENGTH ? "/chain/end" : `/chain/${n + 1}` });
+      res.end();
+      return;
+    }
+    send(res, 404, "text/plain", "not found");
+  }
+
   const server: Server = createServer((req: IncomingMessage, res: ServerResponse) => {
     const target = req.url ?? "/";
     // A fixture may BE a query string (`/authored3/tracked?utm_source=…`), so
@@ -235,6 +336,19 @@ export async function startFixtureApp(fixtures: readonly Fixture[]): Promise<Fix
     // the canonical-conflict page is asked for with `?via=…` and must still be
     // itself.
     const path = target.split("?")[0] ?? "/";
+
+    // THE GATED AREAS (Phase 27c). Not linked from the hub and in no sitemap, so
+    // a spider crawl of the site never reaches them and the harness's counts are
+    // untouched: only a request that names them gets here.
+    if (
+      path.startsWith("/auth/") ||
+      path === "/cookie-gated" ||
+      path === "/header-gated" ||
+      path.startsWith("/chain/")
+    ) {
+      serveGated(req, res, path);
+      return;
+    }
 
     if (path === "/") {
       send(res, 200, "text/html; charset=utf-8", hubHtml(fixtures, selfUrl(req)));
@@ -300,10 +414,12 @@ export async function startFixtureApp(fixtures: readonly Fixture[]): Promise<Fix
   // Every interface, so the site answers to both of its names (see the header).
   await new Promise<void>((resolve) => server.listen(0, resolve));
   const address = server.address() as AddressInfo;
+  legacyPortHolder.port = address.port;
 
   return {
     base: `http://127.0.0.1:${address.port}`,
     legacyBase: legacyOriginOf(address.port),
+    gatedRequests,
     close: () => new Promise<void>((resolve, reject) =>
       server.close((error) => (error === undefined ? resolve() : reject(error))),
     ),

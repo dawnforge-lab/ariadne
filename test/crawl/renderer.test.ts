@@ -2653,3 +2653,95 @@ describe("runRenderPass", () => {
     expect(row.renderConsole).toBeNull();
   });
 });
+
+// ---------------------------------------------------------------------------
+// Phase 27c Task 5: credentials in the render pass.
+// ---------------------------------------------------------------------------
+
+describe("PageRenderer credentials", () => {
+  const HEADER_SECRET = "render-hdr-s3cret";
+  const COOKIE_SECRET = "render-ck-s3cret";
+  const seen: Array<{ path: string; headers: IncomingMessage["headers"] }> = [];
+  let credSite: Server;
+  let credBase: string;
+  let third: Site;
+  let htmlDir: string;
+  let renderer: PageRenderer;
+  const blocked: string[] = [];
+
+  beforeAll(async () => {
+    third = await startThirdParty();
+    credSite = createServer((req: IncomingMessage, res: ServerResponse) => {
+      const path = (req.url ?? "/").split("?")[0] ?? "/";
+      seen.push({ path, headers: req.headers });
+      if (path === "/cred-page") {
+        res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+        res.end(
+          `<!doctype html><html><head><title>Cred</title>` +
+            `<script src="/cred.js"></script>` +
+            `<script src="${third.base}/widget.js"></script>` +
+            `</head><body><p>one two</p></body></html>`,
+        );
+        return;
+      }
+      if (path === "/cred.js") {
+        res.writeHead(200, { "content-type": "text/javascript" });
+        res.end("document.title = 'Cred ran';");
+        return;
+      }
+      res.writeHead(404, { "content-type": "text/html; charset=utf-8" });
+      res.end("<!doctype html><title>404</title>");
+    });
+    await new Promise<void>((resolve) => credSite.listen(0, "127.0.0.1", resolve));
+    credBase = siteBase(credSite);
+    htmlDir = await mkdtemp(join(tmpdir(), "ariadne-render-cred-"));
+    renderer = await PageRenderer.launch({
+      origin: credBase,
+      htmlDir,
+      userAgent: "AriadneBot/0.1 (render credentials test)",
+      perHostDelayMs: 0,
+      settleMs: SETTLE_MS,
+      allowPrivate: true,
+      onRequestBlocked: (url) => blocked.push(url),
+      credentials: {
+        siteUrl: credBase,
+        values: {
+          requestHeaders: { "X-Tenant": HEADER_SECRET },
+          cookies: [{ name: "session", value: COOKIE_SECRET }],
+        },
+      },
+    });
+  }, 120_000);
+
+  afterAll(async () => {
+    await renderer.close();
+    await new Promise<void>((resolve, reject) =>
+      credSite.close((error) => (error === undefined ? resolve() : reject(error))),
+    );
+    await third.close();
+    await rm(htmlDir, { recursive: true, force: true });
+  });
+
+  it("sends the cookie and the header on the document and a same-origin script, and still blocks the third party", async () => {
+    const result = await renderer.render(`${credBase}/cred-page`);
+
+    expect(result.error).toBeNull();
+    expect(result.rendered).toBe(true);
+    // The same-origin script ran: it was fetched, with the credentials.
+    expect(result.title).toBe("Cred ran");
+    for (const path of ["/cred-page", "/cred.js"]) {
+      const hits = seen.filter((s) => s.path === path);
+      expect(hits.length, path).toBeGreaterThan(0);
+      for (const hit of hits) {
+        expect(hit.headers["x-tenant"], path).toBe(HEADER_SECRET);
+        expect(hit.headers.cookie ?? "", path).toContain(`session=${COOKIE_SECRET}`);
+        // The browser's own identity is kept (rule 9).
+        expect(hit.headers["user-agent"], path).toBe("AriadneBot/0.1 (render credentials test)");
+      }
+    }
+    // The third party was never asked, so it never saw a credential either.
+    expect(third.hits).toEqual([]);
+    expect(blocked).toContain(`${third.base}/widget.js`);
+    expect(result.blockedRequests).toBeGreaterThanOrEqual(1);
+  });
+});

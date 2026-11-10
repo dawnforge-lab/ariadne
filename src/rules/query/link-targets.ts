@@ -70,6 +70,30 @@ async function linkTargetClassFindings(
   fetchClass: "client_error" | "server_error",
   caps: RuleCaps,
 ): Promise<Finding[]> {
+  // A LISTED 4xx NOBODY LINKS TO (27c, Deviation 7). The rule reports the LINK,
+  // and a list crawl follows no link, so a listed 404 has no inlink row and 4xx
+  // has no page rule: without this arm it would be reported by nothing. Only
+  // the client-error class (5xx has `http.server-error`), and only rows the
+  // crawl wrote as listed (`discovered_via = 'list'`), which a spider crawl
+  // never writes — so no mode check is needed and a spider crawl is unchanged.
+  const listedOnly =
+    fetchClass === "client_error"
+      ? sql`listed_only as (
+      select p.id as target_page_id, p.url as target_url, p.status_code,
+             0 as inlink_count
+      from pages p
+      where p.crawl_id = ${crawlId} and p.fetch_class = 'client_error'
+        and p.discovered_via = 'list'
+        and not exists (
+          select 1 from links l
+          where l.crawl_id = ${crawlId} and l.is_internal and l.target_url = p.url
+        )
+    ),`
+      : sql``;
+  const listedUnion =
+    fetchClass === "client_error"
+      ? sql`union all select listed_only.*, true as listed from listed_only`
+      : sql``;
   const result = await db.execute<{
     target_page_id: string;
     target_url: string;
@@ -77,20 +101,29 @@ async function linkTargetClassFindings(
     inlink_count: number;
     total_matches: number;
     sample_sources: string[];
+    listed: boolean;
   }>(sql`
-    with targets as (
+    with linked as (
       select p.id as target_page_id, p.url as target_url, p.status_code,
-             count(*)::int as inlink_count,
-             count(*) over ()::int as total_matches
+             count(*)::int as inlink_count
       from links l
       join pages p on p.crawl_id = ${crawlId} and p.url = l.target_url
       where l.crawl_id = ${crawlId} and l.is_internal and p.fetch_class = ${fetchClass}
       group by p.id, p.url, p.status_code
-      order by p.url
+    ),
+    ${listedOnly}
+    targets as (
+      select u.target_page_id, u.target_url, u.status_code, u.inlink_count, u.listed,
+             count(*) over ()::int as total_matches
+      from (
+        select linked.*, false as listed from linked
+        ${listedUnion}
+      ) u
+      order by u.target_url
       ${limitTo(caps.listing)}
     )
     select t.target_page_id, t.target_url, t.status_code, t.inlink_count,
-           t.total_matches, s.sample_sources
+           t.total_matches, t.listed, s.sample_sources
     from targets t
     cross join lateral (
       select coalesce(array_agg(sample.url), array[]::text[]) as sample_sources
@@ -114,6 +147,7 @@ async function linkTargetClassFindings(
         statusCode: row.status_code,
         inlinkCount: row.inlink_count,
         sampleSources: row.sample_sources,
+        ...(row.listed ? { listed: true } : {}),
       },
       dedupeKey: row.target_url,
     }),
@@ -287,12 +321,14 @@ export const linkTargetRules: QueryRule[] = [
   defineRule<QueryRule>({
     kind: "query",
     id: BROKEN.id,
+    listPartial: true,
     checkIds: ["CHECK-11"],
     category: "links",
     severity: BROKEN.severity,
     columns: [
       { key: "inlinkCount", label: "Inlinks" },
       { key: "sampleSources", label: "Sample Sources" },
+      { key: "listed", label: "Listed", optional: true },
     ],
     ...copyFor(BROKEN.id),
     rulesetVersion: RULESET_VERSION,
@@ -312,6 +348,7 @@ export const linkTargetRules: QueryRule[] = [
   defineRule<QueryRule>({
     kind: "query",
     id: TO_SERVER_ERROR.id,
+    listPartial: true,
     checkIds: ["CHECK-11"],
     category: "links",
     severity: TO_SERVER_ERROR.severity,
@@ -342,6 +379,7 @@ export const linkTargetRules: QueryRule[] = [
   defineRule<QueryRule>({
     kind: "query",
     id: NON_200.id,
+    listPartial: true,
     checkIds: ["CHECK-19"],
     category: "canonical",
     severity: NON_200.severity,
@@ -378,6 +416,7 @@ export const linkTargetRules: QueryRule[] = [
   defineRule<QueryRule>({
     kind: "query",
     id: NON_INDEXABLE.id,
+    listPartial: true,
     checkIds: ["CHECK-19"],
     category: "canonical",
     severity: NON_INDEXABLE.severity,

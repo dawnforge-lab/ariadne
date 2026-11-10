@@ -439,6 +439,12 @@ interface HostState {
    * decrements it, never below 0.
    */
   escalations: number;
+  /**
+   * What a base of 0 doubles from, for THIS host: `ZERO_BASE_SEED_MS` unless a
+   * restore found the stored spacing wider than that seed derives (27b Ruling 9),
+   * in which case the seed that reproduces it. Unused while `baseMs > 0`.
+   */
+  zeroSeedMs: number;
   /** Every escalation this host ever caused, for the throttle record. Never decremented. */
   escalationsTotal: number;
   /** How many times a clean run stepped this host down a level. */
@@ -624,6 +630,16 @@ export class HostGate {
         responses429: e.responses429,
         retryAfterSeen: e.retryAfterSeen,
       };
+      // A zero base doubles from a seed, not from itself, so the level alone
+      // cannot say what the host earned: re-derive the seed that reproduces the
+      // stored spacing, so a resume is never faster than it earned (rule 9,
+      // 27b Ruling 9). A positive base needs none: base × 2^level is exact.
+      if (restored.baseMs === 0 && restored.escalations > 0) {
+        restored.zeroSeedMs = Math.max(
+          ZERO_BASE_SEED_MS,
+          Math.min(this.maxDelayMs, e.spacingMs) / 2 ** restored.escalations,
+        );
+      }
       this.hosts.set(host, restored);
       restored.peakSpacingMs = Math.max(
         this.spacingMs(host),
@@ -699,7 +715,7 @@ export class HostGate {
     const base = state?.baseMs ?? this.delayMs;
     const escalations = state?.escalations ?? 0;
     if (escalations === 0) return base;
-    const seed = base > 0 ? base : ZERO_BASE_SEED_MS;
+    const seed = base > 0 ? base : (state?.zeroSeedMs ?? ZERO_BASE_SEED_MS);
     return Math.min(this.maxDelayMs, seed * 2 ** escalations);
   }
 
@@ -1052,6 +1068,7 @@ export class HostGate {
     return {
       nextAllowedAt: 0,
       baseMs,
+      zeroSeedMs: ZERO_BASE_SEED_MS,
       escalations: 0,
       escalationsTotal: 0,
       recoveries: 0,

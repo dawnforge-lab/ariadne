@@ -353,7 +353,7 @@ answered from, and its verdict is the confidence interval around all of them.
   `resources.all-unknown`, `resources.partial-unknown`,
   `hreflang.alternates-not-crawled`, `hreflang.declarations-incomplete`,
   `content.near-duplicate-skipped`,
-  `security.headers-not-recorded`, `extraction.not-recorded`,
+  `security.headers-not-recorded`, `extraction.not-recorded`, `crawl.list-mode`,
   and the per-page `crawl.blocked` and `crawl.unreadable-encoding`. Each one
   is the engine saying a check below could not be answered on this crawl. The four
   resource markers are siblings and never more than one appears: `resources.not-recorded` means
@@ -372,6 +372,16 @@ answered from, and its verdict is the confidence interval around all of them.
   at zero with `failed` carrying the census (`skipped` non-zero as well, for the
   partial case). List them
   here, and mark the checks they claim SKIP rather than PASS when you reach them.
+  `crawl.list-mode` (one finding, ruleset 0.24.0) means the crawl was a LIST crawl: it
+  fetched only the URLs it was given and followed no link, so the rules that need the
+  whole site (orphans, click depth, inlink counts, "not crawled" and the sitemap and
+  pagination comparisons) were not run, and, when no sitemap was read, the sitemap
+  rules were not either. Its `notMeasured` evidence lists exactly those rule ids and
+  `sitemapsRead` says whether a sitemap was read; mark every check they claim SKIP.
+  Its `partiallyMeasured` evidence lists the target checks (broken links, canonical,
+  hreflang and pagination targets) that DID run, but only against URLs the list
+  fetched (listed URLs and their redirect targets): report their findings as true,
+  and never read their silence about any other URL as a pass.
 - **Evaluate**:
   - FAIL if `rulesRunAt` is null — nothing below this line is answerable, and the
     audit stops until the rules have run

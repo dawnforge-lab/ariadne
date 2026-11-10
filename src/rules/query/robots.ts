@@ -347,6 +347,7 @@ export const robotsRules: QueryRule[] = [
   defineRule<QueryRule>({
     kind: "query",
     id: BLOCKS.id,
+    needsSitemaps: true,
     checkIds: ["CHECK-03"],
     category: "crawl",
     severity: BLOCKS.severity,

@@ -69,7 +69,7 @@ import { createGzip } from "node:zlib";
 import { and, asc, desc, eq, getTableColumns, gt, inArray, isNotNull, isNull, sql, type SQL } from "drizzle-orm";
 
 import type { Db } from "../db/client.js";
-import { crawls, frontier, issues, pages } from "../db/schema.js";
+import { crawls, frontier, issues, listUrls, pages } from "../db/schema.js";
 import { deleteCrawlFiles, deleteCrawlRows } from "./crawl-delete.js";
 import {
   ClaimLostError,
@@ -78,9 +78,27 @@ import {
   parseStoredConfig,
   resumeCrawl,
   storableConfig,
+  storedCredentialShape,
   validateCrawlConfig,
   type CrawlConfig,
+  type CrawlMode,
 } from "../crawl/loop.js";
+import {
+  credentialFieldError,
+  describeShape,
+  redactedCredentials,
+  redactionMarkerError,
+  sameShape,
+  shapeOf,
+  type CrawlCredentials,
+  type CredentialShape,
+} from "../crawl/credentials.js";
+import {
+  matchesPattern,
+  patternFamilyError,
+  scopeVerdict,
+  type CrawlScope,
+} from "../crawl/url-scope.js";
 import { DISCOVERED_VIA, frontierCounts, type FrontierCounts } from "../crawl/frontier.js";
 import { FETCH_CLASSES, type FetchClass } from "../crawl/fetch-page.js";
 import {
@@ -124,7 +142,12 @@ import {
   type RenderPassSummary,
 } from "../crawl/render/run-render.js";
 import { resolveRenderConfig } from "../crawl/render/select.js";
-import { hostProbeStarts, hostnameSpellings, normalizeUrl } from "../crawl/parse/url-utils.js";
+import {
+  hostProbeStarts,
+  hostnameSpellings,
+  isSameOrigin,
+  normalizeUrl,
+} from "../crawl/parse/url-utils.js";
 import { isUrlAllowed, UrlPolicyError } from "../crawl/url-policy.js";
 import { buildRegistry } from "../rules/index.js";
 import { RULESET_VERSION, type Registry } from "../rules/registry/registry.js";
@@ -215,6 +238,7 @@ import {
   notDisabled,
   readJudgementBlock,
   refuseIfDisabled,
+  refuseIfNotMeasured,
   storableBlock,
   triageFields,
   type JudgementStale,
@@ -261,6 +285,22 @@ export interface StartCrawlInput {
   renderSamplePerType?: number;
   findingCap?: number | null;
   fetchResources?: boolean;
+  /** Phase 27c: list mode. `urls` is stored in `list_urls`, never in `config_jsonb`. */
+  mode?: CrawlMode;
+  urls?: string[];
+  /** Phase 27c: the crawl's scope patterns. */
+  exclude?: string[];
+  include?: string[];
+  /**
+   * Phase 27c: the three credential fields (`x-ariadne-secret`). Their values
+   * go to `ApiService.credentials` and nowhere else; the row keeps the shape.
+   */
+  requestHeaders?: Record<string, string>;
+  httpAuth?: { username: string; password: string };
+  cookies?: Array<{ name: string; value: string }>;
+  /** Phase 27c: the two limits. */
+  maxRedirectHops?: number;
+  maxUrlLength?: number;
   /**
    * The crawl's judgement block (Phase 27a), parsed against the ruleset by the
    * schema (`parseJudgement` is its semantic check). Its `findingCap` is stored
@@ -269,18 +309,59 @@ export interface StartCrawlInput {
   judgement?: JudgementBlock;
 }
 
-/** What a started crawl stores in `config_jsonb`: its effective config, less the test-only fields. */
-export type StoredConfig = ReturnType<typeof storableConfig>;
+/**
+ * What a started crawl stores in `config_jsonb`: its effective config, less
+ * the test-only fields and the credentials (`storableConfig`), plus — on a
+ * list crawl — how many listed URLs were collapsed as duplicates (27c
+ * Deviation 3), which the loop never reads.
+ */
+export type StoredConfig = ReturnType<typeof storableConfig> & { listDuplicates?: number };
 
 /** `config_validate`'s answer, and what `startCrawl` acts on. */
 export interface StartBodyCheck {
   valid: boolean;
   errors: ConfigError[];
-  /** The config the crawl would be stored with, and its judgement; null when invalid. */
+  /**
+   * The config the crawl would be stored with, and its judgement; null when
+   * invalid. Never the listed URLs (`listUrlCount` and `listDuplicates` stand
+   * for them) and never a credential value (`credentialShape` stands for them).
+   */
   effective: (StoredConfig & { judgement: JudgementBlock | null }) | null;
 }
 
-type FieldKind = "string[]";
+/**
+ * `checkStartBody`'s answer plus what `startCrawl` needs and no answer may
+ * carry: the distinct listed URLs in list order (null on a spider crawl), and
+ * the credential values (undefined when none were supplied).
+ */
+interface StartPlan {
+  check: StartBodyCheck;
+  listed: { urls: string[]; duplicates: number } | null;
+  credentials: CrawlCredentials | undefined;
+}
+
+/** `list_urls` rows per INSERT: three parameters a row, well under Postgres' 65,535. */
+const LIST_INSERT_CHUNK = 1000;
+
+/** `CrawlConfig` keys only a crawl's request sets; refused in `crawlDefaults`. */
+const REQUEST_ONLY_CRAWL_KEYS = ["mode", "listUrlCount", "credentials", "credentialShape"] as const;
+
+/** The request's crawl fields that become `CrawlConfig` keys as they are. */
+type CrawlRequestFields = Omit<
+  StartCrawlInput,
+  "judgement" | "urls" | "requestHeaders" | "httpAuth" | "cookies"
+>;
+
+/**
+ * Which scope list refused `url`: `exclude` when one of its patterns matches
+ * (exclude wins, as in `scopeVerdict`), else `include`. Asked of the patterns,
+ * never read off the verdict's sentence.
+ */
+function scopePathOf(url: string, scope: CrawlScope): "exclude" | "include" {
+  return scope.exclude.some((pattern) => matchesPattern(pattern, url)) ? "exclude" : "include";
+}
+
+type FieldKind = "string[]" | "credential";
 
 /**
  * The fields `POST /crawls/:id/render` accepts, closed on the same terms as the
@@ -289,7 +370,41 @@ type FieldKind = "string[]";
  */
 export const RENDER_CRAWL_FIELDS: Record<keyof RenderCrawlInput, FieldKind> = {
   urls: "string[]",
+  // The crawl's credentials, re-supplied after a restart (27c). Secret: kept
+  // only in this process's memory, never stored, logged or answered.
+  requestHeaders: "credential",
+  httpAuth: "credential",
+  cookies: "credential",
 };
+
+/**
+ * Validate a `POST /crawls/:id/resume` body (27c): absent is a resume with
+ * nothing sent; otherwise only the three credential fields, each checked as
+ * `crawl_start` checks it (`credentialFieldError`) and refusing the
+ * `[redacted]` marker as a value. An unknown field is refused, never ignored —
+ * a caller who sent `{"reclaimLeases": true}` must not read a 202 as having
+ * asked for it.
+ */
+export function parseResumeCrawlInput(raw: unknown): CrawlCredentials {
+  if (raw === undefined) return {};
+  if (!isPlainObject(raw)) {
+    throw new ServiceError("VALIDATION", "request body must be a JSON object");
+  }
+  const input: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(raw)) {
+    if (!(CREDENTIAL_FIELDS as readonly string[]).includes(key)) {
+      throw new ServiceError(
+        "VALIDATION",
+        `unknown field '${clip(key)}' (accepted: ${CREDENTIAL_FIELDS.join(", ")})`,
+      );
+    }
+    if (value === undefined) continue;
+    const why = credentialInputError(key as CredentialField, value);
+    if (why !== null) throw new ServiceError("VALIDATION", why);
+    input[key] = value;
+  }
+  return input as CrawlCredentials;
+}
 
 /**
  * How many unrenderable URLs a refusal spells out before it says "…".
@@ -341,6 +456,11 @@ function assertKind(key: string, value: unknown, kind: FieldKind): void {
         throw new ServiceError("VALIDATION", `field '${key}' must be an array of strings`);
       }
       return;
+    case "credential": {
+      const why = credentialInputError(key as CredentialField, value);
+      if (why !== null) throw new ServiceError("VALIDATION", why);
+      return;
+    }
   }
 }
 
@@ -351,6 +471,10 @@ export interface CrawlAccepted {
   status: string;
   /** Crawls this process must finish first. 0 = it is starting now. */
   queuePosition: number;
+  /** A list crawl's distinct listed URLs (27c). Absent on a spider crawl. */
+  listUrlCount?: number;
+  /** How many listed URLs were collapsed as another's duplicate (27c Deviation 3). */
+  listDuplicates?: number;
 }
 
 /**
@@ -496,6 +620,12 @@ export interface CrawlDetail extends CrawlListItem {
     /** `crawls.robots_blocked_dropped`: discoveries turned away; null = not counted. */
     dropped: number | null;
   };
+  /**
+   * `crawls.excluded_dropped` (migration 0036): discoveries the crawl's scope
+   * patterns turned away past the excluded-row budget. Null = nobody counted
+   * (a crawl written before 0036); zero is a measurement.
+   */
+  excludedDropped: number | null;
   /**
    * The widest per-host spacing the crawl's politeness gate has escalated to,
    * in milliseconds, or null when no crawl loop ever reported one (a row that
@@ -989,6 +1119,13 @@ export interface CrawlConfigOut {
    * operator-only ones included. At start it equals what `config_validate`
    * answers as `effective` for the body that started the crawl, minus
    * `findingCap` and `judgement`; it diverges after a `crawl_config_set`.
+   *
+   * Two departures from the stored row (27c T9), both for the reader:
+   * `credentialShape` is shown as the three credential fields with every
+   * value `[redacted]` (`redactedCredentials` — the names, never a value),
+   * and `scopeChangedAt` (the `scope_changed_at` column, ISO or null) is
+   * added. `crawlViewOf` builds it, and `crawl_config_set` compares what it
+   * is sent against exactly this view (Ruling 12, extended).
    */
   crawl: Record<string, unknown>;
   /**
@@ -1119,7 +1256,7 @@ export interface RenderSummaryOut {
 }
 
 /** What `POST /crawls/:id/render` (and `crawl_render`) accepts as a body. */
-export interface RenderCrawlInput {
+export interface RenderCrawlInput extends CrawlCredentials {
   /**
    * The pages to render, in place of the automatic selection. Absent is the
    * default and leaves the pass exactly as it was.
@@ -1844,6 +1981,13 @@ export interface ExportResult {
    * fire".
    */
   disabledRules?: string[];
+  /**
+   * Beside `disabledRules`, always together: the rules the stored rules run
+   * left out because this is a list crawl (`JudgementView.notMeasured`), whose
+   * absence from the file is "not measured", never "clean"; `[]` on a spider
+   * crawl (27c final wave M16).
+   */
+  notMeasured?: string[];
 }
 
 /**
@@ -1872,6 +2016,8 @@ export interface CsvExportResult {
    * fire". Absent on the views that read no findings.
    */
   disabledRules?: string[];
+  /** Beside `disabledRules`, always together (`ExportResult.notMeasured`). */
+  notMeasured?: string[];
 }
 
 /** A prepared CSV stream: validated, not yet read. */
@@ -1887,6 +2033,8 @@ export interface CsvStream {
    * null on a view that reads no findings (`CsvExportResult.disabledRules`).
    */
   disabledRules: string[] | null;
+  /** Beside `disabledRules`, null with it (`ExportResult.notMeasured`). */
+  notMeasured: string[] | null;
   /**
    * The file, record by record, header first.
    *
@@ -2119,6 +2267,112 @@ interface CrawlPatch {
   sent: Record<string, unknown>;
   /** Operator-only keys as sent: no change if equal to the stored value, else refused. */
   operatorOnly: Record<string, unknown>;
+  /**
+   * The keys `crawl_config_get` reports and nothing sets (`REPORTED_CRAWL_KEYS`),
+   * as sent: no change if equal to the reported value, else refused as `never`.
+   */
+  reported: Record<string, unknown>;
+  /**
+   * The credential fields (27c), RAW: not schema-parsed here, because a field
+   * sent back exactly as `crawl_config_get` showed it (`[redacted]`) is "no
+   * change", which only the row can say. Validated in the transaction.
+   */
+  secrets: Partial<Record<CredentialField, unknown>>;
+}
+
+/** The three credential fields, as a request body names them. */
+type CredentialField = keyof CrawlCredentials;
+const CREDENTIAL_FIELDS: readonly CredentialField[] = ["requestHeaders", "httpAuth", "cookies"];
+
+/**
+ * Why a list crawl's `maxPages` below its distinct list is refused (Deviation
+ * 4) — one wording for `crawl_start` and `crawl_config_set` (27c final wave
+ * M14). The caller appends what else it can offer.
+ */
+function listBudgetShortfall(maxPages: number, listCount: number): string {
+  return (
+    `maxPages ${maxPages} is below the ${listCount} distinct URLs this list crawl ` +
+    "names, so some would never be fetched, and every listed URL must end in a " +
+    `classified row. Raise maxPages to at least ${listCount}`
+  );
+}
+
+/**
+ * Keys of `crawl_config_get`'s `crawl` that report a fact about the crawl
+ * rather than a setting (27c T9): the list's size and duplicates, and when the
+ * scope lists last changed. Their mutability is `never`; the whole `crawl`
+ * object sent back carries them unchanged, and that is no change.
+ */
+export const REPORTED_CRAWL_KEYS: readonly string[] = ["listUrlCount", "listDuplicates", "scopeChangedAt"];
+
+/**
+ * Why a credential field's value, as a request carries it, is refused — the
+ * redaction marker where a value belongs, or `credentialFieldError`'s reason —
+ * or null. Every message names the field and the header or cookie NAME only.
+ */
+function credentialInputError(field: CredentialField, value: unknown): string | null {
+  return redactionMarkerError(field, value) ?? credentialFieldError(field, value);
+}
+
+/**
+ * The credentials a `crawl_resume` / `crawl_render` request carries, validated,
+ * or `undefined` when it carries none. An invalid field is a VALIDATION naming
+ * it (and a header or cookie NAME, never a value). Empty lists are dropped, so
+ * what is returned has exactly the shape `shapeOf` reads.
+ */
+function credentialsInputOf(input: CrawlCredentials): CrawlCredentials | undefined {
+  let given = false;
+  const out: { -readonly [K in CredentialField]?: CrawlCredentials[K] } = {};
+  for (const field of CREDENTIAL_FIELDS) {
+    const value: unknown = input[field];
+    if (value === undefined) continue;
+    given = true;
+    const why = credentialInputError(field, value);
+    if (why !== null) throw new ServiceError("VALIDATION", why);
+    if (field === "requestHeaders") {
+      if (Object.keys(value as object).length > 0) out.requestHeaders = value as Record<string, string>;
+    } else if (field === "cookies") {
+      if ((value as unknown[]).length > 0) out.cookies = value as Array<{ name: string; value: string }>;
+    } else {
+      out.httpAuth = value as { username: string; password: string };
+    }
+  }
+  return given ? out : undefined;
+}
+
+/**
+ * `crawl_config_get`'s `crawl`: the stored config less `findingCap` (the
+ * judgement's) and less `credentialShape`, which is shown as the three
+ * credential fields with every value `[redacted]` (`redactedCredentials`),
+ * plus `scopeChangedAt` from its column. A stored shape this cannot read is a
+ * 409 naming the crawl, as every other unreadable stored config is.
+ */
+function crawlViewOf(
+  crawlId: string,
+  config: Record<string, unknown>,
+  scopeChangedAt: Date | null,
+): Record<string, unknown> {
+  const { findingCap: _findingCap, credentialShape: _shape, ...crawl } = config;
+  // A value under one of the three keys would be a secret in the row, which
+  // this engine never writes: refused loudly, and never shown.
+  const stray = CREDENTIAL_FIELDS.filter((field) => Object.hasOwn(config, field));
+  if (stray.length > 0) {
+    throw new Error(
+      `crawl ${crawlId}: stored config holds ${stray.join(", ")}, a credential this engine never ` +
+        "stores; it is not shown",
+    );
+  }
+  let shape: CredentialShape | null;
+  try {
+    shape = storedCredentialShape(config, crawlId);
+  } catch (error) {
+    throw new ServiceError("CONFLICT", messageOf(error));
+  }
+  return {
+    ...crawl,
+    ...redactedCredentials(shape),
+    scopeChangedAt: scopeChangedAt === null ? null : scopeChangedAt.toISOString(),
+  };
 }
 
 interface QueueEntry {
@@ -2205,6 +2459,19 @@ export class ApiService {
    */
   private readonly rendering = new Set<string>();
 
+  /**
+   * The credential VALUES of the crawls this process accepted (27c), by crawl
+   * id — the only place they are held. Never stored (the row keeps
+   * `credentialShape`, names only), never logged, never answered.
+   *
+   * An entry stays until the crawl is deleted or cancelled, not until it
+   * finishes (Deviation 9): a render pass on a finished crawl needs them. After
+   * a restart the map is empty, and a crawl whose row has a shape is refused
+   * rather than run without them (`requireCredentials`, the crawl loop).
+   * Bounded by the crawls this process accepted with credentials.
+   */
+  private readonly credentials = new Map<string, CrawlCredentials>();
+
   /** Crawls accepted by this process and not yet started, in FIFO order. */
   private readonly waiting: QueueEntry[] = [];
   private running: RunningCrawl | null = null;
@@ -2234,6 +2501,18 @@ export class ApiService {
       if (rule.kind === "metric") continue;
       for (const check of rule.checkIds) push(this.findingRulesByCheck, check, rule.id);
       push(this.findingRulesByCategory, rule.category, rule.id);
+    }
+    // The keys a crawl's REQUEST decides (27c): what is listed, and which
+    // credentials it carries. An operator default for any of them would be
+    // overwritten by every start, or worse, carried into a crawl that never
+    // asked for it — refused at construction, where the operator reads it.
+    for (const key of REQUEST_ONLY_CRAWL_KEYS) {
+      if (config.crawlDefaults !== undefined && Object.hasOwn(config.crawlDefaults, key)) {
+        throw new Error(
+          `ServiceConfig.crawlDefaults.${key} is not an operator default: a crawl's ` +
+            `request decides it (Phase 27c)`,
+        );
+      }
     }
     this.log = config.log ?? ((line) => console.error(line));
     this.exportDir = resolvePath(config.exportDir ?? joinPath(process.cwd(), "exports"));
@@ -2265,28 +2544,57 @@ export class ApiService {
    *     robots.txt pointed at, so both go through the same two checks
    *     (`checkLegacyHosts`, `checkSitemapUrls`) — which is where the allowlist
    *     would otherwise have had a hole big enough to drive a crawler through;
-   *  5. the judgement's `findingCap` against the top-level one, then the crawl
+   *  5. Phase 27c, list mode: `mode: "list"` and `urls` come together or not
+   *     at all, and an empty `sitemapUrls` on a list crawl is refused as
+   *     ambiguous (see there). Each listed URL is normalised, passes the URL
+   *     policy at the crawl's own `maxUrlLength` (`url_policy`, hard rule 5),
+   *     is on the seed's site (`isSameOrigin`, the boundary a spider crawl has;
+   *     a list spanning sites is refused, not split) and is admitted by the
+   *     scope (Deviation 5). Two spellings of one URL are collapsed and counted
+   *     (Deviation 3) — `checkListUrls`;
+   *  6. Phase 27c, scope: a pattern that can never match (no leading `*` and no
+   *     scheme, or an origin admission never admits) is refused
+   *     (`patternFamilyError`); a spider crawl's seed the
+   *     scope refuses is refused (an empty crawl is not an answer);
+   *  7. the judgement's `findingCap` against the top-level one, then the crawl
    *     loop's own ranges over the EFFECTIVE config — the engine's defaults,
-   *     the API's maxPages, the operator's `crawlDefaults`, the request — which
-   *     is where the render budgets are checked (`invalid`).
+   *     the API's maxPages (a list crawl's is twice its distinct URLs,
+   *     Deviation 4), the operator's `crawlDefaults`, the request — which is
+   *     where the render budgets are checked (`invalid`). A list crawl's
+   *     `maxPages` below its distinct URLs is refused (`out_of_range`).
+   *
+   * The credential fields were checked by the schema (`credentialFieldError`,
+   * whose messages never carry a value); here they are split off the request
+   * into `StartPlan.credentials`, and only their shape reaches the config.
    *
    * Every refusal found is returned, and `startCrawl` answers with the first.
    * There is no DNS lookup: `isUrlAllowed` checks the URL as written, and the
    * seed's resolution happens when the crawl runs, as it always has.
    *
    * `effective` is the config the crawl would be stored with
-   * (`storableConfig`, so the two test-only fields are never in it) and the
-   * parsed judgement block, or null when anything was refused.
+   * (`storableConfig`, so the two test-only fields and the credential values
+   * are never in it, and never the listed URLs) and the parsed judgement
+   * block, or null when anything was refused.
    */
   async checkStartBody(raw: unknown): Promise<StartBodyCheck> {
+    return (await this.planStart(raw)).check;
+  }
+
+  /** `checkStartBody`, plus the listed URLs and the credential values `startCrawl` acts on. */
+  private async planStart(raw: unknown): Promise<StartPlan> {
+    const refused = (errors: ConfigError[]): StartPlan => ({
+      check: { valid: false, errors, effective: null },
+      listed: null,
+      credentials: undefined,
+    });
     const parsed = parseStartBody(raw, this.registry);
-    if (!parsed.ok) return { valid: false, errors: parsed.errors, effective: null };
+    if (!parsed.ok) return refused(parsed.errors);
     const input = parsed.value;
 
     const siteUrl = normalizeUrl(input.siteUrl.trim());
     if (siteUrl === null) {
       const message = `siteUrl is not an http(s) URL: ${clip(input.siteUrl)}`;
-      return { valid: false, errors: [{ path: "siteUrl", code: "invalid", message }], effective: null };
+      return refused([{ path: "siteUrl", code: "invalid", message }]);
     }
     const host = new URL(siteUrl).hostname;
     const allowPrivate = this.config.crawlDefaults?.allowPrivate === true;
@@ -2326,8 +2634,10 @@ export class ApiService {
 
     // The judgement block is not crawl config: it is split off here, and its
     // `findingCap` — the one key whose bytes live in `config_jsonb` (plan
-    // Deviation 1) — joins the crawl config.
-    const { judgement, ...crawlInput } = input;
+    // Deviation 1) — joins the crawl config. The listed URLs and the three
+    // credential fields never reach `config_jsonb` either (27c): the list goes
+    // to `list_urls`, the values to `ApiService.credentials`.
+    const { judgement, urls, requestHeaders, httpAuth, cookies, ...crawlInput } = input;
     const block = judgement ?? null;
     if (block?.findingCap !== undefined) {
       if (crawlInput.findingCap !== undefined && crawlInput.findingCap !== block.findingCap) {
@@ -2344,34 +2654,219 @@ export class ApiService {
       }
     }
 
-    const crawlConfig = this.effectiveConfig(siteUrl, crawlInput);
+    const listMode = crawlInput.mode === "list";
+    if (listMode && urls === undefined) {
+      errors.push({
+        path: "urls",
+        code: "invalid",
+        message:
+          'mode "list" needs urls: a list crawl fetches exactly the URLs it is given, ' +
+          "and this body gives none",
+      });
+    }
+    if (!listMode && urls !== undefined) {
+      errors.push({
+        path: "urls",
+        code: "invalid",
+        message:
+          `urls is a list crawl's: send mode "list" with it, or omit urls for a crawl ` +
+          "that follows links from siteUrl",
+      });
+    }
+    // A list crawl reads no sitemap unless `sitemapUrls` is given, and with it
+    // walks the site's declared sitemaps as well as the named ones. `[]` says
+    // both "given" and "nothing to walk": refused rather than read either way.
+    if (listMode && input.sitemapUrls !== undefined && input.sitemapUrls.length === 0) {
+      errors.push({
+        path: "sitemapUrls",
+        code: "invalid",
+        message:
+          "sitemapUrls is an empty list on a list crawl, which says two things: a list " +
+          "crawl reads no sitemap unless sitemapUrls is given, and given, it walks the " +
+          "sitemaps robots.txt declares as well as the ones named. Omit sitemapUrls to " +
+          "read none, or name at least one document",
+      });
+    }
+
+    // The scope and the URL limit as the crawl will run with them — the
+    // request over the operator's defaults over the engine's.
+    const preliminary = this.effectiveConfig(siteUrl, crawlInput, null, undefined);
+    const scope: CrawlScope = {
+      exclude: preliminary.exclude ?? [],
+      include: preliminary.include ?? [],
+    };
+    for (const key of ["exclude", "include"] as const) {
+      for (const pattern of scope[key]) {
+        const why = patternFamilyError(pattern, siteUrl);
+        if (why !== null) {
+          errors.push({ path: key, code: "invalid", message: `${key} ${why}` });
+          break;
+        }
+      }
+    }
+    if (!listMode) {
+      // A list crawl does not fetch its seed, so only a spider crawl's is asked.
+      const seed = scopeVerdict(siteUrl, scope);
+      if (!seed.admitted) {
+        errors.push({
+          path: scopePathOf(siteUrl, scope),
+          code: "invalid",
+          message:
+            `the seed ${siteUrl} is refused by this crawl's own scope (${seed.reason}): ` +
+            "a crawl that may not fetch its seed is an empty crawl. Change the pattern, " +
+            "or start from a URL the scope admits",
+        });
+      }
+    }
+
+    let listed: { urls: string[]; duplicates: number } | null = null;
+    if (listMode && urls !== undefined) {
+      const list = await this.checkListUrls(
+        siteUrl,
+        urls,
+        scope,
+        preliminary.maxUrlLength,
+        allowPrivate,
+      );
+      if ("code" in list) errors.push(list);
+      else listed = list;
+    }
+    // A list crawl whose list was refused has no count to size anything by;
+    // the refusals above are the answer.
+    if (listMode && listed === null) return refused(errors);
+
+    const supplied: CrawlCredentials = {
+      ...(requestHeaders === undefined ? {} : { requestHeaders }),
+      ...(httpAuth === undefined ? {} : { httpAuth }),
+      ...(cookies === undefined ? {} : { cookies }),
+    };
+    // Nothing supplied (or only empty lists) is no credentials at all: a shape
+    // naming nothing would demand credentials it cannot describe.
+    const credentials = shapeOf(supplied) === null ? undefined : supplied;
+
+    const listCount = listed === null ? null : listed.urls.length;
+    const crawlConfig = this.effectiveConfig(siteUrl, crawlInput, listCount, credentials);
+    if (listCount !== null && crawlConfig.maxPages < listCount) {
+      errors.push({
+        path: "maxPages",
+        code: "out_of_range",
+        message:
+          `${listBudgetShortfall(crawlConfig.maxPages, listCount)}, or omit it: ` +
+          "a list crawl's default is twice its distinct URLs",
+      });
+    }
     try {
       validateCrawlConfig(crawlConfig);
     } catch (error) {
       // The loop's own range checks, surfaced where the caller can fix them.
-      // Its messages name the field and the value and nothing else.
+      // Its messages name the field and the value and nothing else — and for
+      // the credentials, the field and the header or cookie NAME only.
       const message = messageOf(error);
       errors.push({ path: loopCheckPath(message), code: "invalid", message });
     }
 
-    if (errors.length > 0) return { valid: false, errors, effective: null };
+    if (errors.length > 0) return refused(errors);
     // The same strip `runCrawl` applies, by the same function: `allowPrivate`
     // never reaches a row, so a resume of this crawl months from now cannot
-    // inherit it (build-plan §7 item 3).
-    return { valid: true, errors: [], effective: { ...storableConfig(crawlConfig), judgement: block } };
+    // inherit it (build-plan §7 item 3), and a credential value never does.
+    const stored: StoredConfig = {
+      ...storableConfig(crawlConfig),
+      ...(listed === null ? {} : { listDuplicates: listed.duplicates }),
+    };
+    return {
+      check: { valid: true, errors: [], effective: { ...stored, judgement: block } },
+      listed,
+      credentials,
+    };
   }
 
   /**
-   * Accept a crawl: check the body (`checkStartBody`), create its row, and put
-   * it in this process's queue. Takes the body as it arrived — both transports
-   * hand it over unparsed, so both are refused by the one parser.
+   * A list crawl's URLs, checked in list order, or the first refusal (27c).
+   *
+   * Each entry is normalised (`normalizeUrl`, the frontier's key), then: the
+   * URL policy at the crawl's own `maxUrlLength` (`url_policy`, hard rule 5);
+   * the seed's site (`isSameOrigin` — the boundary the crawl loop admits by,
+   * so a URL outside it would otherwise be dropped with no row); the scope
+   * (Deviation 5: listing a URL and fencing it off is a contradiction to fix).
+   * A URL whose normalised spelling was already listed is collapsed and
+   * counted (Deviation 3). The first refusal is answered, naming the entry's
+   * index and the URL — never a ten-thousand-line answer.
+   */
+  private async checkListUrls(
+    siteUrl: string,
+    urls: readonly string[],
+    scope: CrawlScope,
+    maxUrlLength: number | undefined,
+    allowPrivate: boolean,
+  ): Promise<{ urls: string[]; duplicates: number } | ConfigError> {
+    const distinct: string[] = [];
+    // Bounded by LIST_MAX_URLS, which the schema enforced.
+    const seen = new Set<string>();
+    for (const [index, entry] of urls.entries()) {
+      const url = normalizeUrl(entry);
+      if (url === null) {
+        return {
+          path: "urls",
+          code: "invalid",
+          message: `urls[${index}] '${clip(entry)}' is not an absolute http(s) URL`,
+        };
+      }
+      if (seen.has(url)) continue;
+      seen.add(url);
+      const verdict = await isUrlAllowed(url, {
+        allowPrivate,
+        ...(maxUrlLength === undefined ? {} : { maxUrlLength }),
+      });
+      if (!verdict.allowed) {
+        return {
+          path: "urls",
+          code: "url_policy",
+          message:
+            `urls[${index}] '${clip(url)}' refused by the URL policy: ` +
+            `${verdict.reason ?? "no reason given"}`,
+        };
+      }
+      if (!isSameOrigin(url, siteUrl)) {
+        return {
+          path: "urls",
+          code: "invalid",
+          message:
+            `urls[${index}] '${clip(url)}' is not on this crawl's site (${siteUrl}: its ` +
+            "host or the www/apex twin, the same scheme or the http→https upgrade). Lists " +
+            "that span sites are refused, not split: start one list crawl per site",
+        };
+      }
+      const inScope = scopeVerdict(url, scope);
+      if (!inScope.admitted) {
+        return {
+          path: "urls",
+          code: "invalid",
+          message:
+            `urls[${index}] '${clip(url)}' is refused by this crawl's own scope ` +
+            `(${inScope.reason}): listing a URL and fencing it off is a contradiction to ` +
+            "fix. Drop it from the list or change the pattern",
+        };
+      }
+      distinct.push(url);
+    }
+    return { urls: distinct, duplicates: urls.length - distinct.length };
+  }
+
+  /**
+   * Accept a crawl: check the body (`checkStartBody`), create its row — and a
+   * list crawl's `list_urls` rows, in the same transaction — and put it in
+   * this process's queue. Takes the body as it arrived — both transports hand
+   * it over unparsed, so both are refused by the one parser.
+   *
+   * Credential values go to `this.credentials` and nowhere else; the row
+   * carries their shape (27c).
    */
   async startCrawl(raw: unknown): Promise<CrawlAccepted> {
     if (this.closed) {
       throw new ServiceError("CONFLICT", "the server is shutting down and is not accepting crawls");
     }
 
-    const check = await this.checkStartBody(raw);
+    const { check, listed, credentials } = await this.planStart(raw);
     const refusal = check.errors[0];
     if (refusal !== undefined) throw new ServiceError(serviceCodeOf(refusal.code), refusal.message);
     if (check.effective === null) {
@@ -2380,21 +2875,41 @@ export class ApiService {
     const { judgement, ...config } = check.effective;
 
     const crawlId = `crawl_${randomUUID()}`;
-    await this.db.insert(crawls).values({
-      id: crawlId,
-      siteUrl: config.siteUrl,
-      config,
-      // Null when the request named no judgement — "no overrides", the state
-      // every crawl before 27a is in.
-      judgement: judgement === null ? null : storableBlock(judgement),
-      rulesetVersion: RULESET_VERSION,
-      status: "queued",
+    await this.db.transaction(async (tx) => {
+      await tx.insert(crawls).values({
+        id: crawlId,
+        siteUrl: config.siteUrl,
+        config,
+        // Null when the request named no judgement — "no overrides", the state
+        // every crawl before 27a is in.
+        judgement: judgement === null ? null : storableBlock(judgement),
+        rulesetVersion: RULESET_VERSION,
+        status: "queued",
+      });
+      // The distinct listed URLs, `position` from 0 in list order (Deviation 2).
+      if (listed === null) return;
+      for (let start = 0; start < listed.urls.length; start += LIST_INSERT_CHUNK) {
+        await tx.insert(listUrls).values(
+          listed.urls
+            .slice(start, start + LIST_INSERT_CHUNK)
+            .map((url, offset) => ({ crawlId, position: start + offset, url })),
+        );
+      }
     });
+    // Before the queue can run it: the runner reads this map at dequeue.
+    if (credentials !== undefined) this.credentials.set(crawlId, credentials);
 
     const entry: QueueEntry = { crawlId, resuming: false };
     this.waiting.push(entry);
     this.pump();
-    return { crawlId, status: "queued", queuePosition: this.queuePosition(crawlId) ?? 0 };
+    return {
+      crawlId,
+      status: "queued",
+      queuePosition: this.queuePosition(crawlId) ?? 0,
+      ...(listed === null
+        ? {}
+        : { listUrlCount: listed.urls.length, listDuplicates: listed.duplicates }),
+    };
   }
 
   /**
@@ -2626,6 +3141,7 @@ export class ApiService {
       // The overflow is STAMPED on the crawl row (null kept: nobody counted),
       // the recorded rows are counted live, like `blockedPages` beside them.
       robotsBlocked: { recorded: robotsBlockedRows, dropped: row.robotsBlockedDropped },
+      excludedDropped: row.excludedDropped,
       hostSpacingMs: row.hostSpacingMs,
       throttle: throttleRecordOf(row.hostSpacingJsonb),
       // Validated, as the loop validates them before resuming: columns we
@@ -3144,6 +3660,8 @@ export class ApiService {
           })
           .where(and(eq(crawls.id, crawlId), eq(crawls.status, row.status)));
         requireMoved(moved, crawlId, row.status, "cancel");
+        // A cancelled crawl never runs again: its credentials go (Deviation 9).
+        this.credentials.delete(crawlId);
         return { crawlId, status: "cancelled", controlRequested: null, immediate: true };
       }
       case "running": {
@@ -3205,6 +3723,8 @@ export class ApiService {
       refuseDeleteWhile(crawlId, current.status, readControlRequest(current.controlRequest, crawlId));
       return await deleteCrawlRows(tx, crawlId);
     });
+    // The rows are gone, so are the credentials (Deviation 9).
+    this.credentials.delete(crawlId);
 
     const files = await deleteCrawlFiles(crawlId, slug(crawlId), this.renderDir, this.exportDir);
     return { crawlId, rows, files };
@@ -3310,6 +3830,11 @@ export class ApiService {
    *     request; a failed crawl is resumable. The claim is also conditioned on
    *     `control_request is null`, so a request set after the read is not
    *     carried in either.
+   * 10. **Credentials the row needs, neither sent nor held** — 409
+   *     `CREDENTIALS_REQUIRED` naming the fields and names (27c,
+   *     `credentialsFor`); sent with another shape, 400. After a restart the
+   *     map is empty and a crawl that needed them is refused here, before
+   *     the claim, rather than accepted and then failed by the loop.
    *
    * A PAUSED CRAWL IS RESUMABLE, and that is the whole point of a pause (27b).
    * `paused` means the loop stopped on purpose — an agent's `crawl_pause`
@@ -3356,13 +3881,15 @@ export class ApiService {
    * server cannot tell the two apart from outside. Expired leases come back on
    * their own through `leaseBatch`; live ones stay with whoever holds them.
    */
-  async resumeCrawl(crawlId: string): Promise<CrawlAccepted> {
+  async resumeCrawl(crawlId: string, input: CrawlCredentials = {}): Promise<CrawlAccepted> {
     if (this.closed) {
       throw new ServiceError(
         "CONFLICT",
         "the server is shutting down and is not accepting crawls",
       );
     }
+    // A malformed request is refused as one, before any fact about the crawl.
+    const sent = credentialsInputOf(input);
 
     const row = await this.crawlRow(crawlId);
 
@@ -3456,6 +3983,11 @@ export class ApiService {
     } catch (error) {
       throw new ServiceError("CONFLICT", messageOf(error));
     }
+    // Refusal 10: credentials the row says it needs, neither sent nor held —
+    // a crawl that needed them never continues without them (27c, hard rule
+    // 7). Decided here rather than left to the loop, which would close the row
+    // `failed` after accepting it.
+    const credentials = this.credentialsFor(crawlId, "crawl_resume", stored.credentialShape, sent);
 
     // Hard rule 5 over the hosts the RESUME will fetch, not the ones the first
     // run did: discovery and the host probe both run again.
@@ -3569,10 +4101,71 @@ export class ApiService {
       );
     }
 
+    // Credentials sent with the resume replace what was held (Deviation 9):
+    // the runner hands the map's entry to the loop when it dequeues the crawl.
+    if (sent !== undefined && credentials !== undefined) this.credentials.set(crawlId, credentials);
     const entry: QueueEntry = { crawlId, resuming: true };
     this.waiting.push(entry);
     this.pump();
     return { crawlId, status: "queued", queuePosition: this.queuePosition(crawlId) ?? 0 };
+  }
+
+  /**
+   * The credentials a resume or a render pass of this crawl runs with (27c),
+   * given the shape its row stores (`required`) and what the request sent:
+   *
+   *  - sent: they must be of exactly the stored shape — the same kinds, the
+   *    same header and cookie names — else VALIDATION naming both (names
+   *    only). A crawl started without credentials gains them through
+   *    `crawl_config_set` while paused, never through a resume or a render;
+   *  - not sent, and the row needs none: none;
+   *  - not sent: what this process holds for the crawl, or
+   *    `CREDENTIALS_REQUIRED` naming the fields — after a restart the map is
+   *    empty (Deviation 9), and the spec's answer is a refusal until they are
+   *    supplied again, never a run without them.
+   */
+  private credentialsFor(
+    crawlId: string,
+    operation: "crawl_resume" | "crawl_render",
+    stored: CredentialShape | undefined,
+    sent: CrawlCredentials | undefined,
+  ): CrawlCredentials | undefined {
+    const required = stored ?? null;
+    if (sent !== undefined) {
+      const supplied = shapeOf(sent);
+      if (!sameShape(required, supplied)) {
+        throw new ServiceError(
+          "VALIDATION",
+          required === null
+            ? `crawl ${crawlId} was started without credentials, and ${operation} was sent ` +
+                `${supplied === null ? "none" : describeShape(supplied)}: credentials are added ` +
+                "to a crawl with crawl_config_set while it is paused"
+            : `crawl ${crawlId} needs ${describeShape(required)}, and ${operation} was sent ` +
+                `${supplied === null ? "none" : describeShape(supplied)}: send exactly the kinds ` +
+                "and names crawl_config_get shows, with their values",
+        );
+      }
+      return supplied === null ? undefined : sent;
+    }
+    if (required === null) return undefined;
+    const held = this.credentials.get(crawlId);
+    if (held === undefined) {
+      throw new ServiceError(
+        "CREDENTIALS_REQUIRED",
+        `crawl ${crawlId} needs credentials this server does not hold: ${describeShape(required)}. ` +
+          "They are kept only in a server's memory, so a restart loses them; send them again " +
+          `with ${operation} (requestHeaders, httpAuth, cookies). A crawl that needed them is ` +
+          "never run without them",
+      );
+    }
+    if (!sameShape(required, shapeOf(held))) {
+      throw new ServiceError(
+        "CREDENTIALS_REQUIRED",
+        `crawl ${crawlId} needs ${describeShape(required)}, and the credentials this server ` +
+          `holds for it are of another shape: send them again with ${operation}`,
+      );
+    }
+    return held;
   }
 
   /**
@@ -3657,12 +4250,18 @@ export class ApiService {
    * refusal that stands in front of it, because each one is a status code and a
    * sentence rather than a database question: see `checkRenderUrls`.
    *
-   * The list is validated BEFORE the driver's own three refusals are reached. A
-   * malformed request is refused as a malformed request; whether the crawl is
-   * live is a fact about the world and is the driver's to state, in the same
-   * order `parseStartBody` puts a bad body ahead of a busy queue.
+   * The list is validated BEFORE the driver's own three refusals are reached,
+   * but AFTER the in-process claim: `rendering` is taken first (27b I3,
+   * claim-first), so a crawl already rendering on this server is refused 409
+   * before a malformed `urls` list is refused 400. Past the claim, a malformed
+   * request is refused as a malformed request; whether the crawl is live is a
+   * fact about the world and is the driver's to state.
    */
   async renderCrawl(crawlId: string, input: RenderCrawlInput = {}): Promise<RenderSummaryOut> {
+    // The credentials sent, validated before anything is claimed: a malformed
+    // request is refused as one (names only in the message, never a value).
+    const { urls: _urls, ...credentialInput } = input;
+    const sent = credentialsInputOf(credentialInput);
     // Check and claim in ONE synchronous step, before the first `await`, as
     // `runRulesForCrawl` claims `judging` (see there for the window a claim
     // taken after the reads left open): while the call runs, `refuseWhileBusy`
@@ -3688,6 +4287,10 @@ export class ApiService {
       } catch (error) {
         throw new ServiceError("CONFLICT", messageOf(error));
       }
+      // Before the driver, which would throw `CredentialsMissingError` and
+      // answer 500: a crawl that needed credentials is refused with the code an
+      // agent acts on (27c). Validated here, as `runRenderPass` does not.
+      const credentials = this.credentialsFor(crawlId, "crawl_render", config.credentialShape, sent);
       const robotsCrawlDelaySec = this.robotsCrawlDelay(row.discovery, crawlId);
       const renderUrls =
         input.urls === undefined
@@ -3697,6 +4300,7 @@ export class ApiService {
       try {
         summary = await runRenderPass(this.db, crawlId, {
           ...config,
+          ...(credentials === undefined ? {} : { credentials }),
           robotsCrawlDelaySec,
           ...(renderUrls === undefined ? {} : { renderUrls }),
           // NOT left to the pass's own cwd-relative default. The render pass
@@ -3713,6 +4317,15 @@ export class ApiService {
         });
       } catch (error) {
         throw mapRenderPassError(error, crawlId, this.log);
+      }
+      // Kept for the next pass (Deviation 9) only once the pass was ACCEPTED
+      // and ran, as a resume stores them only on acceptance: a render refused
+      // for its urls, its status or a lease must not replace what is held (a
+      // mistyped password would overwrite the right one). Never for a
+      // cancelled crawl, whose credentials a cancel released: they served this
+      // pass only. A cancel cannot land meanwhile — `refuseWhileBusy` holds it.
+      if (sent !== undefined && credentials !== undefined && row.status !== "cancelled") {
+        this.credentials.set(crawlId, credentials);
       }
     } finally {
       // Released on every path — a refused read, a refused list, a failed
@@ -3835,12 +4448,26 @@ export class ApiService {
             `has stopped, or they would judge a site that is still being fetched`,
         );
       }
-      // Ruling 11: a crawl with no discovery evidence never ran — it was
-      // paused or cancelled while still queued — so there is nothing to judge.
-      // Refused here, as the render driver refuses a crawl that "never
+      // Ruling 11: a crawl with no discovery evidence and no pages never ran —
+      // it was paused or cancelled while still queued — so there is nothing to
+      // judge. Refused here, as the render driver refuses a crawl that "never
       // completed discovery", rather than letting the first rule that reads
-      // the robots evidence throw and the transport answer 500.
+      // the robots evidence throw and the transport answer 500. A legacy row
+      // (written before the discovery column existed) can hold pages yet a
+      // null `discovery`: it DID run, so the sentence must not say it did not
+      // (27c T11); it names the missing evidence and stops there.
       if (row.discovery === null) {
+        const [{ n: pageCount } = { n: 0 }] = await this.db
+          .select({ n: sql<number>`count(*)::int` })
+          .from(pages)
+          .where(eq(pages.crawlId, crawlId));
+        if (pageCount > 0) {
+          throw new ServiceError(
+            "CONFLICT",
+            `crawl ${crawlId} is '${row.status}' and has ${pageCount} page(s) but no discovery ` +
+              `evidence (it predates the discovery record), so the rules cannot judge it`,
+          );
+        }
         throw new ServiceError(
           "CONFLICT",
           `crawl ${crawlId} is '${row.status}' and has no discovery evidence: it never ran ` +
@@ -3888,7 +4515,23 @@ export class ApiService {
    * `setCrawlConfig` is the way out of.
    */
   async getCrawlConfig(crawlId: string): Promise<CrawlConfigOut> {
-    return crawlConfigOf(crawlId, await this.judgementView(crawlId));
+    // ONE read of the row, `loadJudgementView`'s columns plus `scope_changed_at`,
+    // so the settings, the judgement and the stamp describe one instant.
+    const rows = await this.db
+      .select({
+        config: crawls.config,
+        discovery: crawls.discovery,
+        judgement: crawls.judgement,
+        rulesJudgedWith: crawls.rulesJudgedWith,
+        rulesRunAt: crawls.rulesRunAt,
+        scopeChangedAt: crawls.scopeChangedAt,
+      })
+      .from(crawls)
+      .where(eq(crawls.id, crawlId))
+      .limit(1);
+    const row = rows[0];
+    if (row === undefined) throw new ServiceError("NOT_FOUND", `no such crawl '${clip(crawlId)}'`);
+    return crawlConfigOf(crawlId, judgementViewOf(row, crawlId, this.registry), row.scopeChangedAt);
   }
 
   /**
@@ -3932,13 +4575,22 @@ export class ApiService {
    *  - a body with neither `crawl` nor `judgement`, or a `crawl` null, a field with
    *    a null value, an unknown field, or an operator-only field whose value
    *    differs from the stored one: VALIDATION;
-   *  - a `never` field whose value differs from the stored one: CONFLICT. An
-   *    unchanged `never` or operator-only key is "no change" — not written, not
-   *    refused (Ruling 12) — and every such key is decided before any status
-   *    check, so the refusal does not depend on key order;
+   *  - a `never` field, or a key the server reports (`REPORTED_CRAWL_KEYS`),
+   *    whose value differs from what `crawl_config_get` shows: CONFLICT. ANY
+   *    key sent with the value `crawl_config_get` shows is "no change" — not
+   *    written, not refused (Ruling 12, extended in 27c T9 to `whenPaused`
+   *    keys on any status and to a credential sent back `[redacted]`) — and
+   *    every such key is decided before any status check, so the refusal does
+   *    not depend on key order;
    *  - a changed `whenPaused` field on a crawl that is not queued or paused, or
    *    on a queued crawl this server's runner has already dequeued (it is
    *    starting now and has read its config): CONFLICT;
+   *  - an `exclude` / `include` pattern naming another site's host
+   *    (`patternFamilyError`), or a credential value `credentialFieldError`
+   *    refuses or carrying the `[redacted]` marker: VALIDATION, naming the
+   *    field and names, never a value;
+   *  - a credential change that would leave a kind the row needs unheld
+   *    (after a restart): CREDENTIALS_REQUIRED (`nextCredentials`);
    *  - a `judgement` that is null or not an object: VALIDATION — a null
    *    here would mean "delete the whole block", including a cap whose null is
    *    a value, so clearing is spelled per section instead;
@@ -3947,6 +4599,14 @@ export class ApiService {
    *    not queued — the run read its judgement when it started and stamps
    *    what it read;
    *  - no such crawl: NOT_FOUND.
+   *
+   * ## Credentials and the scope lists (27c T9)
+   *
+   * A credential field's VALUE never reaches the row: the change replaces the
+   * entry `ApiService.credentials` holds, after the commit, and only the new
+   * `credentialShape` (names) is merged into the config. A changed `exclude`
+   * or `include` stamps `scope_changed_at`; the resumed run re-files the
+   * pending URLs the new lists refuse (`refileOutOfScope`, Task 4).
    *
    * The read-merge-write is one transaction holding the crawl row
    * (`for update`), so two concurrent patches cannot each lose the other's
@@ -3986,6 +4646,13 @@ export class ApiService {
     this.refuseWhileConfigBusy(crawlId, crawlSet !== null);
 
     const { findingCap: capPatch, ...blockPatch } = judgementPatch ?? {};
+    /**
+     * The credentials this process holds for the crawl once the transaction has
+     * COMMITTED (27c): `entry` set to the new values, or null to drop them; no
+     * `entry` key leaves the map alone. Applied after the commit, so a refused
+     * or rolled-back patch never changes what is held.
+     */
+    const holdAfter: { entry?: CrawlCredentials | null } = {};
     await this.db.transaction(async (tx) => {
       const rows = await tx
         .select({
@@ -3993,6 +4660,7 @@ export class ApiService {
           judgement: crawls.judgement,
           status: crawls.status,
           pagesCrawled: crawls.pagesCrawled,
+          scopeChangedAt: crawls.scopeChangedAt,
         })
         .from(crawls)
         .where(eq(crawls.id, crawlId))
@@ -4002,22 +4670,28 @@ export class ApiService {
       if (row === undefined) throw new ServiceError("NOT_FOUND", `no such crawl '${clip(crawlId)}'`);
 
       let config: Record<string, unknown> | undefined = undefined;
-      /** Whether the crawl half changes any value (a whenPaused key; Ruling 12 drops unchanged never keys). */
+      /** Whether the crawl half changes any value (Ruling 12 drops unchanged keys). */
       let crawlChanges = false;
+      /** Whether `exclude` or `include` changed, which stamps `scope_changed_at`. */
+      let scopeChanged = false;
 
       if (crawlSet !== null) {
         if (!isPlainObject(row.config)) {
           throw new ServiceError("CONFLICT", `crawl ${crawlId}: stored config is not readable`);
         }
         const storedConfig = row.config;
-        // RULING 12: a `never` or operator-only key whose value deep-equals the
-        // stored one is "no change" — not written, not refused — so get → edit
-        // → set with the whole `crawl` object works. Any change is refused as
-        // before. Every such key is decided FIRST, before any status check, so
-        // which refusal an agent reads does not depend on the order of its keys.
+        // RULING 12, EXTENDED (27c T9): a key whose value deep-equals what
+        // `crawl_config_get` SHOWS is "no change" — not written, not refused —
+        // so get → edit → set with the whole `crawl` object works on any
+        // status: a `never`, operator-only or reported key, a `whenPaused` key
+        // (on a running crawl too), and a credential field sent back exactly as
+        // shown, `[redacted]`. Any change is refused as before. Every such key
+        // is decided FIRST, before any status check, so which refusal an agent
+        // reads does not depend on the order of its keys.
+        const shown = crawlViewOf(crawlId, storedConfig, row.scopeChangedAt);
         const unchanged = (key: string, ...candidates: unknown[]): boolean =>
-          Object.hasOwn(storedConfig, key) &&
-          candidates.some((value) => isDeepStrictEqual(value, storedConfig[key]));
+          Object.hasOwn(shown, key) &&
+          candidates.some((value) => isDeepStrictEqual(value, shown[key]));
         for (const [key, value] of Object.entries(crawlSet.operatorOnly)) {
           if (!unchanged(key, value)) {
             throw new ServiceError(
@@ -4026,12 +4700,20 @@ export class ApiService {
             );
           }
         }
+        for (const [key, value] of Object.entries(crawlSet.reported)) {
+          if (!unchanged(key, value)) {
+            throw new ServiceError(
+              "CONFLICT",
+              `field '${key}' is reported by the server, never set (mutability: never)`,
+            );
+          }
+        }
         const wire: Record<string, { mutable: Mutability } | undefined> = CRAWL_FIELDS;
         const changes: Record<string, unknown> = {};
         for (const [key, value] of Object.entries(crawlSet.values)) {
           const mutable = wire[key]?.mutable;
+          if (unchanged(key, crawlSet.sent[key], value)) continue;
           if (mutable === "never") {
-            if (unchanged(key, crawlSet.sent[key], value)) continue;
             throw new ServiceError(
               "CONFLICT",
               `field '${key}' is never mutable after a crawl starts (mutability: never)`,
@@ -4042,7 +4724,25 @@ export class ApiService {
           }
           changes[key] = value;
         }
-        for (const key of Object.keys(changes)) {
+        // The credential fields: shown back unchanged is no change; anything
+        // else is a new value, validated here (names in the message, never a
+        // value) and never merged into the config — only its shape is.
+        const secretChanges: Partial<Record<CredentialField, unknown>> = {};
+        for (const field of CREDENTIAL_FIELDS) {
+          if (!Object.hasOwn(crawlSet.secrets, field)) continue;
+          const value = crawlSet.secrets[field];
+          if (unchanged(field, value)) continue;
+          if (field === "httpAuth" && value === null) {
+            // Removing Basic auth from a crawl that has none is no change.
+            if (Object.hasOwn(shown, "httpAuth")) secretChanges[field] = null;
+            continue;
+          }
+          const why = credentialInputError(field, value);
+          if (why !== null) throw new ServiceError("VALIDATION", why);
+          secretChanges[field] = value;
+        }
+        const changed = [...Object.keys(changes), ...Object.keys(secretChanges)];
+        for (const key of changed) {
           if (row.status !== "queued" && row.status !== "paused") {
             throw new ServiceError(
               "CONFLICT",
@@ -4052,7 +4752,7 @@ export class ApiService {
             );
           }
         }
-        this.refuseWhileStarting(crawlId, row.status, Object.keys(changes).length > 0);
+        this.refuseWhileStarting(crawlId, row.status, changed.length > 0);
         const maxPages = changes["maxPages"];
         if (typeof maxPages === "number" && maxPages < row.pagesCrawled) {
           throw new ServiceError(
@@ -4061,8 +4761,16 @@ export class ApiService {
               "has already crawled; a budget cannot be lowered past what was spent",
           );
         }
-        crawlChanges = Object.keys(changes).length > 0;
-        const merged = { ...storedConfig, ...changes };
+        crawlChanges = changed.length > 0;
+        scopeChanged = Object.hasOwn(changes, "exclude") || Object.hasOwn(changes, "include");
+        let merged: Record<string, unknown> = { ...storedConfig, ...changes };
+        if (Object.keys(secretChanges).length > 0) {
+          const next = this.nextCredentials(crawlId, storedConfig, secretChanges);
+          const { credentialShape: _previous, ...rest } = merged;
+          const shape = next === null ? null : shapeOf(next);
+          merged = shape === null ? rest : { ...rest, credentialShape: shape };
+          holdAfter.entry = shape === null ? null : next;
+        }
         // The merged config is validated as a stored one is read — with the
         // operator's `allowPrivate`, which is never stored — and written back
         // through the same strip a start applies.
@@ -4071,6 +4779,29 @@ export class ApiService {
           readable = parseStoredConfig(merged, crawlId);
         } catch (error) {
           throw new ServiceError("CONFLICT", messageOf(error));
+        }
+        // A pattern that could never match (`patternFamilyError`): refused
+        // here as at start (`patternFamilyError`), the first per list.
+        for (const key of ["exclude", "include"] as const) {
+          if (!Object.hasOwn(changes, key)) continue;
+          for (const pattern of readable[key] ?? []) {
+            const why = patternFamilyError(pattern, readable.siteUrl);
+            if (why !== null) throw new ServiceError("VALIDATION", `${key} ${why}`);
+          }
+        }
+        // A list crawl's budget may not fall below its list, the rule a start
+        // applies (Deviation 4): a listed URL left pending would never end in
+        // a classified row (27c final wave M14).
+        if (
+          Object.hasOwn(changes, "maxPages") &&
+          readable.mode === "list" &&
+          readable.listUrlCount !== undefined &&
+          readable.maxPages < readable.listUrlCount
+        ) {
+          throw new ServiceError(
+            "VALIDATION",
+            `field 'maxPages': ${listBudgetShortfall(readable.maxPages, readable.listUrlCount)}`,
+          );
         }
         try {
           validateCrawlConfig({
@@ -4127,10 +4858,77 @@ export class ApiService {
         .set({
           ...(judgementWrite ?? {}),
           ...(config === undefined ? {} : { config: storableConfig(config as unknown as CrawlConfig) }),
+          // When the lists last changed, for `crawl_config_get` (spec "Changed
+          // while paused"); the resumed run re-files against them.
+          ...(scopeChanged ? { scopeChangedAt: new Date() } : {}),
         })
         .where(eq(crawls.id, crawlId));
     });
+    if (holdAfter.entry === null) this.credentials.delete(crawlId);
+    else if (holdAfter.entry !== undefined) this.credentials.set(crawlId, holdAfter.entry);
     return await this.getCrawlConfig(crawlId);
+  }
+
+  /**
+   * The credentials a `crawl_config_set` leaves this process holding for the
+   * crawl: what it holds now, with each field the patch sends REPLACED (a field
+   * is replaced whole; an empty `requestHeaders` or `cookies`, or `httpAuth:
+   * null`, drops that kind), or null when nothing is left.
+   *
+   * A field the row's stored shape names and the patch does not replace must
+   * already be held — and after a restart nothing is. Its value cannot be
+   * made up, and a shape naming a value nobody holds would only fail the next
+   * resume, so that is `CREDENTIALS_REQUIRED` now, naming what to send with
+   * the change (names only).
+   */
+  private nextCredentials(
+    crawlId: string,
+    storedConfig: Record<string, unknown>,
+    replace: Partial<Record<CredentialField, unknown>>,
+  ): CrawlCredentials | null {
+    let required: CredentialShape | null;
+    try {
+      required = storedCredentialShape(storedConfig, crawlId);
+    } catch (error) {
+      throw new ServiceError("CONFLICT", messageOf(error));
+    }
+    const held = this.credentials.get(crawlId);
+    if (held === undefined && required !== null) {
+      const missing: CredentialShape = {
+        requestHeaderNames: Object.hasOwn(replace, "requestHeaders") ? [] : required.requestHeaderNames,
+        httpAuth: Object.hasOwn(replace, "httpAuth") ? false : required.httpAuth,
+        cookieNames: Object.hasOwn(replace, "cookies") ? [] : required.cookieNames,
+      };
+      if (missing.requestHeaderNames.length > 0 || missing.httpAuth || missing.cookieNames.length > 0) {
+        throw new ServiceError(
+          "CREDENTIALS_REQUIRED",
+          `crawl ${crawlId} needs ${describeShape(missing)}, which this server does not hold ` +
+            "(credentials live only in a server's memory, and a restart loses them), so this " +
+            "change cannot keep them: send them in the same crawl_config_set",
+        );
+      }
+    }
+    const next: { -readonly [K in CredentialField]?: CrawlCredentials[K] } = { ...(held ?? {}) };
+    // `httpAuth: null` is a removal, not a value to validate.
+    const { httpAuth: auth, ...values } = replace;
+    const given =
+      credentialsInputOf((auth === null ? values : replace) as CrawlCredentials) ?? {};
+    for (const field of CREDENTIAL_FIELDS) {
+      if (!Object.hasOwn(replace, field)) continue;
+      // `credentialsInputOf` dropped an empty list: that kind goes.
+      if (field === "requestHeaders") {
+        if (given.requestHeaders === undefined) delete next.requestHeaders;
+        else next.requestHeaders = given.requestHeaders;
+      } else if (field === "cookies") {
+        if (given.cookies === undefined) delete next.cookies;
+        else next.cookies = given.cookies;
+      } else if (auth === null) {
+        delete next.httpAuth;
+      } else if (given.httpAuth !== undefined) {
+        next.httpAuth = given.httpAuth;
+      }
+    }
+    return shapeOf(next) === null ? null : next;
   }
 
   /**
@@ -4147,11 +4945,18 @@ export class ApiService {
     const out: Record<string, unknown> = {};
     const sent: Record<string, unknown> = {};
     const operatorOnly: Record<string, unknown> = {};
+    const reported: Record<string, unknown> = {};
+    const secrets: Partial<Record<CredentialField, unknown>> = {};
     for (const [key, value] of Object.entries(raw)) {
       if (OPERATOR_ONLY_FIELDS.includes(key)) {
         // Decided against the stored value in the transaction (Ruling 12): an
         // unchanged one is no change, a changed one is refused there.
         operatorOnly[key] = value;
+        continue;
+      }
+      if (REPORTED_CRAWL_KEYS.includes(key)) {
+        // Decided against the reported value in the transaction, likewise.
+        reported[key] = value;
         continue;
       }
       if (key === "findingCap") {
@@ -4164,11 +4969,21 @@ export class ApiService {
       if (field === undefined) {
         throw new ServiceError("VALIDATION", unknownField(key));
       }
-      if (value === null) {
+      // `httpAuth: null` removes Basic auth (27c T9 fix 1, controller ruling):
+      // the one credential kind with no empty form, so null is its "none" —
+      // symmetric with an empty `requestHeaders` or `cookies`.
+      if (value === null && key !== "httpAuth") {
         throw new ServiceError(
           "VALIDATION",
           `field '${key}' is null: name the value you want; a crawl field has no unset`,
         );
+      }
+      // A credential is never merged into the stored config: its value would
+      // land in `config_jsonb` (27c). Kept raw and apart, for the transaction
+      // to tell a `[redacted]` echo from a new value (see `CrawlPatch.secrets`).
+      if (field.secret === true) {
+        secrets[key as CredentialField] = value;
+        continue;
       }
       const parsed = field.schema.safeParse(value);
       if (!parsed.success) {
@@ -4180,7 +4995,7 @@ export class ApiService {
       out[key] = parsed.data;
       sent[key] = value;
     }
-    return { values: out, sent, operatorOnly };
+    return { values: out, sent, operatorOnly, reported, secrets };
   }
 
   /**
@@ -4472,7 +5287,13 @@ export class ApiService {
   async listIssues(
     crawlId: string,
     opts: IssueQuery = {},
-  ): Promise<Page<IssueGroup> & { disabledRules: string[]; judgementStale: JudgementStale }> {
+  ): Promise<
+    Page<IssueGroup> & {
+      disabledRules: string[];
+      notMeasured: string[];
+      judgementStale: JudgementStale;
+    }
+  > {
     // The crawl's judgement, which also answers the 404 for a crawl nothing knows.
     const view = await this.judgementView(crawlId);
     const limit = parseLimit(opts.limit);
@@ -4557,6 +5378,9 @@ export class ApiService {
           ? null
           : encodeCursor(String(last.severity_rank), last.rule_id),
       disabledRules: view.disabledRules,
+      // A rule this list crawl did not run answers an empty page here, which
+      // is "not measured", not "clean" — named beside the disabled ones.
+      notMeasured: view.notMeasured,
       judgementStale: view.judgementStale,
     };
   }
@@ -4640,6 +5464,9 @@ export class ApiService {
     // A disabled rule is refused rather than answered: its findings are stored,
     // and an empty page would read as "this rule found nothing".
     refuseIfDisabled(view, crawlId, ruleId);
+    // So is a rule this list crawl did not run: an empty page would read
+    // "clean" where nobody looked (27c final wave M16).
+    refuseIfNotMeasured(view, crawlId, ruleId);
     const limit = parseLimit(opts.limit);
     const cursor = opts.cursor === undefined ? null : decodeCursor(opts.cursor, 2);
 
@@ -5014,6 +5841,7 @@ export class ApiService {
       .select({
         id: crawls.id,
         config: crawls.config,
+        discovery: crawls.discovery,
         judgement: crawls.judgement,
         rulesJudgedWith: crawls.rulesJudgedWith,
         rulesRunAt: crawls.rulesRunAt,
@@ -5114,11 +5942,14 @@ export class ApiService {
   async listMetrics(
     crawlId: string,
     opts: MetricQuery = {},
-  ): Promise<Page<MetricRow> & { judgementStale: JudgementStale }> {
-    // The crawl's judgement, for `judgementStale` only: a metric is a stored
-    // measurement of the run that wrote it (`site.health` counted the rules
-    // that run left enabled), so the flag says whether the block has moved
-    // since — the rows themselves are served as written.
+  ): Promise<Page<MetricRow> & { notMeasured: string[]; judgementStale: JudgementStale }> {
+    // The crawl's judgement, for `judgementStale` and `notMeasured` only: a
+    // metric is a stored measurement of the run that wrote it (`site.health`
+    // counted the rules that run left enabled), so the flag says whether the
+    // block has moved since — the rows themselves are served as written. A
+    // metric a list crawl's run did not measure has no rows, and
+    // `notMeasured` says so rather than letting the empty page read "clean"
+    // (27c final wave M16).
     const view = await this.judgementView(crawlId);
     const limit = parseLimit(opts.limit);
     const cursor = opts.cursor === undefined ? null : decodeCursor(opts.cursor, 3);
@@ -5194,6 +6025,7 @@ export class ApiService {
         last === undefined
           ? null
           : encodeCursor(last.metric_id, last.scope, last.scope_value),
+      notMeasured: view.notMeasured,
       judgementStale: view.judgementStale,
     };
   }
@@ -5231,7 +6063,7 @@ export class ApiService {
    */
   async metricTable(crawlId: string, metricId: string): Promise<MetricTableOut> {
     // `judgementStale` rides the table for `listMetrics`' reason.
-    const { judgementStale } = await this.judgementView(crawlId);
+    const { judgementStale, notMeasured } = await this.judgementView(crawlId);
     const rule = this.rules.get(metricId);
     if (rule === undefined || rule.kind !== "metric") {
       throw new ServiceError(
@@ -5285,8 +6117,14 @@ export class ApiService {
           "an empty table here would read as 'this site measured nothing'",
       );
     }
+    // A metric a list crawl's run left out wrote nothing because it did not
+    // run: the note says THAT, never "nothing to measure" (27c final wave M16).
     const note =
-      stored.length === 0
+      stored.length === 0 && notMeasured.includes(metricId)
+        ? `crawl ${crawlId} is a list crawl and metric '${metricId}' was not measured: it ` +
+          "needs the whole site or a sitemap read the crawl did not make (crawl.list-mode " +
+          "names it), so it did not run — the table is empty because nobody looked"
+        : stored.length === 0
         ? `crawl ${crawlId} was judged and metric '${metricId}' wrote no rows: the table is ` +
           "empty because there was nothing to measure, not because nobody looked"
         : `metric '${metricId}' wrote ${stored.length} row(s) for crawl ${crawlId} and the ` +
@@ -5428,6 +6266,7 @@ export class ApiService {
         rows: written - 1,
         bytes,
         ...(stream.disabledRules === null ? {} : { disabledRules: stream.disabledRules }),
+        ...(stream.notMeasured === null ? {} : { notMeasured: stream.notMeasured }),
       };
     }
 
@@ -5447,7 +6286,9 @@ export class ApiService {
       path,
       rows: written,
       bytes,
-      ...(view === null ? {} : { disabledRules: view.disabledRules }),
+      ...(view === null
+        ? {}
+        : { disabledRules: view.disabledRules, notMeasured: view.notMeasured }),
     };
   }
 
@@ -5633,7 +6474,10 @@ export class ApiService {
     // thresholds the findings were judged with. No other view reads findings.
     const judged =
       view === "issues" || view === "issue_urls" ? await this.judgementView(crawlId) : null;
-    if (judged !== null && ruleId !== null) refuseIfDisabled(judged, crawlId, ruleId);
+    if (judged !== null && ruleId !== null) {
+      refuseIfDisabled(judged, crawlId, ruleId);
+      refuseIfNotMeasured(judged, crawlId, ruleId);
+    }
     const disabledRules = judged === null ? [] : judged.disabledRules;
     const copy = judged === null ? null : copyRenderer(judged.copyThresholds);
     await this.assertViewAnswerable(crawlId, view, disabledRules);
@@ -5668,6 +6512,7 @@ export class ApiService {
       metricId: null,
       filename: csvFilename(slug(crawlId), view, ruleId === null ? null : slug(ruleId)),
       disabledRules: judged === null ? null : judged.disabledRules,
+      notMeasured: judged === null ? null : judged.notMeasured,
       async *records(): AsyncGenerator<string> {
         // THE HEADER IS UNCONDITIONAL. A zero-row CSV with no header is a file
         // that cannot say what it failed to contain, and a reader would have to
@@ -5707,6 +6552,7 @@ export class ApiService {
       metricId: null,
       filename: csvFilename(slug(crawlId), "issues_overview", null),
       disabledRules: overview.disabledRules,
+      notMeasured: overview.notMeasured,
       async *records(): AsyncGenerator<string> {
         yield csvRecord(ISSUES_OVERVIEW_HEADER);
         for (const row of overview.rows) {
@@ -5731,6 +6577,7 @@ export class ApiService {
       filename: csvFilename(slug(crawlId), "crawl_overview", null),
       // Its issues grid leaves the disabled rules' findings out.
       disabledRules: view.disabledRules,
+      notMeasured: view.notMeasured,
       async *records(): AsyncGenerator<string> {
         yield csvRecord(CRAWL_OVERVIEW_HEADER);
         for (const cells of crawlOverviewRecords(overview)) yield csvRecord(cells);
@@ -5768,6 +6615,7 @@ export class ApiService {
       metricId,
       filename: csvFilename(slug(crawlId), "metric_table", slug(metricId)),
       disabledRules: null,
+      notMeasured: null,
       async *records(): AsyncGenerator<string> {
         yield csvRecord(metricTableHeader(table));
         for (const row of table.rows) yield csvRecord(metricTableCells(table, row));
@@ -5886,9 +6734,16 @@ export class ApiService {
         .where(eq(crawls.id, entry.crawlId));
       if (row === undefined) throw new Error(`queue runner: no crawl ${entry.crawlId}`);
       if (row.status !== "queued") throw new ClaimLostError(entry.crawlId, row.status, "queued");
+      // The credential values, from this process's memory (27c), beside the
+      // test-only fields and on their precedent: the row never holds them.
+      // Nothing is set when the map has no entry; a crawl whose row has a
+      // shape is then refused by the loop (`requireCredentials`), never run
+      // without them.
+      const credentials = this.credentials.get(entry.crawlId);
       const config: CrawlConfig = {
         ...parseStoredConfig(row.config, entry.crawlId),
         ...this.processTrustConfig(),
+        ...(credentials === undefined ? {} : { credentials }),
       };
       this.log(
         `api: crawl ${entry.crawlId} ${entry.resuming ? "resuming" : "starting"} ` +
@@ -5899,6 +6754,10 @@ export class ApiService {
         signal,
         expectStatus: "queued",
       });
+      // A run that ended cancelled (an agent's cancel of a running crawl)
+      // releases its credentials, as a cancel of a queued or paused one does
+      // (Deviation 9). A finished crawl keeps them: a render pass needs them.
+      if (summary.status === "cancelled") this.credentials.delete(entry.crawlId);
       // The template inference beside the page count, because the pair is the
       // whole of "what shape is this site" and the alternative is a second
       // census over `pages` to find out. `pageTemplates` is null only when the
@@ -6327,16 +7186,37 @@ export class ApiService {
     }
   }
 
-  private effectiveConfig(siteUrl: string, input: Omit<StartCrawlInput, "judgement">): CrawlConfig {
-    // Precedence, low to high: the engine's defaults, the API's own maxPages,
-    // the process-trust overrides, then the request. `stripUndefined` on the
-    // request half because an absent optional field must not overwrite a
-    // default with `undefined`.
+  /**
+   * The crawl config a request runs with. `listCount` is a list crawl's
+   * distinct URLs (null for a spider crawl, or before the list is checked);
+   * `credentials` the values, whose shape joins the config beside them (the
+   * shape is stored, the values are stripped by `storableConfig`).
+   */
+  private effectiveConfig(
+    siteUrl: string,
+    input: CrawlRequestFields,
+    listCount: number | null,
+    credentials: CrawlCredentials | undefined,
+  ): CrawlConfig {
+    const shape = credentials === undefined ? null : shapeOf(credentials);
+    // Precedence, low to high: the engine's defaults (with the 27c fields
+    // spelled out, so `effective` shows a spider crawl's mode and empty scope
+    // rather than leaving them to be inferred), the API's own maxPages — a list
+    // crawl's is twice its distinct URLs (Deviation 4) — the process-trust
+    // overrides, then the request. `stripUndefined` on the request half
+    // because an absent optional field must not overwrite a default with
+    // `undefined`. The list count and the credentials come from the request
+    // alone (`REQUEST_ONLY_CRAWL_KEYS`).
     return {
       ...CRAWL_DEFAULTS,
-      ...API_CRAWL_DEFAULTS,
+      mode: "spider",
+      exclude: [],
+      include: [],
+      ...(listCount === null ? API_CRAWL_DEFAULTS : { maxPages: 2 * listCount }),
       ...stripUndefined(this.config.crawlDefaults ?? {}),
       ...stripUndefined({ ...input, siteUrl }),
+      ...(listCount === null ? {} : { listUrlCount: listCount }),
+      ...(credentials === undefined || shape === null ? {} : { credentials, credentialShape: shape }),
     } as CrawlConfig;
   }
 
@@ -6930,7 +7810,11 @@ function configFindingCap(config: unknown, crawlId: string): number | null {
  * config's `findingCap` folded back in (absent when the config has none), and
  * every overridable threshold as the block leaves it.
  */
-function crawlConfigOf(crawlId: string, view: JudgementView): CrawlConfigOut {
+function crawlConfigOf(
+  crawlId: string,
+  view: JudgementView,
+  scopeChangedAt: Date | null,
+): CrawlConfigOut {
   const block = view.block ?? {};
   const effective = effectiveThresholds(view.block);
   const thresholds = Object.fromEntries(
@@ -6950,7 +7834,7 @@ function crawlConfigOf(crawlId: string, view: JudgementView): CrawlConfigOut {
   if (!isPlainObject(view.config)) {
     throw new ServiceError("CONFLICT", `crawl ${crawlId}: stored config is not readable`);
   }
-  const { findingCap: _findingCap, ...crawl } = view.config;
+  const crawl = crawlViewOf(crawlId, view.config, scopeChangedAt);
   const wire: Record<string, { mutable: Mutability } | undefined> = CRAWL_FIELDS;
   const mutability: Record<string, Mutability> = {};
   for (const key of Object.keys(crawl)) mutability[key] = wire[key]?.mutable ?? "never";

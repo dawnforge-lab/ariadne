@@ -549,6 +549,9 @@ export const siteFixture = {
   pathOfIndex,
   indexOfPath,
   linkTargets,
+  /** `linkTargets`'s shape, for a census that inverts it (scripts/gate-rules.ts). */
+  linkStride: LINK_STRIDE,
+  linksPerPage: LINKS_PER_PAGE,
   sitemapShards: SITEMAP_SHARDS,
   page(path: string, site: Layout, base: string): string | null {
     const index = indexOfPath(path, site);

@@ -158,6 +158,7 @@ import { RENDER_CAPTURE_VERSION } from "../versions.js";
 import { RenderConsoleCollector, type RenderConsole } from "./console-capture.js";
 import { analyzeHtml, type RawPageAnalysis } from "../parse/page-analyzer.js";
 import { hostnameSpellings, isSameOrigin, normalizeUrl } from "../parse/url-utils.js";
+import { credentialHeadersOf, type CredentialTarget } from "../credentials.js";
 import {
   isUrlAllowed,
   resolveApprovedAddress,
@@ -290,6 +291,15 @@ export interface RendererOptions {
   allowPrivate?: boolean;
   /** Told about every aborted request. Bounded work only — this is a hot path. */
   onRequestBlocked?: (url: string) => void;
+  /**
+   * The crawl's credentials (Phase 27c). Every request this pass RELEASES is
+   * decided on its own URL (`credentialHeadersFor`): a same-family request
+   * goes out with the custom headers, Basic auth and the cookie line merged
+   * over its own headers; anything else is released untouched — and a
+   * third-party request is never released at all (the fence). Each redirect
+   * hop pauses again and is decided again.
+   */
+  credentials?: CredentialTarget;
   /** TEST ONLY — see `RenderTestFaults`. Never wire it to an API field. */
   testFaults?: RenderTestFaults;
   /**
@@ -669,6 +679,26 @@ export function freshLifetimeMs(headers: HeaderBag): number | null {
   return lifetimeMs > 0 ? lifetimeMs : null;
 }
 
+/**
+ * A paused request's headers with `extra` merged over them, as the
+ * `Fetch.continueRequest` array of `{name, value}`. A name in `extra` replaces
+ * the request's own header of that name in any case, so the browser cannot
+ * send two `Cookie` lines; every other header the browser set — its user agent
+ * included (rule 9) — is kept as it was.
+ */
+function mergedHeaders(
+  own: Record<string, string>,
+  extra: Record<string, string>,
+): Array<{ name: string; value: string }> {
+  const replaced = new Set(Object.keys(extra).map((name) => name.toLowerCase()));
+  return [
+    ...Object.entries(own)
+      .filter(([name]) => !replaced.has(name.toLowerCase()))
+      .map(([name, value]) => ({ name, value })),
+    ...Object.entries(extra).map(([name, value]) => ({ name, value })),
+  ];
+}
+
 /** The slice of `Fetch.requestPaused` the interception reads. */
 interface PausedRequest {
   requestId: string;
@@ -802,6 +832,8 @@ class RenderTraffic {
     private readonly allowPrivate: boolean,
     private readonly onRequestBlocked: ((url: string) => void) | null,
     private readonly testFaults: RenderTestFaults | null,
+    /** The crawl's credentials, decided per released request (Phase 27c). */
+    private readonly credentials: CredentialTarget | null,
   ) {
     this.broken = new Promise<never>((_, reject) => {
       this.breakWith = reject;
@@ -1080,7 +1112,19 @@ class RenderTraffic {
       this.inFlight.set(event.networkId, { url: event.request.url, method: event.request.method });
     }
     this.testFaults?.onRelease?.(event.request.url, Date.now());
-    await this.command("Fetch.continueRequest", { requestId: event.requestId });
+    // THIS request's URL decides (Phase 27c). `Fetch.continueRequest` with
+    // `headers` REPLACES the request's headers, so they are the paused
+    // request's own with the credential headers merged over them — same name,
+    // any case, ours wins — and nothing is passed when nothing is added.
+    const extra = credentialHeadersOf(event.request.url, this.credentials ?? undefined);
+    if (Object.keys(extra).length === 0) {
+      await this.command("Fetch.continueRequest", { requestId: event.requestId });
+      return;
+    }
+    await this.command("Fetch.continueRequest", {
+      requestId: event.requestId,
+      headers: mergedHeaders(event.request.headers, extra),
+    });
   }
 
   private async fail(event: PausedRequest): Promise<void> {
@@ -1550,11 +1594,13 @@ export class PageRenderer {
         | "hostSpacing"
         | "testFaults"
         | "resolve"
+        | "credentials"
       >
     > & {
       allowPrivate: boolean;
       onRequestBlocked: ((url: string) => void) | null;
       testFaults: RenderTestFaults | null;
+      credentials: CredentialTarget | null;
     },
     private readonly gate: HostGate,
   ) {
@@ -1663,6 +1709,7 @@ export class PageRenderer {
         allowPrivate: options.allowPrivate === true,
         onRequestBlocked: options.onRequestBlocked ?? null,
         testFaults: options.testFaults ?? null,
+        credentials: options.credentials ?? null,
       },
       gate,
     );
@@ -1763,6 +1810,7 @@ export class PageRenderer {
         this.opts.allowPrivate,
         this.opts.onRequestBlocked,
         this.opts.testFaults,
+        this.opts.credentials,
       );
       await traffic.start();
     } catch (error) {

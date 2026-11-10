@@ -432,6 +432,7 @@ export const structuredDataRules: QueryRule[] = [
   defineRule<QueryRule>({
     kind: "query",
     id: NONE.id,
+    needsSpider: true,
     checkIds: ["CHECK-43"],
     category: CATEGORY,
     severity: NONE.severity,
@@ -459,6 +460,7 @@ export const structuredDataRules: QueryRule[] = [
   defineRule<QueryRule>({
     kind: "query",
     id: BREADCRUMB_ABSENT.id,
+    needsSpider: true,
     checkIds: ["CHECK-45"],
     category: CATEGORY,
     severity: BREADCRUMB_ABSENT.severity,

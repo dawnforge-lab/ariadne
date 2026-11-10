@@ -503,14 +503,14 @@ describe("routing and body handling", () => {
   it("413s a body over the cap instead of holding it", async () => {
     // Over the cap, under the drain ceiling: the bytes are read and dropped so
     // the caller can be told what went wrong, rather than reset mid-write.
-    const res = await call("POST", "/crawls", { raw: `{"siteUrl":"${"x".repeat(70_000)}"}` });
+    const res = await call("POST", `/crawls/${fixtureCrawlId}/rules`, { raw: `{"siteUrl":"${"x".repeat(70_000)}"}` });
     expect(res.status).toBe(413);
     expect(String(res.body["error"])).toContain("exceeds");
   });
 
   it("hangs up on a body past the drain ceiling rather than reading it out of politeness", async () => {
     await expect(
-      call("POST", "/crawls", { raw: `{"siteUrl":"${"x".repeat(2_000_000)}"}` }),
+      call("POST", `/crawls/${fixtureCrawlId}/rules`, { raw: `{"siteUrl":"${"x".repeat(2_000_000)}"}` }),
     ).rejects.toThrow();
   });
 
@@ -2385,5 +2385,35 @@ describe("GET /crawls/:id — the lifecycle fields (27b)", () => {
     await db.execute(sql`update crawls set control_request = 'stop' where id = ${id}`);
     const bad = await call("GET", `/crawls/${id}`);
     expect(bad.status).toBe(500);
+  });
+});
+
+describe("GET /crawls/:id carries the scope counter (27c T1)", () => {
+  it("answers excludedDropped as null for a crawl nobody counted, and the stored count once set", async () => {
+    const crawlId = await seedCrawl({ status: "finished" });
+    const bare = await fetch(`${base}/crawls/${crawlId}`, { headers: { authorization: `Bearer ${TOKEN}` } });
+    expect(bare.status).toBe(200);
+    expect(((await bare.json()) as Record<string, unknown>)["excludedDropped"]).toBeNull();
+    await db.execute(sql`update crawls set excluded_dropped = 7 where id = ${crawlId}`);
+    const counted = await fetch(`${base}/crawls/${crawlId}`, { headers: { authorization: `Bearer ${TOKEN}` } });
+    expect(((await counted.json()) as Record<string, unknown>)["excludedDropped"]).toBe(7);
+  });
+});
+
+describe("a refusal carries its code beside its sentence (27c Deviation 10)", () => {
+  it("answers a 409 with code CONFLICT, and 400 and 404 with theirs", async () => {
+    const conflict = await call("POST", `/crawls/${fixtureCrawlId}/fail`);
+    expect(conflict.status).toBe(409);
+    expect(conflict.body["code"]).toBe("CONFLICT");
+    expect(String(conflict.body["error"])).toContain("'finished'");
+    expect(Object.keys(conflict.body).sort()).toEqual(["code", "error"]);
+
+    const invalid = await call("POST", "/crawls", { body: { siteUrl: "https://x.example/", maxPages: 0 } });
+    expect(invalid.status).toBe(400);
+    expect(invalid.body["code"]).toBe("VALIDATION");
+
+    const missing = await call("GET", "/crawls/crawl_no-such-crawl");
+    expect(missing.status).toBe(404);
+    expect(missing.body["code"]).toBe("NOT_FOUND");
   });
 });

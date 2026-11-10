@@ -652,6 +652,28 @@ describe("selectRenderSet", () => {
     expect(result.truncated).toBe(false);
   });
 
+  it("leaves scope-excluded rows out of the percentage: nobody fetched them (27c)", async () => {
+    const crawlId = await newCrawl();
+    // Twelve fetched pages and twelve `excluded` rows (refused by the crawl's
+    // scope patterns, never requested). 25% of the twelve fetched is 3 seats;
+    // counting the excluded rows would buy 6.
+    await addPages(crawlId, [
+      ...BUDGET_SITE,
+      ...Array.from({ length: 12 }, (_, i) => ({
+        path: `/fenced/${i}`,
+        fetchClass: "excluded",
+        statusCode: null,
+        outlinks: false,
+      })),
+    ]);
+
+    const result = await selectRenderSet(db, crawlId, {
+      renderBudgetPct: 25,
+      renderSamplePerType: 3,
+    });
+    expect(result.budget).toBe(3);
+  });
+
   it("reports an empty selection rather than nothing at all", async () => {
     const crawlId = await newCrawl();
     const result = await selectRenderSet(db, crawlId, {});

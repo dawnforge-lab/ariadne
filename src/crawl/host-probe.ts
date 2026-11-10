@@ -44,6 +44,7 @@
  *    host can be asked for its rules before we know whether it is the site.
  */
 import { fetchPage, type FetchClass, type FetchResult } from "./fetch-page.js";
+import type { CredentialTarget } from "./credentials.js";
 import type { DnsLookupFn } from "./http.js";
 import { hostProbeStarts } from "./parse/url-utils.js";
 import { HostGate } from "./politeness.js";
@@ -108,6 +109,13 @@ export interface HostProbeOpts {
   /** TEST ONLY, threaded to fetch-page. See FetchOpts.lookup. */
   lookup?: DnsLookupFn;
   /**
+   * The crawl's credentials (Phase 27c), threaded to fetch-page. Every hop is
+   * its own `fetchPage` call, so each spelling decides on its own URL: the
+   * site's family gets them, a legacy host and a plain-http spelling of an
+   * https site do not.
+   */
+  credentials?: CredentialTarget;
+  /**
    * Hosts the site used to live on, from the operator or the client brief. A
    * bare host (`old.example`) is probed under both schemes; a full http(s) URL
    * is probed as written, at its origin root.
@@ -148,6 +156,7 @@ async function followChain(
       allowPrivate: opts.allowPrivate,
       lookup: opts.lookup,
       timeoutMs: opts.timeoutMs,
+      credentials: opts.credentials,
     });
     const floorMs = opts.onResponse?.(result);
     if (floorMs !== undefined) gate.raiseBase(floorMs);

@@ -38,11 +38,35 @@
  *
  * Anything that needs the server: the allowlist, the URL policy, the crawl
  * loop's own ranges over the EFFECTIVE config (the render budgets among them —
- * `resolveRenderConfig` is their one check). Those are `ApiService.checkStartBody`.
+ * `resolveRenderConfig` is their one check), and — Phase 27c — whatever reads
+ * two fields at once or needs the seed: `mode` and `urls` together, each listed
+ * URL's site, policy and scope, a pattern's host, the seed against the scope,
+ * a list crawl's `maxPages`. Those are `ApiService.checkStartBody`.
+ *
+ * ## The credential fields are checked on the value as sent
+ *
+ * `requestHeaders`, `httpAuth` and `cookies` are secrets (`CrawlField.secret`,
+ * published as `x-ariadne-secret: true`). Their schema is `credentialSchema`:
+ * `credentialFieldError` on the raw value, whose messages never carry one, with
+ * the shape published from `CrawlField.jsonSchema`.
  */
 import { z } from "zod";
 
-import { CRAWL_DEFAULTS } from "../crawl/loop.js";
+import {
+  credentialFieldError,
+  MAX_COOKIES,
+  MAX_CREDENTIAL_VALUE_BYTES,
+  MAX_REQUEST_HEADERS,
+  type CrawlCredentials,
+} from "../crawl/credentials.js";
+import {
+  CRAWL_DEFAULTS,
+  MAX_REDIRECT_HOPS,
+  MIN_REDIRECT_HOPS,
+  MIN_URL_LENGTH,
+} from "../crawl/loop.js";
+import { INDEXED_URL_MAX } from "../crawl/parse/url-utils.js";
+import { MAX_PATTERN_LENGTH, MAX_SCOPE_PATTERNS } from "../crawl/url-scope.js";
 import {
   JUDGEMENT_DETAIL,
   JudgementError,
@@ -155,7 +179,28 @@ export interface CrawlField {
   description: string;
   /** The engine's value when the field is absent. Published, never applied. */
   default?: unknown;
+  /**
+   * A credential (27c): its value is held only in the API process's memory —
+   * never stored, logged, quoted in a refusal or answered — and the published
+   * schema marks it `x-ariadne-secret: true`.
+   */
+  secret?: true;
+  /**
+   * The JSON Schema the field publishes, for a field whose zod schema cannot
+   * say it: the credential fields are checked by `credentialFieldError` on the
+   * RAW value (`credentialSchema`), so their shape is published from here.
+   */
+  jsonSchema?: Record<string, unknown>;
 }
+
+/**
+ * The most URLs one list crawl may name (27c). Up to about 1 MiB of JSON,
+ * which is the body cap `POST /crawls` and `POST /config/validate` take
+ * (`LARGE_BODY_BYTES`, src/api/http.ts). Refused past it, never trimmed: a
+ * list this engine silently cut would leave the caller believing every URL
+ * was fetched (hard rule 7).
+ */
+export const LIST_MAX_URLS = 10_000;
 
 /** The crawl part's field names: the body's, less the judgement block. */
 export type CrawlFieldName = Exclude<keyof StartCrawlInput, "judgement">;
@@ -193,6 +238,62 @@ function stringList(key: string) {
   return z.array(z.string({ error: message }), { error: message });
 }
 
+/** An integer in `[min, max]`: the 27c limits, at the wire. */
+function boundedInteger(key: string, min: number, max: number) {
+  const range = (issue: { input?: unknown }): string =>
+    `field '${key}' must be an integer from ${min} to ${max}, got ${String(issue.input)}`;
+  return finiteNumber(key).int({ error: range }).min(min, { error: range }).max(max, { error: range });
+}
+
+/** `exclude` / `include`: up to `MAX_SCOPE_PATTERNS` non-empty patterns of up to `MAX_PATTERN_LENGTH`. */
+function patternList(key: "exclude" | "include") {
+  const type = (): string => `field '${key}' must be an array of URL patterns (strings)`;
+  return z
+    .array(
+      z
+        .string({ error: type })
+        .min(1, { error: () => `${key} holds an empty pattern, which can never match a URL` })
+        .max(MAX_PATTERN_LENGTH, {
+          error: (issue) =>
+            `${key} holds a pattern of ${String((issue.input as string).length)} characters; ` +
+            `the limit is ${MAX_PATTERN_LENGTH}`,
+        }),
+      { error: type },
+    )
+    .max(MAX_SCOPE_PATTERNS, {
+      error: (issue) =>
+        `${key} holds ${(issue.input as readonly unknown[]).length} patterns; the limit is ` +
+        `${MAX_SCOPE_PATTERNS}`,
+    });
+}
+
+/**
+ * A credential field (27c): checked by `credentialFieldError` on the value AS
+ * SENT, never on a zod-parsed copy. Two reasons, both about the secret:
+ *
+ *  - every message is one `credentialFieldError` wrote, and those name the
+ *    field and the header or cookie NAME, never a value — zod's own messages
+ *    are not a promise this module can keep for it;
+ *  - `z.record` rebuilds the object, and a header named `__proto__` (a valid
+ *    HTTP token) would be dropped from the copy without a word.
+ *
+ * So the zod type is `unknown` refined, and the shape the field publishes is
+ * `CrawlField.jsonSchema`.
+ */
+function credentialSchema<T>(field: keyof CrawlCredentials): z.ZodType<T> {
+  return z.unknown().superRefine((value, ctx) => {
+    const error = credentialFieldError(field, value);
+    if (error !== null) ctx.addIssue({ code: "custom", message: error });
+  }) as unknown as z.ZodType<T>;
+}
+
+const SECRET_NOTE =
+  "SECRET: held only in this server's memory for the crawl — never stored, logged or " +
+  "answered; crawl_config_get shows which were supplied and the names, never a value. " +
+  "Sent only to the site's own hosts (its www/apex and http→https spellings), including " +
+  "robots.txt and sitemaps, never to another host. After a server restart they must be " +
+  "supplied again (CREDENTIALS_REQUIRED).";
+
 /**
  * The wire's whole crawl vocabulary, in the order an unknown-field refusal
  * lists it. Descriptions are the ones `crawl_start` has always shown an agent.
@@ -216,7 +317,10 @@ export const CRAWL_FIELDS = {
     mutable: "whenPaused",
     description:
       "Stop after this many pages. Defaults to 500 — a first look at a site. Raise " +
-      "it deliberately: a full crawl of a large site is a real load on it.",
+      "it deliberately: a full crawl of a large site is a real load on it. A list " +
+      "crawl (mode 'list') defaults instead to twice its distinct URLs — room for one " +
+      "redirect target each — and refuses a value below its distinct URLs, so every " +
+      "listed URL ends in a classified row.",
     default: API_CRAWL_DEFAULTS.maxPages,
   },
   maxDepth: {
@@ -338,6 +442,139 @@ export const CRAWL_FIELDS = {
       "turning it off is a decision about somebody's servers, not a speed knob.",
     default: true,
   },
+  mode: {
+    schema: z.enum(["spider", "list"], {
+      error: () => `field 'mode' must be "spider" or "list"`,
+    }),
+    mutable: "never",
+    description:
+      "'spider' (the default) follows links from siteUrl. 'list' fetches exactly the " +
+      "URLs in urls, at depth 0: redirects are followed to their target (within " +
+      "maxRedirectHops) so every listed URL ends in a classified row, links are " +
+      "recorded but not followed, and no sitemap is read unless sitemapUrls is given. " +
+      "robots.txt is always read and obeyed. The host probe (probeHosts: false turns it " +
+      "off), the known-404 probe, and the recheck, resource and render passes as " +
+      "configured run too. Rules that need the whole site (the link " +
+      "graph, click depth, sitemap coverage, orphans) do not run on a list crawl; the " +
+      "crawl.list-mode finding names them.",
+    default: "spider",
+  },
+  urls: {
+    schema: stringList("urls")
+      .min(1, { error: () => "urls is empty: a list crawl needs at least one URL" })
+      .max(LIST_MAX_URLS, {
+        error: (issue) =>
+          `urls names ${(issue.input as readonly unknown[]).length} URLs, above this ` +
+          `server's limit of ${LIST_MAX_URLS} for one list crawl. The list is not ` +
+          `trimmed: split it across crawls`,
+      }),
+    mutable: "never",
+    description:
+      `A list crawl's URLs (mode 'list' only, and required there): 1 to ${LIST_MAX_URLS} ` +
+      "full http(s) URLs, all on siteUrl's own site — its host or the www/apex twin, " +
+      "the same scheme or the http→https upgrade. A list that spans sites is refused, " +
+      "not split. Each must pass the URL policy and exclude/include. Two spellings of " +
+      "one URL (after normalisation) are collapsed and counted: the answer carries " +
+      "listUrlCount (distinct) and listDuplicates. The URLs are not echoed back by " +
+      "config_validate or crawl_config_get.",
+  },
+  exclude: {
+    schema: patternList("exclude"),
+    mutable: "whenPaused",
+    description:
+      `Up to ${MAX_SCOPE_PATTERNS} URL patterns of up to ${MAX_PATTERN_LENGTH} characters ` +
+      "the crawl must not fetch. A pattern matches the whole normalised URL; '*' matches " +
+      "any run of characters and nothing else is special, so '*/blog/*' is a path rule " +
+      "and 'https://shop.example.com/*' a host rule. The match starts at the URL's " +
+      "first character, so a path rule needs a leading '*': '/blog/*' can never match " +
+      "and is refused. Exclude wins over include. A " +
+      "refused URL is recorded as a row with fetch class 'excluded' naming the pattern, " +
+      "never fetched. The seed (spider) and every listed URL (list) are checked at " +
+      "start: one these patterns refuse is a validation error. A pattern that could " +
+      "never match is refused: one with no leading '*' that does not start http:// or " +
+      "https://, and one naming a scheme and host the crawl never admits (another " +
+      "host, or http:// on an https site).",
+    default: [],
+  },
+  include: {
+    schema: patternList("include"),
+    mutable: "whenPaused",
+    description:
+      "When non-empty, only URLs matching at least one of these patterns are fetched " +
+      "(exclude still wins). Same pattern language and limits as exclude.",
+    default: [],
+  },
+  requestHeaders: {
+    schema: credentialSchema<Record<string, string>>("requestHeaders"),
+    mutable: "whenPaused",
+    secret: true,
+    jsonSchema: {
+      type: "object",
+      propertyNames: { type: "string" },
+      additionalProperties: { type: "string" },
+      maxProperties: MAX_REQUEST_HEADERS,
+    },
+    description:
+      `Up to ${MAX_REQUEST_HEADERS} custom request headers, {name: value}. A name is an ` +
+      `HTTP token; a value is at most ${MAX_CREDENTIAL_VALUE_BYTES} bytes with no CR or ` +
+      "LF. Refused names: host, user-agent, accept, accept-encoding, content-length, " +
+      "connection, transfer-encoding, te, upgrade, expect, keep-alive, cookie (use " +
+      "cookies), authorization (use httpAuth), and any name starting proxy- or sec- " +
+      "(the browser owns sec-*). " +
+      SECRET_NOTE,
+  },
+  httpAuth: {
+    schema: credentialSchema<{ username: string; password: string }>("httpAuth"),
+    mutable: "whenPaused",
+    secret: true,
+    jsonSchema: {
+      type: "object",
+      properties: { username: { type: "string" }, password: { type: "string" } },
+      required: ["username", "password"],
+      additionalProperties: false,
+    },
+    description:
+      `HTTP Basic credentials, {username, password}, each at most ` +
+      `${MAX_CREDENTIAL_VALUE_BYTES} bytes; the username may not contain ':'. ` +
+      SECRET_NOTE,
+  },
+  cookies: {
+    schema: credentialSchema<Array<{ name: string; value: string }>>("cookies"),
+    mutable: "whenPaused",
+    secret: true,
+    jsonSchema: {
+      type: "array",
+      maxItems: MAX_COOKIES,
+      items: {
+        type: "object",
+        properties: { name: { type: "string" }, value: { type: "string" } },
+        required: ["name", "value"],
+        additionalProperties: false,
+      },
+    },
+    description:
+      `Up to ${MAX_COOKIES} cookies, [{name, value}], sent as one Cookie header. A value ` +
+      `is at most ${MAX_CREDENTIAL_VALUE_BYTES} bytes of cookie-octets (no ';', ',' or ` +
+      "whitespace). Set-Cookie from the site is ignored: the crawl stays stateless. " +
+      SECRET_NOTE,
+  },
+  maxRedirectHops: {
+    schema: boundedInteger("maxRedirectHops", MIN_REDIRECT_HOPS, MAX_REDIRECT_HOPS),
+    mutable: "whenPaused",
+    description:
+      "The longest redirect chain the page crawl follows. A chain over it ends in a " +
+      "classified row whose reason names the cap; its next target is not fetched.",
+    default: CRAWL_DEFAULTS.maxRedirectHops,
+  },
+  maxUrlLength: {
+    schema: boundedInteger("maxUrlLength", MIN_URL_LENGTH, INDEXED_URL_MAX),
+    mutable: "never",
+    description:
+      "The longest URL the crawl admits, in characters. A longer one is refused at " +
+      "admission and recorded, never fetched. The default is the maximum: the index's " +
+      "own limit.",
+    default: CRAWL_DEFAULTS.maxUrlLength,
+  },
 } satisfies Record<CrawlFieldName, CrawlField>;
 
 /**
@@ -403,10 +640,33 @@ export function unknownField(key: string): string {
 /** A field's schema as the body carries it: described, defaulted, marked. */
 function onTheWire<S extends z.ZodType>(field: { schema: S } & CrawlField): S {
   return field.schema.meta({
+    ...(field.jsonSchema ?? {}),
     description: field.description,
     ...(field.default === undefined ? {} : { default: field.default }),
     "x-ariadne-mutable": field.mutable,
+    ...(field.secret === true ? { "x-ariadne-secret": true } : {}),
   });
+}
+
+/**
+ * The three credential fields as `crawl_resume` and `crawl_render` take them
+ * (27c T9): `crawl_start`'s own schemas (`credentialSchema`, so the refusals
+ * are the same names-only sentences) and published shapes, marked
+ * `x-ariadne-secret`. No mutability marker: on these tools they re-supply the
+ * crawl's credentials for one call, they do not change a setting.
+ */
+export function credentialInputSchemas() {
+  const secret = <S extends z.ZodType>(field: { schema: S } & CrawlField): S =>
+    field.schema.meta({
+      ...(field.jsonSchema ?? {}),
+      description: field.description,
+      "x-ariadne-secret": true,
+    });
+  return {
+    requestHeaders: secret(CRAWL_FIELDS.requestHeaders).optional(),
+    httpAuth: secret(CRAWL_FIELDS.httpAuth).optional(),
+    cookies: secret(CRAWL_FIELDS.cookies).optional(),
+  };
 }
 
 /**
@@ -553,6 +813,15 @@ function buildStartBodySchema(registry: Registry) {
       renderSamplePerType: onTheWire(f.renderSamplePerType).optional(),
       findingCap: onTheWire(f.findingCap).optional(),
       fetchResources: onTheWire(f.fetchResources).optional(),
+      mode: onTheWire(f.mode).optional(),
+      urls: onTheWire(f.urls).optional(),
+      exclude: onTheWire(f.exclude).optional(),
+      include: onTheWire(f.include).optional(),
+      requestHeaders: onTheWire(f.requestHeaders).optional(),
+      httpAuth: onTheWire(f.httpAuth).optional(),
+      cookies: onTheWire(f.cookies).optional(),
+      maxRedirectHops: onTheWire(f.maxRedirectHops).optional(),
+      maxUrlLength: onTheWire(f.maxUrlLength).optional(),
       judgement: judgementSchema(registry)
         .meta({ description: JUDGEMENT_DESCRIPTION, "x-ariadne-mutable": "always" })
         .optional(),

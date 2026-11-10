@@ -97,6 +97,11 @@ import {
   releaseRenderLeases,
 } from "../frontier.js";
 import {
+  requireCredentials,
+  type CrawlCredentials,
+  type CredentialShape,
+} from "../credentials.js";
+import {
   PageRenderer,
   RENDERER_DEFAULTS,
   writeRenderResult,
@@ -322,6 +327,17 @@ export interface RenderPassConfig extends RenderSelectionConfig {
   /** TEST ONLY — the fixture-server escape hatch. See `CrawlConfig`. */
   allowPrivate?: boolean;
   /**
+   * The crawl's credentials and their stored shape (Phase 27c), on exactly
+   * `CrawlConfig`'s terms, so a `CrawlConfig` still satisfies this
+   * structurally. The renderer sends them per request, only to the site
+   * family; a pass whose shape is set and whose credentials are absent or of
+   * another shape is refused with `CredentialsMissingError` before anything
+   * is selected (hard rule 7): a render never runs unauthenticated against a
+   * site that needed auth.
+   */
+  credentials?: CrawlCredentials;
+  credentialShape?: CredentialShape;
+  /**
    * TEST ONLY — the resolver the browser's pin approves the origin through
    * (`RendererOptions.resolve`), so a suite can hand the pass a name that
    * resolves nowhere, or a resolver that fails, without touching the network.
@@ -425,6 +441,9 @@ export async function runRenderPass(
       `runRenderPass: renderConcurrency must be an integer ≥ 1, got ${concurrency}`,
     );
   }
+  // Before anything is selected or launched: credentials the crawl needed and
+  // this pass was not given stop it here, with nothing written.
+  requireCredentials(crawlId, cfg.siteUrl, cfg.credentialShape, cfg.credentials);
   // Parsed before anything is selected, for the same reason: a site URL that
   // is not a URL is our defect, not a launch failure, and recording it as
   // "the render browser could not be launched" would point at the wrong cause.
@@ -607,6 +626,9 @@ export async function runRenderPass(
       navigationTimeoutMs: profiled.navigationTimeoutMs,
       settleMs,
       allowPrivate: cfg.allowPrivate === true,
+      ...(cfg.credentials === undefined
+        ? {}
+        : { credentials: { siteUrl: cfg.siteUrl, values: cfg.credentials } }),
       ...(cfg.resolveAddress === undefined ? {} : { resolve: cfg.resolveAddress }),
       ...(opts.onRequestBlocked === undefined
         ? {}

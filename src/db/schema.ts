@@ -310,6 +310,15 @@ export const crawls = pgTable("crawls", {
   // writes 0 before its first enqueue, so 0 is a measurement: nothing was
   // turned away.
   robotsBlockedDropped: integer("robots_blocked_dropped"),
+  // DISCOVERIES THE CRAWL'S URL SCOPE PATTERNS TURNED AWAY past the excluded-row
+  // budget (migration 0036), counted exactly as `robots_blocked_dropped` is, and
+  // with the same load-bearing null: null means nobody counted (a crawl written
+  // before 0036), 0 is a measurement. Below the budget a refused URL is a
+  // `pages` row with `fetch_class = 'excluded'`.
+  excludedDropped: integer("excluded_dropped"),
+  // When the crawl's scope patterns (`exclude` / `include`) last changed
+  // mid-crawl (migration 0036). Null = never changed since the crawl started.
+  scopeChangedAt: timestamp("scope_changed_at", { withTimezone: true }),
   // WHETHER THE FRONTIER CAP TURNED A NEW URL AWAY (migration 0023). True the
   // first time `enqueue` met a URL the frontier did not hold and had no room
   // left under `maxPages` for it: from then on the crawl's link graph is known
@@ -410,7 +419,7 @@ export const pages = pgTable("pages", {
   // policy refused all leave `redirect_url` null too.
   redirectUrlNormalised: text("redirect_url_normalised"),
   depth: integer("depth").notNull(),
-  discoveredVia: text("discovered_via").notNull(), // seed|link|sitemap|redirect
+  discoveredVia: text("discovered_via").notNull(), // seed|link|sitemap|redirect|list
   title: text("title"),
   metaDescription: text("meta_description"),
   canonicalHtml: text("canonical_html"),
@@ -1363,6 +1372,10 @@ export const frontier = pgTable("frontier", {
   state: text("state").notNull().default("pending"),
   depth: integer("depth").notNull(),
   discoveredVia: text("discovered_via").notNull(),
+  // Redirect hops already taken to reach this URL (migration 0036): 0 for a
+  // seed, link, sitemap or list URL; a redirect target inherits its source's
+  // count plus one. The per-chain `maxRedirectHops` cap is checked against it.
+  redirectHops: integer("redirect_hops").notNull().default(0),
   attempts: integer("attempts").notNull().default(0),
   leaseId: text("lease_id"),
   leasedUntil: timestamp("leased_until", { withTimezone: true }),
@@ -1370,4 +1383,18 @@ export const frontier = pgTable("frontier", {
 }, (t) => [
   primaryKey({ columns: [t.crawlId, t.url] }),
   index("frontier_leasable").on(t.crawlId, t.state, t.leasedUntil),
+]);
+
+/**
+ * The URLs a list-mode crawl was given (migration 0036), one row per distinct
+ * normalised URL in the order supplied. Stored here rather than in
+ * `config_jsonb` because 10,000 URLs is ~1 MiB and the config is read on every
+ * resume and render; the loop reads the table in chunks (hard rule 6).
+ */
+export const listUrls = pgTable("list_urls", {
+  crawlId: text("crawl_id").notNull().references(() => crawls.id, { onDelete: "cascade" }),
+  position: integer("position").notNull(),
+  url: text("url").notNull(),
+}, (t) => [
+  primaryKey({ columns: [t.crawlId, t.position] }),
 ]);

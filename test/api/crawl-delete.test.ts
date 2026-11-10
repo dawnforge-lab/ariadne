@@ -25,7 +25,7 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 
 import { closeDb, createDb, type Db } from "../../src/db/client.js";
 import { runMigrations } from "../../src/db/migrate.js";
-import { crawls, frontier } from "../../src/db/schema.js";
+import { crawls, frontier, listUrls } from "../../src/db/schema.js";
 import { closeFetchAgents } from "../../src/crawl/http.js";
 import { createApiServer, type ApiServer } from "../../src/api/http.js";
 import { createMcpServer, type AriadneMcpServer } from "../../src/api/mcp.js";
@@ -276,6 +276,7 @@ describe("CRAWL_CHILD_TABLES", () => {
       "resources",
       "pages",
       "frontier",
+      "list_urls",
     ]);
   });
 });
@@ -502,5 +503,25 @@ describe("crawl_delete's file step: unreadable directories and containment (27b 
     } finally {
       await rm(root, { recursive: true, force: true });
     }
+  });
+});
+
+describe("crawl_delete removes list_urls (27c T1)", () => {
+  it("removes a crawl's list_urls rows and not a sibling's", async () => {
+    const doomed = await seedCrawl({ status: "finished" });
+    const kept = await seedCrawl({ status: "finished" });
+    for (const id of [doomed, kept]) {
+      await db.insert(listUrls).values([
+        { crawlId: id, position: 0, url: "http://seeded.example/a" },
+        { crawlId: id, position: 1, url: "http://seeded.example/b" },
+      ]);
+    }
+    const deleted = await call("DELETE", `/crawls/${doomed}?confirm=${doomed}`);
+    expect(deleted.status).toBe(200);
+    expect((deleted.body["rows"] as Record<string, number>)["list_urls"]).toBe(2);
+    const left = await db.select().from(listUrls).where(eq(listUrls.crawlId, doomed));
+    expect(left).toEqual([]);
+    const sibling = await db.select().from(listUrls).where(eq(listUrls.crawlId, kept));
+    expect(sibling).toHaveLength(2);
   });
 });

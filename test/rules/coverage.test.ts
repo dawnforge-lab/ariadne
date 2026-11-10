@@ -526,11 +526,18 @@ describe("checklist coverage", () => {
   //   page    72
   //   query   101 + 1 = 102
   //   total   187 + 1 = 188
-  it("pins the ruleset split: 188 rules = 72 page + 102 query + 14 metric", () => {
+  //
+  // Phase 27c Task 7 adds ONE query rule, the marker `crawl.list-mode` (CHECK-83),
+  // in `src/rules/query/list-mode.ts`.
+  //
+  //   page    72
+  //   query   102 + 1 = 103
+  //   total   188 + 1 = 189
+  it("pins the ruleset split: 189 rules = 72 page + 103 query + 14 metric", () => {
     const registry = buildRegistry();
-    expect(registry.all()).toHaveLength(188);
+    expect(registry.all()).toHaveLength(189);
     expect(registry.byKind("page")).toHaveLength(72);
-    expect(registry.byKind("query")).toHaveLength(102);
+    expect(registry.byKind("query")).toHaveLength(103);
     // The link-graph five, the two content metrics and hreflang coverage, plus
     // the URL-parameter, redirect-volume and sitemap-structure metrics, plus
     // the render pass's coverage, the health rollup, and the page-weight table.

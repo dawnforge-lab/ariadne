@@ -95,6 +95,7 @@ import {
   sharedAgent,
   type HeaderBag,
 } from "./http.js";
+import { credentialHeadersOf, type CredentialTarget } from "./credentials.js";
 
 const gunzip = promisify(gunzipCallback);
 
@@ -380,6 +381,12 @@ export interface DiscoveryResult {
   truncation: DiscoveryTruncation;
   /** Phase 26c: written on every result, zeros when there was no sitemap. */
   sitemapFacts: DiscoverySitemapFacts;
+  /**
+   * False when the walk was switched off (`walkSitemaps: false`): no sitemap
+   * document, declared or supplied, was requested. Distinct from a walk that
+   * found nothing, which is the evidence `needsSitemaps` rules read.
+   */
+  sitemapsRead: boolean;
 }
 
 /**
@@ -448,6 +455,12 @@ export interface DiscoveryOpts {
    * loop writes both into `crawls.discovery_jsonb` (see `discoveryEvidence`).
    */
   extraSitemaps?: string[];
+  /**
+   * Phase 27c list mode: false walks NO sitemap document, declared or
+   * supplied. robots.txt is still read, so the `Sitemap:` lines it declares are
+   * still reported as declared. Default true.
+   */
+  walkSitemaps?: boolean;
   /** Per-document deadline: connect, headers and body together. */
   timeoutMs?: number;
   /** Overrides the in-memory entry cap. See MAX_SITEMAP_ENTRIES. */
@@ -474,6 +487,13 @@ export interface DiscoveryOpts {
    * server. Never wire this to config, an API field or an env var.
    */
   allowPrivate?: boolean;
+  /**
+   * The crawl's credentials (Phase 27c). Every document request — robots.txt,
+   * each sitemap, and every redirect hop of either — decides on its OWN URL
+   * (`credentialHeadersFor`): a hop that leaves the site family carries none
+   * of them, and a third-party robots.txt (the resource pass's) never does.
+   */
+  credentials?: CredentialTarget;
 }
 
 /**
@@ -685,7 +705,9 @@ async function requestDoc<T>(
       const response = await request(url, {
         dispatcher: sharedAgent(allowPrivate),
         method: "GET",
+        // THIS hop's URL decides, not the chain's start (Phase 27c).
         headers: {
+          ...credentialHeadersOf(url, opts.credentials),
           "user-agent": opts.userAgent,
           accept: "text/plain,application/xml,text/xml,application/gzip;q=0.9,*/*;q=0.8",
         },
@@ -1198,6 +1220,13 @@ export async function discover(
 
   const robots = await fetchRobots(siteUrl, opts, unreachableMode);
 
+  // List mode without supplied sitemaps: robots.txt was read, and that is all.
+  // No failure is recorded for the unread documents: they were not attempted,
+  // and `sitemapsRead: false` says so.
+  if (opts.walkSitemaps === false) {
+    return { robots, sitemapEntries: [], truncation, sitemapFacts, sitemapsRead: false };
+  }
+
   const sources = startingSources(robots.sitemapUrls, opts.extraSitemaps ?? []);
 
   // Complete disallow means complete: we do not go on to pull 300 sitemap
@@ -1210,7 +1239,7 @@ export async function discover(
         reason: "not fetched: robots.txt unreachable, complete disallow in force",
       });
     }
-    return { robots, sitemapEntries: [], truncation, sitemapFacts };
+    return { robots, sitemapEntries: [], truncation, sitemapFacts, sitemapsRead: true };
   }
 
   // `refused`: a child the walk already knows the policy refuses, recorded as
@@ -1490,5 +1519,11 @@ export async function discover(
     if (result.oversized) recordOversized(next.url, result.bytes, doc.urlsKept);
   }
 
-  return { robots, sitemapEntries: [...entries.values()], truncation, sitemapFacts };
+  return {
+    robots,
+    sitemapEntries: [...entries.values()],
+    truncation,
+    sitemapFacts,
+    sitemapsRead: true,
+  };
 }

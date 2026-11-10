@@ -11,7 +11,7 @@
  *
  * Hard rule 3: the findings are counted by ONE `GROUP BY rule_id` statement
  * with the disabled filter in SQL; nothing loads `issues` into memory. The
- * answer is bounded by the rule count (at most 174 finding rules), which is why
+ * answer is bounded by the rule count (at most 175 finding rules), which is why
  * ordering the aggregate in code is not an unbounded structure.
  *
  * `urls` is the number of DISTINCT URLs, as `issue_urls` lists them: the
@@ -27,7 +27,7 @@ import { sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import type { RuleCategory, Severity, AnyRule, IssueType, Priority } from "../rules/registry/types.js";
 import { RULESET_VERSION, type Registry } from "../rules/registry/registry.js";
-import { INDEXABILITY_STATUS_SQL, ROBOTS_BLOCKED } from "../rules/helpers.js";
+import { INDEXABILITY_STATUS_SQL, NEVER_REQUESTED } from "../rules/helpers.js";
 import { RENDER_PASS_EVIDENCE } from "../rules/metric/render-metrics.js";
 import {
   copyRenderer,
@@ -60,6 +60,12 @@ export interface IssuesOverview {
   pagesJudged: number | null;
   rows: IssuesOverviewRow[];
   disabledRules: string[];
+  /**
+   * The rules this list crawl's rules run left out (`JudgementView.notMeasured`):
+   * never a row, not even with `includeZero` — a zero would read "clean" where
+   * nobody looked (27c final wave M16). `[]` on a spider crawl.
+   */
+  notMeasured: string[];
   judgementStale: JudgementStale;
 }
 
@@ -201,6 +207,7 @@ async function issuesOverviewIn(
     for (const rule of registry.all()) {
       if (rule.kind === "metric" || counts.has(rule.id)) continue;
       if (view.disabledRules.includes(rule.id)) continue;
+      if (view.notMeasured.includes(rule.id)) continue;
       rows.push(rowFor(rule.id, 0));
     }
   }
@@ -218,6 +225,7 @@ async function issuesOverviewIn(
     pagesJudged,
     rows,
     disabledRules: view.disabledRules,
+    notMeasured: view.notMeasured,
     judgementStale: view.judgementStale,
   };
 }
@@ -654,7 +662,8 @@ function storedRenderCoverage(
 
 /**
  * `Pages rendered`, counted live over the REQUESTED pages (every row but the
- * robots-blocked ones, `render.coverage`'s own denominator), then
+ * never-requested ones — robots-blocked and scope-`excluded` —
+ * `render.coverage`'s own denominator), then
  * `Render coverage (<state>)` from the stored `render.coverage` row: value
  * `pagesRendered`, percent `pagesRendered / pagesCrawled`, the metric's
  * `renderPassEvidence` (ran | none | failed) in the label. On an unjudged crawl
@@ -668,8 +677,8 @@ async function renderSection(
   judged: boolean,
 ): Promise<OverviewSection> {
   const result = await db.execute<{ requested: number; rendered: number }>(sql`
-    select count(*) filter (where not ${ROBOTS_BLOCKED("p")})::int as requested,
-           count(*) filter (where p.rendered and not ${ROBOTS_BLOCKED("p")})::int as rendered
+    select count(*) filter (where not ${NEVER_REQUESTED("p")})::int as requested,
+           count(*) filter (where p.rendered and not ${NEVER_REQUESTED("p")})::int as rendered
       from pages p
      where p.crawl_id = ${crawlId}`);
   const r = result.rows[0];

@@ -45,6 +45,7 @@ import {
 import { captureResponseHeaders, type StoredResponseHeaders } from "./response-headers.js";
 import { parseLinkHeader, relTokens, type LinkHeaderEntry } from "./link-header.js";
 import { MAX_HREFLANG_PAIRS, type HreflangPair } from "./parse/page-analyzer.js";
+import { credentialHeadersOf, type CredentialTarget } from "./credentials.js";
 
 /**
  * The body cap, spent on **decompressed** bytes (see readCappedDecoded). It
@@ -134,6 +135,12 @@ export const FETCH_CLASSES = [
    */
   "unsupported_encoding",
   "disallowed",
+  /**
+   * The URL was recorded and never requested because the crawl's own scope
+   * patterns (`exclude` / `include`) refuse it. Our decision, not the site's
+   * answer; see `NEVER_REQUESTED` in src/rules/helpers.ts.
+   */
+  "excluded",
 ] as const;
 
 export type FetchClass = (typeof FETCH_CLASSES)[number];
@@ -266,11 +273,23 @@ export interface FetchOpts {
    */
   allowPrivate?: boolean;
   /**
+   * The crawl's URL length limit (`UrlPolicyOpts.maxUrlLength`), applied to the
+   * URL before it is requested and to a redirect target before it is offered
+   * back to the crawl. Absent is the index's own limit.
+   */
+  maxUrlLength?: number;
+  /**
    * TEST ONLY. Replaces `dns.lookup` under the connect-time guard, so the
    * SSRF tests can pin a hostname to an address without touching the network.
    * Supplying it also opts out of the shared connection pool.
    */
   lookup?: DnsLookupFn;
+  /**
+   * The crawl's credentials (Phase 27c), sent only when THIS url is in the
+   * site family (`credentialHeadersFor`). A redirect is never followed here —
+   * each hop is its own `fetchPage` call — so each hop decides for itself.
+   */
+  credentials?: CredentialTarget;
 }
 
 /**
@@ -443,6 +462,7 @@ async function resolveRedirectTarget(
   location: string | null,
   pageUrl: string,
   allowPrivate: boolean,
+  maxUrlLength: number | undefined,
 ): Promise<{ redirectUrl: string | null; droppedReason: string | null }> {
   if (location === null) {
     return { redirectUrl: null, droppedReason: "3xx without a Location header" };
@@ -458,7 +478,7 @@ async function resolveRedirectTarget(
     };
   }
 
-  const verdict = await isUrlAllowed(resolved, { allowPrivate });
+  const verdict = await isUrlAllowed(resolved, { allowPrivate, maxUrlLength });
   if (verdict.allowed) return { redirectUrl: resolved, droppedReason: null };
   return {
     redirectUrl: null,
@@ -535,7 +555,7 @@ export async function fetchPage(url: string, opts: FetchOpts): Promise<FetchResu
   const callerSignal = opts.signal;
   if (callerSignal?.aborted) throw new FetchAbortedError(url);
 
-  const verdict = await isUrlAllowed(url, { allowPrivate });
+  const verdict = await isUrlAllowed(url, { allowPrivate, maxUrlLength: opts.maxUrlLength });
   if (!verdict.allowed) {
     return emptyResult(url, "disallowed", Date.now() - started, verdict.reason);
   }
@@ -568,7 +588,13 @@ export async function fetchPage(url: string, opts: FetchOpts): Promise<FetchResu
     const response = await request(url, {
       dispatcher,
       method: "GET",
-      headers: pageRequestHeaders(opts.userAgent),
+      // The credential headers first and the engine's after: the refused
+      // names (`credentialError`) already keep them apart, and the engine's
+      // identity wins regardless (rule 9).
+      headers: {
+        ...credentialHeadersOf(url, opts.credentials),
+        ...pageRequestHeaders(opts.userAgent),
+      },
       // Manual redirects: a 3xx is its own row and the crawl loop enqueues the
       // target (which re-enters url-policy on the way in), so chains and loops
       // are visible in the recorded rows instead of collapsed by the client.
@@ -615,6 +641,7 @@ export async function fetchPage(url: string, opts: FetchOpts): Promise<FetchResu
         headerValue(headers, "location"),
         url,
         allowPrivate,
+        opts.maxUrlLength,
       );
       return {
         url,
