@@ -21,6 +21,7 @@
  * is QUEUED behind it; the test cancels each one at once (queued → cancelled,
  * `crawl_cancel`, Task 4), and the queue never reaches it.
  */
+import { randomUUID } from "node:crypto";
 import { createServer, type Server } from "node:http";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -32,7 +33,9 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 
 import { closeDb, createDb, type Db } from "../../src/db/client.js";
 import { runMigrations } from "../../src/db/migrate.js";
-import { crawls } from "../../src/db/schema.js";
+import { crawls, pages } from "../../src/db/schema.js";
+import { mkDiscovery } from "../rules/mk-discovery.js";
+import { mkPage } from "../rules/mk-page.js";
 import { closeFetchAgents } from "../../src/crawl/http.js";
 import { createApiServer, type ApiServer } from "../../src/api/http.js";
 import { createMcpServer, type AriadneMcpServer } from "../../src/api/mcp.js";
@@ -501,5 +504,44 @@ describe("a list crawl over both transports (27c)", () => {
     expect(startedMcp.isError, startedMcp.text).toBe(false);
     expect(startedMcp.body).toMatchObject({ listUrlCount: 3, listDuplicates: 1 });
     await cancelQueuedMcp(String(startedMcp.body?.["crawlId"]));
+  });
+});
+
+describe("the issues overview over both transports (27d)", () => {
+  it("GET /crawls/:id/overview/issues deep-equals the MCP issues_overview result", async () => {
+    // A finished, one-page crawl judged through the HTTP rules route; nothing is fetched.
+    const id = `crawl_parity_overview_${randomUUID()}`;
+    createdCrawls.push(id);
+    await db.insert(crawls).values({
+      id,
+      siteUrl: "https://parity-overview.example/",
+      config: { siteUrl: "https://parity-overview.example/", maxPages: 10, userAgent: "AriadneBot-test" },
+      discovery: mkDiscovery(),
+      rulesetVersion: "test",
+      status: "finished",
+      pagesCrawled: 1,
+    });
+    await db.insert(pages).values(
+      mkPage({
+        id: `page_${randomUUID()}`,
+        crawlId: id,
+        url: "https://parity-overview.example/",
+        urlNormalised: "https://parity-overview.example/",
+        depth: 0,
+        clickDepth: 0,
+        discoveredVia: "seed",
+      }),
+    );
+    const judged = await call("POST", `/crawls/${id}/rules`);
+    expect(judged.status, JSON.stringify(judged.body)).toBe(200);
+
+    for (const includeZero of [false, true]) {
+      const viaHttp = await call("GET", `/crawls/${id}/overview/issues?includeZero=${includeZero}`);
+      expect(viaHttp.status, JSON.stringify(viaHttp.body)).toBe(200);
+      const viaMcp = await tool("issues_overview", { crawlId: id, includeZero });
+      expect(viaMcp.isError, viaMcp.text).toBe(false);
+      expect(viaMcp.body).toEqual(viaHttp.body);
+      expect((viaHttp.body["rows"] as unknown[]).length).toBeGreaterThan(0);
+    }
   });
 });

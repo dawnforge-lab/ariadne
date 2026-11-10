@@ -228,7 +228,9 @@ import {
   buildCrawlOverview,
   buildIssuesOverview,
   type CrawlOverview,
+  type CrawlOverviewDetail,
   type IssuesOverview,
+  type NotMeasured,
   type SnapshotReader,
 } from "./overview.js";
 import {
@@ -1995,7 +1997,7 @@ export interface ExportResult {
    * absence from the file is "not measured", never "clean"; `[]` on a spider
    * crawl (27c final wave M16).
    */
-  notMeasured?: string[];
+  notMeasured?: NotMeasured;
 }
 
 /**
@@ -2025,7 +2027,7 @@ export interface CsvExportResult {
    */
   disabledRules?: string[];
   /** Beside `disabledRules`, always together (`ExportResult.notMeasured`). */
-  notMeasured?: string[];
+  notMeasured?: NotMeasured;
 }
 
 /** A prepared CSV stream: validated, not yet read. */
@@ -2042,7 +2044,7 @@ export interface CsvStream {
    */
   disabledRules: string[] | null;
   /** Beside `disabledRules`, null with it (`ExportResult.notMeasured`). */
-  notMeasured: string[] | null;
+  notMeasured: NotMeasured | null;
   /**
    * The file, record by record, header first.
    *
@@ -5325,7 +5327,7 @@ export class ApiService {
   ): Promise<
     Page<IssueGroup> & {
       disabledRules: string[];
-      notMeasured: string[];
+      notMeasured: NotMeasured;
       judgementStale: JudgementStale;
     }
   > {
@@ -5461,6 +5463,32 @@ export class ApiService {
     return (await this.crawlOverviewRead(crawlId)).overview;
   }
 
+  /**
+   * `crawlDetailOn` plus the scope-excluded counts, read on the same reader so
+   * they share the overview's snapshot (27a Ruling 14). Null when the crawl's
+   * config has neither `exclude` nor `include`.
+   */
+  private async overviewDetailOn(db: SnapshotReader, crawlId: string): Promise<CrawlOverviewDetail> {
+    const detail = await this.crawlDetailOn(db, crawlId);
+    const scoped = await db.execute<{ scoped: boolean }>(sql`
+      select (jsonb_array_length(coalesce(config_jsonb->'exclude', '[]'::jsonb)) > 0
+           or jsonb_array_length(coalesce(config_jsonb->'include', '[]'::jsonb)) > 0) as scoped
+        from crawls where id = ${crawlId}`);
+    const isScoped = scoped.rows[0]?.scoped;
+    if (typeof isScoped !== "boolean") {
+      throw new Error(`overviewDetailOn: scoped came back as ${typeof isScoped}, not a boolean`);
+    }
+    if (!isScoped) return { ...detail, excluded: null };
+    const rows = await db.execute<{ n: number }>(sql`
+      select count(*)::int as n from pages p
+       where p.crawl_id = ${crawlId} and p.fetch_class = 'excluded'`);
+    const n = rows.rows[0]?.n;
+    if (typeof n !== "number") {
+      throw new Error(`overviewDetailOn: excluded count came back as ${typeof n}, not a number`);
+    }
+    return { ...detail, excluded: { recorded: n, dropped: detail.excludedDropped } };
+  }
+
   /** `crawlOverview` with the judgement view it was built under (one snapshot). */
   private async crawlOverviewRead(
     crawlId: string,
@@ -5469,7 +5497,7 @@ export class ApiService {
       this.db,
       crawlId,
       this.registry,
-      (reader) => this.crawlDetailOn(reader, crawlId),
+      (reader) => this.overviewDetailOn(reader, crawlId),
       (id) => this.ruleFor(id, crawlId, "issues"),
     );
   }
@@ -5977,7 +6005,7 @@ export class ApiService {
   async listMetrics(
     crawlId: string,
     opts: MetricQuery = {},
-  ): Promise<Page<MetricRow> & { notMeasured: string[]; judgementStale: JudgementStale }> {
+  ): Promise<Page<MetricRow> & { notMeasured: NotMeasured; judgementStale: JudgementStale }> {
     // The crawl's judgement, for `judgementStale` and `notMeasured` only: a
     // metric is a stored measurement of the run that wrote it (`site.health`
     // counted the rules that run left enabled), so the flag says whether the
@@ -6155,7 +6183,7 @@ export class ApiService {
     // A metric a list crawl's run left out wrote nothing because it did not
     // run: the note says THAT, never "nothing to measure" (27c final wave M16).
     const note =
-      stored.length === 0 && notMeasured.includes(metricId)
+      stored.length === 0 && notMeasured.some((n) => n.id === metricId)
         ? `crawl ${crawlId} is a list crawl and metric '${metricId}' was not measured: it ` +
           "needs the whole site or a sitemap read the crawl did not make (crawl.list-mode " +
           "names it), so it did not run — the table is empty because nobody looked"
@@ -6612,7 +6640,8 @@ export class ApiService {
       filename: csvFilename(slug(crawlId), "crawl_overview", null),
       // Its issues grid leaves the disabled rules' findings out.
       disabledRules: view.disabledRules,
-      notMeasured: view.notMeasured,
+      // The overview's own, so the export answer equals `crawl_overview`'s.
+      notMeasured: overview.notMeasured,
       async *records(): AsyncGenerator<string> {
         yield csvRecord(CRAWL_OVERVIEW_HEADER);
         for (const cells of crawlOverviewRecords(overview)) yield csvRecord(cells);

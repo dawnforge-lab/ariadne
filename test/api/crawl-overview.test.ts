@@ -677,3 +677,75 @@ describe("crawl_overview render section on a scoped crawl (27c)", () => {
     ]);
   });
 });
+
+describe("crawl_overview counts scope-excluded URLs (27d)", () => {
+  const seedScoped = async (id: string, config: Record<string, unknown>, dropped: number): Promise<void> => {
+    allCrawls.push(id);
+    await seedCrawl(
+      id,
+      [
+        { path: "/" },
+        ...["/fenced/1", "/fenced/2"].map((path) =>
+          NOT_JUDGED({
+            path,
+            fetchClass: "excluded",
+            fetchReason: "crawl scope: matches exclude '*/fenced/*'",
+            statusCode: null,
+            contentType: null,
+            responseTimeMs: null,
+            title: null,
+          }),
+        ),
+      ],
+      { pagesCrawled: 1 },
+    );
+    await db
+      .update(crawls)
+      .set({
+        config: { siteUrl: `${SITE}/`, maxPages: 100, userAgent: "AriadneBot-test", ...config },
+        excludedDropped: dropped,
+      })
+      .where(eq(crawls.id, id));
+  };
+
+  it("names the stored rows (a share of Encountered) and the dropped overflow (no percent)", async () => {
+    const id = `crawl_crawl_overview_excl_${runId}`;
+    await seedScoped(id, { exclude: ["*/fenced/*"] }, 5);
+    const urls = section(await overview(id), "urls");
+    // Encountered is the two stored excluded rows (no frontier rows here), so
+    // the stored entry is all of it.
+    expect(urls.entries.find((e) => e.label === "Encountered")?.value).toBe(2);
+    expect(urls.entries.find((e) => e.label === "Excluded by scope (stored)")).toEqual({
+      label: "Excluded by scope (stored)",
+      value: 2,
+      percent: 100,
+    });
+    expect(urls.entries.find((e) => e.label === "Excluded by scope (dropped)")).toEqual({
+      label: "Excluded by scope (dropped)",
+      value: 5,
+      percent: null,
+    });
+  });
+
+  it("is scoped by `include` too, and an unscoped crawl has neither entry", async () => {
+    const byInclude = `crawl_crawl_overview_incl_${runId}`;
+    await seedScoped(byInclude, { include: ["*/ok/*"] }, 0);
+    const labels = section(await overview(byInclude), "urls").entries.map((e) => e.label);
+    expect(labels).toContain("Excluded by scope (stored)");
+    expect(labels).toContain("Excluded by scope (dropped)");
+
+    const unscoped = `crawl_crawl_overview_unscoped_${runId}`;
+    await seedScoped(unscoped, {}, 0);
+    const none = section(await overview(unscoped), "urls").entries.map((e) => e.label);
+    expect(none.filter((l) => l.startsWith("Excluded by scope"))).toEqual([]);
+  });
+
+  it("export_crawl view=crawl_overview answers the notMeasured crawl_overview names", async () => {
+    const stream = await service.prepareCsvExport(unjudgedId, { view: "crawl_overview" });
+    const named = (await overview(unjudgedId)).notMeasured;
+    expect(named.length).toBeGreaterThan(0);
+    expect(stream.notMeasured).toEqual(named);
+    const answer = await service.exportCrawl(unjudgedId, { format: "csv", view: "crawl_overview" });
+    expect(answer.notMeasured).toEqual(named);
+  });
+});

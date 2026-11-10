@@ -590,12 +590,20 @@ describe("what a list crawl did not measure, on every listing (27c final wave M1
     const issues = await a("GET", `/crawls/${id}/issues?ruleId=links.orphan`);
     expect(issues.status, issues.text).toBe(200);
     expect(issues.body["items"]).toEqual([]);
-    const notMeasured = issues.body["notMeasured"] as string[];
+    const notMeasured = issues.body["notMeasured"] as { id: string; reason: string }[];
+    const notMeasuredIds = notMeasured.map((n) => n.id);
     for (const ruleId of ["links.orphan", "inlinks.distribution", "sitemap.invalid"]) {
-      expect(notMeasured, ruleId).toContain(ruleId);
+      expect(notMeasuredIds, ruleId).toContain(ruleId);
     }
-    expect(notMeasured).not.toContain("links.broken-internal");
-    expect([...notMeasured].sort()).toEqual(notMeasured);
+    expect(notMeasuredIds).not.toContain("links.broken-internal");
+    expect([...notMeasuredIds].sort()).toEqual(notMeasuredIds);
+    // One shape: {id, reason}, the reason a sentence that names why (27d).
+    expect(notMeasured.find((n) => n.id === "links.orphan")?.reason).toBe(
+      "a list crawl follows no links, so this rule's evidence was not gathered",
+    );
+    expect(notMeasured.find((n) => n.id === "sitemap.invalid")?.reason).toBe(
+      "a list crawl read no sitemap, so this rule's evidence was not gathered",
+    );
     expect(issues.body["disabledRules"]).toEqual([]);
     const viaIssues = JSON.parse((await tool("issues_list", { crawlId: id, ruleId: "links.orphan" })).text) as Record<string, unknown>;
     expect(viaIssues["items"]).toEqual([]);
@@ -614,7 +622,7 @@ describe("what a list crawl did not measure, on every listing (27c final wave M1
     expect(overview.status, overview.text).toBe(200);
     expect(overview.body["notMeasured"]).toEqual(notMeasured);
     const rowIds = (overview.body["rows"] as { ruleId: string }[]).map((r) => r.ruleId);
-    for (const ruleId of notMeasured) expect(rowIds, ruleId).not.toContain(ruleId);
+    for (const ruleId of notMeasuredIds) expect(rowIds, ruleId).not.toContain(ruleId);
     expect(rowIds).toContain("crawl.list-mode");
 
     // A rule-scoped table of a skipped rule is refused, as a disabled one is.

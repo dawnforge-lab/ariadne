@@ -1057,8 +1057,8 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "ran and its findings are stored, but its group is left out here — the " +
         "answer's disabledRules names every such rule, so 'filtered out' and 'did " +
         "not fire' stay distinguishable. " +
-        "On a LIST crawl, notMeasured names the rules its rules run did not run " +
-        "(the crawl.list-mode marker's own list; [] on a spider crawl): an empty " +
+        "On a LIST crawl, notMeasured names the rules its rules run did not run, as " +
+        "{id, reason} (the crawl.list-mode marker's own list; [] on a spider crawl): an empty " +
         "answer for one of them is NOT MEASURED, never clean. " +
         "judgementStale {stale, reasons} says " +
         "whether the crawl's judgement has changed since its last rules run " +
@@ -1145,7 +1145,7 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "are null when the crawl has no site.health row (and percentOfJudged when " +
         "pagesJudged is 0). Rules the crawl's judgement disables are left out and " +
         "named in disabledRules; rules a list crawl did not run are never a row, not " +
-        "even a zero, and are named in notMeasured; metric rules never appear. Not " +
+        "even a zero, and are named in notMeasured as {id, reason}; metric rules never appear. Not " +
         "paginated: one row per " +
         "rule, at most the ruleset's rule count.\n\n" +
         "A crawl no rules run has judged is refused (409): an empty overview would " +
@@ -1177,10 +1177,13 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "{id, entries: [{label, value, percent}]}; percent is value over the section's " +
         "total to one decimal place, null when that total is 0. Sections, in order:\n" +
         "  urls: Encountered, Fetched, Not fetched (frontier), Blocked by robots.txt " +
-        "(stored), Blocked by robots.txt (dropped), each taken from crawl_status's own " +
+        "(stored), Blocked by robots.txt (dropped), and on a crawl with exclude or " +
+        "include patterns Excluded by scope (stored) and Excluded by scope (dropped), " +
+        "each taken from crawl_status's own " +
         "fields. Encountered is every frontier row (pending + leased + done + failed + " +
-        "renderPending) plus robotsBlocked.recorded, and the percents are against it. " +
-        "The dropped entry counts DISCOVERIES turned away, is not a subset of " +
+        "renderPending) plus robotsBlocked.recorded plus the stored excluded rows, and " +
+        "the percents are against it. " +
+        "Each dropped entry counts DISCOVERIES turned away, is not a subset of " +
         "Encountered, and its percent is null. The entries do not sum.\n" +
         "  fetch-class, status-class (2xx, 3xx, 4xx, 5xx, No response; Other status " +
         "only when a code outside 200-599 was stored), indexability (Indexable, then " +
@@ -1351,7 +1354,7 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "record (never judged, being judged now, or a run that died part-way). " +
         "Read it before you quote a number that is not there. " +
         "On a LIST crawl, notMeasured names the metrics (and rules) its rules run " +
-        "did not run — an empty answer for one is NOT MEASURED; [] on a spider " +
+        "did not run, as {id, reason} — an empty answer for one is NOT MEASURED; [] on a spider " +
         "crawl.\n\n" +
         "Filters, each refused by name if it names nothing this crawl measured:\n" +
         `  metricId   — a single metric, e.g. redirect.volume\n` +
@@ -1880,7 +1883,7 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "on the issues dataset: the rules the crawl's judgement disables, whose " +
         "findings the file leaves out (the issues and issue_urls CSV views leave " +
         "them out too, and issue_urls of a disabled rule is refused), and beside it " +
-        "notMeasured, the rules a list crawl did not run.\n" +
+        "notMeasured, the rules a list crawl did not run, as {id, reason}.\n" +
         `  format=csv writes a spreadsheet of one VIEW: ${CSV_VIEWS.join(", ")} ` +
         "(default issues). issue_urls is one rule's findings and needs a ruleId; " +
         "metric_table is one metric's table and needs a metricId; issues_overview is " +

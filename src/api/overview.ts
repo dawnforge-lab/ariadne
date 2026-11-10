@@ -65,7 +65,7 @@ export interface IssuesOverview {
    * never a row, not even with `includeZero` — a zero would read "clean" where
    * nobody looked (27c final wave M16). `[]` on a spider crawl.
    */
-  notMeasured: string[];
+  notMeasured: NotMeasured;
   judgementStale: JudgementStale;
 }
 
@@ -207,7 +207,7 @@ async function issuesOverviewIn(
     for (const rule of registry.all()) {
       if (rule.kind === "metric" || counts.has(rule.id)) continue;
       if (view.disabledRules.includes(rule.id)) continue;
-      if (view.notMeasured.includes(rule.id)) continue;
+      if (view.notMeasured.some((n) => n.id === rule.id)) continue;
       rows.push(rowFor(rule.id, 0));
     }
   }
@@ -287,9 +287,12 @@ export interface OverviewSection {
 export interface CrawlOverview {
   crawlId: string;
   sections: OverviewSection[];
-  notMeasured: { id: string; reason: string }[];
+  notMeasured: NotMeasured;
   judgementStale: JudgementStale;
 }
+
+/** What a response could not measure: the id, and why. One shape on every response. */
+export type NotMeasured = { id: string; reason: string }[];
 
 /** The `notMeasured` reasons, stated once so the docs and tests quote them. */
 export const NOT_MEASURED_REASONS = {
@@ -309,6 +312,12 @@ export interface CrawlOverviewDetail {
   renderPassCount: number;
   frontier: { pending: number; leased: number; done: number; failed: number; renderPending: number };
   robotsBlocked: { recorded: number; dropped: number | null };
+  /**
+   * The crawl's scope-excluded URLs (`exclude` / `include` patterns): `recorded` is the
+   * `fetch_class = 'excluded'` page rows, `dropped` is `crawls.excluded_dropped`. Null when
+   * the crawl's config has neither list: an unscoped crawl excludes nothing.
+   */
+  excluded: { recorded: number; dropped: number | null } | null;
 }
 
 /** What a section's statements run on: the overview's snapshot transaction. */
@@ -334,7 +343,13 @@ function byCountThenLabel(a: readonly [string, number], b: readonly [string, num
 function urlsSection(detail: CrawlOverviewDetail): OverviewSection {
   const f = detail.frontier;
   const encountered =
-    f.pending + f.leased + f.done + f.failed + f.renderPending + detail.robotsBlocked.recorded;
+    f.pending +
+    f.leased +
+    f.done +
+    f.failed +
+    f.renderPending +
+    detail.robotsBlocked.recorded +
+    (detail.excluded?.recorded ?? 0);
   const share = (label: string, value: number): OverviewEntry => ({
     label,
     value,
@@ -354,6 +369,11 @@ function urlsSection(detail: CrawlOverviewDetail): OverviewSection {
       ...(dropped === null
         ? []
         : [{ label: "Blocked by robots.txt (dropped)", value: dropped, percent: null }]),
+      ...(detail.excluded === null ? [] : [share("Excluded by scope (stored)", detail.excluded.recorded)]),
+      // Discoveries past the stored-row budget, like the robots count: no percent.
+      ...(detail.excluded === null || detail.excluded.dropped === null
+        ? []
+        : [{ label: "Excluded by scope (dropped)", value: detail.excluded.dropped, percent: null }]),
     ],
   };
 }
@@ -777,7 +797,7 @@ export async function buildCrawlOverview(
     const slowMs = view.copyThresholds.SLOW_MS;
 
     const sections: OverviewSection[] = [];
-    const notMeasured: { id: string; reason: string }[] = [];
+    const notMeasured: NotMeasured = [];
     const skip = (id: NotMeasuredId): void => {
       notMeasured.push({ id, reason: NOT_MEASURED_REASONS[id] });
     };
