@@ -173,7 +173,13 @@ async function main(): Promise<number> {
       `writer          pages ${summary.writer.pages}, links ${summary.writer.links}, ` +
         `hreflang ${summary.writer.hreflang}, structured data ${summary.writer.structuredData}`,
     );
-    console.log(`sitemap entries ${summary.discovery.sitemapEntries.toLocaleString()}`);
+    console.log(
+      `sitemap entries ${
+        summary.discovery === null
+          ? "none: stopped before discovery was recorded"
+          : summary.discovery.sitemapEntries.toLocaleString()
+      }`,
+    );
     console.log(`elapsed         ${(elapsedMs / 1000).toFixed(1)}s`);
     console.log(`throughput      ${(summary.pagesCrawled / (elapsedMs / 1000)).toFixed(1)} pages/sec`);
     console.log(`PEAK RSS        ${(peak / MB).toFixed(1)} MB (at +${(sampler.peakAtMs() / 1000).toFixed(0)}s)`);

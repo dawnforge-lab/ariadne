@@ -233,8 +233,50 @@ const UNREACHABLE_CRAWL_DELAY_SEC = 5;
  */
 const MAX_CRAWL_DELAY_MS = 30_000;
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+/**
+ * Thrown (never returned) when the caller's `DiscoveryOpts.signal` aborts
+ * discovery — a pause, a cancel or a shutdown of the crawl (Phase 27d). A stop
+ * is not a fact about the site, so it is never a failed document, never
+ * `timeLimited` (the walk budget is a separate cause) and never a robots
+ * outcome: what discovery had learned is dropped, and the crawl loop closes the
+ * run stopped.
+ */
+export class DiscoveryAbortedError extends Error {
+  /** The document discovery was requesting, or about to request. */
+  readonly url: string;
+  constructor(url: string, options?: { cause?: unknown }) {
+    super(`discovery stopped at ${url}: aborted by the crawl's signal`, options);
+    this.name = "DiscoveryAbortedError";
+    this.url = url;
+  }
+}
+
+/** Throw `DiscoveryAbortedError` naming `url` if the caller has aborted. */
+function throwIfStopped(signal: AbortSignal | undefined, url: string): void {
+  if (signal?.aborted === true) throw new DiscoveryAbortedError(url);
+}
+
+/**
+ * Wait `ms`, or reject with `DiscoveryAbortedError` (naming `url`, the document
+ * the wait comes before) as soon as `signal` aborts: a stop never sits out a
+ * crawl-delay of up to 30 s.
+ */
+function sleep(ms: number, signal: AbortSignal | undefined, url: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted === true) {
+      reject(new DiscoveryAbortedError(url));
+      return;
+    }
+    const onAbort = (): void => {
+      clearTimeout(timer);
+      reject(new DiscoveryAbortedError(url));
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
 }
 
 /** gzip's two magic bytes. Trusted over the headers — see decompress. */
@@ -506,6 +548,14 @@ export interface DiscoveryOpts {
   robotsTiming?: DocTiming;
   /** Wall-clock budget of the whole sitemap walk. Default DISCOVERY_WALK_BUDGET_MS. */
   walkBudgetMs?: number;
+  /**
+   * The crawl's control signal (Phase 27d). Every request (robots.txt, each
+   * sitemap, every redirect hop) and every wait (the robots retry backoff, the
+   * walk's pacing) honours it, and the walk checks it between documents. An
+   * abort rejects with `DiscoveryAbortedError`: never a failed document, never
+   * `timeLimited`.
+   */
+  signal?: AbortSignal;
   /** Overrides the in-memory entry cap. See MAX_SITEMAP_ENTRIES. */
   maxEntries?: number;
   /**
@@ -839,7 +889,9 @@ class ReaderFault extends Error {
  * The document's clocks (`DocTimer`) run while `read` reads, less any time it
  * pauses them, and the limit that fired names the failure. A walk budget
  * (`walkSignal`) that runs out mid-request is reported as `budgetHit`, not as
- * a failure of the document. Whatever `read` throws is classified like a failed request — a reset, a
+ * a failure of the document. The caller's `opts.signal` is a separate cause:
+ * its abort is rethrown as `DiscoveryAbortedError` ahead of any classification.
+ * Whatever `read` throws is classified like a failed request — a reset, a
  * timeout, a corrupt gzip — unless it is a programmer error or a `ReaderFault`.
  */
 async function requestDoc<T>(
@@ -862,8 +914,14 @@ async function requestDoc<T>(
   // One timer for the whole document, so `totalMs` spans the redirect hops.
   const timer = new DocTimer(timing, walkSignal);
 
+  // The caller's stop, beside the document's own clocks: either aborts the
+  // request, and the caller's is told apart by asking it, never by `timer.hit`.
+  const stop = opts.signal;
+  const requestSignal = stop === undefined ? timer.signal : AbortSignal.any([timer.signal, stop]);
+
   try {
   for (let hop = 0; hop <= MAX_REDIRECT_HOPS; hop++) {
+    throwIfStopped(stop, url);
     const verdict = await isUrlAllowed(url, { allowPrivate });
     if (!verdict.allowed) {
       return failed(failedDoc(url, `refused by URL policy: ${verdict.reason}`, null, true));
@@ -880,7 +938,7 @@ async function requestDoc<T>(
           "user-agent": opts.userAgent,
           accept: "text/plain,application/xml,text/xml,application/gzip;q=0.9,*/*;q=0.8",
         },
-        signal: timer.signal,
+        signal: requestSignal,
         // Backstops only: our own timers decide, and name, which limit fired.
         // The headers one is a second wider so ours always fires first; the
         // body one is the document total, and our idle timer is the real limit.
@@ -919,6 +977,10 @@ async function requestDoc<T>(
       if (error instanceof ReaderFault) throw error.fault;
       // Our bug, not theirs — the same contract fetch-page keeps.
       if (isProgrammerError(error)) throw error;
+      // A stop, ahead of every classification below: whatever the abort did to
+      // the request (an AbortError, a destroyed body mid-stream), it says
+      // nothing about the site, and a document it cut short has not failed.
+      if (stop?.aborted === true) throw new DiscoveryAbortedError(url, { cause: error });
       const refusal = blockedAddressMessage(error);
       if (refusal !== null) {
         return failed(failedDoc(url, `refused at connect: ${refusal}`, null, true));
@@ -1127,7 +1189,7 @@ export async function fetchRobots(
   while (!doc.ok && classifyRobotsFailure(doc) === "retry" && attempts < ROBOTS_ATTEMPTS) {
     // Linear backoff, deliberately short: this is a 60-byte text file, and the
     // origin is already unhappy. Three tries, ~750ms, then we stop asking.
-    await sleep(backoffMs * attempts);
+    await sleep(backoffMs * attempts, opts.signal, robotsUrl);
     doc = await fetchDoc(robotsUrl, ROBOTS_MAX_BYTES, opts);
     attempts++;
   }
@@ -1336,7 +1398,8 @@ function startingSources(declared: readonly string[], supplied: readonly string[
  * sitemap that 404s, a 200 that is really an HTML error page and a 60MB
  * shard are all recorded facts on the result. It does throw for our own bugs
  * (a malformed user agent), for the same reason fetch-page does — and for a
- * sink that cannot write, which is ours too.
+ * sink that cannot write, which is ours too. A stop on `opts.signal` rejects
+ * with `DiscoveryAbortedError` (Phase 27d), whatever was in flight.
  *
  * Sitemap sources are exactly the ones robots.txt declares plus the caller's
  * `extraSitemaps`; there is no speculative probe of `/sitemap.xml`, because a
@@ -1590,6 +1653,8 @@ export async function discover(
   while (queue.length > 0) {
     const next = queue.shift();
     if (next === undefined) break;
+    // Between documents: a stop ends the walk before the next one is looked at.
+    throwIfStopped(opts.signal, next.url);
     if (seen.has(next.url)) continue;
     seen.add(next.url);
 
@@ -1618,9 +1683,11 @@ export async function discover(
       // Measured from the end of the previous request, so a slow document
       // never shortens the gap the site asked for.
       const waited = Date.now() - lastRequestAt;
-      if (waited < crawlDelayMs) await sleep(crawlDelayMs - waited);
+      if (waited < crawlDelayMs) await sleep(crawlDelayMs - waited, opts.signal, next.url);
     }
     // Documents are still queued, and the budget is spent: cut short, not failed.
+    // A stop is a separate cause, and is never this: it is asked first.
+    throwIfStopped(opts.signal, next.url);
     if (budget.signal.aborted) {
       truncation.timeLimited = true;
       break;

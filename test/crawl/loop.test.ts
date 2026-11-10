@@ -633,7 +633,7 @@ describe("runCrawl", () => {
     // is asserted is that the column is written at all, never left at its
     // pre-Phase-4 default.
     expect(rows.map((r) => r.urlNormalised).sort()).toEqual([`${base}/`, `${base}/d`]);
-    expect(summary.discovery.sitemapEntries).toBe(2);
+    expect(summary.discovery?.sitemapEntries).toBe(2);
   });
 
   /**
@@ -675,9 +675,9 @@ describe("runCrawl", () => {
     const summary = await crawl(
       config({ sitemapUrls: [`${base}/sitemap.xml#gid=0`] }),
     );
-    expect(summary.discovery.truncation.docsFetched).toBe(1);
-    expect(summary.discovery.sitemapEntries).toBe(2);
-    expect(summary.discovery.truncation.failures).toEqual([]);
+    expect(summary.discovery?.truncation.docsFetched).toBe(1);
+    expect(summary.discovery?.sitemapEntries).toBe(2);
+    expect(summary.discovery?.truncation.failures).toEqual([]);
   });
 
   it("respects maxPages", async () => {
@@ -691,9 +691,9 @@ describe("runCrawl", () => {
 
   it("abort signal stops the loop and releases nothing into limbo", async () => {
     const ac = new AbortController();
-    setTimeout(() => ac.abort(), 50);
+    let grants = 0; // aborted at the page loop's second slot: past discovery, which a stop now cuts short (27d)
     // Paced so the abort lands mid-crawl rather than after it.
-    const summary = await crawl(config({ perHostDelayMs: 40 }), ac.signal);
+    const summary = await crawl(config({ perHostDelayMs: 40 }), ac.signal, { onGrant: () => void (++grants === 2 && ac.abort()) });
 
     const counts = await frontierCounts(db, summary.crawlId);
     expect(counts.leased).toBe(0); // graceful shutdown released leases
@@ -779,7 +779,7 @@ describe("runCrawl", () => {
     expect(summary.status).toBe("failed");
     expect(summary.pagesCrawled).toBe(0);
     expect(summary.note).toMatch(/robots\.txt unreachable/);
-    expect(summary.robots.outcome).toBe("unreachable");
+    expect(summary.robots?.outcome).toBe("unreachable");
 
     const crawlRow = await db.select().from(crawls).where(eq(crawls.id, summary.crawlId));
     expect(crawlRow[0]?.status).toBe("failed");
@@ -930,7 +930,7 @@ describe("runCrawl", () => {
     const summary = await crawl(config({ siteUrl: closed }));
     expect(summary.status).toBe("finished");
     expect(summary.pagesCrawled).toBe(0);
-    expect(summary.robots.outcome).toBe("read");
+    expect(summary.robots?.outcome).toBe("read");
     expect(summary.note).toMatch(/nothing to crawl/);
     expect(summary.frontier).toEqual({
       pending: 0, leased: 0, done: 0, failed: 0, renderPending: 0,
@@ -1554,8 +1554,8 @@ describe("crawl-level evidence", () => {
 describe("resumeCrawl", () => {
   it("continues a cancelled crawl instead of restarting it", async () => {
     const ac = new AbortController();
-    setTimeout(() => ac.abort(), 50);
-    const first = await crawl(config({ perHostDelayMs: 40 }), ac.signal);
+    let grants = 0; // aborted at the page loop's second slot: past discovery, which a stop now cuts short (27d)
+    const first = await crawl(config({ perHostDelayMs: 40 }), ac.signal, { onGrant: () => void (++grants === 2 && ac.abort()) });
     expect([first.status, first.pauseReason]).toEqual(["paused", "shutdown"]);
     expect(first.pagesCrawled).toBeLessThan(6);
 
@@ -1589,8 +1589,8 @@ describe("resumeCrawl", () => {
   // which is the same defect `renderPaceMs` fixed for the render pass in Phase 6.
   it("resumes at the spacing the crawl earned, not the one it was configured with", async () => {
     const ac = new AbortController();
-    setTimeout(() => ac.abort(), 50);
-    const first = await crawl(config({ perHostDelayMs: 40 }), ac.signal);
+    let grants = 0; // aborted at the page loop's second slot: past discovery, which a stop now cuts short (27d)
+    const first = await crawl(config({ perHostDelayMs: 40 }), ac.signal, { onGrant: () => void (++grants === 2 && ac.abort()) });
     expect([first.status, first.pauseReason]).toEqual(["paused", "shutdown"]);
 
     // What the first run would have written had the site refused it: the column
@@ -1621,8 +1621,8 @@ describe("resumeCrawl", () => {
   // "re-enters each host at ITS OWN earned spacing".
   it("resumes each host at its own earned spacing from the per-host map", async () => {
     const ac = new AbortController();
-    setTimeout(() => ac.abort(), 50);
-    const first = await crawl(config({ perHostDelayMs: 40 }), ac.signal);
+    let grants = 0; // aborted at the page loop's second slot: past discovery, which a stop now cuts short (27d)
+    const first = await crawl(config({ perHostDelayMs: 40 }), ac.signal, { onGrant: () => void (++grants === 2 && ac.abort()) });
     expect([first.status, first.pauseReason]).toEqual(["paused", "shutdown"]);
 
     const host = new URL(base).host;
@@ -1721,8 +1721,8 @@ describe("resumeCrawl", () => {
   // honest degradation, never a fabricated split.
   it("falls back to the crawl-wide spacing when the per-host map is null (pre-0015)", async () => {
     const ac = new AbortController();
-    setTimeout(() => ac.abort(), 50);
-    const first = await crawl(config({ perHostDelayMs: 40 }), ac.signal);
+    let grants = 0; // aborted at the page loop's second slot: past discovery, which a stop now cuts short (27d)
+    const first = await crawl(config({ perHostDelayMs: 40 }), ac.signal, { onGrant: () => void (++grants === 2 && ac.abort()) });
     expect([first.status, first.pauseReason]).toEqual(["paused", "shutdown"]);
 
     // The crawl-wide number only — no map, as a row written before 0015 carries.
@@ -1806,8 +1806,8 @@ describe("resumeCrawl", () => {
 
   it("re-fetches a URL whose page row a hard kill left in the buffer", async () => {
     const ac = new AbortController();
-    setTimeout(() => ac.abort(), 50);
-    const first = await crawl(config({ perHostDelayMs: 40 }), ac.signal);
+    let grants = 0; // aborted at the page loop's second slot: past discovery, which a stop now cuts short (27d)
+    const first = await crawl(config({ perHostDelayMs: 40 }), ac.signal, { onGrant: () => void (++grants === 2 && ac.abort()) });
     expect([first.status, first.pauseReason]).toEqual(["paused", "shutdown"]);
 
     // The worker that gets killed: it leases a URL, fetches it, buffers the
@@ -2028,8 +2028,8 @@ describe("the test-only config fields are not persisted", () => {
 
   it("comes back when the caller re-asserts it in the resume config", async () => {
     const ac = new AbortController();
-    setTimeout(() => ac.abort(), 50);
-    const first = await crawl(config({ perHostDelayMs: 40 }), ac.signal);
+    let grants = 0; // aborted at the page loop's second slot: past discovery, which a stop now cuts short (27d)
+    const first = await crawl(config({ perHostDelayMs: 40 }), ac.signal, { onGrant: () => void (++grants === 2 && ac.abort()) });
     expect([first.status, first.pauseReason]).toEqual(["paused", "shutdown"]);
 
     // The same resume, with the hatch re-stated at the call site — explicit,

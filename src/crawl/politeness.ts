@@ -1023,8 +1023,8 @@ export class HostGate {
    * gate from `host_spacing_jsonb`). With no signal this is the old acquire,
    * always `true`.
    *
-   * Overloaded so the callers that pass no signal (the host probe, the
-   * renderer, the 404 probe) keep `Promise<void>` exactly as before; only a
+   * Overloaded so the callers that pass no signal (the renderer, the 404
+   * probe) keep `Promise<void>` exactly as before; only a
    * caller that hands a signal over gets the answer to branch on.
    */
   acquire(host: string): Promise<void>;
