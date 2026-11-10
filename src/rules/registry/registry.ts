@@ -988,7 +988,14 @@ const KINDS = ["page", "query", "metric"] as const satisfies readonly AnyRule["k
 //     run, and the marker names them under `partiallyMeasured`. A spider
 //     crawl's findings do not move. 189 rules:
 //     72 page / 103 query / 14 metric.
-export const RULESET_VERSION = "0.24.0";
+// 0.25.0: Phase 27d — the sitemap walk has a time budget; a walk that ran out
+//     of it records `truncation.timeLimited`, which the hreflang rules read as
+//     a cut-short sitemap (`sitemapHreflangCutShort`), and the marker
+//     `hreflang.declarations-incomplete` names it (evidence `timeLimited`, a
+//     column and a sentence in its `reason`). A crawl without the key reads as
+//     false. The sitemap documents' own failure reasons changed wording
+//     ("no headers within 60 s", ...), which `sitemap.invalid` quotes.
+export const RULESET_VERSION = "0.25.0";
 
 /**
  * The 47 crawl-derived checks (sf-audit checklist, Pre-Crawl + sections 1–11):

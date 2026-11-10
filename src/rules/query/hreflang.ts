@@ -812,6 +812,7 @@ async function declarationsIncompleteFindings(db: Db, crawlId: string): Promise<
         entryLimited: reading?.entryLimited ?? null,
         docLimited: reading?.docLimited ?? null,
         depthLimited: reading?.depthLimited ?? null,
+        timeLimited: reading?.timeLimited ?? null,
         sitemapDocsFailed: reading?.sitemapDocsFailed ?? null,
         sitemapDocsOversized: reading?.sitemapDocsOversized ?? null,
         alternatesCapped: reading?.alternatesCapped ?? null,
@@ -820,6 +821,18 @@ async function declarationsIncompleteFindings(db: Db, crawlId: string): Promise<
       dedupeKey: "site",
     }),
   ];
+}
+
+/** The time budget is the only reason the sitemaps were cut short. */
+function onlyTimeLimited(reading: SitemapHreflangReading): boolean {
+  return (
+    reading.timeLimited &&
+    !reading.hreflangLimited &&
+    !reading.entryLimited &&
+    !reading.docLimited &&
+    !reading.depthLimited &&
+    reading.sitemapDocsOversized === 0
+  );
 }
 
 /** `count` and the word for it, singular or plural. */
@@ -839,9 +852,14 @@ function incompleteReason(
   possiblyCappedPages: number,
 ): string {
   const said: string[] = [];
-  if (cutShort(reading)) {
+  if (cutShort(reading) && !(reading !== null && onlyTimeLimited(reading))) {
     said.push(
       "The sitemaps were only partly read because a size, entry, file-count or nesting limit was reached, so missing return links, missing self-references, missing x-default and sets naming only the page itself were not checked.",
+    );
+  }
+  if (reading !== null && reading.timeLimited) {
+    said.push(
+      "The sitemaps were only partly read because the sitemap walk ran out of time (timeLimited), so missing return links, missing self-references, missing x-default and sets naming only the page itself were not checked.",
     );
   }
   if (reading !== null && reading.sitemapDocsFailed > 0) {
@@ -1204,6 +1222,7 @@ export const hreflangRules: QueryRule[] = [
       { key: "entryLimited", label: "Sitemap Entry Limit Reached" },
       { key: "docLimited", label: "Sitemap Document Limit Reached" },
       { key: "depthLimited", label: "Sitemap Depth Limit Reached" },
+      { key: "timeLimited", label: "Sitemap Time Limit Reached" },
       { key: "sitemapDocsFailed", label: "Sitemaps Not Read" },
       { key: "sitemapDocsOversized", label: `Sitemaps Over ${SITEMAP_MAX_BYTES / (1024 * 1024)} MB` },
       {

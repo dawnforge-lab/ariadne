@@ -511,7 +511,7 @@ export async function fetchCrawlResources(
                 {
                   userAgent: opts.userAgent,
                   allowPrivate,
-                  timeoutMs,
+                  robotsTiming: { headersMs: timeoutMs, idleMs: timeoutMs, totalMs: timeoutMs },
                   retryBackoffMs: opts.robotsRetryBackoffMs,
                   // Decided per hop by discovery: another host's robots.txt
                   // gets nothing, unless a redirect brings it back home.

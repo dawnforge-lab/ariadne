@@ -67,6 +67,7 @@ describe("hreflang.declarations-incomplete metadata", () => {
       "entryLimited",
       "docLimited",
       "depthLimited",
+      "timeLimited",
       "sitemapDocsFailed",
       "sitemapDocsOversized",
       "alternatesCapped",
@@ -224,6 +225,7 @@ describe("hreflang.declarations-incomplete against the database", () => {
     entryLimited: false,
     docLimited: false,
     depthLimited: false,
+    timeLimited: false,
     sitemapDocsFailed: 0,
     sitemapDocsOversized: 0,
     alternatesCapped: 0,
@@ -576,6 +578,7 @@ describe("hreflang.declarations-incomplete against the database", () => {
       entryLimited: null,
       docLimited: null,
       depthLimited: null,
+      timeLimited: null,
       sitemapDocsFailed: null,
       sitemapDocsOversized: null,
       alternatesCapped: null,
@@ -615,5 +618,40 @@ describe("hreflang.declarations-incomplete against the database", () => {
     });
     await expect(run(MARKER, crawlId)).rejects.toThrow(/docLimited/);
     await expect(run(RETURN_LINK, crawlId)).rejects.toThrow(/docLimited/);
+  });
+
+  // Phase 27d: the walk's time budget.
+  it("(27d) a walk cut short by its time budget refuses the four rules and the marker names timeLimited", async () => {
+    const crawlId = await newCrawl(mkDiscovery({ truncation: { timeLimited: true } }));
+    await seedAbsences(crawlId);
+    expect(await absenceCounts(crawlId)).toEqual(NONE_FIRE);
+    const found = await run(MARKER, crawlId);
+    expect(found).toHaveLength(1);
+    expect(withoutReason(found[0]!)).toEqual({ ...CLEAN, timeLimited: true });
+    const reason = String(found[0]!.evidence.reason);
+    expect(reason).toMatch(/timeLimited/);
+    // Only the time budget fired: the size / entry / nesting sentence is not said.
+    expect(reason).not.toMatch(/size, entry, file-count or nesting limit/);
+  });
+
+  it("(27d) a pre-27d truncation without timeLimited reads as false", async () => {
+    const discovery = mkDiscovery();
+    const { timeLimited: _dropped, ...truncation } = discovery.truncation;
+    const crawlId = await newCrawl({
+      ...discovery,
+      truncation: truncation as DiscoveryEvidence["truncation"],
+    });
+    await seedAbsences(crawlId);
+    expect(await run(MARKER, crawlId)).toEqual([]);
+    expect(await absenceCounts(crawlId)).toEqual(ALL_FIRE);
+  });
+
+  it("(27d) a non-boolean timeLimited is a loud error, not false", async () => {
+    const discovery = mkDiscovery();
+    const crawlId = await newCrawl({
+      ...discovery,
+      truncation: { ...discovery.truncation, timeLimited: "yes" } as unknown as DiscoveryEvidence["truncation"],
+    });
+    await expect(run(MARKER, crawlId)).rejects.toThrow(/timeLimited/);
   });
 });
