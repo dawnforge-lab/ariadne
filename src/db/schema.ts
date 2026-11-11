@@ -1,7 +1,7 @@
 import { sql } from "drizzle-orm";
 import {
   pgTable, text, integer, smallint, bigint, boolean, jsonb, timestamp, real,
-  primaryKey, index, uniqueIndex,
+  primaryKey, index, uniqueIndex, customType,
 } from "drizzle-orm/pg-core";
 import type { StoredHostSpacing } from "../crawl/politeness.js";
 import type { StoredPlatformProfile } from "../crawl/platform.js";
@@ -40,7 +40,8 @@ export const crawls = pgTable("crawls", {
   // check constraints):
   //  - control_request: "pause" | "cancel", non-null only while status='running'
   //    (a request the loop has not yet acted on);
-  //  - pause_reason: "request" | "shutdown", non-null exactly when status='paused';
+  //  - pause_reason: "request" | "shutdown" | "credentials_unreadable" (28b),
+  //    non-null exactly when status='paused';
   //  - cancelled_at: set only when status='cancelled'.
   controlRequest: text("control_request"),
   pauseReason: text("pause_reason"),
@@ -383,6 +384,15 @@ export const crawls = pgTable("crawls", {
   // no render pass was ever started, or the crawl predates 0025. Read it beside
   // the render pass columns, never alone.
   renderLaunchError: text("render_launch_error"),
+  // HOW MANY TIMES THIS CRAWL'S CREDENTIALS HAVE BEEN WRITTEN (migration 0039,
+  // Phase 28b). `CredentialVault.write` bumps it in the same transaction as the
+  // `crawl_credentials` row it writes, and the row is encrypted with
+  // `${crawl_id}:${credential_generation}` as its associated data, so a
+  // ciphertext replayed from an earlier write fails authentication. It lives on
+  // the crawl rather than on the credentials row because that row is deleted
+  // when the credentials are removed: a counter on it would restart and let a
+  // removed generation's ciphertext authenticate again. 0 means never written.
+  credentialGeneration: integer("credential_generation").notNull().default(0),
 }, (t) => [
   // The order `listCrawls` pages by, scoped to a tenant (28a).
   index("crawls_tenant_started").on(t.tenantId, t.startedAt.desc(), t.id.desc()),
@@ -1410,3 +1420,37 @@ export const listUrls = pgTable("list_urls", {
 }, (t) => [
   primaryKey({ columns: [t.crawlId, t.position] }),
 ]);
+
+/** Postgres `bytea`, read and written as a Node `Buffer` (node-postgres's own mapping). */
+const bytea = customType<{ data: Buffer; driverData: Buffer }>({
+  dataType() {
+    return "bytea";
+  },
+});
+
+/**
+ * A crawl's credential VALUES, encrypted (migration 0039, Phase 28b item 10),
+ * so a crawl can be resumed, rendered or run by another process without Talos
+ * sending them again. Written and read only through `CredentialVault`
+ * (src/crawl/credential-vault.ts); no other code reads `ciphertext`.
+ *
+ * AES-256-GCM: `nonce` is a fresh random 12 bytes per write, `ciphertext` is
+ * the encrypted JSON of `CrawlCredentials` with the 16-byte tag appended, and
+ * the associated data is `${crawl_id}:${crawls.credential_generation}`. `key_id`
+ * names the key it was written under (`ARIADNE_CREDENTIALS_KEY`'s id); the key
+ * itself is never in the database. `generation` repeats the crawl's counter at
+ * the write, and a row whose generation is not the crawl's is not read.
+ *
+ * One row per crawl at most. Deleted on `crawl_cancel` and `crawl_delete`, when
+ * `crawl_config_set` removes the last credential, and by the retention sweep
+ * (`sweepExpired`) once the crawl has been settled for the retention period.
+ */
+export const crawlCredentials = pgTable("crawl_credentials", {
+  crawlId: text("crawl_id").primaryKey().references(() => crawls.id, { onDelete: "cascade" }),
+  tenantId: text("tenant_id").notNull(),
+  generation: integer("generation").notNull(),
+  keyId: text("key_id").notNull(),
+  nonce: bytea("nonce").notNull(),
+  ciphertext: bytea("ciphertext").notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+});

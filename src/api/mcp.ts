@@ -302,9 +302,10 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "crawl_config_set.\n\n" +
         "CREDENTIALS. requestHeaders, httpAuth (Basic) and cookies reach only the site's " +
         "own hosts (never a CDN or another host, never https credentials over http), " +
-        "are held in this server's memory only — never stored, logged or answered — and " +
-        "after a server restart must be sent again on crawl_resume / crawl_render " +
-        "(refused with code CREDENTIALS_REQUIRED until they are). They cannot change the " +
+        "are stored only encrypted (for the crawl's resumes and renders, across server " +
+        "restarts) — never logged or answered — and are deleted on cancel and delete. If " +
+        "the stored copy cannot be read, crawl_resume / crawl_render refuse with code " +
+        "CREDENTIALS_REQUIRED until they are sent again there. They cannot change the " +
         "user agent, the pacing floor or robots.txt.",
       // The crawl-start body schema itself: one declaration for both
       // transports, so an argument this refuses is a body POST /crawls refuses.
@@ -473,7 +474,9 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "This is the polling tool. status is one of queued, running, paused, " +
         "finished, cancelled, failed. finished, cancelled and failed are terminal; " +
         "paused is a stop that crawl_resume continues, with pauseReason 'request' " +
-        "(crawl_pause) or 'shutdown' (the server stopped mid-run). cancelled is " +
+        "(crawl_pause), 'shutdown' (the server stopped mid-run) or " +
+        "'credentials_unreadable' (its stored credentials could not be read when it was " +
+        "picked up, so nothing was fetched: crawl_resume with them continues it). cancelled is " +
         "final — crawl_resume refuses it; cancelledAt says when, and neverFetched " +
         "counts the URLs it never asked for (null on a crawl cancelled before it ran: " +
         "nothing was seen, which is not zero). controlRequested is a pause or cancel " +
@@ -632,12 +635,15 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "resource pass — and a paused crawl may owe that work with no row " +
         "counting it, so the resume runs to find out.\n\n" +
         "CREDENTIALS. A crawl started with requestHeaders, httpAuth or cookies keeps " +
-        "them only in the server's memory. After a server restart they are gone, and " +
-        "this tool refuses with code CREDENTIALS_REQUIRED (409), naming the fields and " +
-        "header/cookie names it needs, until you send them again here — exactly those " +
+        "them stored encrypted, and a resume uses them without your sending them, after " +
+        "a server restart too. When the stored copy cannot be read (the server's key " +
+        "changed, or it was deleted after the crawl finished), the crawl is paused " +
+        "'credentials_unreadable' and this tool refuses with code CREDENTIALS_REQUIRED " +
+        "(409), naming the fields and header/cookie names it needs, until you send them " +
+        "again here — exactly those " +
         "kinds and names (crawl_config_get shows them, values [redacted]); another " +
         "shape is a VALIDATION refusal. A crawl that needed them never runs without " +
-        "them. Values sent are never stored, logged or answered. A crawl started " +
+        "them. Values sent replace the stored copy and are never logged or answered. A crawl started " +
         "without credentials cannot be given them here: set them with " +
         "crawl_config_set while it is paused.\n\n" +
         "SCOPE. Before its first fetch the resumed run re-applies the crawl's current " +
@@ -800,8 +806,8 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "spelling come back as 'policy refusal' render errors. '<host> has no A or " +
         "AAAA record' for www. is normal on a site with no www record.\n\n" +
         "CREDENTIALS. A crawl started with requestHeaders, httpAuth or cookies renders " +
-        "with them, sent only to the site's own hosts. After a server restart (or a " +
-        "cancel) the server no longer holds them: this tool refuses with code " +
+        "with them, sent only to the site's own hosts, from the stored copy. After a " +
+        "cancel, or when the stored copy cannot be read, this tool refuses with code " +
         "CREDENTIALS_REQUIRED (409) until you send them here, of exactly the shape " +
         "crawl_config_get shows. A crawl started without credentials cannot be " +
         "rendered with them: set them with crawl_config_set while it is paused, or " +
@@ -931,10 +937,10 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "with one field edited. A changed exclude or include stamps scopeChangedAt, " +
         "and the resumed run files the pending URLs the new lists refuse as " +
         "excluded rows; pages already fetched stay. Credentials sent here replace " +
-        "the ones this server holds (each field whole; an empty requestHeaders or " +
-        "cookies, or httpAuth null — the one null accepted here — drops that kind) " +
-        "and are never stored, logged or answered; after a " +
-        "server restart a change must send every credential the crawl needs, or it " +
+        "the stored ones (each field whole; an empty requestHeaders or " +
+        "cookies, or httpAuth null — the one null accepted here — drops that kind), " +
+        "stored only encrypted and never logged or answered; when the stored copy " +
+        "cannot be read, a change must send every credential the crawl needs, or it " +
         "is refused CREDENTIALS_REQUIRED (409). A queued " +
         "crawl this server is already starting is refused 409 (pause it first). " +
         "maxPages cannot go below the pages " +

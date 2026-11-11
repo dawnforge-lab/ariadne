@@ -45,6 +45,7 @@ import { JudgementError, parseJudgement, readStoredJudgement } from "../../src/r
 import { RULESET_VERSION } from "../../src/rules/registry/registry.js";
 import { mkDiscovery } from "../rules/mk-discovery.js";
 import { LOCAL_TENANT } from "../../src/tenant.js";
+import { TEST_CREDENTIAL_KEYS } from "../helpers/credential-keys.js";
 
 const SENTINEL = "sk_live_27d_SENTINEL";
 const TOKEN = "test-token-no-key-echo-0123456789";
@@ -180,6 +181,7 @@ beforeAll(async () => {
   }
 
   const config: ServiceConfig = {
+    credentialKeys: TEST_CREDENTIAL_KEYS,
     allowedDomains: [],
     exportDir,
     renderDir,

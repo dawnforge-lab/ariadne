@@ -61,6 +61,7 @@ function titleOf(ruleId: string): string {
 }
 import { RULESET_VERSION } from "../../src/rules/registry/registry.js";
 import { LOCAL_TENANT } from "../../src/tenant.js";
+import { TEST_CREDENTIAL_KEYS } from "../helpers/credential-keys.js";
 
 const TOKEN = "test-token-0123456789abcdef";
 const SITE = "http://query.example";
@@ -1054,6 +1055,7 @@ beforeAll(async () => {
   api = createApiServer({
     db,
     config: {
+      credentialKeys: TEST_CREDENTIAL_KEYS,
       token: TOKEN,
       // Empty on purpose: this server may not start a crawl, and every query
       // below still answers (the read-only posture).

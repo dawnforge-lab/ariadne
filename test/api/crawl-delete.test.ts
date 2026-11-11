@@ -33,6 +33,7 @@ import { CRAWL_CHILD_TABLES, deleteCrawlFiles } from "../../src/api/crawl-delete
 import { ApiService, slug } from "../../src/api/service.js";
 import { ServiceError } from "../../src/api/errors.js";
 import { LOCAL_TENANT } from "../../src/tenant.js";
+import { TEST_CREDENTIAL_KEYS } from "../helpers/credential-keys.js";
 
 const TOKEN = "test-token-crawl-delete-0123456789abcdef";
 
@@ -230,6 +231,7 @@ beforeAll(async () => {
   site = `http://127.0.0.1:${typeof address === "object" && address !== null ? address.port : 0}`;
 
   const config = {
+    credentialKeys: TEST_CREDENTIAL_KEYS,
     token: TOKEN,
     allowedDomains: ["127.0.0.1"],
     crawlDefaults: { allowPrivate: true, probeHosts: false, perHostDelayMs: 0 },
@@ -245,7 +247,7 @@ beforeAll(async () => {
   client = new Client({ name: "ariadne-test-delete", version: "0.0.1" });
   await mcp.connect(serverSide);
   await client.connect(clientSide);
-  service = new ApiService(db, { allowedDomains: [], exportDir, renderDir, log: () => {} });
+  service = new ApiService(db, { credentialKeys: TEST_CREDENTIAL_KEYS, allowedDomains: [], exportDir, renderDir, log: () => {} });
 }, 60_000);
 
 afterAll(async () => {
@@ -279,6 +281,7 @@ describe("CRAWL_CHILD_TABLES", () => {
       "pages",
       "frontier",
       "list_urls",
+      "crawl_credentials",
     ]);
   });
 });
@@ -428,7 +431,7 @@ describe("crawl_delete file failures", () => {
     // A directory that cannot be written to refuses the unlink of what is in it.
     const locked = await mkdtemp(join(tmpdir(), "ariadne-delete-locked-"));
     await mkdir(join(locked, "local"), { recursive: true });
-    const lockedService = new ApiService(db, { allowedDomains: [], exportDir: locked, renderDir, log: () => {} });
+    const lockedService = new ApiService(db, { credentialKeys: TEST_CREDENTIAL_KEYS, allowedDomains: [], exportDir: locked, renderDir, log: () => {} });
     const lockedFile = join(locked, "local", `${slug(id)}-issues.jsonl.gz`);
     await writeFile(lockedFile, "x");
     await chmod(join(locked, "local"), 0o555);

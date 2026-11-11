@@ -14,8 +14,8 @@
  * over HTTP and in MCP's JSON error (27c Deviation 10) — so an agent tells
  * `CREDENTIALS_REQUIRED` from any other 409 without parsing the sentence.
  * `CREDENTIALS_REQUIRED`: a crawl whose stored shape says it needs credentials
- * was asked to run without them (after a restart the in-memory credentials
- * are gone); re-supply them.
+ * was asked to run without them, and no readable stored copy exists (28b: the
+ * key changed, or the copy was swept or never written); re-supply them.
  */
 export type ServiceErrorCode =
   | "VALIDATION"

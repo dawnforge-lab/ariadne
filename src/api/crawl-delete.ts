@@ -21,6 +21,7 @@ import { join as joinPath, resolve as resolvePath, sep as pathSep } from "node:p
 
 import type { Db } from "../db/client.js";
 import {
+  crawlCredentials,
   crawls,
   frontier,
   hreflang,
@@ -42,8 +43,9 @@ import { tenantExportDir, type TenantId } from "../tenant.js";
 type CrawlChildTable = PgTable & { crawlId: PgColumn };
 
 /**
- * The 14 tables with a `crawl_id`, in deletion order: what points at `pages`
- * and `resources` goes before them, `frontier` last.
+ * The 15 tables with a `crawl_id`, in deletion order: what points at `pages`
+ * and `resources` goes before them, then `frontier`, `list_urls`, and the
+ * crawl's encrypted credentials (28b).
  */
 export const CRAWL_CHILD_TABLES: readonly CrawlChildTable[] = [
   issues,
@@ -60,6 +62,7 @@ export const CRAWL_CHILD_TABLES: readonly CrawlChildTable[] = [
   pages,
   frontier,
   listUrls,
+  crawlCredentials,
 ];
 
 type Tx = Parameters<Parameters<Db["transaction"]>[0]>[0];

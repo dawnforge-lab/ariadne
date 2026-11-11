@@ -66,6 +66,7 @@ import { readFileSync } from "node:fs";
 import type { Db } from "../db/client.js";
 import { createApiServer, type ApiServer } from "../api/http.js";
 import type { ServiceConfig } from "../api/config.js";
+import type { CredentialKeys } from "../crawl/credential-vault.js";
 import { LOCAL_TENANT } from "../tenant.js";
 
 /**
@@ -188,6 +189,8 @@ function crossOriginRefusal(req: IncomingMessage): string | null {
 
 export interface CreateDemoServerOpts {
   db: Db;
+  /** The credential keys (28b): `ServiceConfig.credentialKeys`, read from the environment by the entrypoint. */
+  credentialKeys: CredentialKeys;
   /** Test seam only — the demo entrypoint never passes it. Same contract as ApiServerConfig.crawlDefaults. */
   crawlDefaults?: ServiceConfig["crawlDefaults"];
   renderDir?: string;
@@ -214,6 +217,7 @@ export function createDemoServer(opts: CreateDemoServerOpts): DemoServer {
       // list has nothing to say. `allowPrivate` is absent by construction.
       allowedDomains: [],
       allowAnyPublicHost: true,
+      credentialKeys: opts.credentialKeys,
       ...(opts.crawlDefaults === undefined ? {} : { crawlDefaults: opts.crawlDefaults }),
       ...(opts.renderDir === undefined ? {} : { renderDir: opts.renderDir }),
       ...(opts.exportDir === undefined ? {} : { exportDir: opts.exportDir }),

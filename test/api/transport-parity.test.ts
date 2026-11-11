@@ -41,6 +41,7 @@ import { createApiServer, type ApiServer } from "../../src/api/http.js";
 import { createMcpServer, type AriadneMcpServer } from "../../src/api/mcp.js";
 import type { ServiceConfig } from "../../src/api/config.js";
 import { LOCAL_TENANT } from "../../src/tenant.js";
+import { TEST_CREDENTIAL_KEYS } from "../helpers/credential-keys.js";
 
 const TOKEN = "test-token-transport-parity-0123456789";
 const PAGE_DELAY_MS = 100;
@@ -307,6 +308,7 @@ beforeAll(async () => {
   // what refuses a sitemap there: the metadata address is refused even under
   // the test-only `allowPrivate`.
   const config: ServiceConfig = {
+    credentialKeys: TEST_CREDENTIAL_KEYS,
     allowedDomains: ["127.0.0.1", "localhost", "169.254.169.254"],
     crawlDefaults: { allowPrivate: true, probeHosts: false, perHostDelayMs: 0 },
     exportDir,

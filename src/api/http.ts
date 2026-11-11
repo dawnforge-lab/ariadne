@@ -30,9 +30,9 @@
  *                                      A paused crawl resumes; a cancelled one
  *                                      is final and 409s. Optional body: the
  *                                      crawl's `requestHeaders` / `httpAuth` /
- *                                      `cookies`, which a crawl that needed
- *                                      them must be sent again after a restart
- *                                      (409 `CREDENTIALS_REQUIRED` until then)
+ *                                      `cookies`, which replace the stored
+ *                                      copy; one that cannot be read is 409
+ *                                      `CREDENTIALS_REQUIRED` until they are
  *   POST /crawls/:id/pause             pause a crawl. Queued: paused now -> 200.
  *                                      Running: requested of its loop -> 202.
  *                                      `{crawlId, status, controlRequested,
@@ -203,7 +203,7 @@ const MAX_BODY_BYTES = 64 * 1024;
  * `PATCH /crawls/:id/config` (27c T9 fix 1): a maximal set (20 headers and 50
  * cookies of up to 1 KiB each, plus Basic auth) is about 74 KB, past
  * `MAX_BODY_BYTES`, and a crawl started with one must be resumable over HTTP
- * after a restart. A route opts in with `Route.maxBodyBytes`; every other
+ * when its stored copy cannot be read. A route opts in with `Route.maxBodyBytes`; every other
  * route keeps `MAX_BODY_BYTES`.
  */
 export const LARGE_BODY_BYTES = 1024 * 1024;
@@ -441,7 +441,7 @@ function buildRoutes(): Route[] {
       maxBodyBytes: LARGE_BODY_BYTES,
       // 202, not 200, and for `POST /crawls`'s reason: the crawl is ACCEPTED
       // here and runs later. A 200 would say the work is done. The body is
-      // optional: the crawl's credentials, re-supplied after a restart (27c);
+      // optional: the crawl's credentials, re-supplied when its stored copy cannot be read (27c, 28b);
       // `parseResumeCrawlInput` refuses any other field rather than ignoring it.
       handler: async (service, ctx) => ({
         status: 202,

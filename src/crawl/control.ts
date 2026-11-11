@@ -14,7 +14,14 @@ import { crawls } from "../db/schema.js";
 export const CONTROL_REQUESTS = ["pause", "cancel"] as const;
 export type ControlRequest = (typeof CONTROL_REQUESTS)[number];
 
-export const PAUSE_REASONS = ["request", "shutdown"] as const;
+/**
+ * Why a crawl is `paused`: an agent asked (`request`), the process running it
+ * shut down (`shutdown`), or its stored credentials could not be read when a
+ * runner picked it up (`credentials_unreadable`, Phase 28b: the key was rotated
+ * past them, they failed authentication, or the retention sweep deleted them;
+ * `crawl_resume` with the values continues it).
+ */
+export const PAUSE_REASONS = ["request", "shutdown", "credentials_unreadable"] as const;
 export type PauseReason = (typeof PAUSE_REASONS)[number];
 
 function readOf<T extends string>(

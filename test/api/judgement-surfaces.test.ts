@@ -36,6 +36,7 @@ import { buildRegistry } from "../../src/rules/index.js";
 import { mkDiscovery } from "../rules/mk-discovery.js";
 import { mkPage } from "../rules/mk-page.js";
 import { LOCAL_TENANT } from "../../src/tenant.js";
+import { TEST_CREDENTIAL_KEYS } from "../helpers/credential-keys.js";
 
 function databaseUrl(): string {
   const url = process.env.DATABASE_URL;
@@ -82,7 +83,7 @@ beforeAll(async () => {
   db = createDb(databaseUrl());
   await runMigrations(db);
   exportDir = await mkdtemp(join(tmpdir(), "ariadne-judgement-surfaces-"));
-  service = new ApiService(db, { allowedDomains: [], exportDir, log: () => {} });
+  service = new ApiService(db, { credentialKeys: TEST_CREDENTIAL_KEYS, allowedDomains: [], exportDir, log: () => {} });
 
   await db.insert(crawls).values({
     tenantId: LOCAL_TENANT,

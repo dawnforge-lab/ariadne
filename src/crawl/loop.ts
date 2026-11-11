@@ -404,11 +404,13 @@ export interface CrawlConfig extends RenderSelectionConfig {
    * pages, the recheck, the known-404 probe and same-family resources — and
    * never to any other host.
    *
-   * NEVER STORED, on `allowPrivate`'s precedent: `storableConfig` strips it,
-   * and `parseStoredConfig`'s closed field set never reads it back. A secret
-   * value must not reach a column, a log line, an error or a response. A
-   * resume re-supplies it through `ResumeOpts.config`, and a resume that does
-   * not is refused (`credentialShape`).
+   * NEVER STORED WITH THE CONFIG, on `allowPrivate`'s precedent:
+   * `storableConfig` strips it, and `parseStoredConfig`'s closed field set
+   * never reads it back. A secret value must not reach a column in clear, a
+   * log line, an error or a response; the API keeps it encrypted in
+   * `crawl_credentials` (28b, `CredentialVault`). A resume re-supplies it
+   * through `ResumeOpts.config`, and a resume that does not is refused
+   * (`credentialShape`).
    */
   credentials?: CrawlCredentials;
   /**

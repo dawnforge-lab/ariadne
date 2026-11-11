@@ -16,6 +16,7 @@ import { ApiService } from "../../src/api/service.js";
 import { TRIAGE } from "../../src/rules/registry/triage.js";
 import { countOtherSessions, createPruneDb, isTestHost, PRUNE_APPLICATION_NAME, pruneTestCrawls } from "../../scripts/prune-test-crawls.js";
 import { LOCAL_TENANT } from "../../src/tenant.js";
+import { TEST_CREDENTIAL_KEYS } from "../helpers/credential-keys.js";
 
 function databaseUrl(): string {
   const url = process.env.DATABASE_URL;
@@ -101,7 +102,7 @@ describe("pruneTestCrawls", () => {
   beforeAll(async () => {
     db = createDb(databaseUrl());
     await runMigrations(db);
-    service = new ApiService(db, { allowedDomains: [], log: () => {} });
+    service = new ApiService(db, { credentialKeys: TEST_CREDENTIAL_KEYS, allowedDomains: [], log: () => {} });
     fixtureLive = await seed("http://127.0.0.1:35807/", "running");
     fixtureDone = await seed("http://seeded.example/", "finished");
     real = await seed("https://lavishalice.com/", "running");

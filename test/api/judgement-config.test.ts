@@ -36,6 +36,7 @@ import { DEFAULT_THRESHOLDS, OVERRIDABLE_THRESHOLDS } from "../../src/rules/judg
 import { mkDiscovery } from "../rules/mk-discovery.js";
 import { mkPage } from "../rules/mk-page.js";
 import { LOCAL_TENANT } from "../../src/tenant.js";
+import { TEST_CREDENTIAL_KEYS } from "../helpers/credential-keys.js";
 
 /** The test-controlled hold on a rules run (see the module header). */
 const gate = vi.hoisted(() => ({
@@ -191,6 +192,7 @@ beforeAll(async () => {
   api = createApiServer({
     db,
     config: {
+      credentialKeys: TEST_CREDENTIAL_KEYS,
       token: TOKEN,
       allowedDomains: ["127.0.0.1"],
       crawlDefaults: { allowPrivate: true, probeHosts: false, perHostDelayMs: 0, maxResources: 1000 },
@@ -200,7 +202,7 @@ beforeAll(async () => {
   });
   base = `http://127.0.0.1:${(await api.listen(0)).port}`;
 
-  mcp = createMcpServer({ db, config: { tenant: LOCAL_TENANT, allowedDomains: [], exportDir, log: () => {} } });
+  mcp = createMcpServer({ db, config: { credentialKeys: TEST_CREDENTIAL_KEYS, tenant: LOCAL_TENANT, allowedDomains: [], exportDir, log: () => {} } });
   const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
   client = new Client({ name: "ariadne-test-judgement-config", version: "0.0.1" });
   await mcp.connect(serverSide);

@@ -901,13 +901,13 @@ Two properties make the double-transport claim below cheap to trust:
 - **One service, two transports.** `src/api/service.ts` holds every query,
   refusal and vocabulary; `http.ts` and `mcp.ts` do routing and serialisation
   and nothing else.
-- **The equality is tested, not argued.** `test/api/mcp.test.ts:2752`
+- **The equality is tested, not argued.** `test/api/mcp.test.ts:2756`
   ("answers the same JSON for the same question, route by tool") calls thirteen
   (tool, route) pairs over the wire against one database and asserts the two
-  answers are `toEqual`. `test/api/mcp.test.ts:2773` ("refuses in the same
+  answers are `toEqual`. `test/api/mcp.test.ts:2777` ("refuses in the same
   words, whichever transport asked") does the same for five refusals — the same
-  sentence and the mapped status. `test/api/mcp.test.ts:2831` ("streams the
-  bytes the other transport writes to a file") and `test/api/mcp.test.ts:2857`
+  sentence and the mapped status. `test/api/mcp.test.ts:2835` ("streams the
+  bytes the other transport writes to a file") and `test/api/mcp.test.ts:2861`
   ("streams the resources view byte for byte") assert the CSV a route streams is
   byte-identical to the file the tool writes, for the `issues` and `resources`
   views.
@@ -923,9 +923,9 @@ Two properties make the double-transport claim below cheap to trust:
   cursor behaviour is pinned per transport, by walks that page a listing to a
   null cursor, but page two is not compared across the two. The three read
   tools Phase 27a added are not among the thirteen pairs; each has its own
-  route-equals-tool test instead (`test/api/judgement-config.test.ts:654`
+  route-equals-tool test instead (`test/api/judgement-config.test.ts:656`
   "crawl_config_get answers what GET /crawls/:id/config answers",
-  `test/api/crawl-overview.test.ts:471` "serves the same answer at GET
+  `test/api/crawl-overview.test.ts:472` "serves the same answer at GET
   /crawls/:id/overview/crawl"). `GET /crawls/:id/overview/issues` has no
   route test of its own: it is the same service call as the tool, and the
   Phase 27a gate compared the two live, with and without `includeZero`, and
@@ -945,15 +945,15 @@ Two properties make the double-transport claim below cheap to trust:
 
 - The token is `ARIADNE_API_TOKEN`, minimum 16 characters, compared in constant
   time over SHA-256 digests (`src/api/auth.ts`). The server refuses to boot
-  without one (`test/api/http.test.ts:2149` "refuses to produce a config without
+  without one (`test/api/http.test.ts:2154` "refuses to produce a config without
   a token").
 - **The token is checked before routing**, so an unauthenticated caller cannot
   map the surface: an unknown path answers 401, not 404
-  (`test/api/http.test.ts:474` "checks the token before routing"). Every refusal
+  (`test/api/http.test.ts:477` "checks the token before routing"). Every refusal
   names *which* thing was wrong — missing header, wrong scheme, wrong token.
 - **MCP asks for no credential** and that is a posture, not an omission: an
   stdio client either started this process or was handed its pipes
-  (`test/api/mcp.test.ts:2961` "asks for no bearer token: an stdio client is the
+  (`test/api/mcp.test.ts:3015` "asks for no bearer token: an stdio client is the
   process that started this one"). If Ariadne's MCP server is ever mounted on a
   network transport, that argument dies with the change and a credential has to
   arrive with it.
@@ -970,8 +970,8 @@ Two properties make the double-transport claim below cheap to trust:
   exact host or `*.example.com`). An empty allowlist refuses every crawl
   trigger and still answers every query — the read-only posture a Talos
   deployment can run for reporting-only tenants
-  (`test/api/mcp.test.ts:946` "refuses every crawl when the allowlist is empty",
-  `test/api/http.test.ts:802` "refuses every crawl when the allowlist is empty,
+  (`test/api/mcp.test.ts:948` "refuses every crawl when the allowlist is empty",
+  `test/api/http.test.ts:805` "refuses every crawl when the allowlist is empty,
   but still answers queries").
 - **`ServiceConfig.allowAnyPublicHost` is a second code-only process-trust seam**
   (the first is `crawlDefaults`), and a Talos reader who finds the field in
@@ -979,7 +979,7 @@ Two properties make the double-transport claim below cheap to trust:
   optional. It accepts any host at the crawl-trigger allowlist gate and nothing
   else: it is never wired to env or to the wire (`loadApiConfig` does not read
   it, no request or tool field maps to it —
-  `test/api/open-posture.test.ts:286` "loadApiConfig can never set the posture
+  `test/api/open-posture.test.ts:289` "loadApiConfig can never set the posture
   from the environment"), and `api:serve` and `mcp:serve` never set it. Its only
   setter is the local demo surface added in Phase 15: the `npm run demo`
   entrypoint `src/demo/serve.ts`, which binds `127.0.0.1`, and the server factory
@@ -987,7 +987,7 @@ Two properties make the double-transport claim below cheap to trust:
   assignment lives. `isUrlAllowed` still runs on every URL with `allowPrivate`
   sourced from `crawlDefaults` alone, so loopback and RFC1918 targets stay
   refused under the posture, with the policy's own reason rather than the
-  allowlist's (`test/api/open-posture.test.ts:244` "the posture does not touch
+  allowlist's (`test/api/open-posture.test.ts:247` "the posture does not touch
   url-policy: loopback is refused with the policy's own reason"). Nothing
   tenant-visible changes: a deployment that does not set it in code — which is
   every deployment Talos talks to — behaves exactly as the allowlist rows above
@@ -1015,12 +1015,12 @@ one the status already implies; read `code` to tell `CREDENTIALS_REQUIRED` from 
 409 without parsing the sentence. The transport's own refusals (401, an unknown route's
 404, 405, 413, malformed JSON) and the 500 carry no `code`, and neither does an MCP
 schema refusal (the SDK's plain-text "Input validation error", §4.1). Pinned:
-`test/api/credentials-restart.test.ts:287` "crawl_resume and crawl_render refuse
-CREDENTIALS_REQUIRED and write nothing".
+`test/api/credentials-restart.test.ts:346` "answers crawl_resume and crawl_render 409
+CREDENTIALS_REQUIRED and writes nothing".
 
 `correlationId` is a UUID; the stack goes to the server log under that id and
-nowhere else (`test/api/mcp.test.ts:2884` "turns an unexpected throw into a tool
-error with a correlation id", `test/api/http.test.ts:2092` "turns an unexpected
+nowhere else (`test/api/mcp.test.ts:2888` "turns an unexpected throw into a tool
+error with a correlation id", `test/api/http.test.ts:2097` "turns an unexpected
 throw into a 500 with a correlation id").
 
 ---
@@ -1034,15 +1034,15 @@ field more, `columns`, the header their rows are printed under (§4.4). It is
 served with every page rather than only the first, so a paging client keeps no
 state. `limit` defaults to 50 and is capped at 200 — a limit outside the
 contract is refused, never clamped (`PAGE_SIZE_DEFAULT` / `PAGE_SIZE_MAX`,
-`test/api/mcp.test.ts:1216` "refuses a limit outside the contract rather than
+`test/api/mcp.test.ts:1218` "refuses a limit outside the contract rather than
 clamping it").
 
 **Closed vocabularies.** Every query parameter, body field and tool argument is
 on a closed list. `?serverity=critical` is a 400 naming both the typo and the
 accepted set, never an unfiltered listing with a 200 on it
-(`test/api/query.test.ts:4068` "refuses a typo'd filter instead of answering the
+(`test/api/query.test.ts:4070` "refuses a typo'd filter instead of answering the
 question nobody asked"). MCP argument typos are refused by the SDK's schema
-validator before the handler runs (`test/api/mcp.test.ts:828` "refuses an
+validator before the handler runs (`test/api/mcp.test.ts:830` "refuses an
 argument nobody allowed, naming it").
 
 **Not paginated, on purpose:** `rules_catalog`, `crawl_compare` and (Phase 27a)
@@ -1185,15 +1185,15 @@ webhooks**: polling `crawl_status` is the contract until Talos asks otherwise.
 | `compare_urls` | `GET /compare/urls` | `baseCrawlId`, `headCrawlId`, `ruleId`, `set` (all required), `limit`, `cursor` |
 | `export_crawl` | `GET /crawls/:id/export` | `format` (`jsonl.gz` \| `csv`), `dataset` (jsonl.gz only), `view` + `ruleId` \| `metricId` (csv only) |
 
-Pinned: the tool list and every schema — `test/api/mcp.test.ts:670`
+Pinned: the tool list and every schema — `test/api/mcp.test.ts:672`
 ("advertises exactly the twenty-seven tools of the agent surface"),
-`test/api/mcp.test.ts:697` ("closes every input schema and describes every
-field"), `test/api/mcp.test.ts:729` ("names every member of the closed
+`test/api/mcp.test.ts:699` ("closes every input schema and describes every
+field"), `test/api/mcp.test.ts:731` ("names every member of the closed
 vocabulary each field enumerates"). `crawl_start`'s field set is not a second
 declaration to keep in step: its input schema IS the crawl-start body schema
 (`src/api/config-schema.ts`), and a test walks that schema's published form and
 drives every field through both transports
-(`test/api/transport-parity.test.ts:354` "walks the published schema and drives
+(`test/api/transport-parity.test.ts:356` "walks the published schema and drives
 every body through POST /crawls and crawl_start"). `crawl_render`'s is asserted
 against the service's own `RENDER_CRAWL_FIELDS` table.
 
@@ -1211,7 +1211,7 @@ transports (§4.1b): over MCP a body that does not fit it is refused by the SDK
 before the tool runs, in the schema's own words with the path appended, rather
 than as `{error}` JSON. `config_validate` answers every one of these without
 starting anything, with the same first message
-(`test/api/transport-parity.test.ts:383` "answers valid: false exactly when POST
+(`test/api/transport-parity.test.ts:385` "answers valid: false exactly when POST
 /crawls refuses"). The body refusals themselves are pinned in
 `test/api/config-schema.test.ts:241` ("refuses a perHostDelayMs under the
 politeness floor rather than raising it").
@@ -1241,10 +1241,10 @@ checked against the ruleset before the crawl is accepted, and a block the
 ruleset cannot apply is a 400 naming the path, exactly as `crawl_config_set`
 refuses it. `judgement.findingCap` is the top-level `findingCap` by another
 name and is stored in the same place: given in both places they must agree,
-or the start is refused naming both (`test/api/judgement-config.test.ts:275`
+or the start is refused naming both (`test/api/judgement-config.test.ts:277`
 "is accepted, stored, and read back by GET /crawls/:id/config",
-`test/api/judgement-config.test.ts:349` "refuses findingCap at both levels when
-they disagree, naming both"; over MCP, `test/api/judgement-config.test.ts:670`
+`test/api/judgement-config.test.ts:351` "refuses findingCap at both levels when
+they disagree, naming both"; over MCP, `test/api/judgement-config.test.ts:672`
 "crawl_start takes the judgement field").
 
 **List mode, scope and credentials (Phase 27c).** The fields, their bounds and what
@@ -1271,25 +1271,25 @@ each does are in the Phase 27c summary at the top of this document; this is what
   holding `:`, more than 20 headers or 50 cookies (400). **No refusal quotes a value**: the
   message names the field and the header or cookie name only — and a name that is not
   a token, or an unknown key, only by its position, never quoted (pinned:
-  `test/api/scope-start.test.ts:540` "is never echoed: each refusal names the position,
+  `test/api/scope-start.test.ts:542` "is never echoed: each refusal names the position,
   on HTTP and MCP, start, validate, set and resume").
 
 A list crawl's answer adds `listUrlCount` (distinct URLs) and `listDuplicates` (how
 many were collapsed as another's spelling); a spider crawl's has neither. Pinned:
-`test/api/scope-start.test.ts:280` "refuses an off-site URL, an excluded listed URL,
+`test/api/scope-start.test.ts:282` "refuses an off-site URL, an excluded listed URL,
 an excluded seed, a typo'd host and maxPages below the list",
-`test/api/scope-start.test.ts:376` "collapses two spellings of one URL, counts it, and
-stores the distinct URLs in order", `test/api/scope-start.test.ts:239` "413s a 1.5 MiB
+`test/api/scope-start.test.ts:378` "collapses two spellings of one URL, counts it, and
+stores the distinct URLs in order", `test/api/scope-start.test.ts:241` "413s a 1.5 MiB
 body to POST /crawls, and accepts 900 KiB carrying 10,000 URLs",
-`test/api/scope-start.test.ts:398` "refuses an invalid credential set with a body that
-quotes no secret, on both transports" and `test/api/scope-start.test.ts:432` "accepts
+`test/api/scope-start.test.ts:400` "refuses an invalid credential set with a body that
+quotes no secret, on both transports" and `test/api/scope-start.test.ts:434` "accepts
 a valid set and shows no value in crawl_status, effective, crawl_config_get, the row
 or the log". The crawl side: `test/crawl/list-mode.test.ts:180` "fetches every listed
 URL at depth 0 and follows redirects but no link", `test/crawl/scope-admission.test.ts:244`
 "writes an excluded row for a URL an exclude pattern matches, never requests it, and
 stamps excluded_dropped 0", `test/crawl/credentials.test.ts:423` "sends none of them to
 another host: a resource, its robots.txt, a legacy host's probe, a redirect hop", and
-the secret scan, `test/fixtures/scope-and-requests.test.ts:337` "after a crawl with all
+the secret scan, `test/fixtures/scope-and-requests.test.ts:339` "after a crawl with all
 three credential kinds and a render pass, no secret is in any stored column or the
 log".
 
@@ -1360,7 +1360,7 @@ ran, `findingsCount` would sit beside a larger `pagesScanned`, and
 against §2's "empty is never a verdict", which rests entirely on that field.
 Findings rows are left in place and then read exactly as a run that died
 part-way, which §5 already covers. Re-run `crawl_rules` after the resumed crawl
-finishes (`test/api/http.test.ts:1260` "unjudges a crawl it queues, so no
+finishes (`test/api/http.test.ts:1265` "unjudges a crawl it queues, so no
 timestamp outlives the pages it described").
 
 Refusals, each naming which one fired: no such crawl (404); this server already
@@ -1383,11 +1383,11 @@ takes the same three fields on the same terms, and stores what it was sent only 
 the render is accepted, so a refused render leaves the held values as they were. A
 resume also re-applies the crawl's current `exclude`/`include` before its first lease,
 both ways (the Phase 27c summary at the top). Pinned:
-`test/api/credentials-restart.test.ts:287` "crawl_resume and crawl_render refuse
-CREDENTIALS_REQUIRED and write nothing; a resume with them finishes with no 401 row",
-`test/api/credentials-restart.test.ts:556` "a maximal credential set is re-supplied
+`test/api/credentials-restart.test.ts:346` "answers crawl_resume and crawl_render 409
+CREDENTIALS_REQUIRED and writes nothing; resumed with them, it finishes",
+`test/api/credentials-restart.test.ts:625` "a maximal credential set is re-supplied
 over HTTP after a restart (1 MiB cap); a 64 KiB route still 413s",
-`test/api/credentials-restart.test.ts:591` "a refused render leaves the held
+`test/api/credentials-restart.test.ts:660` "a refused render leaves the stored
 credentials as they were", `test/crawl/scope-admission.test.ts:375` "re-files pending
 URLs a changed scope refuses as excluded rows before any lease, leaving fetched ones
 alone" and `test/crawl/scope-admission.test.ts:680` "re-admits an excluded URL the
@@ -1413,11 +1413,11 @@ follows. A caller who wants a crawl dead and not continued uses `crawl_cancel`;
 **Pages waiting on the render pass are NOT resumable work.** `render_pending`
 rows are already-crawled pages the selection promoted and the crawl loop never
 leases them; the refusal names them and points at `crawl_render`
-(`test/api/http.test.ts:1374` "names render_pending rows as the render pass's
+(`test/api/http.test.ts:1379` "names render_pending rows as the render pass's
 work, not a resume's"). Neither are the null `fetch_class` rows of a crawl
 configured with `fetchResources: false` — those carry the operator's decision,
 and a resume would not ask about them
-(`test/api/http.test.ts:1351` "does not read an off switch as resumable work").
+(`test/api/http.test.ts:1356` "does not read an off switch as resumable work").
 
 **The honest race.** The two liveness checks are a snapshot: a lease can expire
 between the count and the enqueue, and a worker this server cannot see can take a
@@ -1428,7 +1428,7 @@ row says something else — the silent no-op hard rule 7 forbids. That narrows t
 double-accept race as far as it goes without a lock (of two callers past the
 guards, only the one whose UPDATE lands first is accepted), and it cannot close
 the window against a process that never touches the status
-(`test/api/http.test.ts:1293` "409s when the crawl's state changes under the
+(`test/api/http.test.ts:1298` "409s when the crawl's state changes under the
 call, rather than queueing anyway").
 
 For the remainder, the guard is not the safety mechanism — `leaseBatch` is.
@@ -1449,9 +1449,9 @@ Proven end to end, not argued: a real fixture crawl killed in the middle of its
 resource pass by stopping the server that ran it, resumed over the wire by a
 different server, reaches the totals of a control crawl that was never killed —
 3 pages, 24 resources seen and weighed, 0 unasked, 23 findings, on both
-(`test/api/http.test.ts:1175` "a killed crawl resumed over the wire reaches the
+(`test/api/http.test.ts:1180` "a killed crawl resumed over the wire reaches the
 totals of a control that was never killed"; the MCP half is
-`test/api/mcp.test.ts:1610` "finishes a crawl a server was killed in the middle
+`test/api/mcp.test.ts:1613` "finishes a crawl a server was killed in the middle
 of, and keeps its earned spacing").
 
 ### 4.1c `crawl_pause` / `crawl_cancel` / `crawl_delete` → stopping a crawl
@@ -1554,7 +1554,7 @@ same checks `crawl_start` does, allowlist and URL policy on `siteUrl`, every
 lookup**. `errors[0]` is the refusal `crawl_start` would answer with, in the
 same words; `effective`, on a valid body, is exactly what the crawl would store
 in `config_jsonb` plus the parsed `judgement` (null when none was given), and
-is null on an invalid one (`test/api/transport-parity.test.ts:383` "answers
+is null on an invalid one (`test/api/transport-parity.test.ts:385` "answers
 valid: false exactly when POST /crawls refuses").
 
 ### 4.2 `crawl_status` → the crawl in full
@@ -1637,8 +1637,8 @@ A crawl whose stored judgement overrides a rule this ruleset does not define is 
 with no stamp, or with a stamp whose `thresholds` lack any of the 20 names or
 hold a value outside its range, is a 500 (the server log names the crawl under
 the correlation id), never "not stale" (hard rule 7). Pinned:
-`test/api/judgement-config.test.ts:596` "judgementStale on crawl_status,
-metrics_get and metric_table" (three tests), `test/api/judgement-config.test.ts:474`
+`test/api/judgement-config.test.ts:598` "judgementStale on crawl_status,
+metrics_get and metric_table" (three tests), `test/api/judgement-config.test.ts:476`
 "can repair a stored override naming a rule the ruleset no longer has".
 
 **`failureReason` — why a `failed` crawl failed.** One sentence, and `null` on
@@ -1785,34 +1785,34 @@ server error and that is an answer; what is unknown is whether it persists. The
 page keeps its `critical` finding, and its evidence carries
 `recheck: "not run"` so a report writer can say which it is (§5.5).
 
-Pinned: `test/api/query.test.ts:2085` "the fields an audit checks itself against"
+Pinned: `test/api/query.test.ts:2087` "the fields an audit checks itself against"
 (15 tests over the whole block — the marker, the live findings count,
 `pagesScanned`, the one-statement read, the four the recheck block added, and
 the no-response partition Phase 23 added),
-`test/api/query.test.ts:2198` "counts
+`test/api/query.test.ts:2200` "counts
 the resource census off the database, partitioned exactly",
-`test/api/query.test.ts:2240` "answers the block on a crawl that holds no
-resource rows at all", `test/api/query.test.ts:2432` "reports the cap-exceeded
+`test/api/query.test.ts:2242` "answers the block on a crawl that holds no
+resource rows at all", `test/api/query.test.ts:2434` "reports the cap-exceeded
 page count a crawl stamped, and null when none did",
-`test/api/query.test.ts:2459` "echoes whether the crawl
-asked about its files", `test/api/query.test.ts:2477` "409s a stored
+`test/api/query.test.ts:2461` "echoes whether the crawl
+asked about its files", `test/api/query.test.ts:2479` "409s a stored
 fetchResources that is not a boolean"; over the agent transport,
-`test/api/mcp.test.ts:1029` "answers the resource census and whether the crawl
-asked for it" and `test/api/mcp.test.ts:1118` "tells an agent what the resource
+`test/api/mcp.test.ts:1031` "answers the resource census and whether the crawl
+asked for it" and `test/api/mcp.test.ts:1120` "tells an agent what the resource
 numbers mean, and what they do not". The recheck block:
-`test/api/query.test.ts:2251` "partitions the crawl's server errors by what the
+`test/api/query.test.ts:2253` "partitions the crawl's server errors by what the
 second look found" (the arithmetic, over a fixture holding one row of every
-outcome), `test/api/query.test.ts:2296` "counts as cleared exactly the classes
+outcome), `test/api/query.test.ts:2298` "counts as cleared exactly the classes
 http.server-error-transient fires on" (the surface and the rule read ONE set,
-imported, never two lists), `test/api/query.test.ts:2376` "tells a crawl with no
+imported, never two lists), `test/api/query.test.ts:2378` "tells a crawl with no
 server errors apart from a crawl nobody rechecked",
-`test/api/query.test.ts:2412` "keeps the recheck block off the crawl listing";
-over the agent transport, `test/api/mcp.test.ts:1059` "answers the recheck
+`test/api/query.test.ts:2414` "keeps the recheck block off the crawl listing";
+over the agent transport, `test/api/mcp.test.ts:1061` "answers the recheck
 coverage, and keeps its two zeroes apart" (which also reads the block off a
 crawl the suite really ran). The robots split itself is
-`test/crawl/fetch-resources.test.ts:863` "classes an unreachable third-party
+`test/crawl/fetch-resources.test.ts:864` "classes an unreachable third-party
 robots.txt apart from a forbidding one" and
-`test/crawl/fetch-resources.test.ts:881` "keeps `robots_denied` for a file the
+`test/crawl/fetch-resources.test.ts:882` "keeps `robots_denied` for a file the
 robots file actually forbade". Shape regenerated live from `crawl_02ff6f7a`
 (2026-09-08, after migration 0016 — the `recheck` block above is that crawl's
 own answer, not an invented example).
@@ -1876,7 +1876,7 @@ are stored, but its group is left out. The filter is SQL, so `count`,
 never fired. This field is how a reader tells "filtered out" from "did not
 fire". **`judgementStale`** is `crawl_status`'s flag (§4.2), carried on the
 listing so a dashboard drawing it needs no second call. Pinned:
-`test/api/judgement-surfaces.test.ts:141` "issues_list drops the disabled rule,
+`test/api/judgement-surfaces.test.ts:142` "issues_list drops the disabled rule,
 names it, and carries the overrides".
 
 **`notMeasured` (27c final wave; `{id, reason}` since 27d)** sits beside `disabledRules`
@@ -1897,13 +1897,13 @@ the `issue_urls` CSV view) of one is refused 409 naming `crawl.list-mode`, and
 `metric_table` of a skipped metric says in its `note` that it was not measured (its
 JSON carries no `notMeasured`). The MCP answer of an `export_csv` over a findings view
 carries the same `{id, reason}` list. Before 27d every one of these was a bare list of ids.
-Pinned: `test/api/scope-start.test.ts:580` "issues_list and metrics_get name a
+Pinned: `test/api/scope-start.test.ts:582` "issues_list and metrics_get name a
 skipped rule in notMeasured, on HTTP and MCP, and never read it as clean".
 
-Pinned: `test/api/query.test.ts:1084` "groups by rule, orders by severity then
-rule id", `test/api/query.test.ts:1227` "says so when a rule's listing was capped"
-(the capped shape); `test/api/mcp.test.ts:1759` "groups findings by rule, orders
-them by severity" and `test/api/mcp.test.ts:1773` "carries a capped rule's real
+Pinned: `test/api/query.test.ts:1086` "groups by rule, orders by severity then
+rule id", `test/api/query.test.ts:1229` "says so when a rule's listing was capped"
+(the capped shape); `test/api/mcp.test.ts:1762` "groups findings by rule, orders
+them by severity" and `test/api/mcp.test.ts:1776` "carries a capped rule's real
 magnitude".
 
 ### 4.3a `issues_overview` → one row per rule, with the judgement applied
@@ -1963,10 +1963,10 @@ its 46 rows, as they came back (2026-11-08):
   a clean site; a crawl holding findings of a rule this ruleset lacks, as
   `issues_list` refuses it; a stored judgement overriding such a rule (§4.2).
 
-Pinned: `test/api/issues-overview.test.ts:157` "issues_overview rows" (8 tests:
+Pinned: `test/api/issues-overview.test.ts:158` "issues_overview rows" (8 tests:
 the distinct-URL count against `issue_urls` for every rule, a site-wide rule's
 URLs, the ordering, the disabled rule, `includeZero`) and
-`test/api/issues-overview.test.ts:259` "issues_overview refusals" (4 tests,
+`test/api/issues-overview.test.ts:260` "issues_overview refusals" (4 tests,
 including the null `pagesJudged`).
 
 ### 4.3b `crawl_overview` → counts that describe the crawl
@@ -2060,12 +2060,12 @@ back with `click-depth`, `issues-grid`, `render` and `robots-blocked-dropped`
 named, and those sections and that entry absent rather than written as zeros
 (§5.7).
 
-Pinned: `test/api/crawl-overview.test.ts:245` "crawl_overview on a judged,
-unrendered crawl" (9 tests, among them `test/api/crawl-overview.test.ts:264`
+Pinned: `test/api/crawl-overview.test.ts:246` "crawl_overview on a judged,
+unrendered crawl" (9 tests, among them `test/api/crawl-overview.test.ts:265`
 "takes every urls entry from the crawl_status field it names"),
-`test/api/crawl-overview.test.ts:416` "crawl_overview on other crawls" (7 tests:
+`test/api/crawl-overview.test.ts:417` "crawl_overview on other crawls" (7 tests:
 the unjudged, rendered and pre-0020 crawls, and the route), and
-`test/api/crawl-overview.test.ts:505` "the overviews read the judgement inside
+`test/api/crawl-overview.test.ts:506` "the overviews read the judgement inside
 their snapshot".
 
 ### 4.4 `issue_urls` → `{columns, items, nextCursor}` — one rule as a table
@@ -2149,9 +2149,9 @@ its own `pageUrl` key. It is deliberately NOT flattened into the row: nine
 rules record a `statusCode` of their own, and flattening would let one of them
 replace a column derived from the page row.
 
-Pinned: `test/api/query.test.ts:1289` "returns the URL slice with the evidence as
-stored", `test/api/query.test.ts:1470` "never leaks a column the projection did
-not name", `test/api/query.test.ts:1478` "carries a finding with no page as a
+Pinned: `test/api/query.test.ts:1291` "returns the URL slice with the evidence as
+stored", `test/api/query.test.ts:1472` "never leaks a column the projection did
+not name", `test/api/query.test.ts:1480` "carries a finding with no page as a
 null url", `test/rules/helpers.test.ts:697` "maps each fetch class to the status
 a reader acts on", `test/rules/helpers.test.ts:717` "names a block a block,
 whatever status the challenge was served with",
@@ -2169,9 +2169,9 @@ to list its findings`. `issue_inlinks` refuses a disabled rule the same way.
 **A rule a list crawl did not measure** (`notMeasured`, §4.3) is refused 409 by
 `issue_urls` and its CSV view on the same terms, naming `crawl.list-mode`: an
 empty page would read as "clean" where nobody looked (27c final wave).
-Pinned: `test/api/judgement-surfaces.test.ts:167` "issue_urls and issue_inlinks
+Pinned: `test/api/judgement-surfaces.test.ts:168` "issue_urls and issue_inlinks
 refuse a disabled rule with CONFLICT naming it",
-`test/api/judgement-surfaces.test.ts:222` "the issue_urls CSV of a disabled
+`test/api/judgement-surfaces.test.ts:223` "the issue_urls CSV of a disabled
 rule is refused before a byte".
 
 ### 4.4a `issue_inlinks` → `{columns, items, nextCursor}` — the links that point at it
@@ -2312,13 +2312,13 @@ them would hand a client a file saying "`_pos` appears on 47 URLs" while losing
 "this site has 5 parameters on 61 URLs". The file is named
 `crawl_<uuid>-<metricId>.csv`.
 
-Pinned: `test/api/query.test.ts:1588` "serves the metric's copy, its header and
-one row per scope", `test/api/query.test.ts:1664` "puts both sitemap scopes in
+Pinned: `test/api/query.test.ts:1590` "serves the metric's copy, its header and
+one row per scope", `test/api/query.test.ts:1666` "puts both sitemap scopes in
 one table, with the site-only cells empty",
-`test/api/query.test.ts:1735` "says which kind of empty a rowless table is, and
-refuses the two that are not", `test/api/query.test.ts:1771` "serves the same
+`test/api/query.test.ts:1737` "says which kind of empty a rowless table is, and
+refuses the two that are not", `test/api/query.test.ts:1773` "serves the same
 header on the catalog, and only on metric rules",
-`test/api/mcp.test.ts:2192` "answers one metric's table: the copy, the header,
+`test/api/mcp.test.ts:2195` "answers one metric's table: the copy, the header,
 and one row per scope",
 `test/rules/metric-table.test.ts:377` "gives every metric rule a table whose
 columns are the catalog's",
@@ -2342,16 +2342,16 @@ stored, and `site.health` counted only the findings of the rules that run left
 enabled, so a stale judgement means these numbers predate the crawl's current
 settings: a rule disabled since is still in `site.health`'s counts, and a rule
 re-enabled since is still out of them, until `crawl_rules` re-runs
-(`test/api/judgement-config.test.ts:723` "brings the group back at once while
+(`test/api/judgement-config.test.ts:725` "brings the group back at once while
 site.health keeps the disabled run's value"; the flag itself,
-`test/api/judgement-config.test.ts:596` "judgementStale on crawl_status,
+`test/api/judgement-config.test.ts:598` "judgementStale on crawl_status,
 metrics_get and metric_table").
 `value` is the metric's own object — its shape belongs to the metric, and the
 copy travels with it. Scopes: `site | page_type | sitemap_doc` (`rule` was never
 one — corrected in P21-T1, beside §4.4b). See §6 for
 `site.health` and for the absent-family trap.
-Pinned: `test/api/query.test.ts:1512` "returns the stored value with the
-registry's copy joined", `test/api/mcp.test.ts:2163` "answers the measured
+Pinned: `test/api/query.test.ts:1514` "returns the stored value with the
+registry's copy joined", `test/api/mcp.test.ts:2166` "answers the measured
 numbers with their copy joined".
 
 **One field inside one metric's value that this contract does pin, because it
@@ -2376,8 +2376,8 @@ NOT MEASURED applies only to what no pass rendered, and to the whole check only
 when both counts are 0. `"failed"` is neither "rendered" nor "no render
 needed". `"failed"` takes precedence over `"ran"`; the closed vocabulary is
 `ran`, `none`, `failed`. Read it before quoting any JavaScript finding. Pinned:
-`test/api/mcp.test.ts:1469` "says over the wire whether a render pass ran, not
-just how many pages it left", `test/api/http.test.ts:1752` "serves
+`test/api/mcp.test.ts:1471` "says over the wire whether a render pass ran, not
+just how many pages it left", `test/api/http.test.ts:1757` "serves
 renderPassEvidence none beside the selection a pass would make",
 `test/rules/render-metrics.test.ts:536` "answers none on a crawl nobody
 rendered, and still reports what a pass would choose".
@@ -2431,12 +2431,12 @@ the two bounds every weight figure needs (the `src`+`srcset` ceiling, the
 unweighed-file floor). Per template it is `metrics_get` with
 `metricId: "page.weight"`, which states both; per file it is the `resources` CSV
 view (§12), which carries `referencingPages`.
-Pinned: `test/api/query.test.ts:1791` "returns a slim projection and nothing
+Pinned: `test/api/query.test.ts:1793` "returns a slim projection and nothing
 else" (the widened projection, pinned as a whole set),
-`test/api/query.test.ts:1829` "carries both observations, and never lets the
-second rewrite the first", `test/api/mcp.test.ts:2315` "names every field of the
-row it answers with, in its own description", `test/api/query.test.ts:1932` "carries both word counts, so the number a
-reader quotes is the one they can see", `test/api/mcp.test.ts:2249` "answers the
+`test/api/query.test.ts:1831` "carries both observations, and never lets the
+second rewrite the first", `test/api/mcp.test.ts:2318` "names every field of the
+row it answers with, in its own description", `test/api/query.test.ts:1934` "carries both word counts, so the number a
+reader quotes is the one they can see", `test/api/mcp.test.ts:2252` "answers the
 crawled pages, slim and ordered by URL".
 
 ### 4.7 `robots_get` → the robots.txt this crawl obeyed
@@ -2446,8 +2446,8 @@ sitemapSources[], suppliedSitemaps[], userAgent}`. It is **stored evidence, neve
 a re-fetch**: the file as the crawl read it, which is the only honest answer to
 "what did this crawl obey". `outcome ∈ read | absent | unreachable`, and
 `unreachable` is not "there are no rules" (RFC 9309 §2.3.1.4).
-Pinned: `test/api/query.test.ts:1980` "answers with the robots.txt the crawl
-read, and the metadata that makes it readable", `test/api/mcp.test.ts:2352`
+Pinned: `test/api/query.test.ts:1982` "answers with the robots.txt the crawl
+read, and the metadata that makes it readable", `test/api/mcp.test.ts:2355`
 "answers with the robots.txt the crawl read, verbatim".
 
 ### 4.8 `crawl_list` → `{items: CrawlListItem[], nextCursor}`
@@ -2461,11 +2461,11 @@ seeded as `http://example.com/`. It is the engine's one definition of "the same
 site" (`hostnameSpellings`), the same one the cross-site compare refusal uses.
 A `siteUrl` that is not an http(s) URL is **refused by name and never read as
 "no filter"** — a dropped filter would answer with every crawl the engine holds.
-Pinned: `test/api/query.test.ts:3431` "narrows the listing to one site, and
-leaves the other site's crawls out", `test/api/query.test.ts:3437` "matches the
-apex and www spellings, both schemes", `test/api/query.test.ts:3451` "refuses a
+Pinned: `test/api/query.test.ts:3433` "narrows the listing to one site, and
+leaves the other site's crawls out", `test/api/query.test.ts:3439` "matches the
+apex and www spellings, both schemes", `test/api/query.test.ts:3453` "refuses a
 siteUrl that is not an http(s) URL rather than dropping the filter";
-`test/api/mcp.test.ts:2058` "narrows crawl_list to one site".
+`test/api/mcp.test.ts:2061` "narrows crawl_list to one site".
 
 **Pre-tenancy posture, stated plainly (see §9).** Without `siteUrl`, this
 listing returns every crawl the engine holds, including other tenants'
@@ -2620,7 +2620,7 @@ crawl is `running` or closed (409 naming the status), a change to a `queued` cra
 this server has already taken off its queue (409: it is starting now and has read its
 config; pause it first), `maxPages` below the pages already crawled or, on a list
 crawl, below its distinct list (400, the start's wording; pinned:
-`test/api/lifecycle.test.ts:1161` "refuses maxPages below the distinct list, as a start
+`test/api/lifecycle.test.ts:1163` "refuses maxPages below the distinct list, as a start
 does"), `perHostDelayMs` under the politeness floor (400), and any change while a
 render pass or `crawl_rules`
 runs over the crawl (409).
@@ -2638,19 +2638,19 @@ sentence was corrected in 27c), and still before it touches a finding or the sta
 that `{judgement: {rules: {<id>: null}}}` can remove the override. A patch that
 leaves such an override in place is refused (400), naming its path.
 
-Pinned: `test/api/judgement-config.test.ts:380` "crawl_config_set — PATCH
+Pinned: `test/api/judgement-config.test.ts:382` "crawl_config_set — PATCH
 /crawls/:id/config" (12 tests: merge, removal, severity, unknown rule, repair,
-`crawl_rules` refusing a removed rule's override, the 409 while the rules run), `test/api/judgement-config.test.ts:560`
+`crawl_rules` refusing a removed rule's override, the 409 while the rules run), `test/api/judgement-config.test.ts:562`
 "findingCap through crawl_config_set" (4 tests, including
-`test/api/judgement-config.test.ts:572` "null is uncapped, as at crawl_start —
-never a silent return to the default"), over MCP `test/api/judgement-config.test.ts:654`
+`test/api/judgement-config.test.ts:574` "null is uncapped, as at crawl_start —
+never a silent return to the default"), over MCP `test/api/judgement-config.test.ts:656`
 "crawl_config_get answers what GET /crawls/:id/config answers" and
-`test/api/judgement-config.test.ts:660` "crawl_config_set refuses severity with
-the HTTP route's text", `test/api/judgement-config.test.ts:723` "brings the group
+`test/api/judgement-config.test.ts:662` "crawl_config_set refuses severity with
+the HTTP route's text", `test/api/judgement-config.test.ts:725` "brings the group
 back at once while site.health keeps the disabled run's value",
-`test/api/judgement-surfaces.test.ts:317` "re-enabling brings the findings back
+`test/api/judgement-surfaces.test.ts:318` "re-enabling brings the findings back
 at once, and the judgement is no longer stale" and
-`test/api/judgement-surfaces.test.ts:330` "quotes the stamped value until the
+`test/api/judgement-surfaces.test.ts:331` "quotes the stamped value until the
 rules re-run, and reports the staleness".
 
 ---
@@ -2704,9 +2704,9 @@ the crawl's findings were judged with) and `judgementStale`; and the copy is
 rendered from those thresholds, so an override shows in the text only after
 `crawl_rules` re-runs (the gate crawl's `performance.slow-response` title read
 "Response time over 1500 ms" with `SLOW_MS: 500` set and stale, and "over 500
-ms" after the re-run). Pinned: `test/api/judgement-surfaces.test.ts:184`
+ms" after the re-run). Pinned: `test/api/judgement-surfaces.test.ts:185`
 "rules_catalog keeps the disabled rule, flags it, and still counts its stored
-findings", `test/api/judgement-surfaces.test.ts:353` "without a crawl the
+findings", `test/api/judgement-surfaces.test.ts:354` "without a crawl the
 catalog is the default rendering, with type and priority and no judgement
 fields".
 
@@ -2727,7 +2727,7 @@ so a UI that draws both puts the same rule in the same place twice. The METRIC
 rules follow them as one contiguous block, by their declared `table.order` then
 by id (Phase 21); no other listing has an opinion about where a metric goes,
 because a metric writes no finding row and never appears in `issues_list`.
-Pinned: `test/api/query.test.ts:4272` "leads the metric section with the site
+Pinned: `test/api/query.test.ts:4274` "leads the metric section with the site
 census, then the declared sequence".
 
 A NOT MEASURED marker's row carries one field more — `marker`, the reason
@@ -2790,18 +2790,18 @@ cap the two differ by construction, which is what `atLeast` is for. Quoting a
 catalog count to a client as "the number of orphans on this site" is the Phase 6
 D-1 incident recurring in a new place.
 
-Pinned: `test/api/query.test.ts:2514` "answers the whole ruleset with its
-client-facing copy and no fired state", `test/api/query.test.ts:2594` "joins a
+Pinned: `test/api/query.test.ts:2516` "answers the whole ruleset with its
+client-facing copy and no fired state", `test/api/query.test.ts:2596` "joins a
 judged crawl's fired state, and counts a clean rule as zero",
-`test/api/query.test.ts:2618` "marks a metric rule's structural zero apart from a
-real clean", `test/api/query.test.ts:2644` "says fired null on a crawl nobody has
-judged, however many rows it holds", `test/api/query.test.ts:2661` "marks a
+`test/api/query.test.ts:2620` "marks a metric rule's structural zero apart from a
+real clean", `test/api/query.test.ts:2646` "says fired null on a crawl nobody has
+judged, however many rows it holds", `test/api/query.test.ts:2663` "marks a
 capped rule's count as a floor, agreeing with issues_list",
-`test/api/query.test.ts:2700` "reads the marker and the counts from one
-statement", `test/api/query.test.ts:2556` "carries the registry's marker on every
-NOT MEASURED marker, and on no other rule"; `test/api/mcp.test.ts:1879` "joins a
+`test/api/query.test.ts:2702` "reads the marker and the counts from one
+statement", `test/api/query.test.ts:2558` "carries the registry's marker on every
+NOT MEASURED marker, and on no other rule"; `test/api/mcp.test.ts:1882` "joins a
 judged crawl's fired state, zero included, summing to findingsCount" and
-`test/api/mcp.test.ts:1942` "names every field it actually answers with".
+`test/api/mcp.test.ts:1945` "names every field it actually answers with".
 
 ### 5.2 `metrics_get` — an absent family is not a zero gauge
 
@@ -2909,9 +2909,9 @@ rows cannot say it and only the config can.
    nobody weighed, and reports the referenced-and-weighed pair beside it.
 
 Pinned: `src/db/schema.ts`'s `resources.fetch_class` comment (the column says
-this); `test/api/query.test.ts:3052` "writes one row per referenced file, with
+this); `test/api/query.test.ts:3054` "writes one row per referenced file, with
 the class that makes an empty status readable" (all four spellings in the CSV);
-`test/crawl/fetch-resources.test.ts:1337` "asks nobody anything when the operator
+`test/crawl/fetch-resources.test.ts:1338` "asks nobody anything when the operator
 turned resource fetching off".
 
 ### 5.4 `resourceRefsCappedPages` null — nobody counted
@@ -2966,7 +2966,7 @@ Pinned: `src/db/schema.ts`'s `crawls.resource_refs_capped_pages` comment;
 `test/db/migration-0014.test.ts:233` "leaves the column null on a row no crawl
 loop ever closed"; `test/db/migration-0014.test.ts:211` "stamps 0 on a crawl that
 lost nothing — a measurement, not a silence";
-`test/api/query.test.ts:2432` "reports the cap-exceeded page count a crawl
+`test/api/query.test.ts:2434` "reports the cap-exceeded page count a crawl
 stamped, and null when none did".
 
 ### 5.5 `recheckFetchClass` null — nobody asked about this page
@@ -3000,10 +3000,10 @@ evidence blob carries `recheck: "not run"` (one of `"not run"`, `"capped"`,
 than implying a re-verification that never happened.
 
 Pinned: `src/db/schema.ts`'s `pages.recheck_fetch_class` comment (the null
-contract, stated at the column); `test/api/query.test.ts:1829` "carries both
+contract, stated at the column); `test/api/query.test.ts:1831` "carries both
 observations, and never lets the second rewrite the first" (the three nulls,
 told apart row by row, and the `recheckAt` invariant over every row of a
-listing); `test/api/query.test.ts:2376` "tells a crawl with no server errors
+listing); `test/api/query.test.ts:2378` "tells a crawl with no server errors
 apart from a crawl nobody rechecked" (the two zeroes, at the crawl level).
 
 ### 5.6 `failureReason` null — either nothing failed, or nobody could say
@@ -3038,9 +3038,9 @@ robots.txt answers 502); `test/db/migration-0017.test.ts:259` "clears the
 sentence when the failed crawl is resumed" (the implication over a RESUME, which
 is the one move that changes the status without closing the crawl — the fixture
 holds the robots request so the row is read mid-run);
-`test/api/mcp.test.ts:3112` "clears the failure sentence of the crawl a resume
+`test/api/mcp.test.ts:3166` "clears the failure sentence of the crawl a resume
 accepts" (the same, over the queue's own writer and on the wire);
-`test/api/query.test.ts:4215` "tells a pre-0017 failed
+`test/api/query.test.ts:4217` "tells a pre-0017 failed
 crawl apart from a crawl that did not fail" (the two nulls, on the wire).
 
 ### 5.7 The overviews: `pagesJudged`, `percentOfJudged` and `notMeasured`
@@ -3060,11 +3060,11 @@ a number) is a loud error, never `null` (hard rule 7). And the overview of a
 crawl nobody has judged is not an empty `rows`: it is **refused** (409), because
 an empty overview reads as a clean site. In the CSV view a `null`
 `percentOfJudged` is an empty `% of Judged` cell. Pinned:
-`test/api/issues-overview.test.ts:275` "answers pagesJudged null (and
+`test/api/issues-overview.test.ts:276` "answers pagesJudged null (and
 percentOfJudged null) with no site.health row",
-`test/api/issues-overview.test.ts:283` "throws on a malformed site.health row
-rather than reading it as null", `test/api/issues-overview.test.ts:260` "refuses
-an unjudged crawl with CONFLICT", `test/api/issues-overview.test.ts:307` "writes
+`test/api/issues-overview.test.ts:284` "throws on a malformed site.health row
+rather than reading it as null", `test/api/issues-overview.test.ts:261` "refuses
+an unjudged crawl with CONFLICT", `test/api/issues-overview.test.ts:308` "writes
 an empty % of Judged cell when pagesJudged is null".
 
 **`crawl_overview`: `notMeasured`.** (The listings' `notMeasured`, §4.3, has the same
@@ -3087,13 +3087,13 @@ measurement (pages no internal link reaches); and the dropped entry's `null`
 percent means "not a share of Encountered", not "not measured". In the CSV view
 each `notMeasured` item is a row after the entries, `<id>,Not measured:
 <reason>,,` with empty Value and Percent cells. Pinned:
-`test/api/crawl-overview.test.ts:246` "lists the measured sections in order and
-names render as not measured", `test/api/crawl-overview.test.ts:439` "names
+`test/api/crawl-overview.test.ts:247` "lists the measured sections in order and
+names render as not measured", `test/api/crawl-overview.test.ts:440` "names
 render coverage as not measured on a rendered crawl no rules run judged",
-`test/api/crawl-overview.test.ts:450` "names an uncounted robots overflow
-(pre-0020 crawl) instead of writing 0", `test/api/crawl-overview.test.ts:543`
+`test/api/crawl-overview.test.ts:451` "names an uncounted robots overflow
+(pre-0020 crawl) instead of writing 0", `test/api/crawl-overview.test.ts:544`
 "crawl_overview names issues-grid and click-depth as not measured, never zeros",
-`test/api/crawl-overview.test.ts:564` "has the exact header and one row per JSON
+`test/api/crawl-overview.test.ts:565` "has the exact header and one row per JSON
 entry, then the not-measured rows".
 
 ---
@@ -3375,7 +3375,7 @@ A `crawls.site_url` that is not a URL is a **409** ("whether they are the same
 site cannot be decided"), never "different sites". So is a side whose stored
 judgement overrides a rule this ruleset does not define (Phase 27a, §4.2), naming
 the crawl and the rule; `crawl_config_set` on that crawl is the repair. Pinned
-for the caveat: `test/api/judgement-config.test.ts:683` "adds a
+for the caveat: `test/api/judgement-config.test.ts:685` "adds a
 judgement-overrides caveat naming the crawl and the count".
 
 **The self-compare 400 has a UI consequence Talos should design for.** A compare
@@ -3388,12 +3388,12 @@ showing a user.
 
 Pinned: the whole `GET /compare` and `GET /compare/urls` blocks of
 `test/api/query.test.ts` — the arithmetic, the per-URL collapse, every caveat and
-every refusal — of which `test/api/query.test.ts:3500` "answers both sides,
+every refusal — of which `test/api/query.test.ts:3502` "answers both sides,
 comparable, and the rules in issues_list's order" is the answer itself and
-`test/api/query.test.ts:3914` "makes the same refusals as the summary" is the
+`test/api/query.test.ts:3916` "makes the same refusals as the summary" is the
 drill-down inheriting the summary's refusals; over the agent transport,
-`test/api/mcp.test.ts:2005` "answers the counts and the caveat when the two
-rulesets differ" and `test/api/mcp.test.ts:2070` "names every field it answers
+`test/api/mcp.test.ts:2008` "answers the counts and the caveat when the two
+rulesets differ" and `test/api/mcp.test.ts:2073` "names every field it answers
 with, and both caveat codes it produced".
 
 **Measured, not fixtured** (2026-09-01, `crawl_3f3ab847` → `crawl_02ff6f7a`):
@@ -3455,8 +3455,8 @@ Obligation 6, as a checked property rather than a promise:
 - No stack frame, no filesystem path, no repository document, no connection
   string, no private host, in any answer or any refusal. Pinned as a standing
   guard over live answers and over the CSV bytes:
-  `test/api/query.test.ts:3978` "carries no path, no document and no stack in any
-  answer this phase added" and `test/api/query.test.ts:4021` "holds for the CSV
+  `test/api/query.test.ts:3980` "carries no path, no document and no stack in any
+  answer this phase added" and `test/api/query.test.ts:4023` "holds for the CSV
   bytes, which are a response like any other".
 - Refusals name **the caller's own words** — the ids they supplied, the field
   they misspelled, the accepted vocabulary — plus, for a cross-site compare, the
@@ -3511,7 +3511,7 @@ Six postures a Talos integrator should know about rather than discover:
    the stored request-header evidence redacts the custom header names as it already
    redacted `authorization` and `cookie`. The names themselves are stored and shown,
    so do not put a secret in a header or cookie NAME. Pinned by the secret scan,
-   `test/fixtures/scope-and-requests.test.ts:337` "after a crawl with all three
+   `test/fixtures/scope-and-requests.test.ts:339` "after a crawl with all three
    credential kinds and a render pass, no secret is in any stored column or the log",
    which reads every text and jsonb column of every crawl-scoped table.
 
@@ -3826,7 +3826,7 @@ Three consequences a consumer must plan for:
 2. **A malformed truncation note is a 500, not a dropped field.** If a rule
    writes a note naming neither `total` nor `atLeast`, the issues surface fails
    loudly rather than answering with a bare `count` a reader would take as the
-   total (`test/api/query.test.ts:1264` "500s a truncation note it cannot read
+   total (`test/api/query.test.ts:1266` "500s a truncation note it cannot read
    rather than dropping it"). Same family of decision as the 409: the
    engine refuses to answer rather than answer wrongly.
 3. **Copy is always today's.** Every surface joins titles, explanations and
@@ -3877,7 +3877,7 @@ Semantics a consumer must repeat to its own users:
   `issue_urls` view of a disabled rule is refused before the first byte (409). On the gate crawl,
   with `title.same-as-h1` disabled, the `issues` view held 2,864 rows, its
   3,202 findings less that rule's 338
-  (`test/api/judgement-surfaces.test.ts:211` "the issues CSV carries type and
+  (`test/api/judgement-surfaces.test.ts:212` "the issues CSV carries type and
   priority and leaves out the disabled rule").
 - **`issues_overview` is the Issues Overview as a sheet** (Phase 27a): the
   JSON's rows in the JSON's order, with `Issue Name` the rule's title and
@@ -3972,7 +3972,7 @@ Semantics a consumer must repeat to its own users:
   column in these eleven views emits one (a metric's cells are counts, bytes,
   distances and percentages, none of which go below zero). It is not a text-column guard: a
   `Cache-Control` header is the server's own string and lands in a cell exactly
-  as a page title does, which is what `test/api/query.test.ts:3093` "never lets a
+  as a page title does, which is what `test/api/query.test.ts:3095` "never lets a
   crawled string become a formula" asserts.
 - **No BOM**, `\r\n` line endings, RFC 4180 quoting. Excel on a non-UTF-8
   Windows locale may mangle accents on a double-click; every parser and pipeline
@@ -3992,23 +3992,23 @@ Pinned: `test/api/csv.test.ts` (the writer, the guard, the
 flattening, the SQL keyset pins, and the view vocabulary — including
 `test/api/csv.test.ts:248` "heads the issue_urls view with the rule's own
 columns, in the rule's own order");
-`test/api/query.test.ts:2907` "writes each view's header, always, and the row a
+`test/api/query.test.ts:2909` "writes each view's header, always, and the row a
 caller came for" (including the three recheck columns, empty on a page nobody
-re-asked about and filled on one that was), `test/api/query.test.ts:3052` "writes one row per referenced
+re-asked about and filled on one that was), `test/api/query.test.ts:3054` "writes one row per referenced
 file, with the class that makes an empty status readable" (the four unfetched
-spellings), `test/api/query.test.ts:3093` "never lets a crawled string become a
-formula" (including a hostile `Cache-Control`), `test/api/query.test.ts:3114`
+spellings), `test/api/query.test.ts:3095` "never lets a crawled string become a
+formula" (including a hostile `Cache-Control`), `test/api/query.test.ts:3116`
 "quotes a cell holding a comma, a quote or a newline",
-`test/api/query.test.ts:3215` "exports exactly as many rows as the source holds"
+`test/api/query.test.ts:3217` "exports exactly as many rows as the source holds"
 (for `resources`, against BOTH of its tables: one row per file, and the
-referencing counts summing to the edge table), `test/api/query.test.ts:3270`
+referencing counts summing to the edge table), `test/api/query.test.ts:3272`
 "reads every view through a cursor that can be walked one row at a time",
-`test/api/query.test.ts:3305` "refuses a view, a format or a rule it cannot
-answer", `test/api/query.test.ts:3380` "refuses a crawl holding a retired rule's
-findings BEFORE the header", `test/api/http.test.ts:1968` "tears the response
+`test/api/query.test.ts:3307` "refuses a view, a format or a rule it cannot
+answer", `test/api/query.test.ts:3382` "refuses a crawl holding a retired rule's
+findings BEFORE the header", `test/api/http.test.ts:1973` "tears the response
 when a CSV export fails mid-stream, rather than truncating the file";
-`test/api/mcp.test.ts:799` "describes the shape of the CSV it writes, not just
-that it writes one" and `test/api/mcp.test.ts:2857` "streams the resources view
+`test/api/mcp.test.ts:801` "describes the shape of the CSV it writes, not just
+that it writes one" and `test/api/mcp.test.ts:2861` "streams the resources view
 byte for byte, as it writes it".
 
 ---

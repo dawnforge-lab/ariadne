@@ -93,7 +93,12 @@ import {
   type CrawlCredentials,
   type CredentialShape,
 } from "../crawl/credentials.js";
-import { CredentialStore } from "./credential-store.js";
+import {
+  assertRetentionDays,
+  CredentialVault,
+  DEFAULT_CREDENTIAL_RETENTION_DAYS,
+  type CredentialRead,
+} from "../crawl/credential-vault.js";
 import {
   matchesPattern,
   patternFamilyError,
@@ -375,8 +380,8 @@ type FieldKind = "string[]" | "credential";
  */
 export const RENDER_CRAWL_FIELDS: Record<keyof RenderCrawlInput, FieldKind> = {
   urls: "string[]",
-  // The crawl's credentials, re-supplied after a restart (27c). Secret: kept
-  // only in this process's memory, never stored, logged or answered.
+  // The crawl's credentials, re-supplied when the stored copy cannot be read
+  // (27c, 28b). Secret: stored only encrypted, never logged or answered.
   requestHeaders: "credential",
   httpAuth: "credential",
   cookies: "credential",
@@ -2471,17 +2476,24 @@ export class ApiService {
   private readonly rendering = new Set<string>();
 
   /**
-   * The credential VALUES of the crawls this process accepted (27c), by crawl
-   * id — the only place they are held. Never stored (the row keeps
-   * `credentialShape`, names only), never logged, never answered.
+   * The crawls' credential VALUES, encrypted in `crawl_credentials` (Phase 28b
+   * item 10; it replaced the in-memory store of 27c/27d). The row of a crawl
+   * keeps `credentialShape` (names only); the values are written through the
+   * vault in the same transaction as the crawl change that carries them, and
+   * read back where a run needs them. Never logged, never answered.
    *
-   * An entry stays until the crawl is deleted or cancelled, not until it
-   * finishes (Deviation 9): a render pass on a finished crawl needs them. After
-   * a restart the map is empty, and a crawl whose row has a shape is refused
-   * rather than run without them (`requireCredentials`, the crawl loop).
-   * Bounded by the crawls this process accepted with credentials.
+   * A crawl's row stays until it is cancelled or deleted, or the retention
+   * sweep removes it once the crawl has been settled `credentialRetentionDays`
+   * (Deviation 9: a render pass on a finished crawl needs them). A restart
+   * keeps them; a row this process cannot decrypt is `CREDENTIALS_REQUIRED` on
+   * a resume or a render, and pauses a queued crawl `credentials_unreadable`.
    */
-  private readonly credentials = new CredentialStore();
+  private readonly vault: CredentialVault;
+  /**
+   * `ServiceConfig.credentialRetentionDays`, validated at construction; read by
+   * whatever runs the retention sweep (`CredentialVault.sweepExpired`).
+   */
+  readonly credentialRetentionDays: number;
 
   /** Crawls accepted by this process and not yet started, in FIFO order. */
   private readonly waiting: QueueEntry[] = [];
@@ -2526,6 +2538,11 @@ export class ApiService {
       }
     }
     this.log = config.log ?? ((line) => console.error(line));
+    // The keys are checked by the vault's constructor, the retention here:
+    // both are refused at construction, naming the field, never a value.
+    this.vault = new CredentialVault(db, config.credentialKeys);
+    this.credentialRetentionDays = config.credentialRetentionDays ?? DEFAULT_CREDENTIAL_RETENTION_DAYS;
+    assertRetentionDays(this.credentialRetentionDays, "ServiceConfig.credentialRetentionDays");
     this.exportDir = resolvePath(config.exportDir ?? joinPath(process.cwd(), "exports"));
     this.renderDir = resolvePath(config.renderDir ?? joinPath(process.cwd(), RENDER_HTML_DIR));
   }
@@ -2869,8 +2886,8 @@ export class ApiService {
    * this process's queue. Takes the body as it arrived — both transports hand
    * it over unparsed, so both are refused by the one parser.
    *
-   * Credential values go to `this.credentials` and nowhere else; the row
-   * carries their shape (27c).
+   * Credential values go to the vault, encrypted, in the transaction that
+   * creates the row; the row carries their shape (27c, 28b).
    */
   async startCrawl(tenant: TenantId, raw: unknown): Promise<CrawlAccepted> {
     if (this.closed) {
@@ -2898,6 +2915,9 @@ export class ApiService {
         rulesetVersion: RULESET_VERSION,
         status: "queued",
       });
+      // The values, encrypted, in the transaction that creates the row whose
+      // `credentialShape` names them: a reader sees both or neither (28b).
+      if (credentials !== undefined) await this.vault.write(tx, tenant, crawlId, credentials);
       // The distinct listed URLs, `position` from 0 in list order (Deviation 2).
       if (listed === null) return;
       for (let start = 0; start < listed.urls.length; start += LIST_INSERT_CHUNK) {
@@ -2908,8 +2928,6 @@ export class ApiService {
         );
       }
     });
-    // Before the queue can run it: the runner reads this map at dequeue.
-    if (credentials !== undefined) this.credentials.set(crawlId, credentials);
 
     const entry: QueueEntry = { crawlId, resuming: false };
     this.waiting.push(entry);
@@ -3659,24 +3677,27 @@ export class ApiService {
     switch (row.status) {
       case "queued":
       case "paused": {
-        // From here to the UPDATE's dispatch there is no `await`.
+        // From here to the transaction's dispatch there is no `await`.
         if (row.status === "queued") this.dropFromQueue(crawlId);
         const now = new Date();
-        const moved = await this.db
-          .update(crawls)
-          .set({
-            status: "cancelled",
-            cancelledAt: now,
-            pauseReason: null,
-            controlRequest: null,
-            // A queued crawl stops now; a paused one already has the time its
-            // run stopped, and that stays.
-            ...(row.status === "queued" ? { finishedAt: now } : {}),
-          })
-          .where(and(eq(crawls.id, crawlId), eq(crawls.status, row.status)));
-        requireMoved(moved, crawlId, row.status, "cancel");
-        // A cancelled crawl never runs again: its credentials go (Deviation 9).
-        this.credentials.delete(crawlId);
+        await this.db.transaction(async (tx) => {
+          const moved = await tx
+            .update(crawls)
+            .set({
+              status: "cancelled",
+              cancelledAt: now,
+              pauseReason: null,
+              controlRequest: null,
+              // A queued crawl stops now; a paused one already has the time its
+              // run stopped, and that stays.
+              ...(row.status === "queued" ? { finishedAt: now } : {}),
+            })
+            .where(and(eq(crawls.id, crawlId), eq(crawls.status, row.status)));
+          requireMoved(moved, crawlId, row.status, "cancel");
+          // A cancelled crawl never runs again: its credentials go with the
+          // status, in one transaction (Deviation 9, 28b).
+          await this.vault.remove(tx, crawlId);
+        });
         return { crawlId, status: "cancelled", controlRequested: null, immediate: true };
       }
       case "running": {
@@ -3740,10 +3761,10 @@ export class ApiService {
         throw new ServiceError("NOT_FOUND", `no such crawl '${clip(crawlId)}'`);
       }
       refuseDeleteWhile(crawlId, current.status, readControlRequest(current.controlRequest, crawlId));
+      // `crawl_credentials` is one of the crawl's child tables, so the stored
+      // credentials go in this transaction with every other row (Deviation 9).
       return await deleteCrawlRows(tx, crawlId);
     });
-    // The rows are gone, so are the credentials (Deviation 9).
-    this.credentials.delete(crawlId);
 
     const files = await deleteCrawlFiles(crawlId, slug(crawlId), this.renderDir, this.exportDir, tenant);
     return { crawlId, rows, files };
@@ -3849,11 +3870,13 @@ export class ApiService {
    *     request; a failed crawl is resumable. The claim is also conditioned on
    *     `control_request is null`, so a request set after the read is not
    *     carried in either.
-   * 10. **Credentials the row needs, neither sent nor held** — 409
+   * 10. **Credentials the row needs, neither sent nor stored readably** — 409
    *     `CREDENTIALS_REQUIRED` naming the fields and names (27c,
-   *     `credentialsFor`); sent with another shape, 400. After a restart the
-   *     map is empty and a crawl that needed them is refused here, before
-   *     the claim, rather than accepted and then failed by the loop.
+   *     `credentialsFor`); sent with another shape, 400. A restart keeps the
+   *     stored copy (28b); one this server cannot decrypt, or one the
+   *     retention sweep removed, is refused here, before the claim, rather
+   *     than accepted and then paused by the runner. Credentials sent with
+   *     the resume replace the stored copy in the claim's transaction.
    *
    * A PAUSED CRAWL IS RESUMABLE, and that is the whole point of a pause (27b).
    * `paused` means the loop stopped on purpose — an agent's `crawl_pause`
@@ -4006,11 +4029,12 @@ export class ApiService {
     } catch (error) {
       throw new ServiceError("CONFLICT", messageOf(error));
     }
-    // Refusal 10: credentials the row says it needs, neither sent nor held —
-    // a crawl that needed them never continues without them (27c, hard rule
-    // 7). Decided here rather than left to the loop, which would close the row
-    // `failed` after accepting it.
-    const credentials = this.credentialsFor(crawlId, "crawl_resume", stored.credentialShape, sent);
+    // Refusal 10: credentials the row says it needs, neither sent nor stored
+    // readably — a crawl that needed them never continues without them (27c,
+    // hard rule 7). Decided here rather than left to the runner, which would
+    // pause the row after accepting it. What a stored copy decrypts to is not
+    // kept: the runner reads it again at dequeue, beside the config it claims.
+    await this.credentialsFor(crawlId, "crawl_resume", stored.credentialShape, sent);
 
     // Hard rule 5 over the hosts the RESUME will fetch, not the ones the first
     // run did: discovery and the host probe both run again.
@@ -4040,93 +4064,99 @@ export class ApiService {
       }
     }
 
-    // Again, synchronously before the claim: the check at the top was several
-    // `await`s ago, and a render pass or a rules run may have claimed the crawl
-    // since. Once the row says `queued`, both refuse it.
-    this.refuseWhileBusy(crawlId, "crawl_resume");
-    const claimed = await this.db
-      .update(crawls)
-      .set({
-        status: "queued",
-        // `finished_at` goes with the status: a queued crawl has not finished,
-        // and a row saying both would be unreadable. The crawl loop clears it
-        // too when it starts, but a row can sit in this queue for a while first.
-        finishedAt: null,
-        // And the pause's reason goes with the pause: non-null exactly when
-        // `status = 'paused'` (27b column contract).
-        pauseReason: null,
-        // AND SO DOES `rules_run_at`, for a sharper reason than tidiness.
-        //
-        // It is the surface's single load-bearing sentence (talos-surface.md
-        // §5): a timestamp means a complete rules pass is on record, so an empty
-        // findings answer means "looked, found nothing", and null means nobody
-        // has looked. Judge a paused crawl and then resume it, and the
-        // timestamp would survive over a crawl that has since grown pages —
-        // `findingsCount` would describe a strictly smaller crawl than
-        // `pagesScanned` counts, and every reader is told to trust the pair.
-        // `crawl_compare` would inherit the staleness silently, because it
-        // compares two crawls it believes were both judged.
-        //
-        // So the marker is cleared here, by `finishedAt`'s own argument: the row
-        // must not say two things that cannot both be true. The findings rows
-        // themselves are left alone and are then read exactly as a run that died
-        // part-way — a state the surface already documents and handles — until
-        // `crawl_rules` re-judges the finished crawl and rewrites them.
-        rulesRunAt: null,
-        // The stamp of what that judgement used goes with it: non-null exactly when `rules_run_at` is (27a).
-        rulesJudgedWith: null,
-        // AND THE FAILURE SENTENCE, by `finishedAt`'s argument again: the
-        // column's contract is `failure_reason IS NOT NULL` ⟹ `status =
-        // 'failed'` (migration 0017), so a queued row still carrying why the
-        // last run failed breaks it — and serves an accepted crawl with a
-        // death notice attached. The loop clears it too when it starts.
-        failureReason: null,
-      })
-      // Conditioned on the status this call READ, for `markCrawlFailed`'s
-      // reason: a crawl that started under another process between the guards
-      // and here is left exactly as it is. And on no request pending (refusal
-      // 9), so one set after the read is not carried into a queued row.
-      .where(
-        and(
-          eq(crawls.id, crawlId),
-          eq(crawls.status, row.status),
-          isNull(crawls.controlRequest),
-        ),
-      );
+    // The claim and the credentials sent with it are one transaction (28b):
+    // a resume that queues the crawl stores the values it was sent, and one
+    // that is refused stores nothing. A mistyped password sent with a refused
+    // resume never replaces the right one.
+    const toStore = sent !== undefined && shapeOf(sent) !== null ? sent : undefined;
+    await this.db.transaction(async (tx) => {
+      // Again, synchronously before the claim: the check at the top was several
+      // `await`s ago, and a render pass or a rules run may have claimed the crawl
+      // since. Once the row says `queued`, both refuse it.
+      this.refuseWhileBusy(crawlId, "crawl_resume");
+      const claimed = await tx
+        .update(crawls)
+        .set({
+          status: "queued",
+          // `finished_at` goes with the status: a queued crawl has not finished,
+          // and a row saying both would be unreadable. The crawl loop clears it
+          // too when it starts, but a row can sit in this queue for a while first.
+          finishedAt: null,
+          // And the pause's reason goes with the pause: non-null exactly when
+          // `status = 'paused'` (27b column contract).
+          pauseReason: null,
+          // AND SO DOES `rules_run_at`, for a sharper reason than tidiness.
+          //
+          // It is the surface's single load-bearing sentence (talos-surface.md
+          // §5): a timestamp means a complete rules pass is on record, so an empty
+          // findings answer means "looked, found nothing", and null means nobody
+          // has looked. Judge a paused crawl and then resume it, and the
+          // timestamp would survive over a crawl that has since grown pages —
+          // `findingsCount` would describe a strictly smaller crawl than
+          // `pagesScanned` counts, and every reader is told to trust the pair.
+          // `crawl_compare` would inherit the staleness silently, because it
+          // compares two crawls it believes were both judged.
+          //
+          // So the marker is cleared here, by `finishedAt`'s own argument: the row
+          // must not say two things that cannot both be true. The findings rows
+          // themselves are left alone and are then read exactly as a run that died
+          // part-way — a state the surface already documents and handles — until
+          // `crawl_rules` re-judges the finished crawl and rewrites them.
+          rulesRunAt: null,
+          // The stamp of what that judgement used goes with it: non-null exactly when `rules_run_at` is (27a).
+          rulesJudgedWith: null,
+          // AND THE FAILURE SENTENCE, by `finishedAt`'s argument again: the
+          // column's contract is `failure_reason IS NOT NULL` ⟹ `status =
+          // 'failed'` (migration 0017), so a queued row still carrying why the
+          // last run failed breaks it — and serves an accepted crawl with a
+          // death notice attached. The loop clears it too when it starts.
+          failureReason: null,
+        })
+        // Conditioned on the status this call READ, for `markCrawlFailed`'s
+        // reason: a crawl that started under another process between the guards
+        // and here is left exactly as it is. And on no request pending (refusal
+        // 9), so one set after the read is not carried into a queued row.
+        .where(
+          and(
+            eq(crawls.id, crawlId),
+            eq(crawls.status, row.status),
+            isNull(crawls.controlRequest),
+          ),
+        );
 
-    // AND THE COMPARE-AND-SWAP IS READ, which is the whole point of writing one.
-    //
-    // Zero rows means the guard above raced: between reading the row and this
-    // statement, something else moved the crawl — another process started it,
-    // its own worker closed it, `crawl_mark_failed` retired it. Queueing anyway
-    // would answer `{status: "queued"}` about a row that says nothing of the
-    // kind, and this process would then run a crawl somebody else may be
-    // running: a silent no-op dressed as an acceptance, which is exactly what
-    // hard rule 7 forbids and exactly the trap `markCrawlFailed`'s conditioned
-    // update was written to avoid.
-    //
-    // It is also the narrowest this server can make the double-accept race
-    // without a lock: two callers reading the same status both reach here, and
-    // only the one whose UPDATE lands first sees a row. The other is refused,
-    // by the database, on the row itself.
-    if (claimed.rowCount === null) {
-      throw new Error(
-        `resumeCrawl: the update of crawl ${crawlId} reported no row count, so whether ` +
-          `this server claimed it is unknown`,
-      );
-    }
-    if (claimed.rowCount === 0) {
-      throw new ServiceError(
-        "CONFLICT",
-        `crawl ${crawlId} changed state while this resume was being checked — it was ` +
-          `'${row.status}' when the call began and something else has moved it since. ` +
-          `Nothing was queued; read crawl_status and try again`,
-      );
-    }
-
-    // Credentials sent with the resume replace what was held (Deviation 9):
-    // the runner hands the map's entry to the loop when it dequeues the crawl.
-    if (sent !== undefined && credentials !== undefined) this.credentials.set(crawlId, credentials);
+      // AND THE COMPARE-AND-SWAP IS READ, which is the whole point of writing one.
+      //
+      // Zero rows means the guard above raced: between reading the row and this
+      // statement, something else moved the crawl — another process started it,
+      // its own worker closed it, `crawl_mark_failed` retired it. Queueing anyway
+      // would answer `{status: "queued"}` about a row that says nothing of the
+      // kind, and this process would then run a crawl somebody else may be
+      // running: a silent no-op dressed as an acceptance, which is exactly what
+      // hard rule 7 forbids and exactly the trap `markCrawlFailed`'s conditioned
+      // update was written to avoid.
+      //
+      // It is also the narrowest this server can make the double-accept race
+      // without a lock: two callers reading the same status both reach here, and
+      // only the one whose UPDATE lands first sees a row. The other is refused,
+      // by the database, on the row itself.
+      if (claimed.rowCount === null) {
+        throw new Error(
+          `resumeCrawl: the update of crawl ${crawlId} reported no row count, so whether ` +
+            `this server claimed it is unknown`,
+        );
+      }
+      if (claimed.rowCount === 0) {
+        throw new ServiceError(
+          "CONFLICT",
+          `crawl ${crawlId} changed state while this resume was being checked — it was ` +
+            `'${row.status}' when the call began and something else has moved it since. ` +
+            `Nothing was queued; read crawl_status and try again`,
+        );
+      }
+      // Credentials sent with the resume replace the stored copy (Deviation 9),
+      // bumping its generation: the runner reads them at dequeue.
+      if (toStore !== undefined) await this.vault.write(tx, tenant, crawlId, toStore);
+    });
     const entry: QueueEntry = { crawlId, resuming: true };
     this.waiting.push(entry);
     this.pump();
@@ -4142,17 +4172,18 @@ export class ApiService {
    *    only). A crawl started without credentials gains them through
    *    `crawl_config_set` while paused, never through a resume or a render;
    *  - not sent, and the row needs none: none;
-   *  - not sent: what this process holds for the crawl, or
-   *    `CREDENTIALS_REQUIRED` naming the fields — after a restart the map is
-   *    empty (Deviation 9), and the spec's answer is a refusal until they are
+   *  - not sent: the stored copy, decrypted (28b; a restart keeps it), or
+   *    `CREDENTIALS_REQUIRED` naming the fields when there is none (cancelled,
+   *    swept by retention, or never written) or this server cannot decrypt it
+   *    (`unreadable`, logged with its reason) — a refusal until they are
    *    supplied again, never a run without them.
    */
-  private credentialsFor(
+  private async credentialsFor(
     crawlId: string,
     operation: "crawl_resume" | "crawl_render",
     stored: CredentialShape | undefined,
     sent: CrawlCredentials | undefined,
-  ): CrawlCredentials | undefined {
+  ): Promise<CrawlCredentials | undefined> {
     const required = stored ?? null;
     if (sent !== undefined) {
       const supplied = shapeOf(sent);
@@ -4171,24 +4202,54 @@ export class ApiService {
       return supplied === null ? undefined : sent;
     }
     if (required === null) return undefined;
-    const held = this.credentials.get(crawlId, required);
-    if (held === undefined && !this.credentials.has(crawlId)) {
+    const held = this.storedCredentials(crawlId, required, await this.vault.read(crawlId));
+    if (held.kind === "missing") {
       throw new ServiceError(
         "CREDENTIALS_REQUIRED",
-        `crawl ${crawlId} needs credentials this server does not hold: ${describeShape(required)}. ` +
-          "They are kept only in a server's memory, so a restart loses them; send them again " +
+        `crawl ${crawlId} needs ${describeShape(required)}, and ${held.why}: send them again ` +
           `with ${operation} (requestHeaders, httpAuth, cookies). A crawl that needed them is ` +
           "never run without them",
       );
     }
-    if (held === undefined) {
-      throw new ServiceError(
-        "CREDENTIALS_REQUIRED",
-        `crawl ${crawlId} needs ${describeShape(required)}, and the credentials this server ` +
-          `holds for it are of another shape: send them again with ${operation}`,
-      );
+    return held.credentials;
+  }
+
+  /**
+   * A vault read, for a crawl whose row names `required`: the values, or why
+   * there are none this server can use, as a phrase an answer can carry (no
+   * value, no key). An unreadable copy is logged with its reason, once per
+   * read. A readable copy of another shape than the row's is our defect —
+   * both are written in one transaction — and throws, naming the shapes only.
+   */
+  private storedCredentials(
+    crawlId: string,
+    required: CredentialShape,
+    read: CredentialRead,
+  ): { kind: "ok"; credentials: CrawlCredentials } | { kind: "missing"; why: string } {
+    switch (read.kind) {
+      case "none":
+        return { kind: "missing", why: "this server has no stored copy of them" };
+      case "unreadable":
+        this.log(`api: crawl ${crawlId}: its stored credentials cannot be read (${read.reason})`);
+        return {
+          kind: "missing",
+          why:
+            read.reason === "unknown-key"
+              ? "the stored copy was encrypted under a key this server does not hold"
+              : "the stored copy does not authenticate under this server's keys",
+        };
+      case "ok": {
+        const found = shapeOf(read.credentials);
+        if (!sameShape(found, required)) {
+          throw new Error(
+            `crawl ${crawlId}: its stored credentials are ${found === null ? "empty" : describeShape(found)}, ` +
+              `and its row names ${describeShape(required)}; the two are written together, so this ` +
+              "is a defect, not a request to fix",
+          );
+        }
+        return { kind: "ok", credentials: read.credentials };
+      }
     }
-    return held;
   }
 
   /**
@@ -4321,7 +4382,7 @@ export class ApiService {
       // Before the driver, which would throw `CredentialsMissingError` and
       // answer 500: a crawl that needed credentials is refused with the code an
       // agent acts on (27c). Validated here, as `runRenderPass` does not.
-      const credentials = this.credentialsFor(crawlId, "crawl_render", config.credentialShape, sent);
+      const credentials = await this.credentialsFor(crawlId, "crawl_render", config.credentialShape, sent);
       const robotsCrawlDelaySec = this.robotsCrawlDelay(row.discovery, crawlId);
       const renderUrls =
         input.urls === undefined
@@ -4349,14 +4410,18 @@ export class ApiService {
       } catch (error) {
         throw mapRenderPassError(error, crawlId, this.log);
       }
-      // Kept for the next pass (Deviation 9) only once the pass was ACCEPTED
+      // Stored for the next pass (Deviation 9) only once the pass was ACCEPTED
       // and ran, as a resume stores them only on acceptance: a render refused
-      // for its urls, its status or a lease must not replace what is held (a
+      // for its urls, its status or a lease must not replace the stored copy (a
       // mistyped password would overwrite the right one). Never for a
       // cancelled crawl, whose credentials a cancel released: they served this
       // pass only. A cancel cannot land meanwhile — `refuseWhileBusy` holds it.
+      // The pass changes no crawl row a write could share a transaction with,
+      // so the write has its own (28b).
       if (sent !== undefined && credentials !== undefined && row.status !== "cancelled") {
-        this.credentials.set(crawlId, credentials);
+        await this.db.transaction(async (tx) => {
+          await this.vault.write(tx, tenant, crawlId, credentials);
+        });
       }
     } finally {
       // Released on every path — a refused read, a refused list, a failed
@@ -4627,8 +4692,9 @@ export class ApiService {
    *    (`patternFamilyError`), or a credential value `credentialFieldError`
    *    refuses or carrying the `[redacted]` marker: VALIDATION, naming the
    *    field and names, never a value;
-   *  - a credential change that would leave a kind the row needs unheld
-   *    (after a restart): CREDENTIALS_REQUIRED (`nextCredentials`);
+   *  - a credential change that would keep a kind the row needs while no
+   *    readable stored copy of it exists: CREDENTIALS_REQUIRED
+   *    (`nextCredentials`);
    *  - a `judgement` that is null or not an object: VALIDATION — a null
    *    here would mean "delete the whole block", including a cap whose null is
    *    a value, so clearing is spelled per section instead;
@@ -4640,9 +4706,13 @@ export class ApiService {
    *
    * ## Credentials and the scope lists (27c T9)
    *
-   * A credential field's VALUE never reaches the row: the change replaces the
-   * entry `ApiService.credentials` holds, after the commit, and only the new
-   * `credentialShape` (names) is merged into the config. A changed `exclude`
+   * A credential field's VALUE never reaches the row: the change writes the
+   * new values through the vault, encrypted, in the same transaction as the
+   * config (28b; or removes the stored copy when no kind is left), and only
+   * the new `credentialShape` (names) is merged into the config. A runner
+   * that reads the crawl after the commit gets the new values with the new
+   * shape, and one that read it before gets the old pair: the 27d R17
+   * same-shape window is gone. A changed `exclude`
    * or `include` stamps `scope_changed_at`; the resumed run re-files the
    * pending URLs the new lists refuse (`refileOutOfScope`, Task 4).
    *
@@ -4687,16 +4757,6 @@ export class ApiService {
     this.refuseWhileConfigBusy(crawlId, crawlSet !== null);
 
     const { findingCap: capPatch, ...blockPatch } = judgementPatch ?? {};
-    /**
-     * The new credentials are STAGED beside the held ones as soon as they are
-     * known, before the transaction can commit (27d, closing 27c M9), and
-     * settled on its outcome: a committed change keeps only the new entry, a
-     * refused or rolled-back one drops it and the old values stay usable. A
-     * queue runner that dequeues in the gap between the commit and the settle
-     * asks by the shape its row states (`CredentialStore.get`) and finds
-     * whichever entry belongs to the row it read.
-     */
-    const staged: { settle: ((committed: boolean) => void) | null } = { settle: null };
     await this.db.transaction(async (tx) => {
       const rows = await tx
         .select({
@@ -4714,6 +4774,11 @@ export class ApiService {
       if (row === undefined) throw new ServiceError("NOT_FOUND", `no such crawl '${clip(crawlId)}'`);
 
       let config: Record<string, unknown> | undefined = undefined;
+      /**
+       * What the change does to the stored credentials, applied with the row's
+       * write below: written anew, removed, or (null) left alone.
+       */
+      let credentialWrite: { kind: "write"; values: CrawlCredentials } | { kind: "remove" } | null = null;
       /** Whether the crawl half changes any value (Ruling 12 drops unchanged keys). */
       let crawlChanges = false;
       /** Whether `exclude` or `include` changed, which stamps `scope_changed_at`. */
@@ -4809,11 +4874,11 @@ export class ApiService {
         scopeChanged = Object.hasOwn(changes, "exclude") || Object.hasOwn(changes, "include");
         let merged: Record<string, unknown> = { ...storedConfig, ...changes };
         if (Object.keys(secretChanges).length > 0) {
-          const next = this.nextCredentials(crawlId, storedConfig, secretChanges);
+          const next = await this.nextCredentials(tx, crawlId, storedConfig, secretChanges);
           const { credentialShape: _previous, ...rest } = merged;
           const shape = next === null ? null : shapeOf(next);
           merged = shape === null ? rest : { ...rest, credentialShape: shape };
-          staged.settle = this.credentials.stage(crawlId, shape === null ? null : next);
+          credentialWrite = next === null || shape === null ? { kind: "remove" } : { kind: "write", values: next };
         }
         // The merged config is validated as a stored one is read — with the
         // operator's `allowPrivate`, which is never stored — and written back
@@ -4898,6 +4963,12 @@ export class ApiService {
       // may have dequeued it.
       this.refuseWhileConfigBusy(crawlId, crawlSet !== null);
       this.refuseWhileStarting(crawlId, row.status, crawlChanges);
+      // The values with the shape that names them, in this transaction (28b).
+      if (credentialWrite?.kind === "write") {
+        await this.vault.write(tx, tenant, crawlId, credentialWrite.values);
+      } else if (credentialWrite?.kind === "remove") {
+        await this.vault.remove(tx, crawlId);
+      }
       await tx
         .update(crawls)
         .set({
@@ -4909,59 +4980,56 @@ export class ApiService {
         })
         .where(eq(crawls.id, crawlId));
       await this.config.afterConfigWrite?.("written");
-    }).catch((error: unknown) => {
-      staged.settle?.(false);
-      throw error;
     });
-    // Committed: the row states the new shape from here, and the staged entry
-    // is still beside the old one until the settle below.
-    try {
-      await this.config.afterConfigWrite?.("committed");
-    } catch (error) {
-      staged.settle?.(true);
-      throw error;
-    }
-    staged.settle?.(true);
     return await this.getCrawlConfig(tenant, crawlId);
   }
 
   /**
-   * The credentials a `crawl_config_set` leaves this process holding for the
-   * crawl: what it holds now, with each field the patch sends REPLACED (a field
-   * is replaced whole; an empty `requestHeaders` or `cookies`, or `httpAuth:
-   * null`, drops that kind), or null when nothing is left.
+   * The credentials a `crawl_config_set` leaves the crawl with: its stored
+   * copy, with each field the patch sends REPLACED (a field is replaced whole;
+   * an empty `requestHeaders` or `cookies`, or `httpAuth: null`, drops that
+   * kind), or null when nothing is left.
    *
-   * A field the row's stored shape names and the patch does not replace must
-   * already be held — and after a restart nothing is. Its value cannot be
-   * made up, and a shape naming a value nobody holds would only fail the next
-   * resume, so that is `CREDENTIALS_REQUIRED` now, naming what to send with
-   * the change (names only).
+   * The stored copy is read inside the change's transaction (`tx`), which
+   * holds the crawl row, so no other write lands between this read and the
+   * change's own. A field the row's stored shape names and the patch does not
+   * replace must be readable there — there may be no stored copy (it was
+   * swept, or the row predates 28b), or this server may not be able to
+   * decrypt it. Its value cannot be made up, and a shape naming a value
+   * nobody holds would only fail the next resume, so that is
+   * `CREDENTIALS_REQUIRED` now, naming what to send with the change (names
+   * only).
    */
-  private nextCredentials(
+  private async nextCredentials(
+    tx: Parameters<Parameters<Db["transaction"]>[0]>[0],
     crawlId: string,
     storedConfig: Record<string, unknown>,
     replace: Partial<Record<CredentialField, unknown>>,
-  ): CrawlCredentials | null {
+  ): Promise<CrawlCredentials | null> {
     let required: CredentialShape | null;
     try {
       required = storedCredentialShape(storedConfig, crawlId);
     } catch (error) {
       throw new ServiceError("CONFLICT", messageOf(error));
     }
-    const held = this.credentials.get(crawlId, required);
-    if (held === undefined && required !== null) {
-      const missing: CredentialShape = {
-        requestHeaderNames: Object.hasOwn(replace, "requestHeaders") ? [] : required.requestHeaderNames,
-        httpAuth: Object.hasOwn(replace, "httpAuth") ? false : required.httpAuth,
-        cookieNames: Object.hasOwn(replace, "cookies") ? [] : required.cookieNames,
-      };
-      if (missing.requestHeaderNames.length > 0 || missing.httpAuth || missing.cookieNames.length > 0) {
-        throw new ServiceError(
-          "CREDENTIALS_REQUIRED",
-          `crawl ${crawlId} needs ${describeShape(missing)}, which this server does not hold ` +
-            "(credentials live only in a server's memory, and a restart loses them), so this " +
-            "change cannot keep them: send them in the same crawl_config_set",
-        );
+    let held: CrawlCredentials | undefined;
+    if (required !== null) {
+      const stored = this.storedCredentials(crawlId, required, await this.vault.read(crawlId, tx));
+      if (stored.kind === "ok") {
+        held = stored.credentials;
+      } else {
+        const missing: CredentialShape = {
+          requestHeaderNames: Object.hasOwn(replace, "requestHeaders") ? [] : required.requestHeaderNames,
+          httpAuth: Object.hasOwn(replace, "httpAuth") ? false : required.httpAuth,
+          cookieNames: Object.hasOwn(replace, "cookies") ? [] : required.cookieNames,
+        };
+        if (missing.requestHeaderNames.length > 0 || missing.httpAuth || missing.cookieNames.length > 0) {
+          throw new ServiceError(
+            "CREDENTIALS_REQUIRED",
+            `crawl ${crawlId} needs ${describeShape(missing)}, and ${stored.why}, so this change ` +
+              "cannot keep them: send them in the same crawl_config_set",
+          );
+        }
       }
     }
     const next: { -readonly [K in CredentialField]?: CrawlCredentials[K] } = { ...(held ?? {}) };
@@ -6860,21 +6928,46 @@ export class ApiService {
    */
   private async runQueued(entry: QueueEntry, signal: AbortSignal): Promise<void> {
     try {
-      const [row] = await this.db
-        .select({ status: crawls.status, config: crawls.config })
-        .from(crawls)
-        .where(eq(crawls.id, entry.crawlId));
-      if (row === undefined) throw new Error(`queue runner: no crawl ${entry.crawlId}`);
+      // THE ROW AND ITS CREDENTIALS FROM ONE SNAPSHOT (28b). Both are written
+      // in one transaction by every change (`credential_generation` counts
+      // them), so a repeatable-read pair is a config and the values written
+      // with it — never a new shape beside old values, nor the reverse.
+      const { row, read } = await this.db.transaction(
+        async (tx) => {
+          const [found] = await tx
+            .select({ status: crawls.status, config: crawls.config })
+            .from(crawls)
+            .where(eq(crawls.id, entry.crawlId));
+          return { row: found, read: found === undefined ? null : await this.vault.read(entry.crawlId, tx) };
+        },
+        { isolationLevel: "repeatable read", accessMode: "read only" },
+      );
+      if (row === undefined || read === null) throw new Error(`queue runner: no crawl ${entry.crawlId}`);
       if (row.status !== "queued") throw new ClaimLostError(entry.crawlId, row.status, "queued");
-      // The credential values, from this process's memory (27c), beside the
-      // test-only fields and on their precedent: the row never holds them.
-      // Nothing is set when the map has no entry; a crawl whose row has a
-      // shape is then refused by the loop (`requireCredentials`), never run
-      // without them.
-      // Asked by the shape the row ITS read states (27d M9): a change in
-      // flight holds both shapes, and this finds the one that belongs to the row.
       const parsed = parseStoredConfig(row.config, entry.crawlId);
-      const credentials = this.credentials.get(entry.crawlId, parsed.credentialShape ?? null);
+      const required = parsed.credentialShape ?? null;
+      let credentials: CrawlCredentials | undefined;
+      if (required === null) {
+        // A crawl with no credentials has no stored copy: one would be a
+        // write this engine never makes, and it is not run on a guess.
+        if (read.kind !== "none") {
+          throw new Error(
+            `queue runner: crawl ${entry.crawlId} names no credentials and has a stored copy; ` +
+              "the two are written together, so this is a defect",
+          );
+        }
+      } else {
+        const stored = this.storedCredentials(entry.crawlId, required, read);
+        if (stored.kind === "missing") {
+          // NOT RUN, AND NOT FAILED: paused, before a single request, until
+          // the values are sent again (28b item 10). The loop would refuse
+          // the crawl too (`requireCredentials`), but as `failed` — and a
+          // crawl whose site never saw a request did not fail.
+          await this.pauseUnreadable(entry.crawlId, stored.why);
+          return;
+        }
+        credentials = stored.credentials;
+      }
       const config: CrawlConfig = {
         ...parsed,
         ...this.processTrustConfig(),
@@ -6892,7 +6985,7 @@ export class ApiService {
       // A run that ended cancelled (an agent's cancel of a running crawl)
       // releases its credentials, as a cancel of a queued or paused one does
       // (Deviation 9). A finished crawl keeps them: a render pass needs them.
-      if (summary.status === "cancelled") this.credentials.delete(entry.crawlId);
+      if (summary.status === "cancelled") await this.vault.remove(this.db, entry.crawlId);
       // The template inference beside the page count, because the pair is the
       // whole of "what shape is this site" and the alternative is a second
       // census over `pages` to find out. `pageTemplates` is null only when the
@@ -6944,6 +7037,37 @@ export class ApiService {
         })
         .where(and(eq(crawls.id, entry.crawlId), eq(crawls.status, "queued")));
     }
+  }
+
+  /**
+   * Close a queued crawl `paused` with `pause_reason = 'credentials_unreadable'`
+   * (28b item 10): its row names credentials and this process has none it can
+   * use — no stored copy, or one it cannot decrypt. Nothing was fetched. The
+   * row says so, `crawl_resume` with the values continues it, and the log line
+   * gives the reason in words (never a value). Conditioned on `queued`, as the
+   * runner's other closes are: a row another writer moved is left as it is.
+   */
+  private async pauseUnreadable(crawlId: string, why: string): Promise<void> {
+    const moved = await this.db
+      .update(crawls)
+      .set({
+        status: "paused",
+        pauseReason: "credentials_unreadable",
+        // As every pause writes it: when the crawl stopped.
+        finishedAt: new Date(),
+        controlRequest: null,
+      })
+      .where(and(eq(crawls.id, crawlId), eq(crawls.status, "queued")));
+    if (moved.rowCount === null) {
+      throw new Error(`queue runner: the pause of crawl ${crawlId} reported no row count`);
+    }
+    this.log(
+      moved.rowCount === 0
+        ? `api: crawl ${crawlId} left the queue state before it could be paused for its ` +
+            `credentials (${why}); not started`
+        : `api: crawl ${crawlId} paused (credentials_unreadable) before any request: it needs ` +
+            `credentials and ${why}. crawl_resume with them continues it`,
+    );
   }
 
   /**

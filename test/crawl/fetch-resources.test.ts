@@ -32,6 +32,7 @@ import {
   type ResourcePassSummary,
 } from "../../src/crawl/resources/fetch-resources.js";
 import { LOCAL_TENANT } from "../../src/tenant.js";
+import { TEST_CREDENTIAL_KEYS } from "../helpers/credential-keys.js";
 
 function databaseUrl(): string {
   const url = process.env.DATABASE_URL;
@@ -931,7 +932,7 @@ describe("robots.txt, per host, fetched once", () => {
     const summary = await runPass(crawlId, assets.base, { robotsRetryBackoffMs: 1 });
     expect(summary.aborted).toBe(false);
 
-    const service = new ApiService(db, { allowedDomains: ["127.0.0.1"], log: () => {} });
+    const service = new ApiService(db, { credentialKeys: TEST_CREDENTIAL_KEYS, allowedDomains: ["127.0.0.1"], log: () => {} });
     try {
       const detail = await service.getCrawl(LOCAL_TENANT, crawlId);
       const census = detail.resources;

@@ -22,6 +22,7 @@
  * elsewhere wants `api:serve`, not this.
  */
 import { closeDb, createDb } from "../db/client.js";
+import { parseCredentialKeys } from "../crawl/credential-vault.js";
 import { createDemoServer } from "./server.js";
 
 const databaseUrl = process.env["DATABASE_URL"];
@@ -35,8 +36,11 @@ if (!Number.isInteger(port) || port < 1 || port > 65535) {
   throw new Error(`ARIADNE_DEMO_PORT is not a port: ${String(rawPort)}`);
 }
 
+// A boot error naming the variable when it is missing or malformed (28b): the
+// demo accepts crawls, so it encrypts credentials like every other entrypoint.
+const credentialKeys = parseCredentialKeys(process.env);
 const db = createDb(databaseUrl);
-const demo = createDemoServer({ db });
+const demo = createDemoServer({ db, credentialKeys });
 // 127.0.0.1 is a decision, not a default: the demo's open-allowlist posture is
 // only acceptable because nobody but this machine can reach the page.
 const bound = await demo.listen(port, "127.0.0.1");

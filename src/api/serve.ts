@@ -14,16 +14,23 @@
  * the only way to set it is to import `createApiServer` from code that means to.
  */
 import { closeDb, createDb } from "../db/client.js";
+import { parseCredentialKeys, parseCredentialRetentionDays } from "../crawl/credential-vault.js";
 import { loadApiConfig } from "./config.js";
 import { createApiServer } from "./http.js";
 
 const config = loadApiConfig();
+// Before anything is constructed: a missing or malformed key is a boot error
+// naming the variable, never a server that cannot store credentials (28b).
+const credentialKeys = parseCredentialKeys(process.env);
+const credentialRetentionDays = parseCredentialRetentionDays(process.env);
 const db = createDb(config.databaseUrl);
 const api = createApiServer({
   db,
   config: {
     token: config.token,
     allowedDomains: config.allowedDomains,
+    credentialKeys,
+    credentialRetentionDays,
     // Undefined means each field's own default — `exports/` and `renders/`; see
     // `ServiceConfig`. Unlike `crawlDefaults` these ARE environment knobs, and
     // safely so: they name where the server keeps its own output, not what it

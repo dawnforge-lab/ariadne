@@ -17,6 +17,7 @@
  */
 import { domainToASCII } from "node:url";
 
+import type { CredentialKeys } from "../crawl/credential-vault.js";
 import type { CrawlConfig } from "../crawl/loop.js";
 import type { AddressResolver } from "../crawl/url-policy.js";
 import { ServiceError } from "./errors.js";
@@ -82,14 +83,31 @@ export interface ServiceConfig {
   resolveAddress?: AddressResolver;
   /**
    * TEST ONLY, like `resolveAddress` and `RenderTestFaults`: awaited inside
-   * `crawl_config_set` at two points, `"written"` (the row is updated, the
-   * transaction not yet committed; a throw rolls it back) and `"committed"`
-   * (the transaction has committed, the credential store has not yet settled).
-   * A suite holds the second to dequeue a crawl inside that window (27c M9).
+   * `crawl_config_set` once the row and its credentials are written and the
+   * transaction has not yet committed (`"written"`); a throw rolls both back.
+   * `test/api/credential-vault.test.ts` throws from it to prove a refused
+   * change leaves the stored credentials as they were. (The `"committed"`
+   * phase went with the in-memory credential store in 28b: the values commit
+   * with the row, so there is no window after the commit to hold open.)
    * `loadApiConfig` does not read it, the entrypoints never set it, and no
    * request field may ever map to it.
    */
-  afterConfigWrite?: (phase: "written" | "committed") => Promise<void>;
+  afterConfigWrite?: (phase: "written") => Promise<void>;
+  /**
+   * The keys crawl credentials are encrypted with (Phase 28b item 10;
+   * `src/crawl/credential-vault.ts`). Required: every process that accepts or
+   * runs crawls holds them, and the entrypoints read them from
+   * `ARIADNE_CREDENTIALS_KEY` (and `ARIADNE_CREDENTIALS_KEY_PREVIOUS`) with
+   * `parseCredentialKeys`, which refuses to boot without a well-formed key.
+   */
+  credentialKeys: CredentialKeys;
+  /**
+   * How many days a settled crawl keeps its stored credentials before the
+   * retention sweep deletes them (`CredentialVault.sweepExpired`). A positive
+   * whole number; 30 when absent. The entrypoints read it from
+   * `ARIADNE_CREDENTIALS_RETENTION_DAYS` (`parseCredentialRetentionDays`).
+   */
+  credentialRetentionDays?: number;
   /**
    * Where `GET /crawls/:id/export` (and the MCP `export_crawl` tool) writes its
    * files. Defaults to `exports/` under the process's working directory, and the

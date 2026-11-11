@@ -33,6 +33,7 @@ import { createMcpServer, TOOL_NAMES, type AriadneMcpServer } from "../../src/ap
 import { mkDiscovery } from "../rules/mk-discovery.js";
 import { mkPage } from "../rules/mk-page.js";
 import { LOCAL_TENANT, type TenantId } from "../../src/tenant.js";
+import { TEST_CREDENTIAL_KEYS } from "../helpers/credential-keys.js";
 
 /** Test-controlled holds on a rules run and on a render pass (module header). */
 const gates = vi.hoisted(() => ({
@@ -286,7 +287,7 @@ beforeAll(async () => {
 
   api = await newApi();
 
-  mcp = createMcpServer({ db, config: { tenant: LOCAL_TENANT, allowedDomains: [], exportDir, renderDir, log: () => {} } });
+  mcp = createMcpServer({ db, config: { credentialKeys: TEST_CREDENTIAL_KEYS, tenant: LOCAL_TENANT, allowedDomains: [], exportDir, renderDir, log: () => {} } });
   const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
   client = new Client({ name: "ariadne-test-lifecycle", version: "0.0.1" });
   await mcp.connect(serverSide);
@@ -297,6 +298,7 @@ async function newApi(): Promise<ApiServer> {
   const server = createApiServer({
     db,
     config: {
+      credentialKeys: TEST_CREDENTIAL_KEYS,
       token: TOKEN,
       allowedDomains: ["127.0.0.1"],
       crawlDefaults: { allowPrivate: true, probeHosts: false, perHostDelayMs: 0 },

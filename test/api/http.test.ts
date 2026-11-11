@@ -36,6 +36,7 @@ import { DEFAULT_THRESHOLDS } from "../../src/rules/judgement.js";
 import { URL_FINDING_CAP } from "../../src/rules/query/crawl-evidence.js";
 import { RENDER_PASS_EVIDENCE } from "../../src/rules/metric/render-metrics.js";
 import { LOCAL_TENANT } from "../../src/tenant.js";
+import { TEST_CREDENTIAL_KEYS } from "../helpers/credential-keys.js";
 
 const TOKEN = "test-token-0123456789abcdef";
 
@@ -204,6 +205,7 @@ async function riggedServer(
   const api = createApiServer({
     db: rigged,
     config: {
+      credentialKeys: TEST_CREDENTIAL_KEYS,
       token: TOKEN,
       allowedDomains: ["127.0.0.1"],
       crawlDefaults: { allowPrivate: true, probeHosts: false, perHostDelayMs: 0 },
@@ -400,6 +402,7 @@ beforeAll(async () => {
   api = createApiServer({
     db,
     config: {
+      credentialKeys: TEST_CREDENTIAL_KEYS,
       token: TOKEN,
       allowedDomains: ["127.0.0.1", "*.localhost"],
       // PROCESS TRUST, NOT WIRE TRUST. See the module header.
@@ -420,7 +423,7 @@ beforeAll(async () => {
 
   closedApi = createApiServer({
     db,
-    config: { token: TOKEN, allowedDomains: [], log: (line) => serverLog.push(line) },
+    config: { credentialKeys: TEST_CREDENTIAL_KEYS, token: TOKEN, allowedDomains: [], log: (line) => serverLog.push(line) },
   });
   const closedBound = await closedApi.listen(0);
   closedBase = `http://127.0.0.1:${closedBound.port}`;
@@ -1031,6 +1034,7 @@ describe("POST /crawls/:id/resume", () => {
     const spare = createApiServer({
       db,
       config: {
+        credentialKeys: TEST_CREDENTIAL_KEYS,
         token: TOKEN,
         allowedDomains: ["127.0.0.1"],
         crawlDefaults: { allowPrivate: true, probeHosts: false, perHostDelayMs: 0 },
@@ -1075,6 +1079,7 @@ describe("POST /crawls/:id/resume", () => {
     const spare = createApiServer({
       db: rigged,
       config: {
+        credentialKeys: TEST_CREDENTIAL_KEYS,
         token: TOKEN,
         allowedDomains: ["127.0.0.1"],
         crawlDefaults: { allowPrivate: true, probeHosts: false, perHostDelayMs: 0 },
