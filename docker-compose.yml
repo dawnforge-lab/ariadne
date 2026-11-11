@@ -1,0 +1,87 @@
+# Local use and the 28b gate. Secrets come from an env file you generate
+# (`docker compose --env-file .env.compose up`, see .env.compose.example and
+# docs/deploy.md); nothing secret lives in this file.
+#
+# Postgres publishes NO host port (it is reachable as `postgres:5432` inside the
+# compose network only), so it cannot collide with other projects' databases.
+x-ariadne: &ariadne
+  build:
+    context: .
+    args:
+      ARIADNE_GIT_SHA: ${ARIADNE_GIT_SHA:-unknown}
+  image: ariadne:local
+  # Chromium's sandbox: it starts as the non-root user under Docker's DEFAULT
+  # seccomp profile (verified, docs/deploy.md "Chromium sandbox"), so no
+  # security_opt / cap_add is set and --no-sandbox is never used. If a host's
+  # runtime blocks user namespaces the render pass fails loudly
+  # (crawls.render_launch_error); docs/deploy.md says what to change then.
+  environment: &ariadne-env
+    DATABASE_URL: postgresql://ariadne:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}@postgres:5432/ariadne
+    ARIADNE_CREDENTIALS_KEY: ${ARIADNE_CREDENTIALS_KEY:?set ARIADNE_CREDENTIALS_KEY}
+    ARIADNE_METRICS_TOKEN: ${ARIADNE_METRICS_TOKEN:?set ARIADNE_METRICS_TOKEN}
+    ARIADNE_ALLOWED_DOMAINS: ${ARIADNE_ALLOWED_DOMAINS-}
+
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: ariadne
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+      POSTGRES_DB: ariadne
+    volumes:
+      - ariadne-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ariadne -d ariadne"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  migrate:
+    <<: *ariadne
+    command: ["migrate"]
+    restart: "no"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  api:
+    <<: *ariadne
+    command: ["api"]
+    environment:
+      <<: *ariadne-env
+      ARIADNE_API_TOKEN: ${ARIADNE_API_TOKEN:?set ARIADNE_API_TOKEN}
+      ARIADNE_API_PORT: "8787"
+      # A container must bind all interfaces; the publish below is loopback-only.
+      ARIADNE_API_HOST: 0.0.0.0
+    ports:
+      - "127.0.0.1:${ARIADNE_API_HOST_PORT:-18787}:8787"
+    volumes:
+      - ariadne-exports:/app/exports
+      - ariadne-renders:/app/renders
+    restart: unless-stopped
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  worker:
+    <<: *ariadne
+    command: ["worker"]
+    environment:
+      <<: *ariadne-env
+      ARIADNE_WORKER_HTTP_PORT: "8788"
+      ARIADNE_WORKER_CONCURRENCY: ${ARIADNE_WORKER_CONCURRENCY:-1}
+    deploy:
+      replicas: 2
+    # Workers write exports and renders for the crawls they run.
+    volumes:
+      - ariadne-exports:/app/exports
+      - ariadne-renders:/app/renders
+    restart: unless-stopped
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+volumes:
+  ariadne-pgdata:
+  ariadne-exports:
+  ariadne-renders:

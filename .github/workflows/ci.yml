@@ -61,3 +61,21 @@ jobs:
       - run: npx tsc --noEmit
       - run: npm run db:migrate
       - run: npm test
+
+  # Builds the image on every PR and pushes it nowhere: a Dockerfile that stops
+  # building (a lockfile bump that breaks `npm ci`, a Playwright install that
+  # moves) is caught here, not at deploy. The compose smoke
+  # (scripts/compose-smoke.sh) is run by hand and by the 28b gate.
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          tags: ariadne:ci
+          build-args: ARIADNE_GIT_SHA=${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

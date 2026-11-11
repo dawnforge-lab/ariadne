@@ -12,3 +12,4 @@ drizzle/meta/_journal.json.bak
 renders/
 # Claude Code worktrees (the per-phase build workspaces); never source.
 .claude/worktrees/
+.env.compose
