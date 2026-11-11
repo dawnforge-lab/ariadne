@@ -158,48 +158,79 @@ merges before the next is planned.
        resumes like any paused crawl, on whichever runner claims the resume.
      - A `render` or `rules` job is abandoned, and the crawl answers as it did before the
        call, because a re-run is the caller's to ask for.
-     - A **queued** job pinned to a dead instance is abandoned too. If it is a crawl job, its
-       crawl moves `queued → paused` (`worker_lost`), so its resume answers
-       `CREDENTIALS_REQUIRED` like any other credentialed crawl the API forgot. With one API
-       replica, this happens on every API deploy.
-   - **System pauses resume by themselves.** A crawl paused by `shutdown` or `worker_lost`
-     that carries no credentials is re-queued automatically by the reaper, keeping the same
-     id, pages and earned spacing. In containers every deploy is a shutdown, so without this,
-     each deploy would stop every crawl until Talos noticed. A credentialed crawl stays
-     `paused` until Talos re-supplies its values, and an agent's pause is never undone. This
-     reverses part of obligation 7 ("a restart starts none of them"), so it is an owner call
-     (listed below).
+   - **System pauses resume by themselves.** The reaper re-queues a crawl paused by
+     `shutdown` or `worker_lost`, keeping the same id, pages and earned spacing. Credentialed
+     crawls are included, because their values are now stored encrypted (item 10). In
+     containers every deploy is a shutdown, so without this, each deploy would stop every crawl
+     until Talos noticed. An agent's pause is never undone. This reverses part of obligation 7
+     ("a restart starts none of them"), so it is an owner call (listed below).
    - This replaces "a dead process leaves the crawl `running` forever" and the 27b carry
      "orphan running crawls with a pending request are not reaped".
    - Dead instance rows older than a day are deleted.
 9. **Roles and entry points.**
    - `src/worker/serve.ts` (`npm run worker:serve`) runs a claim loop over unpinned jobs and
      has no API.
-   - `src/api/serve.ts` serves HTTP and runs a claim loop over jobs **pinned to itself** (item
-     10).
+   - `src/api/serve.ts` serves HTTP and runs only the synchronous `render` and `rules` jobs it
+     pinned to itself (item 6). It runs no crawls.
    - `src/api/mcp-serve.ts` (stdio, local) claims every job: a local agent has no workers, so
      the one process is everything, as today.
    - Shutdown (SIGTERM/SIGINT) stops claiming, then pauses running crawls exactly as today
      (`pause_reason: "shutdown"`) and marks its jobs `abandoned`. Queued jobs stay queued for
      another runner. That is the change from today, where they were stranded.
-10. **Credentials stay out of the database.** Obligation 8 says values live in one process's
-   memory and nowhere else, "encrypted or not". A worker in another container cannot read the
-   API's memory, so:
-   - A crawl that carries credentials gets its jobs **pinned to the API instance that holds
-     them**, and that instance runs them.
-   - A credentialed crawl whose instance dies is reaped to `paused` (`worker_lost`). Its resume
-     answers `CREDENTIALS_REQUIRED`, exactly as after an API restart today, until Talos
-     re-supplies the values.
-   - Workers never see credential values, so the obligation holds unchanged and Talos's
-     contract does not move.
-   - The cost is that credentialed crawls run on the API container (same image, Chromium
-     included), at most `ARIADNE_API_CRAWL_CONCURRENCY` (default 1) at a time.
-   - The alternative is to store the values encrypted on the row and let any worker run them.
-     That reverses an owner-agreed obligation, so it is listed under owner calls, not chosen
-     here.
-   - **The 27d R17 carry rides along:** `crawls.credential_generation` (int, bumped by every
-     credential change). The store keys entries by `(crawl, generation)`, and the runner reads
-     the generation from the row it claimed, which closes the same-shape window.
+10. **Credentials are stored encrypted, for reruns** (owner, 2026-11-11: "We could do
+   encrypted credentials for reruns"). This replaces obligation 8's "memory only, encrypted or
+   not". Talos stays the source of truth for the values. Ariadne keeps an encrypted copy so
+   that a crawl can be rerun without Talos: a resume after a deploy, a dead worker's crawl
+   picked up elsewhere, a render or rules run later, or a scheduled re-crawl.
+   - **Storage.** A new table `crawl_credentials` holds `crawl_id` (primary key, cascade on
+     delete), `tenant_id`, `generation`, `key_id`, `nonce` and `ciphertext`.
+     - `ciphertext` is AES-256-GCM (`node:crypto`, no new dependency) over the same JSON the
+       in-memory store holds today. The nonce is a fresh random 12 bytes per write.
+     - The associated data is `crawl_id` + `generation`, so a ciphertext copied onto another
+       crawl's row, or an older generation replayed, fails authentication.
+     - Schedules get the same shape in `schedule_credentials` (28c).
+   - **Key.**
+     - `ARIADNE_CREDENTIALS_KEY` holds 32 bytes, base64, with an id (`<id>:<base64>`). It is
+       required at boot by every process that runs or accepts crawls. A missing or malformed
+       key is a boot error, never a mode that silently refuses credentials.
+     - `ARIADNE_CREDENTIALS_KEY_PREVIOUS` (optional, same format) decrypts rows written under
+       the previous id. Rows are re-encrypted under the current key when next written, which
+       is enough for one rotation step. A bulk re-encrypt script is a later item.
+     - The key lives in the platform's secret store, never in the database.
+   - **Decryption.** Only the runner decrypts, right before the crawl, render or rules job
+     needs the values, and it holds them in memory for that job only.
+     - The values never appear in a response, log, event, error, metric or export, which
+       is the rest of obligation 8 unchanged.
+     - `crawl_config_get` still shows kinds and names only.
+   - **Writes.**
+     - `crawl_start`, `crawl_resume`, `crawl_render` and `crawl_config_set` write the row inside
+       the same transaction as the crawl change.
+     - Each write bumps `generation`, so the runner always reads the values that match the
+       config it claimed. The in-memory `CredentialStore` and its stage/settle window go away,
+       which closes the 27d R17 same-shape carry for good.
+     - A call that re-supplies credentials overwrites the row, exactly as it replaces them in
+       memory today.
+   - **Lifetime.**
+     - The row is deleted on `crawl_cancel` and `crawl_delete`, and when a `crawl_config_set`
+       removes the credentials.
+     - The row stays while the crawl is `queued`, `running`, `paused` or `finished`. A
+       finished crawl still needs it for a later `crawl_render`.
+     - It is also deleted **30 days after the crawl finishes**, by the reaper's tick (my call;
+       Talos can re-supply after that).
+     - The 30 days is `ARIADNE_CREDENTIALS_RETENTION_DAYS`, which must be set to a positive
+       integer if it is set at all.
+   - **When the values cannot be read.** This covers an unknown `key_id` (the key was rotated
+     past it), a failed authentication tag, or a row deleted by retention.
+     - The job does not run. The crawl stays or becomes `paused` with `pause_reason:
+       "credentials_unreadable"`, the reason is logged without any value, and resume and render
+       answer 409 `CREDENTIALS_REQUIRED` until Talos sends the values again.
+     - `CREDENTIALS_REQUIRED` keeps its meaning ("send them on this call") and its Talos
+       handling. It just becomes rare.
+   - **Consequence for runners.** Any worker runs a credentialed crawl, so there is no
+     pinning for credentials and no crawl runs on the API container.
+   - **What it costs.** Someone holding both a database dump and the key reads the values. The
+     key never sits beside the data, and the gate's secret scan still proves that no plaintext
+     value is anywhere in the database, the logs or the metrics.
 11. **Health and metrics.**
    - **Health:**
      - `GET /healthz` is liveness: no auth, no database call, `{status:"ok"}`. This mirrors Talos.
@@ -246,7 +277,7 @@ merges before the next is planned.
      contradicts the 2026-11-05 ruling that Ariadne keeps no rendered HTML.
    - So the worker role does not write them: the column stays null, and `crawl_status`
      gains `renderDocuments: "kept" | "not kept"`.
-   - The stdio MCP process and an API-pinned run keep writing them, so local audits are
+   - The stdio MCP process and the API's synchronous `crawl_render` keep writing them, so local audits are
      unchanged.
    - Exports stay on the API's disk (written and served by the same process). Phase 28 runs
      **one API replica**. Several would need a shared blob store, which is roadmap decision 5's
@@ -268,9 +299,11 @@ merges before the next is planned.
        The crawl keeps whatever it already has.
      - A crawl that ends `paused` or `cancelled` ends the chain silently, because the pause
        or cancel is already its own event.
-   - **Credentialed schedules are refused** (400, `code: "SCHEDULE_CREDENTIALS"`). A schedule
-     fires unattended, so nobody is there to re-supply values that Ariadne must not keep. Talos
-     can run a credentialed recurrence itself by calling `crawl_start` on its own clock.
+   - **Credentialed schedules are allowed.** `schedule_create` and `schedule_update` take the
+     same credentials `crawl_start` does. They are stored encrypted in `schedule_credentials`
+     (item 10) and copied, re-encrypted under the new crawl's id, into each fired crawl. They
+     are deleted with the schedule. Retention does not apply to a schedule's own copy while
+     the schedule exists.
    - **Tools and routes:** `schedule_create`, `schedule_list`, `schedule_get`, `schedule_update`
      and `schedule_delete`, on MCP and HTTP. All are tenant-scoped, and creation checks the
      domain allowlist exactly like `crawl_start`.
@@ -287,7 +320,7 @@ merges before the next is planned.
    - **Skip rules:**
      - The previous crawl, or its chain, is still queued, running or paused: skip with reason
        `overlap`. A schedule never stacks crawls. A deploy cannot strand the schedule, because a
-       scheduled crawl carries no credentials and so resumes by itself (item 8). Only an
+       paused scheduled crawl resumes by itself (item 8). Only an
        agent's pause holds it, which is deliberate.
      - The host is no longer allowlisted: skip with reason `not-allowed`. This is checked at
        fire time as well as at creation.
@@ -320,7 +353,8 @@ merges before the next is planned.
 
 ### Carried from 27d (R17 and the parked minors), placed where they fit
 
-- **Same-shape credential window:** in 28b item 10 (credential generation).
+- **Same-shape credential window:** closed by 28b item 10. The values move into the same
+  transaction as the config, so there is no window.
 - **`sitemap_memberships` staging across a changed site:**
   - **Problem:** a stopped walk's memberships survive through `onConflictDoNothing`, which
     equals a whole walk's only while the site is unchanged.
@@ -372,15 +406,21 @@ merges before the next is planned.
   - A missing tenant header, tenant env, metrics token, worker port or schema version is a
     loud refusal or a boot error, never a default tenant or an open endpoint.
   - The `local` backfill is a migration, not a default.
-- Credential values never reach the database, a log, an event, an error or a response
-  (obligation 8 unchanged).
+- Credential values never reach a log, an event, an error, a metric or a response. They
+  reach the database only as AES-256-GCM ciphertext under a key the database never holds
+  (obligation 8 as amended by the owner).
 - A foreign crawl answers like a missing crawl in every respect.
 
 ## Surface changes (Talos-facing)
 
 - `X-Ariadne-Tenant` is required on every HTTP request.
 - 404 replaces any other answer for a crawl outside the tenant.
-- `crawl_status` gains `job`, `renderDocuments`, and `pause_reason: "worker_lost"`.
+- `crawl_status` gains `job` and `renderDocuments`. `pause_reason` gains `worker_lost` and
+  `credentials_unreadable`.
+- Credentials are stored encrypted for reruns (obligation 8 rewritten). Talos's calls do
+  not change. `CREDENTIALS_REQUIRED` keeps its code and handling and now appears only when the
+  stored copy cannot be read (key rotated past it, retention expired, tampering).
+- Credentialed schedules are accepted.
 - New tools and routes: `schedule_*` (5), `crawl_history`, `schedule_history`, plus `/healthz`,
   `/readyz` and `/metrics`.
 - `queuePosition` is now computed from the jobs table (same meaning).
@@ -403,8 +443,11 @@ merges before the next is planned.
 3. A worker is killed with `kill -9` mid-crawl. Within 90 s the crawl is `paused`
    (`worker_lost`), its leases are released, and a resume finishes on the other worker with no
    duplicate `pages` rows.
-4. A credentialed crawl runs on the API instance. A secret scan of every table, the events,
-   both processes' logs and `/metrics` finds no value.
+4. A credentialed crawl is paused by a `kill -9` of its worker and finishes on the other
+   worker with its values intact. A secret scan of every table (ciphertext excepted, by
+   construction), the events, both processes' logs and `/metrics` finds no plaintext value.
+   A row encrypted under an unknown key id, and a row with a flipped tag byte, each give
+   `paused` (`credentials_unreadable`) and a 409 `CREDENTIALS_REQUIRED` on resume.
 5. `/healthz`, `/readyz` and `/metrics` answer per spec. `readyz` answers 503 against a database
    one migration behind, and the metrics label test passes.
 6. The 50k crawl runs as a `crawl` job in a `worker:serve` process, using a new harness that
@@ -424,10 +467,13 @@ merges before the next is planned.
 
 ## Calls I made (owner to check)
 
-1. **Credentialed crawls run on the API container** (item 10). This keeps obligation 8 as
-   written. The alternative, values encrypted on the row so any worker can run them, would
-   reverse that obligation, so I have not chosen it.
-2. **System-paused, credential-free crawls resume by themselves** (item 8). This reverses part
+1. **Encrypted credentials** (owner direction; item 10). My calls inside it:
+   - AES-256-GCM with the key in `ARIADNE_CREDENTIALS_KEY`.
+   - The associated data binds each ciphertext to its crawl and generation.
+   - Retention is 30 days after the crawl finishes.
+   - Values that cannot be read pause the crawl as `credentials_unreadable` instead of
+     failing it.
+2. **System-paused crawls resume by themselves** (item 8), credentialed ones included. This reverses part
    of obligation 7. Without it, every deploy stops every crawl until Talos calls
    `crawl_resume`, and a schedule whose crawl a deploy paused would skip forever.
 3. **`crawl_render` and `crawl_rules` stay synchronous** and run in the API process that
