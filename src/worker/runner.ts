@@ -46,6 +46,7 @@ import type { Db } from "../db/client.js";
 import { jobs } from "../db/schema.js";
 import type { CredentialVault } from "../crawl/credential-vault.js";
 import { assertTenantCap, claimNextJob, finishJob, type ClaimedJob, type JobKind, type JobOutcome } from "./jobs.js";
+import { jobClaimWait, jobDuration, recordPeakRss } from "../ops/metrics.js";
 import { heartbeat, InstanceGoneError } from "./instance.js";
 import { ReaperLoop } from "./reaper-loop.js";
 import { timingWith, type Timing } from "./timing.js";
@@ -302,6 +303,8 @@ export class JobRunner {
 
   /** Never rejects: see the module header. */
   private async run(job: ClaimedJob, signal: AbortSignal): Promise<void> {
+    const startedAt = process.hrtime.bigint();
+    jobClaimWait.observe(Math.max(0, job.claimedAt.getTime() - job.queuedAt.getTime()) / 1000);
     let outcome: JobOutcome;
     let error: string | undefined;
     try {
@@ -312,6 +315,9 @@ export class JobRunner {
       error = messageOf(caught);
       this.log(`runner ${this.opts.instanceId}: ${job.kind} job ${job.id} (crawl ${job.crawlId}) failed — ${error}`);
     }
+    // What it cost, by kind and how it ended: the labels are closed enums.
+    jobDuration.observe({ kind: job.kind, outcome }, Number(process.hrtime.bigint() - startedAt) / 1e9);
+    if (job.kind === "crawl") recordPeakRss();
     try {
       await finishJob(this.db, job.id, outcome, error);
     } catch (finishError) {

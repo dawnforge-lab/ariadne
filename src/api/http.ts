@@ -175,6 +175,7 @@ import { randomUUID } from "node:crypto";
 import type { Db } from "../db/client.js";
 import type { ApiServerConfig } from "./config.js";
 import { checkBearer } from "./auth.js";
+import { serveOps } from "../ops/serve.js";
 import { parseTenant, type TenantId } from "../tenant.js";
 import { unknownQueryParameterMessage } from "./errors.js";
 import {
@@ -307,13 +308,27 @@ interface Route {
 /** Every listing takes these; each route names its own filters alongside. */
 const PAGINATION_PARAMS = ["limit", "cursor"] as const;
 
+/**
+ * The routes served BEFORE the bearer and tenant checks (28b T6): an
+ * orchestrator's probe and a metrics scraper hold neither the API token nor a
+ * tenant. This list is the sentinel's global set for them
+ * (test/api/tenant-isolation.test.ts `GLOBAL_ROUTES`), not an ad-hoc bypass;
+ * `routeSignatures()` includes them. `/metrics` has its own bearer
+ * (`ARIADNE_METRICS_TOKEN`), checked in src/ops/serve.ts.
+ */
+export const PRE_AUTH_ROUTES: ReadonlyArray<{ method: "GET"; path: "/healthz" | "/readyz" | "/metrics" }> = [
+  { method: "GET", path: "/healthz" },
+  { method: "GET", path: "/readyz" },
+  { method: "GET", path: "/metrics" },
+];
+
 export function createApiServer({ db, config }: CreateApiServerOpts): ApiServer {
   const service = new ApiService(db, config);
   const log = config.log ?? ((line: string) => console.error(line));
   const routes = buildRoutes();
 
   const server = createServer((req, res) => {
-    handle(req, res, service, config, routes, log).catch((error: unknown) => {
+    handle(req, res, service, config, routes, log, db).catch((error: unknown) => {
       // The handler's own catch covers everything a request can do; reaching
       // here means the response machinery itself failed. Say so loudly rather
       // than leaving the socket open.
@@ -362,10 +377,13 @@ export function createApiServer({ db, config }: CreateApiServerOpts): ApiServer 
  * `buildRoutes` without a tenancy case there fails CI.
  */
 export function routeSignatures(): ReadonlyArray<{ method: string; path: string }> {
-  return buildRoutes().map((route) => ({
-    method: route.method,
-    path: `/${route.pattern.map((seg) => (typeof seg === "string" ? seg : `:${seg.param}`)).join("/")}`,
-  }));
+  return [
+    ...PRE_AUTH_ROUTES.map((route) => ({ method: route.method as string, path: route.path as string })),
+    ...buildRoutes().map((route) => ({
+      method: route.method,
+      path: `/${route.pattern.map((seg) => (typeof seg === "string" ? seg : `:${seg.param}`)).join("/")}`,
+    })),
+  ];
 }
 
 function buildRoutes(): Route[] {
@@ -758,8 +776,14 @@ async function handle(
   config: ApiServerConfig,
   routes: Route[],
   log: (line: string) => void,
+  db: Db,
 ): Promise<void> {
-  // AUTH FIRST, before routing and before the body is read. An unauthenticated
+  // THE PRE-AUTH ROUTES FIRST (`PRE_AUTH_ROUTES`): health and metrics answer
+  // with no API token and no tenant. Only an exact GET of one of the three;
+  // everything else, a POST to /healthz included, takes the checks below.
+  if (await serveOps(req, res, { db, metricsToken: config.metricsToken, log })) return;
+
+  // AUTH SECOND, before routing and before the body is read. An unauthenticated
   // caller must not be able to learn which routes exist (a 404 would say so),
   // nor to make the server read 64KB off the wire.
   const auth = checkBearer(req.headers.authorization, config.token);

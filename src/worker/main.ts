@@ -18,10 +18,10 @@
  *    argument, never a variable: nothing in this file or in `serve.ts` reads
  *    it from the environment, and absent it a worker refuses loopback and
  *    private targets.
- *  - `GET /healthz` answers 200 `{"status":"ok"}`, without authentication and
- *    without touching the database, and every other path 404s. Task 6 replaces
- *    this handler with the shared `/healthz`, `/readyz` and `/metrics`
- *    (`metricsToken` is already accepted for it).
+ *  - THE HTTP SERVER serves the shared `/healthz`, `/readyz` and `/metrics`
+ *    (src/ops/serve.ts, 28b T6) and nothing else: any other path, or a non-GET,
+ *    is a 404. `/metrics` takes `metricsToken`; absent, it is a 404 and one
+ *    boot line says so.
  *
  * `stop()` (graceful shutdown, SIGTERM): stop claiming; abort every running
  * crawl, which its loop closes `paused` (`shutdown`) with its job `abandoned`
@@ -42,6 +42,7 @@ import {
 } from "../crawl/credential-vault.js";
 import type { CrawlConfig } from "../crawl/loop.js";
 import { isHostAllowed } from "../api/config.js";
+import { serveOps } from "../ops/serve.js";
 import { crawlJobExecutor } from "./crawl-job.js";
 import { registerInstance, stopInstance } from "./instance.js";
 import { assertTenantCap } from "./jobs.js";
@@ -57,7 +58,7 @@ export interface StartWorkerOptions {
   maxRunningPerTenant: number;
   /** The liveness port; 0 asks the system for one (`RunningWorker.port` says which). */
   httpPort: number;
-  /** For Task 6's `/metrics`; null serves it to nobody. Unused until then. */
+  /** The bearer `/metrics` takes; null serves it to nobody (404, and a boot line). */
   metricsToken: string | null;
   /**
    * This worker's crawl allowlist (`ARIADNE_ALLOWED_DOMAINS`, through
@@ -107,7 +108,10 @@ export async function startWorker(opts: StartWorkerOptions): Promise<RunningWork
   const allowedDomains = [...opts.allowedDomains];
   const processTrust = opts.processTrust ?? { allowPrivate: false };
 
-  const server = createHealthServer();
+  if (opts.metricsToken === null) {
+    log("ariadne worker: ARIADNE_METRICS_TOKEN is unset, so /metrics answers 404 (set it to expose metrics)");
+  }
+  const server = createOpsServer(opts.db, opts.metricsToken, log);
   const port = await listen(server, opts.httpPort, opts.httpHost ?? "0.0.0.0");
 
   let instanceId: string | null = null;
@@ -180,17 +184,22 @@ export async function startWorker(opts: StartWorkerOptions): Promise<RunningWork
   return { instanceId: id, port, stop };
 }
 
-/** `GET /healthz` is liveness: the process is up. No auth, no database. */
-function createHealthServer(): Server {
+/** `/healthz`, `/readyz` and `/metrics` (src/ops/serve.ts); every other request is a 404. */
+function createOpsServer(db: Db, metricsToken: string | null, log: (line: string) => void): Server {
   return createServer((req, res) => {
-    const path = (req.url ?? "/").split("?")[0];
-    if (req.method === "GET" && path === "/healthz") {
-      res.writeHead(200, { "content-type": "application/json" });
-      res.end(JSON.stringify({ status: "ok" }));
-      return;
-    }
-    res.writeHead(404, { "content-type": "application/json" });
-    res.end(JSON.stringify({ error: "not found" }));
+    serveOps(req, res, { db, metricsToken, log })
+      .then((served) => {
+        if (served) return;
+        res.writeHead(404, { "content-type": "application/json" });
+        res.end(JSON.stringify({ error: "not found" }));
+      })
+      .catch((error: unknown) => {
+        log(`worker: ops handler failed — ${error instanceof Error ? (error.stack ?? error.message) : String(error)}`);
+        if (!res.headersSent) {
+          res.writeHead(500, { "content-type": "application/json" });
+          res.end(JSON.stringify({ error: "internal error" }));
+        } else res.destroy();
+      });
   });
 }
 

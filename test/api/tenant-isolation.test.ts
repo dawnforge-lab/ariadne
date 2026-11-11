@@ -26,7 +26,7 @@ import { crawls, issues, jobs, links, metrics, pages } from "../../src/db/schema
 import { EXTRACTION_VERSION } from "../../src/crawl/versions.js";
 import { RULESET_VERSION } from "../../src/rules/registry/registry.js";
 import { closeFetchAgents } from "../../src/crawl/http.js";
-import { createApiServer, routeSignatures, type ApiServer } from "../../src/api/http.js";
+import { createApiServer, PRE_AUTH_ROUTES, routeSignatures, type ApiServer } from "../../src/api/http.js";
 import { createMcpServer, TOOL_NAMES, type AriadneMcpServer } from "../../src/api/mcp.js";
 import { parseTenant, type TenantId } from "../../src/tenant.js";
 import { TEST_CREDENTIAL_KEYS } from "../helpers/credential-keys.js";
@@ -55,6 +55,11 @@ const GLOBAL_ROUTES: ReadonlySet<string> = new Set([
   "POST /config/validate", // dry run of a body; reads no crawl
   "POST /crawls", // creates a crawl FOR the caller
   "GET /crawls", // the caller's own listing, asserted separately below
+  // Served BEFORE the bearer and tenant checks (28b T6), for an orchestrator's probe and a scraper:
+  // they read no crawl and name no tenant. Asserted separately below.
+  "GET /healthz", // liveness
+  "GET /readyz", // database + migration count
+  "GET /metrics", // its own bearer (ARIADNE_METRICS_TOKEN); labels carry no tenant
 ]);
 const GLOBAL_TOOLS: ReadonlySet<string> = new Set(["config_schema", "config_validate", "crawl_start", "crawl_list"]);
 
@@ -319,9 +324,55 @@ describe("coverage: every route and tool is scoped or explicitly global", () => 
 
   it("keeps the global lists to exactly the ruled set", () => {
     expect([...GLOBAL_ROUTES].sort()).toEqual(
-      ["GET /config/schema", "GET /crawls", "POST /config/validate", "POST /crawls"].sort(),
+      [
+        "GET /config/schema",
+        "GET /crawls",
+        "GET /healthz",
+        "GET /metrics",
+        "GET /readyz",
+        "POST /config/validate",
+        "POST /crawls",
+      ].sort(),
     );
     expect([...GLOBAL_TOOLS].sort()).toEqual(["config_schema", "config_validate", "crawl_list", "crawl_start"]);
+  });
+});
+
+describe("the pre-auth routes are the sentinel's global list, not an ad-hoc bypass", () => {
+  const PRE_AUTH = ["GET /healthz", "GET /readyz", "GET /metrics"];
+
+  it("PRE_AUTH_ROUTES is exactly the three routes GLOBAL_ROUTES names for this purpose", () => {
+    expect(PRE_AUTH_ROUTES.map((r) => `${r.method} ${r.path}`).sort()).toEqual([...PRE_AUTH].sort());
+    for (const signature of PRE_AUTH) expect(GLOBAL_ROUTES.has(signature)).toBe(true);
+    const signatures = routeSignatures().map((r) => `${r.method} ${r.path}`);
+    for (const signature of PRE_AUTH) expect(signatures).toContain(signature);
+  });
+
+  it("/healthz answers 200 with neither a token nor a tenant", async () => {
+    expect((await fetch(`${base}/healthz`)).status).toBe(200);
+  });
+
+  it("/readyz answers with neither a token nor a tenant (200, or 503 if the shared dev database's migrations differ from this branch's; never 401 or 400)", async () => {
+    // The readiness verdict itself is test/ops/health.test.ts's, on a scratch database.
+    expect([200, 503]).toContain((await fetch(`${base}/readyz`)).status);
+  });
+
+  it("/metrics answers on its own token alone (no API token, no tenant), and 404 or 401 never 400", async () => {
+    const res = await fetch(`${base}/metrics`);
+    expect(res.status).toBe(404); // this server has no metrics token configured
+  });
+
+  it.each(
+    routeSignatures()
+      .map((r) => `${r.method} ${r.path}`)
+      .filter((s) => !["GET /healthz", "GET /readyz", "GET /metrics"].includes(s)),
+  )("every other route, %s, still answers 401 without a token and 400 without a tenant", async (signature) => {
+    const [method, path] = signature.split(" ") as [string, string];
+    const concrete = path.replace(/:\w+/g, "x");
+    const bare = await fetch(`${base}${concrete}`, { method });
+    expect(bare.status).toBe(401);
+    const noTenant = await fetch(`${base}${concrete}`, { method, headers: { authorization: `Bearer ${TOKEN}` } });
+    expect(noTenant.status).toBe(400);
   });
 });
 

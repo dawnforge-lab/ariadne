@@ -135,6 +135,7 @@ import {
   type CrawlScope,
 } from "./url-scope.js";
 import { engineVersion, redactRequestHeaders } from "./versions.js";
+import { pagesFetched } from "../ops/metrics.js";
 import {
   credentialError,
   credentialHeadersFor,
@@ -2679,6 +2680,7 @@ async function runToCompletion(
         analysis,
         { complete: !RETRYABLE.has(result.fetchClass) },
       );
+      pagesFetched.inc({ fetch_class: result.fetchClass });
 
       // List mode records a page's links (the writer above) and follows none.
       if (analysis !== null && !listMode && item.depth < config.maxDepth) {

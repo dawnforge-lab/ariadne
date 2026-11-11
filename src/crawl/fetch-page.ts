@@ -26,6 +26,7 @@
  */
 import { request } from "undici";
 import { isUrlAllowed } from "./url-policy.js";
+import { fetchDuration } from "../ops/metrics.js";
 import { detectPlatform, type Platform } from "./platform.js";
 import {
   ACCEPT_ENCODING,
@@ -549,6 +550,14 @@ export function pageRequestHeaders(userAgent: string): Record<string, string> {
  * either absent, unusable, or not worth carrying into the rule engine.
  */
 export async function fetchPage(url: string, opts: FetchOpts): Promise<FetchResult> {
+  const began = process.hrtime.bigint();
+  const result = await fetchPageUnmetered(url, opts);
+  // A fetch that threw (aborted) is not observed: it has no classified result.
+  fetchDuration.observe(Number(process.hrtime.bigint() - began) / 1e9);
+  return result;
+}
+
+async function fetchPageUnmetered(url: string, opts: FetchOpts): Promise<FetchResult> {
   const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const allowPrivate = opts.allowPrivate === true;
   const started = Date.now();

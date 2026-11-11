@@ -31,11 +31,15 @@ const config = loadApiConfig();
 // naming the variable, never a server that cannot store credentials (28b).
 const credentialKeys = parseCredentialKeys(process.env);
 const credentialRetentionDays = parseCredentialRetentionDays(process.env);
+// `ARIADNE_METRICS_TOKEN` is the bearer `GET /metrics` takes. Unset: the route
+// answers 404 and is never open (said once at boot, below).
+const metricsToken = (process.env["ARIADNE_METRICS_TOKEN"] ?? "").trim() || null;
 const db = createDb(config.databaseUrl);
 const api = createApiServer({
   db,
   config: {
     token: config.token,
+    metricsToken,
     allowedDomains: config.allowedDomains,
     credentialKeys,
     credentialRetentionDays,
@@ -74,6 +78,9 @@ console.error(
 console.error(
   `ariadne api: crawl exports -> ${config.exportDir ?? "exports/ (default; set ARIADNE_EXPORT_DIR to move it)"}`,
 );
+if (metricsToken === null) {
+  console.error("ariadne api: ARIADNE_METRICS_TOKEN is unset, so /metrics answers 404 (set it to expose metrics)");
+}
 if (config.allowedDomains.length === 0) {
   console.error(
     "ariadne api: the crawl allowlist is EMPTY — every crawl trigger will be refused " +

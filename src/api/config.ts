@@ -201,6 +201,11 @@ export interface ServiceConfig {
 export interface ApiServerConfig extends ServiceConfig {
   /** Required. Compared constant-time against `Authorization: Bearer <token>`. */
   token: string;
+  /**
+   * `ARIADNE_METRICS_TOKEN`: the bearer `GET /metrics` takes, separate from
+   * `token`. Null or absent: `/metrics` answers 404 and is never open.
+   */
+  metricsToken?: string | null;
 }
 
 /**

@@ -107,6 +107,8 @@ export interface ClaimedJob {
   pinnedTo: string | null;
   claimedBy: string;
   claimedAt: Date;
+  /** When it was queued; `claimedAt - queuedAt` is the claim wait (a metric). */
+  queuedAt: Date;
 }
 
 /** A crawl's live (`queued|running`) job, as the guards read it. */
@@ -587,7 +589,7 @@ export async function claimNextJob(
         for update of q skip locked
         limit 1)
        and status = 'queued'
-    returning id, tenant_id, crawl_id, kind, pinned_to, claimed_by, claimed_at`;
+    returning id, tenant_id, crawl_id, kind, pinned_to, claimed_by, claimed_at, queued_at`;
   type Row = {
     id: string;
     tenant_id: string;
@@ -596,6 +598,7 @@ export async function claimNextJob(
     pinned_to: string | null;
     claimed_by: string;
     claimed_at: Date | string;
+    queued_at: Date | string;
   };
   const fetches = opts.kinds.some((k) => FETCHING_KINDS.includes(k));
   const result = fetches
@@ -614,6 +617,7 @@ export async function claimNextJob(
     pinnedTo: row.pinned_to,
     claimedBy: row.claimed_by,
     claimedAt: row.claimed_at instanceof Date ? row.claimed_at : new Date(row.claimed_at),
+    queuedAt: row.queued_at instanceof Date ? row.queued_at : new Date(row.queued_at),
   };
 }
 
