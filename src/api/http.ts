@@ -351,6 +351,18 @@ export function createApiServer({ db, config }: CreateApiServerOpts): ApiServer 
   };
 }
 
+/**
+ * Every route as `{method, path}` with params rendered `:name` — the sentinel's
+ * enumeration (test/api/tenant-isolation.test.ts), so a route added to
+ * `buildRoutes` without a tenancy case there fails CI.
+ */
+export function routeSignatures(): ReadonlyArray<{ method: string; path: string }> {
+  return buildRoutes().map((route) => ({
+    method: route.method,
+    path: `/${route.pattern.map((seg) => (typeof seg === "string" ? seg : `:${seg.param}`)).join("/")}`,
+  }));
+}
+
 function buildRoutes(): Route[] {
   const id: Segment = { param: "id" };
   return [
