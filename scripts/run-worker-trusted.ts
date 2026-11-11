@@ -20,6 +20,9 @@
  *  - `DATABASE_URL`, `ARIADNE_CREDENTIALS_KEY`: as for the real worker;
  *  - `TRUSTED_WORKER_CONCURRENCY`: crawls at once (default 1);
  *  - `TRUSTED_WORKER_TIMING`: JSON, a `Partial<Timing>` (a short clock);
+ *  - `TRUSTED_WORKER_METRICS_TOKEN`: the bearer `/metrics` takes (unset: `/metrics`
+ *    answers 404, as on a real worker without `ARIADNE_METRICS_TOKEN`); the
+ *    gate scrapes it to prove no credential value reaches a metric;
  *  - `TRUSTED_WORKER_PEERS_FILE`: a JSON array of instance ids, read at every
  *    reaper tick. The reaper is CONFINED (`onlyInstances`, test only) to those
  *    and to this worker's own id: tests share a database, and an unconfined
@@ -54,7 +57,7 @@ const worker = await startWorker({
   maxRunningPerTenant: 1,
   httpPort: 0,
   httpHost: "127.0.0.1",
-  metricsToken: null,
+  metricsToken: (process.env["TRUSTED_WORKER_METRICS_TOKEN"] ?? "").trim() || null,
   // IN CODE: the loopback fixture hosts, and the trust to fetch them.
   allowedDomains: ["127.0.0.1", "127.0.0.2", "127.0.0.3", "127.0.0.4"],
   processTrust: { allowPrivate: true },
