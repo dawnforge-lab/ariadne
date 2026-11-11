@@ -70,7 +70,10 @@ console.log(`READY ${JSON.stringify({ instanceId: worker.instanceId, port: worke
 let shuttingDown = false;
 for (const signal of ["SIGINT", "SIGTERM"] as const) {
   process.on(signal, () => {
-    if (shuttingDown) return;
+    if (shuttingDown) {
+      console.error(`trusted worker: ${signal} again while closing — exiting at once (1)`);
+      process.exit(1);
+    }
     shuttingDown = true;
     worker
       .stop()

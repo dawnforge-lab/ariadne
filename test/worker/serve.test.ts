@@ -26,6 +26,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { eq, inArray, sql } from "drizzle-orm";
+import pg from "pg";
 
 import { closeDb, createDb, type Db } from "../../src/db/client.js";
 import { runMigrations } from "../../src/db/migrate.js";
@@ -382,6 +383,43 @@ describe("graceful SIGTERM", () => {
     // `shutdown` is a deploy: it never spends the three-in-a-row cap (R17).
     expect(row.autoResumeCount).toBe(0);
     await service.cancelCrawl(LOCAL_TENANT, id).catch(() => undefined);
+    await clearTest([id]);
+    await site.close();
+  });
+});
+
+describe("a shutdown that cannot finish", () => {
+  it("a second SIGTERM exits 1 at once while the first is blocked closing the crawl", async () => {
+    const site = await fixture("127.0.0.1", { delayMs: 100, endless: true });
+    await setPeers([]);
+    const a = await spawnTrusted();
+    await setPeers([a.instanceId]);
+    const id = await start(tenantFor("term3"), { siteUrl: `${site.base}/` });
+    await until("the crawl running", async () => (await crawlRow(id)).status, (st) => st === "running");
+    await until("some pages fetched", async () => site.requests(), (n) => n >= 4);
+
+    // Hold the crawl row: the loop's close needs it, so the first SIGTERM blocks.
+    const blocker = new pg.Client({ connectionString: databaseUrl() });
+    await blocker.connect();
+    try {
+      await blocker.query("begin");
+      await blocker.query("select id from crawls where id = $1 for update", [id]);
+      a.proc.kill("SIGTERM");
+      const early = await Promise.race([a.exited, sleep(1_500).then(() => "blocked" as const)]);
+      expect(early).toBe("blocked");
+      a.proc.kill("SIGTERM");
+      const code = await Promise.race([
+        a.exited,
+        sleep(10_000).then(() => {
+          throw new Error("the second SIGTERM did not end the worker within 10 s");
+        }),
+      ]);
+      expect(code).toBe(1);
+      expect(a.stderr.join("")).toMatch(/again while closing/);
+    } finally {
+      await blocker.query("rollback").catch(() => undefined);
+      await blocker.end();
+    }
     await clearTest([id]);
     await site.close();
   });

@@ -13,7 +13,7 @@
  *    a boot error, because a worker must be told explicitly; set to the empty
  *    string it is allowed and means every crawl is refused.
  *
- * Optional: `ARIADNE_WORKER_CONCURRENCY` (crawls at once, default 2),
+ * Optional: `ARIADNE_WORKER_CONCURRENCY` (crawls at once, default 1),
  * `ARIADNE_TENANT_MAX_RUNNING` (the pool's per-tenant cap, default 1),
  * `ARIADNE_METRICS_TOKEN`, `ARIADNE_CREDENTIALS_RETENTION_DAYS`.
  *
@@ -36,7 +36,7 @@ import { parseTenantMaxRunning } from "./runner.js";
 import { startWorker, type RunningWorker } from "./main.js";
 
 /** `ARIADNE_WORKER_CONCURRENCY` when it is not set. */
-const DEFAULT_WORKER_CONCURRENCY = 2;
+const DEFAULT_WORKER_CONCURRENCY = 1;
 
 interface WorkerEnv {
   databaseUrl: string;
@@ -138,7 +138,11 @@ if (config.allowedDomains.length === 0) {
 let shuttingDown = false;
 for (const signal of ["SIGINT", "SIGTERM"] as const) {
   process.on(signal, () => {
-    if (shuttingDown) return;
+    if (shuttingDown) {
+      // A shutdown that cannot finish must not need a SIGKILL.
+      console.error(`ariadne worker: ${signal} again while closing — exiting at once (1)`);
+      process.exit(1);
+    }
     shuttingDown = true;
     console.error(`ariadne worker: ${signal} — closing (a running crawl is paused (shutdown), not killed)`);
     worker

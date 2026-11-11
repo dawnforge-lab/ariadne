@@ -157,13 +157,23 @@ export async function startWorker(opts: StartWorkerOptions): Promise<RunningWork
           log(`worker ${id}: heartbeat during shutdown failed — ${messageOf(error)}`);
         });
       }, timing.heartbeat);
-      try {
-        await runner.stop();
-      } finally {
-        clearInterval(beat);
+      // Every step runs whatever an earlier one did; the first error is rethrown.
+      const errors: unknown[] = [];
+      const step = async (what: () => Promise<void>): Promise<void> => {
+        try {
+          await what();
+        } catch (error) {
+          errors.push(error);
+        }
+      };
+      await step(() => runner.stop());
+      clearInterval(beat);
+      await step(() => closeServer(server));
+      await step(() => stopInstance(opts.db, id));
+      if (errors.length > 0) {
+        for (const extra of errors.slice(1)) log(`worker ${id}: a further shutdown step failed — ${messageOf(extra)}`);
+        throw errors[0];
       }
-      await closeServer(server);
-      await stopInstance(opts.db, id);
     })();
     return stopping;
   };
