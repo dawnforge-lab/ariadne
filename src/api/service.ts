@@ -48,7 +48,8 @@
  * unpinned job is claimed by whichever worker is up next. A crawl job pinned
  * to an in-process service that stopped stays queued and pinned (the
  * `close()` log line names it), held by nobody: `crawl_resume` from any server
- * adopts it (re-pins it to itself and runs it). Before 28b it was stranded.
+ * adopts it (abandons the orphan job and queues a fresh one, stamped with its
+ * own code's versions, for itself). Before 28b it was stranded.
  *
  * A crawl left `running` by a killed process is the other half of the same
  * story: `markCrawlFailed`, whose lease test is the one the render driver uses
@@ -3997,8 +3998,8 @@ export class ApiService {
    *  2. **A crawl job holds it** — 409. A `queued` or `running` crawl job of a
    *     LIVE process (28b, Ruling R10): the crawl is running or waiting to, and
    *     a second resume of it is refused too. A crawl job whose process stopped
-   *     or died holds nothing: the resume adopts it (a queued one is re-pinned
-   *     to this server, a running one abandoned and replaced).
+   *     or died holds nothing: the resume adopts it (abandons it and queues a
+   *     fresh job, with this code's versions, for this server).
    *  3. **A live worker holds leases** — 409, naming the count. An unexpired
    *     `leased_until` is the frontier's own live-worker detector, and it is the
    *     test `markCrawlFailed` and the render driver already make.
@@ -4121,9 +4122,9 @@ export class ApiService {
     }
     // Held only while the process its crawl job belongs to is live (Ruling
     // R10). A crawl job whose process stopped or died is nobody's work, and
-    // this resume ADOPTS it (below, in the claim's transaction): a queued one
-    // is re-pinned to this server's runner, a running one is abandoned and a
-    // fresh job enqueued. Before 28b such a crawl was stranded.
+    // this resume ADOPTS it (below, in the claim's transaction): queued or
+    // running, it is abandoned and a fresh job enqueued for this server.
+    // Before 28b such a crawl was stranded.
     if (holder?.live === true) {
       throw new ServiceError("CONFLICT", busySentences.held(crawlId, row.status));
     }
@@ -4320,43 +4321,31 @@ export class ApiService {
         );
       }
       // The run itself, in the claim's transaction (28b): a queued crawl
-      // always has the job that will run it. An orphan's queued job is
-      // ADOPTED — re-pinned to this server's pool, conditioned on still being
-      // the queued job pinned where it was read, so of two resumes racing to
-      // adopt it one wins and the other is refused. An orphan's running job
-      // (its process died mid-crawl) is abandoned, and a fresh job enqueued.
-      if (orphanJob !== null && orphanJob.status === "queued") {
-        const adopted = await tx
-          .update(jobs)
-          .set({ pinnedTo: pinnedTo ?? null })
-          .where(
-            and(
-              eq(jobs.id, orphanJob.id),
-              eq(jobs.status, "queued"),
-              orphanJob.pinnedTo === null ? isNull(jobs.pinnedTo) : eq(jobs.pinnedTo, orphanJob.pinnedTo),
-            ),
-          )
-          .returning({ id: jobs.id });
-        if (adopted.length === 0) {
-          throw new ServiceError(
-            "CONFLICT",
-            `crawl ${crawlId} changed state while this resume was being checked — its queued ` +
-              `job was taken since it was read. Nothing was queued; read crawl_status and try again`,
-          );
-        }
+      // always has the job that will run it.
+      //
+      // AN ORPHAN'S JOB — queued or running, its process stopped or died — is
+      // ADOPTED THE ONE WAY FOR BOTH: abandoned, and a fresh job enqueued.
+      // A resume is a new acceptance by THIS code, so the job must carry this
+      // code's ruleset and extraction versions: the orphan carries those of the
+      // process that first accepted the crawl, and after a deploy that bumped
+      // either no runner of this code would ever claim it — while, pinned to a
+      // live server, it would read as held: a silent stall. Two resumes racing
+      // to adopt: the second's abandon finds the job settled, and its enqueue
+      // meets the first's new job at the one-live-job index and is refused.
+      if (orphanJob !== null) {
+        await finishJob(tx, orphanJob.id, "abandoned");
         this.log(
-          `api: crawl ${crawlId}: adopted its queued job from instance ${orphanJob.pinnedTo ?? "(none)"}, ` +
-            "which is no longer live",
+          `api: crawl ${crawlId}: adopted — its ${orphanJob.status} crawl job of instance ` +
+            `${(orphanJob.status === "running" ? orphanJob.claimedBy : orphanJob.pinnedTo) ?? "(none)"}, ` +
+            "which is no longer live, is abandoned and a new one queued",
         );
-      } else {
-        if (orphanJob !== null) await finishJob(tx, orphanJob.id, "abandoned");
-        await enqueueJob(tx, {
-          tenant,
-          crawlId,
-          kind: "crawl",
-          ...(pinnedTo === undefined ? {} : { pinnedTo }),
-        });
       }
+      await enqueueJob(tx, {
+        tenant,
+        crawlId,
+        kind: "crawl",
+        ...(pinnedTo === undefined ? {} : { pinnedTo }),
+      });
       // Credentials sent with the resume replace the stored copy (Deviation 9),
       // bumping its generation: the runner reads them when it claims the job.
       if (toStore !== undefined) await this.vault.write(tx, tenant, crawlId, toStore);

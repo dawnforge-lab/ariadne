@@ -33,6 +33,7 @@ import { ClaimLostError, resumeCrawl } from "../../src/crawl/loop.js";
 import { CredentialVault } from "../../src/crawl/credential-vault.js";
 import { hostKeyOf } from "../../src/crawl/host-key.js";
 import { RULESET_VERSION } from "../../src/rules/registry/registry.js";
+import { EXTRACTION_VERSION } from "../../src/crawl/versions.js";
 import { ApiService } from "../../src/api/service.js";
 import type { ServiceConfig } from "../../src/api/config.js";
 import { LOCAL_TENANT } from "../../src/tenant.js";
@@ -432,13 +433,25 @@ describe("liveness decides held (Ruling R10)", () => {
     expect(failed.status).toBe("failed");
     expect((await jobsOf(y.crawlId)).map((j) => j.status)).toEqual(["abandoned"]);
 
-    // crawl_resume: B adopts the queued job (re-pinned to B) and runs it.
+    // The usual restart is a deploy: the orphan was enqueued by code with
+    // another ruleset (and B's runner claims only its own versions). Stamped
+    // here on the row, as an older process would have written it.
+    const [orphan] = await jobsOf(z.crawlId);
+    await db.update(jobs).set({ rulesetVersion: "0.0.0-before-the-deploy" }).where(eq(jobs.id, orphan!.id));
+
+    // crawl_resume: B adopts the crawl — the orphan job abandoned, a fresh one
+    // with THIS code's versions queued for B — and runs it.
     const resumed = await b.resumeCrawl(LOCAL_TENANT, z.crawlId);
     expect(resumed).toMatchObject({ crawlId: z.crawlId, status: "queued" });
     const bInstance = await b.instanceId();
     const adopted = await jobsOf(z.crawlId);
-    expect(adopted).toHaveLength(1);
-    expect(adopted[0]?.pinnedTo).toBe(bInstance);
+    expect(adopted).toHaveLength(2);
+    expect(adopted[0]).toMatchObject({ id: orphan!.id, status: "abandoned", pinnedTo: aInstance, claimedBy: null });
+    expect(adopted[1]).toMatchObject({
+      pinnedTo: bInstance,
+      rulesetVersion: RULESET_VERSION,
+      extractionVersion: EXTRACTION_VERSION,
+    });
     expect(bLog.some((l) => l.includes(z.crawlId) && l.includes("adopted"))).toBe(true);
     const done = await until(
       "B finished the adopted crawl",
@@ -446,7 +459,10 @@ describe("liveness decides held (Ruling R10)", () => {
       (row) => row.status !== "queued" && row.status !== "running",
     );
     expect(done).toMatchObject({ status: "finished", pagesCrawled: 3 });
-    expect(await jobsOf(z.crawlId)).toMatchObject([{ status: "done", claimedBy: bInstance, pinnedTo: bInstance }]);
+    expect(await jobsOf(z.crawlId)).toMatchObject([
+      { id: orphan!.id, status: "abandoned" },
+      { id: adopted[1]!.id, status: "done", claimedBy: bInstance, pinnedTo: bInstance },
+    ]);
   }, 90_000);
 
   it("a live server's queued crawl is still held: another server's crawl_mark_failed and crawl_resume refuse", async () => {
