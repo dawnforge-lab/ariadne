@@ -68,7 +68,7 @@
  * milliseconds, so the turns cost nothing a caller can see.
  */
 import { randomUUID } from "node:crypto";
-import { and, eq, inArray, sql, type SQL } from "drizzle-orm";
+import { and, eq, inArray, isNull, sql, type SQL } from "drizzle-orm";
 
 import type { Db } from "../db/client.js";
 import { jobs } from "../db/schema.js";
@@ -165,6 +165,16 @@ export const busySentences = {
     `crawl_render is refused for crawl ${crawlId}: ${hostKey} is being crawled or rendered ` +
     "by another job, and two at once would together break the site's politeness limits. " +
     "Wait for it to end, then ask again",
+  /**
+   * `crawl_resume` / `crawl_mark_failed` whose orphan job moved between the
+   * read and the write (`abandonOrphanJob`): a live engine process claimed
+   * it, or another call settled it first. The caller's own crawl only; who
+   * moved it is not named.
+   */
+  orphanClaimed: (crawlId: string, operation: "crawl_resume" | "crawl_mark_failed"): string =>
+    `${operation} is refused for crawl ${crawlId}: its crawl job changed while this call ` +
+    "was being checked — a live engine process claimed it, or another call settled it " +
+    "first. Nothing was changed; read crawl_status and try again",
 } as const;
 
 /**
@@ -558,6 +568,38 @@ export async function finishJob(
   if (moved.length > 0) return;
   const [exists] = await db.select({ id: jobs.id }).from(jobs).where(eq(jobs.id, jobId));
   if (exists === undefined) throw new Error(`finishJob: no job ${jobId}`);
+}
+
+/**
+ * Abandon an orphan job (one `liveJobOf` read as not held) ONLY if it still
+ * stands as it was read: the same status, and — running — the same claimer.
+ * True when it moved. `crawl_resume`'s adoption and `crawl_mark_failed` use it
+ * inside their transaction, after the reads that called the job an orphan.
+ *
+ * Why not `finishJob`: that settles `queued` or `running` alike, and between
+ * the read and the settle a runner may have claimed the job — an old-version
+ * runner during a rolling deploy claims exactly the unpinned job this code
+ * reads as nobody's. Abandoning a job that is now running leaves the runner
+ * crawling under an `abandoned` row: `busy_hosts` no longer sees its host
+ * (hard rule 9) and `crawl_status.job` misreports it. A job that moved is the
+ * caller's refusal, never a settle.
+ */
+export async function abandonOrphanJob(
+  tx: Writer,
+  job: Pick<LiveJob, "id" | "status" | "claimedBy">,
+): Promise<boolean> {
+  const moved = await tx
+    .update(jobs)
+    .set({ status: "abandoned", finishedAt: new Date(), error: null })
+    .where(
+      and(
+        eq(jobs.id, job.id),
+        eq(jobs.status, job.status),
+        job.claimedBy === null ? isNull(jobs.claimedBy) : eq(jobs.claimedBy, job.claimedBy),
+      ),
+    )
+    .returning({ id: jobs.id });
+  return moved.length > 0;
 }
 
 /**

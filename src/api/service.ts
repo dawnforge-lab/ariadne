@@ -157,7 +157,7 @@ import { hostKeyOf } from "../crawl/host-key.js";
 import {
   busySentences,
   enqueueJob,
-  finishJob,
+  abandonOrphanJob,
   JobBusyError,
   latestJobOf,
   liveJobOf,
@@ -3676,6 +3676,7 @@ export class ApiService {
       );
     }
 
+    if (holder !== null) await this.config.beforeOrphanSettle?.("crawl_mark_failed", crawlId);
     await this.db.transaction(async (tx) => {
       const moved = await tx
         .update(crawls)
@@ -3700,9 +3701,15 @@ export class ApiService {
         .where(and(eq(crawls.id, crawlId), eq(crawls.status, row.status)));
       // The dead process's crawl job goes with the close (`abandoned`): left
       // live, it would hold the index and refuse the resume a failed crawl is
-      // entitled to. Only the job read above, and only if still unsettled.
+      // entitled to. Only the job read above, and only AS READ (28b T4a fix
+      // round 1): a live runner may have claimed it since — an old-version
+      // runner on a rolling deploy claims the unpinned job this code reads as
+      // nobody's — and that is a refusal, rolling the close back, never an
+      // abandon of work that is now running.
       if (holder !== null && moved.rowCount !== 0) {
-        await finishJob(tx, holder.id, "abandoned");
+        if (!(await abandonOrphanJob(tx, holder))) {
+          throw new ServiceError("CONFLICT", busySentences.orphanClaimed(crawlId, "crawl_mark_failed"));
+        }
       }
     });
     return this.getCrawl(tenant, crawlId);
@@ -4235,6 +4242,7 @@ export class ApiService {
     // resume never replaces the right one.
     const toStore = sent !== undefined && shapeOf(sent) !== null ? sent : undefined;
     const pinnedTo = await this.crawlJobPin();
+    if (orphanJob !== null) await this.config.beforeOrphanSettle?.("crawl_resume", crawlId);
     await this.db.transaction(async (tx) => {
       // The check at the top was several `await`s ago, and a render pass or a
       // rules run may have taken the crawl since: the job enqueued below is
@@ -4330,10 +4338,19 @@ export class ApiService {
       // process that first accepted the crawl, and after a deploy that bumped
       // either no runner of this code would ever claim it — while, pinned to a
       // live server, it would read as held: a silent stall. Two resumes racing
-      // to adopt: the second's abandon finds the job settled, and its enqueue
-      // meets the first's new job at the one-live-job index and is refused.
+      // to adopt: the second's abandon finds the job settled and is refused.
+      //
+      // The abandon is conditioned on the job standing AS READ (28b T4a fix
+      // round 1): a live runner may have claimed it since — on a rolling
+      // deploy an old-version runner claims exactly the unpinned job this code
+      // reads as nobody's. Abandoning it then would leave that runner crawling
+      // under an `abandoned` row, invisible to host exclusivity (hard rule 9).
+      // A moved job is a refusal, and the crawl update above rolls back with
+      // it; the runner's own `queued → running` waits on that row and wins.
       if (orphanJob !== null) {
-        await finishJob(tx, orphanJob.id, "abandoned");
+        if (!(await abandonOrphanJob(tx, orphanJob))) {
+          throw new ServiceError("CONFLICT", busySentences.orphanClaimed(crawlId, "crawl_resume"));
+        }
         this.log(
           `api: crawl ${crawlId}: adopted — its ${orphanJob.status} crawl job of instance ` +
             `${(orphanJob.status === "running" ? orphanJob.claimedBy : orphanJob.pinnedTo) ?? "(none)"}, ` +

@@ -547,6 +547,9 @@ describe("fair claims (28b T4a)", () => {
       if (address === null || typeof address === "string") throw new Error("bound oddly");
       ports.push(address.port);
     }
+    // Settled before the ports are let go: a job left running would hold
+    // 127.0.0.1:<port> for any other file's fixture server that binds it next.
+    const claimed: string[] = [];
     try {
       const pinnedTo = pin();
       const one = `http://127.0.0.1:${ports[0]}/`;
@@ -554,13 +557,18 @@ describe("fair claims (28b T4a)", () => {
       const one1 = await enqueueJob(db, { tenant: LOCAL_TENANT, crawlId: await seedCrawl("queued", one), kind: "crawl", pinnedTo });
       const one2 = await enqueueJob(db, { tenant: LOCAL_TENANT, crawlId: await seedCrawl("queued", one), kind: "crawl", pinnedTo });
       const two1 = await enqueueJob(db, { tenant: LOCAL_TENANT, crawlId: await seedCrawl("queued", two), kind: "crawl", pinnedTo });
-      const claim = (): Promise<ClaimedJob | null> => claimNextJob(db, { instanceId: "runner-ports", kinds: ["crawl"], pinnedTo });
+      const claim = async (): Promise<ClaimedJob | null> => {
+        const job = await claimNextJob(db, { instanceId: "runner-ports", kinds: ["crawl"], pinnedTo });
+        if (job !== null) claimed.push(job.id);
+        return job;
+      };
       expect((await claim())?.id).toBe(one1);
       expect((await claim())?.id).toBe(two1);
       expect(await claim()).toBeNull();
       await finishJob(db, one1, "done");
       expect((await claim())?.id).toBe(one2);
     } finally {
+      for (const id of claimed) await finishJob(db, id, "done");
       for (const server of servers) await new Promise<void>((r) => server.close(() => r()));
     }
   });

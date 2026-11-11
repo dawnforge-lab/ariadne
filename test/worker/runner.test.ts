@@ -646,6 +646,55 @@ describe("fair claims over the unpinned pool, and HOST_BUSY (28b T4a)", () => {
     await db.update(jobs).set({ status: "abandoned" }).where(inArray(jobs.crawlId, [older, current]));
   });
 
+  it.each(["crawl_resume", "crawl_mark_failed"] as const)(
+    "%s of an old deploy's orphan job refuses, and changes nothing, when a live runner claims that job between the call's read and its write",
+    async (operation) => {
+      await clearPool();
+      // The window, held open by the TEST ONLY seam: after the reads called
+      // the job an orphan, before the transaction that settles it. The "old
+      // runner" claims it there, as the claim statement would.
+      const window = { crawlId: "", jobId: "" };
+      const oldRunner = `old-deploy-runner-${short()}`;
+      const service = newService([], {
+        crawlRunner: "workers",
+        beforeOrphanSettle: async (op, crawlId) => {
+          if (op !== operation || crawlId !== window.crawlId) return;
+          await db
+            .update(jobs)
+            .set({ status: "running", claimedBy: oldRunner, claimedAt: new Date(), heartbeatAt: new Date() })
+            .where(and(eq(jobs.id, window.jobId), eq(jobs.status, "queued")));
+        },
+      });
+      const { crawlId } = await start(service, 3);
+      const [job] = await jobsOf(crawlId);
+      // Enqueued by the deploy before this one: nobody's to this code.
+      await db.update(jobs).set({ rulesetVersion: "0.0.0-old-deploy" }).where(eq(jobs.id, job!.id));
+      expect(await service.queuePosition(crawlId)).toBeNull();
+      const before = await crawlRow(crawlId);
+      Object.assign(window, { crawlId, jobId: job!.id });
+
+      const refusal = await (operation === "crawl_resume"
+        ? service.resumeCrawl(LOCAL_TENANT, crawlId)
+        : service.markCrawlFailed(LOCAL_TENANT, crawlId)
+      ).then(
+        () => null,
+        (error: unknown) => error,
+      );
+      expect(refusal).toBeInstanceOf(Error);
+      expect((refusal as { code?: unknown }).code).toBe("CONFLICT");
+      expect((refusal as Error).message).toBe(
+        `${operation} is refused for crawl ${crawlId}: its crawl job changed while this call ` +
+          "was being checked — a live engine process claimed it, or another call settled it " +
+          "first. Nothing was changed; read crawl_status and try again",
+      );
+      // The claimed job still runs, the one job of the crawl, and the crawl
+      // row is as it was: the old runner's own queued → running wins.
+      expect(await jobsOf(crawlId)).toMatchObject([{ id: job!.id, status: "running", claimedBy: oldRunner }]);
+      expect(await crawlRow(crawlId)).toEqual(before);
+      await db.update(jobs).set({ status: "abandoned" }).where(eq(jobs.id, job!.id));
+    },
+  );
+
   it("crawl_render on a crawl whose host has a running crawl job answers 409 HOST_BUSY, naming the host and not the crawl", async () => {
     const token = `test-token-runner-${randomUUID()}`;
     const log: string[] = [];

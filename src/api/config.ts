@@ -95,6 +95,16 @@ export interface ServiceConfig {
    */
   afterConfigWrite?: (phase: "written") => Promise<void>;
   /**
+   * TEST ONLY, like `afterConfigWrite`: awaited by `crawl_resume` and
+   * `crawl_mark_failed` after their reads have called the crawl's job an
+   * orphan and before the transaction that settles it begins — the window a
+   * live runner can claim that job in (28b T4a fix round 1). A test claims the
+   * job here to prove the call refuses rather than abandon running work.
+   * `loadApiConfig` does not read it, the entrypoints never set it, and no
+   * request field may ever map to it.
+   */
+  beforeOrphanSettle?: (operation: "crawl_resume" | "crawl_mark_failed", crawlId: string) => Promise<void>;
+  /**
    * The keys crawl credentials are encrypted with (Phase 28b item 10;
    * `src/crawl/credential-vault.ts`). Required: every process that accepts or
    * runs crawls holds them, and the entrypoints read them from
