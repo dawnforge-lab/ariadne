@@ -74,7 +74,7 @@ per-rule breakdown, and it is no longer the only evidence a pass happened.
 ## Prerequisites
 
 - A running Ariadne server, MCP preferred (`npm run mcp:serve`), HTTP as the fallback
-  (`npm run api:serve` with `ARIADNE_API_TOKEN`). See the `ariadne-crawl` skill.
+  (`npm run api:serve` with `ARIADNE_API_TOKEN` and an `X-Ariadne-Tenant` header; `mcp:serve` needs `ARIADNE_TENANT`). See the `ariadne-crawl` skill.
 - A crawl of the site that is `finished`, rendered if the site needs it, and JUDGED.
 - GSC and GA4 MCP servers for Phase 0. Ahrefs MCP if the client has it.
 - A browser MCP server for Phase 3.

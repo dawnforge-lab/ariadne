@@ -1,11 +1,42 @@
 # The Ariadne surface Talos codes against
 
-**Status:** the contract as of Phase 27d (ruleset 0.25.0, migrations 0000–0036,
+**Status:** the contract as of Phase 28a (ruleset 0.25.0, migrations 0000–0037,
 27 MCP tools / 27 HTTP routes; every column label in this document is served
 under the ruleset version the engine reports — `rules_catalog`'s
 `rulesetVersion`, which the metric-table pass moves).
 `docs/talos-integration.md` says *why* the seam exists and what obligations bind
 it; this document says *what the seam is*.
+
+**What Phase 28a changed here (2026-11-11): every request names its tenant. Talos must
+send the header before it upgrades.** No tool or route is added (27 / 27) and the
+ruleset is unchanged; migration 0037 adds `crawls.tenant_id`. The gate evidence is
+`docs/gates/phase-28a.md`.
+
+- **HTTP needs a second header.** Every request carries `Authorization: Bearer <token>`
+  AND `X-Ariadne-Tenant: <tenant>`, and a caller that sends only the bearer is refused.
+  The order is bearer (401), then tenant (400 `TENANT_REQUIRED` for a missing or empty
+  header, 400 `INVALID_TENANT` for a value that is not `^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$`),
+  then routing. The value is opaque and case-sensitive; Talos sends its user id as a
+  string. An error never quotes the value. Stdio MCP reads `ARIADNE_TENANT` once at boot
+  and refuses to start without it (there is no default).
+- **A foreign crawl is a missing crawl.** Every crawl-facing route and tool resolves the
+  crawl by (id, tenant). Another tenant's crawl answers 404 `NOT_FOUND`, `no such crawl
+  '<id>'`, byte for byte what an id that never existed answers, including while that
+  crawl is busy, and `crawl_compare` / `compare_urls` never name the other site's host.
+  `crawl_list` lists only the caller's crawls; `crawl_start` creates for the caller.
+  `config_schema`, `config_validate` and the no-`crawlId` form of `rules_catalog` are
+  global; `queuePosition` stays a position in the global queue.
+- **Exports sit under the tenant.** `export_crawl` writes `<exportDir>/<tenant>/…`, and
+  `crawl_delete` looks there. Exports written before 28a at `<exportDir>/<file>` are no
+  longer found: the operator moves them once (`mkdir -p <exportDir>/local && mv
+  <exportDir>/<crawl files> <exportDir>/local/`).
+- **Pinned** by `test/api/tenant-isolation.test.ts`, which enumerates every route and tool
+  and fails on one that is neither scoped nor on the global list, and by
+  `test/api/tenancy.test.ts`.
+- Two 27d carries landed with it: a sitemap re-walk on resume clears its memberships and
+  hreflang staging only when a walk replaces them
+  (`test/crawl/loop-resume-staging.test.ts`), and a programmer error in `fetchPage` is
+  never hidden by an abort (`test/crawl/fetch-page.test.ts`).
 
 **What Phase 27c changed here: a crawl can be a list, it can be fenced by URL
 patterns, and it can carry credentials.** Ruleset 0.24.0, 189 rules (72 page / 103
@@ -907,8 +938,8 @@ Two properties make the double-transport claim below cheap to trust:
 | | HTTP | MCP |
 |---|---|---|
 | Where | `node:http`, one port (`ARIADNE_API_PORT`) | stdio |
-| Who may call | anyone with the bearer token | the process that started this one |
-| Auth | `Authorization: Bearer <token>`, checked **before routing** | none, deliberately |
+| Who may call | anyone with the bearer token, naming a tenant | the process that started this one, as its one tenant |
+| Auth | `Authorization: Bearer <token>`, checked **before routing**, then `X-Ariadne-Tenant: <tenant>` (Phase 28a) | none, deliberately; `ARIADNE_TENANT` required at boot |
 | Errors | status code + `{error, code}` (since 27c; `code` on every `ServiceError`) | `isError: true` + one text block of `{error, code}` |
 | Bulk data | `GET …/export` streams `text/csv` | `export_crawl` writes a file, answers with its path |
 
@@ -926,6 +957,15 @@ Two properties make the double-transport claim below cheap to trust:
   process that started this one"). If Ariadne's MCP server is ever mounted on a
   network transport, that argument dies with the change and a credential has to
   arrive with it.
+- **Tenancy (Phase 28a).** A request names its tenant in `X-Ariadne-Tenant`, checked
+  right after the token and before routing: missing or empty is 400 `TENANT_REQUIRED`, a
+  value outside `^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$` is 400 `INVALID_TENANT`, and neither
+  quotes the value. The token proves the caller is Talos; the header says which tenant
+  Talos acts for. Example: `curl -H "Authorization: Bearer $ARIADNE_API_TOKEN" -H
+  "X-Ariadne-Tenant: 42" $ARIADNE/crawls`. A crawl of another tenant answers as a crawl
+  that does not exist (404 `NOT_FOUND`). Stdio MCP is one tenant by process trust,
+  `ARIADNE_TENANT`, required at boot. Pinned by `test/api/tenant-isolation.test.ts` and
+  `test/api/tenancy.test.ts`.
 - **The domain allowlist binds both transports** (`ARIADNE_ALLOWED_DOMAINS`,
   exact host or `*.example.com`). An empty allowlist refuses every crawl
   trigger and still answers every query — the read-only posture a Talos
@@ -964,6 +1004,9 @@ Two properties make the double-transport claim below cheap to trust:
 | The crawl needs credentials this server does not hold (Phase 27c: after a restart; `crawl_resume`, `crawl_render`, a credential patch to `crawl_config_set`) | 409 `{error, code: "CREDENTIALS_REQUIRED"}` | tool error, same body |
 | A body over the route's cap (64 KiB; 1 MiB on `POST /crawls`, `POST /config/validate`, `POST /crawls/:id/resume`, `POST /crawls/:id/render`, `PATCH /crawls/:id/config`) | 413 `{error}` (no `code`: the transport's own refusal) | n/a (stdio) |
 | A defect of ours | 500 `{error: "internal error", correlationId}` | `{error: "internal error", correlationId}` |
+
+**Phase 28a adds two 400 codes**, `TENANT_REQUIRED` and `INVALID_TENANT`, both from the
+transport's tenant check (HTTP only; stdio fails at boot instead).
 
 **`code` (Phase 27c, additive).** Every refusal the service raises carries `code` beside
 the sentence: `VALIDATION` (400), `FORBIDDEN` (403), `NOT_FOUND` (404), `CONFLICT` (409)
@@ -3450,22 +3493,17 @@ Six postures a Talos integrator should know about rather than discover:
    **Show it to an operator, log it, quote it in a handover — do not paste it
    into a tenant-facing report.** A crawl's `siteUrl` is the tenant's own; this
    sentence is the engine's.
-4. **There is no tenancy isolation on crawl listing yet.** `crawl_list` without
-   a `siteUrl` returns every crawl this engine holds — including other tenants'
-   `siteUrl`s — to any caller with the token. The crawl row is the isolation
-   unit (obligation 3) and every *per-crawl* read is scoped by id, but the
-   listing is not scoped by anything. **Today's mitigation is deployment:** one
-   Ariadne per tenant, or a Talos-side proxy that always passes `siteUrl` and
-   never forwards an unfiltered listing. A per-caller scope is a real change to
-   this surface (a tenant key on the crawl row, and a filter on every listing)
-   and it is not in Phase 10.
+4. **Crawl listing is tenant-scoped (met in Phase 28a).** `crawl_list` returns only the
+   caller's crawls, whatever `siteUrl` is or is not passed, and every per-crawl read and
+   command resolves the crawl by (id, tenant). Retired: the deployment mitigation (one
+   Ariadne per tenant, or a proxy that forces `siteUrl`). Pinned by
+   `test/api/tenant-isolation.test.ts`.
 5. **`crawl_delete` is hard, and its only guard is the confirm echo.** It removes the
    crawl's rows and its render and export files with no undo and no soft delete, and
    it refuses a queued or running crawl, a pending request, a crawl in use in this
-   server, and live leases (§4.1c). **Until Phase 28's tenant key, anyone with the
-   token who knows a crawl id can delete it, as for every per-crawl command.** A
-   tenant-facing Talos surface must not expose it without its own ownership check on
-   the id.
+   server, and live leases (§4.1c). **Met in Phase 28a:** a crawl of another tenant
+   answers 404, so a caller can delete only its own crawls; the confirm echo remains
+   the guard against a mistaken delete.
 6. **A crawl's credentials never come back** (Phase 27c). `requestHeaders`,
    `httpAuth` and `cookies` values are held in this server's memory only and appear in
    no stored column, log line, error message or response: refusals name the field and
@@ -3518,8 +3556,9 @@ Six postures a Talos integrator should know about rather than discover:
   after a restart; there is no form login, no JavaScript-driven login and no session
   refresh. No credential, header or cookie changes the user agent, the delay floor
   or robots.txt. No regular expressions in scope patterns, and no proxies.
-- **No tenancy isolation on listing** (§9.3) and no per-tenant credentials: one
-  bearer token per server.
+- **No per-tenant tokens** (Phase 28a): one bearer token per server proves the caller
+  is Talos, and the tenant header says whom it acts for; tenancy is a key, not an
+  identity system.
 - **No writes from a read surface.** Every query path runs read-only; the nine
   command tools (`crawl_start`, `crawl_resume`, `crawl_render`, `crawl_rules`,
   `crawl_mark_failed`, `crawl_config_set`, `crawl_pause`, `crawl_cancel`,
@@ -4048,7 +4087,8 @@ byte for byte, as it writes it".
 - The comparison's identity collapses multi-finding rules to per-URL presence
   (§7.1). Nothing on the surface can un-collapse it; `issues_list` counts are
   the row-level truth.
-- No tenancy isolation on listing (§9.3).
+- A re-walk on resume never clears `sitemap_urls` (a URL dropped from a changed site
+  stays a sitemap entry); carried to Phase 28b.
 - `crawl_config_set`'s "rules are running" refusal (§4.9) sees only the rules
   runs of ITS OWN server process, as `crawl_rules`' own "already being judged"
   refusal does. A run started by another process can read the block a moment
@@ -4081,11 +4121,13 @@ byte for byte, as it writes it".
 
 ## Cross-references
 
-- `docs/talos-integration.md` — why the seam exists, the eight obligations, and
+- `docs/talos-integration.md` — why the seam exists, the nine obligations, and
   what Talos must eventually do.
 - `docs/gates/phase-10.md` and `docs/gates/phase-11.md` — the measurements
   behind this file's Phase 10 and Phase 11 numbers; each number here also names
   the test or the measurement it came from directly.
+- `docs/gates/phase-28a.md` — the Phase 28a gate: the tenant sentinel, the backfill
+  on the dev database and the carried loop fixes.
 - `docs/gates/phase-27a.md` — the Phase 27a gate: the overviews reconciled with
   `issues_list`, `issue_urls` and `crawl_status` on the stored lavishalice crawl,
   the override round trip, and every rule whose type or priority differs from

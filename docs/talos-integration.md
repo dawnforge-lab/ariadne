@@ -10,7 +10,7 @@ absorbing the other.
 | | Talos | Ariadne |
 |---|---|---|
 | What | Multi-tenant SEO SaaS (keyword research, interlinking, redirects, content, ecommerce content, conversational SEO agent) | Site crawl + audit evidence engine |
-| Where | `/home/eugen-dev/Workflows/talos`, branch `feat/talos-rewrite` | this repo |
+| Where | `/home/eugen-dev/Documents/Workflows/talos`, branch `feat/talos-rewrite` | this repo |
 | Stack | Python 3.13 / FastAPI / Next.js 16 / Postgres | TypeScript / Node 22 / Postgres |
 | Crawling today | Per-URL pipeline crawls (crawl4ai/httpx) + the agent's single-page `crawl` tool with DNS-pinned SSRF guard | Site-wide frontier crawl (to be built) |
 
@@ -105,7 +105,7 @@ crawler inside Talos. The intended shape:
    every phase (host probe, sitemap walk, seeding, page crawl, 404 probe, recheck, resource pass),
    so Talos need not budget a fetch deadline for it. A pause or cancel never makes a crawl faster than
    the spacing it earned (obligation 4), and `crawl_delete` is the one call that
-   destroys a crawl, guarded only by its confirm echo until Phase 28's tenant key
+   destroys a crawl, guarded by its confirm echo and, since Phase 28a, by the tenant key
    (`docs/talos-surface.md` §4.1c and §9).
 
 8. **Talos holds a crawl's credentials; Ariadne only borrows them.** Since Phase 27c a
@@ -126,6 +126,17 @@ crawler inside Talos. The intended shape:
    (obligation 4). The surface is `docs/talos-surface.md`'s Phase 27c summary, §1 and
    §4.1a.
 
+9. **Tenancy: Talos names the tenant on every call, and a foreign crawl is a missing
+   crawl.** Since Phase 28a every HTTP request carries `X-Ariadne-Tenant` beside the
+   bearer token (400 `TENANT_REQUIRED` / `INVALID_TENANT` otherwise), and the stdio
+   server takes `ARIADNE_TENANT` at boot. Talos passes its user id as a string. The value
+   is opaque to Ariadne, matches `^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$` and is
+   case-sensitive. Every crawl-facing route and tool resolves the crawl by (id, tenant),
+   and another tenant's crawl answers 404 `NOT_FOUND` exactly as an unknown id does, so
+   the answer is no oracle for whether an id exists. Talos must start sending the header
+   before it upgrades to 28a. Pinned by `test/api/tenant-isolation.test.ts`; the surface
+   is `docs/talos-surface.md`'s Phase 28a summary and §1.
+
 ## What Talos must eventually do (not Ariadne's job, recorded so it isn't lost)
 
 - Add agent tools wrapping Ariadne's API (mirroring the sf-skill vocabulary).
@@ -145,14 +156,11 @@ crawler inside Talos. The intended shape:
 
 ## Cross-references
 
-- The surface contract: `docs/talos-surface.md` (Phase 10). Its §9 records the
-  one obligation that is NOT met yet — there is no tenancy isolation on crawl
-  listing: `crawl_list` without a `siteUrl` returns every crawl this engine
-  holds, other tenants' site URLs included, to any caller with the token.
-  Obligation 3 (the crawl row as the isolation unit) holds for every per-crawl
-  read; the listing is not scoped, and today's mitigation is deployment.
+- The surface contract: `docs/talos-surface.md`. Obligation 9 (tenancy) is met as of
+  Phase 28a: the listing and every per-crawl read are scoped by the tenant header
+  (`docs/gates/phase-28a.md`).
 - Talos repo pointer to this project: `docs/talos/crawler-engine.md` in the
-  talos repo (`github.com/dawnforge-lab/talos`, local `/home/eugen-dev/Workflows/talos`).
+  talos repo (`github.com/dawnforge-lab/talos`, local `/home/eugen-dev/Documents/Workflows/talos`).
 - Talos deep history: serena memory `talos-rewrite-status` in the talos
   repo (`.serena/memories/`).
 - The audit checklist both systems serve: `skills/ariadne-audit/checklist.md`

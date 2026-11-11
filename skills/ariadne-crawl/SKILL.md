@@ -28,9 +28,12 @@ of them is worked around.
 
 1. **A server is running.** Either transport, over the same service:
    - `npm run mcp:serve` — MCP on stdio, the preferred surface. Twelve tools,
-     no token: an stdio client is the process that started the server.
+     no token: an stdio client is the process that started the server. It needs
+     `ARIADNE_TENANT` (Phase 28a; the one tenant this process acts for, for example
+     `local`) and refuses to boot without it.
    - `npm run api:serve` — HTTP on `127.0.0.1:8787` by default, bearer token
-     required (`ARIADNE_API_TOKEN`, 16 characters minimum).
+     required (`ARIADNE_API_TOKEN`, 16 characters minimum), plus an
+     `X-Ariadne-Tenant` header on every request.
    Both need `DATABASE_URL`. Neither invents one.
 2. **The target host is on the allowlist.** `ARIADNE_ALLOWED_DOMAINS` is a
    comma-separated list of bare hosts (`example.com`) or subdomain wildcards
@@ -76,7 +79,8 @@ same JSON:
 | `robots_get` | `GET /crawls/:id/robots` |
 | `export_crawl` | `GET /crawls/:id/export` |
 
-Over HTTP every request carries `Authorization: Bearer $ARIADNE_API_TOKEN`. Filters
+Over HTTP every request carries `Authorization: Bearer $ARIADNE_API_TOKEN` and
+`X-Ariadne-Tenant: <tenant>`; a crawl of another tenant answers 404 as a missing one. Filters
 are query parameters with the same names, and an unknown parameter is a 400 naming
 it rather than an ignored filter.
 
