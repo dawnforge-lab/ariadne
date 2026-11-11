@@ -39,6 +39,7 @@ import { URL_FINDING_CAP } from "../../src/rules/query/crawl-evidence.js";
 import type { Finding, QueryRule } from "../../src/rules/registry/types.js";
 import { mkDiscovery } from "./mk-discovery.js";
 import { writerIndexable, type IndexabilitySpec } from "./mk-page.js";
+import { LOCAL_TENANT } from "../../src/api/tenant.js";
 
 function databaseUrl(): string {
   const url = process.env.DATABASE_URL;
@@ -227,6 +228,7 @@ describe("the content rules against the database", () => {
   async function newCrawl(probe?: NotFoundProbeEvidence): Promise<string> {
     const id = `crawl_${randomUUID()}`;
     await db.insert(crawls).values({
+      tenantId: LOCAL_TENANT,
       id,
       siteUrl: SITE,
       config: { userAgent: "AriadneBot-test", maxPages: 500 },
@@ -535,6 +537,7 @@ describe("the content rules against the database", () => {
     it("refuses a notfound probe blob it cannot read", async () => {
       const id = `crawl_${randomUUID()}`;
       await db.insert(crawls).values({
+        tenantId: LOCAL_TENANT,
         id,
         siteUrl: SITE,
         config: { userAgent: "AriadneBot-test" },

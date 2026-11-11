@@ -35,6 +35,7 @@ import { crawls, pages } from "../../src/db/schema.js";
 import { buildRegistry } from "../../src/rules/index.js";
 import { mkDiscovery } from "../rules/mk-discovery.js";
 import { mkPage } from "../rules/mk-page.js";
+import { LOCAL_TENANT } from "../../src/api/tenant.js";
 
 function databaseUrl(): string {
   const url = process.env.DATABASE_URL;
@@ -84,6 +85,7 @@ beforeAll(async () => {
   service = new ApiService(db, { allowedDomains: [], exportDir, log: () => {} });
 
   await db.insert(crawls).values({
+    tenantId: LOCAL_TENANT,
     id: crawlId,
     siteUrl: `${SITE}/`,
     config: { siteUrl: `${SITE}/`, maxPages: 100, userAgent: "AriadneBot-test" },
@@ -367,6 +369,7 @@ describe("an unjudged crawl", () => {
   it("is never stale, and renders its copy from the current block", async () => {
     const id = `crawl_judgement_unjudged_${randomUUID()}`;
     await db.insert(crawls).values({
+      tenantId: LOCAL_TENANT,
       id,
       siteUrl: `${SITE}/`,
       config: { siteUrl: `${SITE}/` },
@@ -394,6 +397,7 @@ describe("an unjudged crawl", () => {
   it("a judged crawl with no stamp is a loud error naming the crawl", async () => {
     const id = `crawl_judgement_nostamp_${randomUUID()}`;
     await db.insert(crawls).values({
+      tenantId: LOCAL_TENANT,
       id,
       siteUrl: `${SITE}/`,
       config: { siteUrl: `${SITE}/` },

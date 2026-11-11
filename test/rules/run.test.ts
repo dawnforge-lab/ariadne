@@ -33,6 +33,7 @@ import type {
 } from "../../src/rules/registry/types.js";
 import { mkDiscovery, mkHostProbe } from "./mk-discovery.js";
 import { CLEAN_META, mkPage } from "./mk-page.js";
+import { LOCAL_TENANT } from "../../src/api/tenant.js";
 
 /**
  * The triage a synthetic rule is registered with. The real table
@@ -199,6 +200,7 @@ describe("runRules against the database", () => {
   async function newCrawl(): Promise<string> {
     const id = `crawl_${randomUUID()}`;
     await db.insert(crawls).values({
+      tenantId: LOCAL_TENANT,
       id,
       siteUrl: SITE,
       config: { maxPages: 10_000, userAgent: "AriadneBot-test" },

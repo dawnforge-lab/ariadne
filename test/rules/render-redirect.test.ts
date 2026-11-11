@@ -18,6 +18,7 @@ import { crawls, pages } from "../../src/db/schema.js";
 import { renderRedirectRules } from "../../src/rules/query/render-redirect.js";
 import type { QueryRule } from "../../src/rules/registry/types.js";
 import { databaseUrl } from "./metric-db.js";
+import { LOCAL_TENANT } from "../../src/api/tenant.js";
 
 const SITE = "https://jsredirect.example";
 const url = (path: string): string => `${SITE}${path}`;
@@ -62,6 +63,7 @@ describe("redirect.js against the database", () => {
   async function newCrawl(): Promise<string> {
     const id = `crawl_${randomUUID()}`;
     await db.insert(crawls).values({
+      tenantId: LOCAL_TENANT,
       id,
       siteUrl: SITE,
       config: { userAgent: "AriadneBot-test", maxPages: 500 },

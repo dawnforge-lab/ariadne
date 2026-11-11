@@ -28,6 +28,7 @@ import { createApiServer, type ApiServer } from "../../src/api/http.js";
 import { createMcpServer, type AriadneMcpServer } from "../../src/api/mcp.js";
 import type { ServiceConfig } from "../../src/api/config.js";
 import { mkDiscovery } from "../rules/mk-discovery.js";
+import { LOCAL_TENANT } from "../../src/api/tenant.js";
 
 const TOKEN = "test-token-credentials-restart-0123456789";
 const PAGE_DELAY_MS = 60;
@@ -175,6 +176,7 @@ async function seedPaused(
 ): Promise<string> {
   const id = `crawl_credentials_${randomUUID()}`;
   await db.insert(crawls).values({
+    tenantId: LOCAL_TENANT,
     id,
     siteUrl: `${site}/auth/`,
     config: {

@@ -147,6 +147,7 @@ import {
   type CredentialTarget,
 } from "./credentials.js";
 import { storableCap, storableDeep } from "./storable-text.js";
+import type { TenantId } from "../api/tenant.js";
 
 /**
  * `RenderSelectionConfig` is extended rather than restated: the render pass's
@@ -831,6 +832,7 @@ export class ClaimLostError extends Error {
  */
 export async function runCrawl(
   db: Db,
+  tenant: TenantId,
   config: CrawlConfig,
   signal?: AbortSignal,
   testHooks?: LoopTestHooks,
@@ -854,6 +856,7 @@ export async function runCrawl(
   const crawlId = `crawl_${randomUUID()}`;
   await db.insert(crawls).values({
     id: crawlId,
+    tenantId: tenant,
     siteUrl: config.siteUrl,
     config: storableConfig(config),
     rulesetVersion: RULESET_VERSION,

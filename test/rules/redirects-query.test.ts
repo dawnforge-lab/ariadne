@@ -17,6 +17,7 @@ import { URL_FINDING_CAP } from "../../src/rules/query/crawl-evidence.js";
 import { MAX_REDIRECT_HOPS, redirectRules } from "../../src/rules/query/redirects.js";
 import type { Finding, QueryRule } from "../../src/rules/registry/types.js";
 import { normalised } from "./mk-page.js";
+import { LOCAL_TENANT } from "../../src/api/tenant.js";
 
 function databaseUrl(): string {
   const url = process.env.DATABASE_URL;
@@ -63,7 +64,7 @@ describe("redirectRules against the database", () => {
 
   async function newCrawl(): Promise<string> {
     const id = `crawl_${randomUUID()}`;
-    await db.insert(crawls).values({ id, siteUrl: SITE, config: {}, rulesetVersion: "test" });
+    await db.insert(crawls).values({ tenantId: LOCAL_TENANT, id, siteUrl: SITE, config: {}, rulesetVersion: "test" });
     createdCrawls.push(id);
     return id;
   }

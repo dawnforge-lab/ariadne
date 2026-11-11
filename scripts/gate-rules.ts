@@ -92,6 +92,7 @@ import type { JudgementContext, RuleCaps } from "../src/rules/registry/types.js"
 import { runRules } from "../src/rules/run.js";
 import { scopeRefusesSql, scopeVerdict, type CrawlScope } from "../src/crawl/url-scope.js";
 import { siteFixture, startSiteServer } from "../test/gate/site-server.js";
+import { LOCAL_TENANT } from "../src/api/tenant.js";
 
 /** The gate's three numbers. All are the build plan's, not this script's. */
 const GATE_PAGES = 50_000;
@@ -826,7 +827,7 @@ async function main(): Promise<number> {
       const pauseFraction = pauseAtFraction();
       let summary: CrawlSummary;
       if (pauseFraction === null) {
-        summary = await runCrawl(db, config);
+        summary = await runCrawl(db, LOCAL_TENANT, config);
       } else {
         const ended = { value: false };
         // The watcher's failure is held, not left to reject unhandled while the
@@ -837,7 +838,7 @@ async function main(): Promise<number> {
         );
         let first: CrawlSummary;
         try {
-          first = await runCrawl(db, config);
+          first = await runCrawl(db, LOCAL_TENANT, config);
         } catch (runError) {
           // The run threw: stop the watcher (its loops check `ended`), wait for
           // it to let go of the database, and surface the RUN's error — a

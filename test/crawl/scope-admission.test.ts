@@ -30,6 +30,7 @@ import {
   type CrawlSummary,
 } from "../../src/crawl/loop.js";
 import { RULESET_VERSION } from "../../src/rules/registry/registry.js";
+import { LOCAL_TENANT } from "../../src/api/tenant.js";
 
 function databaseUrl(): string {
   const url = process.env.DATABASE_URL;
@@ -202,7 +203,7 @@ function cfg(seedPath: string, overrides: Partial<CrawlConfig> = {}): CrawlConfi
 
 async function crawl(config: CrawlConfig): Promise<CrawlSummary> {
   requested = [];
-  const summary = await runCrawl(db, config);
+  const summary = await runCrawl(db, LOCAL_TENANT, config);
   createdCrawls.push(summary.crawlId);
   return summary;
 }
@@ -376,7 +377,7 @@ describe("the re-filter on resume", () => {
     requested = [];
     // Two at a time, so the seed's two links (/x/0, /hold) are one batch:
     // /x/0 answers and queues /x/1 and /x/2, while /hold keeps the batch open.
-    const run = runCrawl(db, cfg("/res/", { maxConcurrency: 2 }));
+    const run = runCrawl(db, LOCAL_TENANT, cfg("/res/", { maxConcurrency: 2 }));
     run.catch(() => undefined);
     let id = "";
     await until("the crawl row", async () => {
@@ -465,6 +466,7 @@ describe("refileOutOfScope", () => {
   async function seededCrawl(): Promise<string> {
     const id = `crawl_refile_${Math.random().toString(36).slice(2)}`;
     await db.insert(crawls).values({
+      tenantId: LOCAL_TENANT,
       id,
       siteUrl: "https://refile.example/",
       config: {},
@@ -678,7 +680,7 @@ describe("the re-filter on resume, widening", () => {
   it("re-admits an excluded URL the cleared scope admits, and fetches it to an ok row", async () => {
     heldPaths.add("/hold2");
     requested = [];
-    const run = runCrawl(db, cfg("/wid/", { exclude: ["*/x/*"], maxConcurrency: 2 }));
+    const run = runCrawl(db, LOCAL_TENANT, cfg("/wid/", { exclude: ["*/x/*"], maxConcurrency: 2 }));
     run.catch(() => undefined);
     let id = "";
     await until("the crawl row", async () => {
@@ -812,6 +814,7 @@ describe("refileOutOfScope, the final wave (27c)", () => {
   async function crawlWithExcludedRows(): Promise<string> {
     const id = `crawl_refile_fw_${Math.random().toString(36).slice(2)}`;
     await db.insert(crawls).values({
+      tenantId: LOCAL_TENANT,
       id,
       siteUrl: "https://refile.example/",
       config: {},

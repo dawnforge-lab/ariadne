@@ -44,6 +44,7 @@ import {
 } from "../../src/rules/query/render-diff.js";
 import type { QueryRule } from "../../src/rules/registry/types.js";
 import { databaseUrl } from "./metric-db.js";
+import { LOCAL_TENANT } from "../../src/api/tenant.js";
 
 const SITE = "https://render.example";
 const url = (path: string): string => `${SITE}${path}`;
@@ -225,6 +226,7 @@ describe("the render diff rules against the database", () => {
   async function newCrawl(): Promise<string> {
     const id = `crawl_${randomUUID()}`;
     await db.insert(crawls).values({
+      tenantId: LOCAL_TENANT,
       id,
       siteUrl: SITE,
       config: { userAgent: "AriadneBot-test", maxPages: 500 },

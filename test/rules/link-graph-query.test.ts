@@ -29,6 +29,7 @@ import { URL_FINDING_CAP } from "../../src/rules/query/crawl-evidence.js";
 import { DEEP_DEPTH, linkGraphRules } from "../../src/rules/query/link-graph.js";
 import type { Finding, QueryRule } from "../../src/rules/registry/types.js";
 import { normalised, writerIndexable, type IndexabilitySpec } from "./mk-page.js";
+import { LOCAL_TENANT } from "../../src/api/tenant.js";
 
 function databaseUrl(): string {
   const url = process.env.DATABASE_URL;
@@ -119,6 +120,7 @@ describe("the link-graph rules against the database", () => {
   async function newCrawl(overrides: Record<string, unknown> = {}): Promise<string> {
     const id = `crawl_${randomUUID()}`;
     await db.insert(crawls).values({
+      tenantId: LOCAL_TENANT,
       id,
       siteUrl: SITE,
       config: { maxPages: MAX_PAGES },

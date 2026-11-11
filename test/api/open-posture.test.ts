@@ -26,6 +26,7 @@ import { crawls } from "../../src/db/schema.js";
 import { closeFetchAgents } from "../../src/crawl/http.js";
 import { createApiServer, type ApiServer } from "../../src/api/http.js";
 import { loadApiConfig } from "../../src/api/config.js";
+import { LOCAL_TENANT } from "../../src/api/tenant.js";
 
 const TOKEN = "test-token-0123456789abcdef";
 
@@ -117,6 +118,7 @@ async function startCrawl(base: string, body: Record<string, unknown>): Promise<
 async function seedFailedCrawl(siteUrl: string): Promise<string> {
   const id = `crawl_seed_${createdCrawls.length}_${Date.now()}`;
   await db.insert(crawls).values({
+    tenantId: LOCAL_TENANT,
     id,
     siteUrl,
     config: {

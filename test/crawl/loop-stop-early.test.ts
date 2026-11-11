@@ -40,6 +40,7 @@ import { deriveSitemapHreflang } from "../../src/rules/derive/sitemap-hreflang.j
 import { hreflangIntegrityRules } from "../../src/rules/query/hreflang-integrity.js";
 import { hreflangRules } from "../../src/rules/query/hreflang.js";
 import type { Finding } from "../../src/rules/registry/types.js";
+import { LOCAL_TENANT } from "../../src/api/tenant.js";
 
 /** The spec's stop target: one poll interval, plus one second for the close. */
 const STOP_TARGET_MS = CONTROL_POLL_MS + 1_000;
@@ -369,7 +370,7 @@ async function measureStop(
 
 /** Run a crawl with its rejection observed, so a stop test never leaves one unhandled. */
 function start(cfg: CrawlConfig, hooks?: LoopTestHooks): Promise<CrawlSummary> {
-  const run = runCrawl(db, cfg, undefined, hooks);
+  const run = runCrawl(db, LOCAL_TENANT, cfg, undefined, hooks);
   run.catch(() => undefined);
   return run;
 }
@@ -597,7 +598,7 @@ describe("a stop while a sitemap's rows are being flushed (Review Focus 2)", () 
     // Resume to the end, then compare with a crawl that was never interrupted.
     const resumed = await resumeCrawl(db, pausedId, { config: config(heavySite) });
     expect(resumed.status).toBe("finished");
-    const whole = await runCrawl(db, config(heavySite));
+    const whole = await runCrawl(db, LOCAL_TENANT, config(heavySite));
     createdCrawls.push(whole.crawlId);
     expect(whole.status).toBe("finished");
 
@@ -767,7 +768,7 @@ describe("a resumed crawl stopped during its re-walk (ruling R8)", () => {
   it("marks the kept evidence interrupted: the absence rules refuse, the marker names it, and a complete walk clears it", async () => {
     const cfg = config(hreflangSite, { maxPages: 10 });
     hreflangSlow = false;
-    const first = await runCrawl(db, cfg);
+    const first = await runCrawl(db, LOCAL_TENANT, cfg);
     createdCrawls.push(first.crawlId);
     expect(first.status).toBe("finished");
     const id = first.crawlId;
@@ -808,7 +809,7 @@ describe("a resumed crawl stopped during its re-walk (ruling R8)", () => {
   /** A finished crawl of the hreflang site, whose evidence a resume will keep. */
   async function finishedHreflangCrawl(cfg: CrawlConfig): Promise<string> {
     hreflangSlow = false;
-    const first = await runCrawl(db, cfg);
+    const first = await runCrawl(db, LOCAL_TENANT, cfg);
     createdCrawls.push(first.crawlId);
     expect(first.status).toBe("finished");
     expect((await evidenceOf(first.crawlId)).truncation.interrupted).toBeUndefined();
@@ -1072,7 +1073,7 @@ describe("a stop during the render pass", () => {
 
   it("crawl_pause and crawl_cancel are refused while a page renders, so there is no render stop to time", async () => {
     renderHang = false;
-    const first = await runCrawl(db, config(renderSite, { maxPages: 1 }));
+    const first = await runCrawl(db, LOCAL_TENANT, config(renderSite, { maxPages: 1 }));
     createdCrawls.push(first.crawlId);
     expect(first.status).toBe("finished");
 
@@ -1269,7 +1270,7 @@ describe("the interrupted mark is written ahead of the re-walk (R10, crash-proof
   it("a resumed crawl's kept evidence reads interrupted while its re-walk runs, and not once the walk's evidence is written", async () => {
     const cfg = config(hreflangSite, { maxPages: 10 });
     hreflangSlow = false;
-    const first = await runCrawl(db, cfg);
+    const first = await runCrawl(db, LOCAL_TENANT, cfg);
     createdCrawls.push(first.crawlId);
     expect(first.status).toBe("finished");
     const id = first.crawlId;

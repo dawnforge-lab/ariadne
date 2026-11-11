@@ -16,6 +16,7 @@ import { runMigrations } from "../../src/db/migrate.js";
 import { crawls, issues, metrics, pages } from "../../src/db/schema.js";
 import { mkDiscovery } from "../rules/mk-discovery.js";
 import { mkPage } from "../rules/mk-page.js";
+import { LOCAL_TENANT } from "../../src/api/tenant.js";
 
 function databaseUrl(): string {
   const url = process.env.DATABASE_URL;
@@ -42,6 +43,7 @@ const extraCrawls = [unjudgedId, staleRuleId, malformedId];
 
 async function seedCrawl(id: string, paths: string[]): Promise<void> {
   await db.insert(crawls).values({
+    tenantId: LOCAL_TENANT,
     id,
     siteUrl: `${SITE}/`,
     config: { siteUrl: `${SITE}/`, maxPages: 100, userAgent: "AriadneBot-test" },
@@ -318,6 +320,7 @@ describe("a list crawl names what it did not measure as {id, reason} (27d)", () 
   it("reads one shape on issues_list, issues_overview, metrics and the issues export", async () => {
     extraCrawls.push(listId);
     await db.insert(crawls).values({
+      tenantId: LOCAL_TENANT,
       id: listId,
       siteUrl: `${SITE}/`,
       config: { siteUrl: `${SITE}/`, maxPages: 100, userAgent: "AriadneBot-test", mode: "list" },

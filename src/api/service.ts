@@ -224,6 +224,7 @@ import {
   type ExportFormat,
 } from "./csv.js";
 import { ServiceError, clip, unknownKeysMessage } from "./errors.js";
+import { LOCAL_TENANT } from "./tenant.js";
 import {
   buildCrawlOverview,
   buildIssuesOverview,
@@ -2888,6 +2889,8 @@ export class ApiService {
     await this.db.transaction(async (tx) => {
       await tx.insert(crawls).values({
         id: crawlId,
+        // Task 2: replaced by the caller's tenant.
+        tenantId: LOCAL_TENANT,
         siteUrl: config.siteUrl,
         config,
         // Null when the request named no judgement — "no overrides", the state

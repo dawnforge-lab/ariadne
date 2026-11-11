@@ -27,6 +27,7 @@ import {
   MIN_COHORT,
   type TemplateMember,
 } from "../../src/crawl/page-type.js";
+import { LOCAL_TENANT } from "../../src/api/tenant.js";
 
 const SITE = "https://lavishalice.com";
 
@@ -301,6 +302,7 @@ describe("inferPageTemplates", () => {
     const id = `crawl_${randomUUID()}`;
     created.push(id);
     await db.insert(crawls).values({
+      tenantId: LOCAL_TENANT,
       id,
       siteUrl: SITE,
       config: { maxPages: 1000 },
@@ -414,6 +416,7 @@ describe("inferPageTemplates — the collapse in SQL (27d)", () => {
     const id = `crawl_${randomUUID()}`;
     created.push(id);
     await db.insert(crawls).values({
+      tenantId: LOCAL_TENANT,
       id,
       siteUrl: SITE,
       config: { maxPages: 100_000 },

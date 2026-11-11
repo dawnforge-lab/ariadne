@@ -78,6 +78,7 @@ import {
   metricTableSummary,
   SITE_SCOPE_VALUE,
 } from "../../src/rules/registry/registry.js";
+import { LOCAL_TENANT } from "../../src/api/tenant.js";
 
 let db: Db;
 
@@ -908,6 +909,7 @@ describe("a client that leaves mid-export", () => {
   async function seedFindings(): Promise<string> {
     const id = `crawl_wedge_${Date.now()}`;
     await db.insert(crawls).values({
+      tenantId: LOCAL_TENANT,
       id,
       siteUrl: "http://seeded.example/",
       config: {

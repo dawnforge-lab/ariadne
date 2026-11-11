@@ -24,6 +24,7 @@ import type { FetchResult } from "../../src/crawl/fetch-page.js";
 import { analyzePage, type PageAnalysis, type PageLink } from "../../src/crawl/parse/page-analyzer.js";
 import { HEAD_SNIPPET_MAX } from "../../src/crawl/parse/page-facts.js";
 import { fitsIndex, INDEXED_URL_MAX } from "../../src/crawl/parse/url-utils.js";
+import { LOCAL_TENANT } from "../../src/api/tenant.js";
 
 function databaseUrl(): string {
   const url = process.env.DATABASE_URL;
@@ -185,6 +186,7 @@ describe("PageWriter", () => {
   async function newCrawl(): Promise<string> {
     const id = `crawl_${randomUUID()}`;
     await db.insert(crawls).values({
+      tenantId: LOCAL_TENANT,
       id,
       siteUrl: SITE,
       config: {},
@@ -2013,6 +2015,7 @@ describe("PageWriter", () => {
     it("cascades from the crawl delete", async () => {
       const id = `crawl_${randomUUID()}`;
       await db.insert(crawls).values({
+        tenantId: LOCAL_TENANT,
         id,
         siteUrl: SITE,
         config: {},

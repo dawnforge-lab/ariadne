@@ -44,6 +44,7 @@ import { buildRegistry } from "../../src/rules/index.js";
 import { JudgementError, parseJudgement, readStoredJudgement } from "../../src/rules/judgement.js";
 import { RULESET_VERSION } from "../../src/rules/registry/registry.js";
 import { mkDiscovery } from "../rules/mk-discovery.js";
+import { LOCAL_TENANT } from "../../src/api/tenant.js";
 
 const SENTINEL = "sk_live_27d_SENTINEL";
 const TOKEN = "test-token-no-key-echo-0123456789";
@@ -150,6 +151,7 @@ beforeAll(async () => {
   exportDir = await mkdtemp(join(tmpdir(), "ariadne-no-key-echo-export-"));
   renderDir = await mkdtemp(join(tmpdir(), "ariadne-no-key-echo-render-"));
   await db.insert(crawls).values({
+    tenantId: LOCAL_TENANT,
     id: crawlId,
     siteUrl: `${SITE}/`,
     config: { siteUrl: `${SITE}/`, maxPages: 100, userAgent: "AriadneBot-test" },
@@ -159,6 +161,7 @@ beforeAll(async () => {
     pagesCrawled: 0,
   });
   await db.insert(crawls).values({
+    tenantId: LOCAL_TENANT,
     id: brokenId,
     siteUrl: `${SITE}/`,
     config: { siteUrl: `${SITE}/`, maxPages: 100, userAgent: "AriadneBot-test" },

@@ -14,6 +14,9 @@ import type {
 export const crawls = pgTable("crawls", {
   id: text("id").primaryKey(),                 // e.g. crawl_<ulid>
   siteUrl: text("site_url").notNull(),
+  // The tenant that owns the crawl (28a). NOT NULL with no default: every writer
+  // says whose crawl it is. Migration 0037 backfilled pre-28a rows to `local`.
+  tenantId: text("tenant_id").notNull(),
   config: jsonb("config_jsonb").notNull(),
   rulesetVersion: text("ruleset_version").notNull(),
   // queued|running|paused|finished|failed|cancelled. `running`, `paused` and
@@ -380,7 +383,10 @@ export const crawls = pgTable("crawls", {
   // no render pass was ever started, or the crawl predates 0025. Read it beside
   // the render pass columns, never alone.
   renderLaunchError: text("render_launch_error"),
-});
+}, (t) => [
+  // The order `listCrawls` pages by, scoped to a tenant (28a).
+  index("crawls_tenant_started").on(t.tenantId, t.startedAt.desc(), t.id.desc()),
+]);
 
 export const pages = pgTable("pages", {
   id: text("id").primaryKey(),

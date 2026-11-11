@@ -22,6 +22,7 @@ import { crawls, frontier, issues, pages, resources, sitemapUrls } from "../../s
 import type { PageRecord } from "../../src/rules/registry/types.js";
 import { mkDiscovery } from "../rules/mk-discovery.js";
 import { mkPage } from "../rules/mk-page.js";
+import { LOCAL_TENANT } from "../../src/api/tenant.js";
 
 function databaseUrl(): string {
   const url = process.env.DATABASE_URL;
@@ -52,6 +53,7 @@ async function seedCrawl(
   extra: { judgement?: unknown; pagesCrawled?: number; renderPassCount?: number } = {},
 ): Promise<void> {
   await db.insert(crawls).values({
+    tenantId: LOCAL_TENANT,
     id,
     siteUrl: `${SITE}/`,
     config: { siteUrl: `${SITE}/`, maxPages: 100, userAgent: "AriadneBot-test" },

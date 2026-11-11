@@ -26,6 +26,7 @@ import { startFixtureApp, type FixtureApp } from "../fixtures/app.js";
 import { startAssetHost, type AssetHost } from "../fixtures/assets.js";
 import { allFixtures } from "../fixtures/fixture.js";
 import { startOffsiteHost, type OffsiteHost } from "../fixtures/pages/render-p5.js";
+import { LOCAL_TENANT } from "../../src/api/tenant.js";
 
 describe("control readers", () => {
   it("readControlRequest passes null and the two requests, refuses anything else naming the crawl", () => {
@@ -178,7 +179,7 @@ function stallConfig(overrides: Partial<CrawlConfig> = {}): CrawlConfig {
 async function startStalled(signal?: AbortSignal): Promise<{ id: string; run: Promise<CrawlSummary> }> {
   stallAnswers = false;
   const before = stallRequests;
-  const run = runCrawl(db, stallConfig(), signal);
+  const run = runCrawl(db, LOCAL_TENANT, stallConfig(), signal);
   run.catch(() => undefined); // asserted by the caller; never left unhandled
   const crawlId = await newCrawlOf(`${stallBase}/`);
   await until(
@@ -340,7 +341,7 @@ describe("a pause under a long per-host spacing (Ruling 2)", () => {
     // handlers queued on the gate at +2 s, +4 s, +6 s and +8 s. Without the
     // signal reaching `HostGate.acquire` the pause would land after the last.
     const config = stallConfig({ perHostDelayMs: 2_000, maxConcurrency: 4 });
-    const run = runCrawl(db, config);
+    const run = runCrawl(db, LOCAL_TENANT, config);
     run.catch(() => undefined);
     const id = await newCrawlOf(`${stallBase}/`);
     await until("the seed to be done", async () => (await frontierCounts(db, id)).done >= 1);
@@ -407,6 +408,7 @@ describe("cancel", () => {
   it("setControlRequest touches only a running crawl", async () => {
     const id = `crawl_ctl_${Date.now()}`;
     await db.insert(crawls).values({
+      tenantId: LOCAL_TENANT,
       id,
       siteUrl: `${stallBase}/`,
       config: storableConfig(stallConfig()),
@@ -493,7 +495,7 @@ describe("a pause during the resource pass (Review Focus 1)", () => {
       probeHosts: false,
       allowPrivate: true,
     };
-    const run = runCrawl(db, config);
+    const run = runCrawl(db, LOCAL_TENANT, config);
     run.catch(() => undefined);
     const crawlId = await newCrawlOf(`${imageBase}/`);
 
@@ -529,6 +531,7 @@ describe("the claim", () => {
   it("a resume that expects 'queued' and finds 'paused' throws ClaimLostError and changes nothing", async () => {
     const id = `crawl_claim_${Date.now()}`;
     await db.insert(crawls).values({
+      tenantId: LOCAL_TENANT,
       id,
       siteUrl: `${stallBase}/`,
       config: storableConfig(stallConfig()),
@@ -553,6 +556,7 @@ describe("the claim", () => {
   it("a resume that expects 'queued' and finds 'cancelled' throws ClaimLostError, not the final-cancel Error (Ruling 3)", async () => {
     const id = `crawl_claim_c_${Date.now()}`;
     await db.insert(crawls).values({
+      tenantId: LOCAL_TENANT,
       id,
       siteUrl: `${stallBase}/`,
       config: storableConfig(stallConfig()),
@@ -636,11 +640,11 @@ describe("pause/resume equivalence on the fixture site (gate 27b clause 1)", () 
   }
 
   it("a crawl paused once done >= 10 and resumed ends with the uninterrupted crawl's pages and fetch classes", async () => {
-    const a = await runCrawl(db, fixtureConfig());
+    const a = await runCrawl(db, LOCAL_TENANT, fixtureConfig());
     createdCrawls.push(a.crawlId);
     expect(a.status).toBe("finished");
 
-    const run = runCrawl(db, fixtureConfig());
+    const run = runCrawl(db, LOCAL_TENANT, fixtureConfig());
     run.catch(() => undefined);
     const bId = await newCrawlOf(app.base);
     await until("crawl B to have ten URLs done", async () => (await frontierCounts(db, bId)).done >= 10, 60_000);
@@ -751,7 +755,7 @@ describe("a robots-unreachable close while the control poll has failed (27b fina
     // poll that fails DURING the walk stops it (27d), and no note exists then.
     let known!: (crawlId: string) => void;
     const crawlIdKnown = new Promise<string>((resolve) => (known = resolve));
-    const run = runCrawl(db, stallConfig({ siteUrl: `${robotsDownBase}/` }), undefined, {
+    const run = runCrawl(db, LOCAL_TENANT, stallConfig({ siteUrl: `${robotsDownBase}/` }), undefined, {
       afterDiscovery: async (stop) => {
         // A value this engine never writes: the watcher's next poll fails on it.
         await db.update(crawls).set({ controlRequest: "stop" }).where(eq(crawls.id, await crawlIdKnown));

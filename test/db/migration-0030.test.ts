@@ -17,6 +17,7 @@ import { eq, sql } from "drizzle-orm";
 import { closeDb, createDb, type Db } from "../../src/db/client.js";
 import { runMigrations } from "../../src/db/migrate.js";
 import { crawls, pageResources, pages, resources } from "../../src/db/schema.js";
+import { LOCAL_TENANT } from "../../src/api/tenant.js";
 
 function databaseUrl(): string {
   const url = process.env.DATABASE_URL;
@@ -47,6 +48,7 @@ describe("0030 — share images of pre-26c crawls are marked", () => {
     const outcome = await db
       .transaction(async (tx) => {
         await tx.insert(crawls).values({
+          tenantId: LOCAL_TENANT,
           id: crawlId, siteUrl: "https://m30.example", config: {}, rulesetVersion: "test",
         });
         await tx.insert(pages).values({

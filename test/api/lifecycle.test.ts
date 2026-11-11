@@ -32,6 +32,7 @@ import { createApiServer, type ApiServer } from "../../src/api/http.js";
 import { createMcpServer, TOOL_NAMES, type AriadneMcpServer } from "../../src/api/mcp.js";
 import { mkDiscovery } from "../rules/mk-discovery.js";
 import { mkPage } from "../rules/mk-page.js";
+import { LOCAL_TENANT } from "../../src/api/tenant.js";
 
 /** Test-controlled holds on a rules run and on a render pass (module header). */
 const gates = vi.hoisted(() => ({
@@ -208,6 +209,7 @@ async function seedRow(
 ): Promise<string> {
   const id = `crawl_lifecycle_${randomUUID()}`;
   await db.insert(crawls).values({
+    tenantId: LOCAL_TENANT,
     id,
     siteUrl: `${site}/`,
     config: {

@@ -35,6 +35,7 @@ import { UrlPolicyError, type AddressResolver } from "../../src/crawl/url-policy
 import { DEFAULT_THRESHOLDS } from "../../src/rules/judgement.js";
 import { URL_FINDING_CAP } from "../../src/rules/query/crawl-evidence.js";
 import { RENDER_PASS_EVIDENCE } from "../../src/rules/metric/render-metrics.js";
+import { LOCAL_TENANT } from "../../src/api/tenant.js";
 
 const TOKEN = "test-token-0123456789abcdef";
 
@@ -246,6 +247,7 @@ async function seedCrawl(row: {
 }): Promise<string> {
   const id = `crawl_seed_${createdCrawls.length}_${Date.now()}`;
   await db.insert(crawls).values({
+    tenantId: LOCAL_TENANT,
     id,
     siteUrl: row.siteUrl ?? "http://seeded.example/",
     config: {
@@ -1100,6 +1102,7 @@ describe("POST /crawls/:id/resume", () => {
   async function seedResumable(status: string): Promise<string> {
     const id = `crawl_resumable_${createdCrawls.length}_${Date.now()}`;
     await db.insert(crawls).values({
+      tenantId: LOCAL_TENANT,
       id,
       siteUrl: `${resumeSite}/`,
       config: {
@@ -1920,10 +1923,10 @@ describe("GET /crawls", () => {
     const later = `crawl_micro_late_${Date.now()}`;
     const earlier = `crawl_micro_early_${Date.now()}`;
     await db.execute(sql`
-      insert into crawls (id, site_url, config_jsonb, ruleset_version, status, started_at)
-      values (${later}, 'http://micro.example/', '{}'::jsonb, '0.0.0-test', 'failed',
+      insert into crawls (id, tenant_id, site_url, config_jsonb, ruleset_version, status, started_at)
+      values (${later}, ${LOCAL_TENANT}, 'http://micro.example/', '{}'::jsonb, '0.0.0-test', 'failed',
               '2099-01-01T00:00:00.123999Z'),
-             (${earlier}, 'http://micro.example/', '{}'::jsonb, '0.0.0-test', 'failed',
+             (${earlier}, ${LOCAL_TENANT}, 'http://micro.example/', '{}'::jsonb, '0.0.0-test', 'failed',
               '2099-01-01T00:00:00.123111Z')`);
     createdCrawls.push(later, earlier);
 

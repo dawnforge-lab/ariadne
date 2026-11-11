@@ -59,6 +59,7 @@ import { closeFetchAgents } from "../src/crawl/http.js";
 import { CRAWL_DEFAULTS, SitemapRowSink } from "../src/crawl/loop.js";
 import { SITEMAP_MAX_BYTES } from "../src/crawl/sitemap-stream.js";
 import { RULESET_VERSION } from "../src/rules/registry/registry.js";
+import { LOCAL_TENANT } from "../src/api/tenant.js";
 
 const MB = 1024 * 1024;
 
@@ -220,6 +221,7 @@ async function main(): Promise<number> {
 
   try {
     await db.insert(crawls).values({
+      tenantId: LOCAL_TENANT,
       id: crawlId,
       siteUrl: `${probe.base}/`,
       config: { probe: "scripts/probe-sitemap-50mb.ts", gzip },

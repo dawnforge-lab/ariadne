@@ -25,6 +25,7 @@ import { robotsRules } from "../../src/rules/query/robots.js";
 import type { Finding, QueryRule } from "../../src/rules/registry/types.js";
 import { mkDiscovery } from "./mk-discovery.js";
 import { normalised } from "./mk-page.js";
+import { LOCAL_TENANT } from "../../src/api/tenant.js";
 
 function databaseUrl(): string {
   const url = process.env.DATABASE_URL;
@@ -94,6 +95,7 @@ describe("the robots rules against the database", () => {
   ): Promise<string> {
     const id = `crawl_${randomUUID()}`;
     await db.insert(crawls).values({
+      tenantId: LOCAL_TENANT,
       id,
       siteUrl: SITE,
       config,
@@ -416,6 +418,7 @@ describe("robots.blocks-internal-urls against the database", () => {
   async function newCrawl(dropped: number | null = 0): Promise<string> {
     const id = `crawl_${randomUUID()}`;
     await db.insert(crawls).values({
+      tenantId: LOCAL_TENANT,
       id,
       siteUrl: SITE,
       config: { maxPages: 500, userAgent: UA },

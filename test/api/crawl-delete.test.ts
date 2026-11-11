@@ -32,6 +32,7 @@ import { createMcpServer, type AriadneMcpServer } from "../../src/api/mcp.js";
 import { CRAWL_CHILD_TABLES, deleteCrawlFiles } from "../../src/api/crawl-delete.js";
 import { ApiService, slug } from "../../src/api/service.js";
 import { ServiceError } from "../../src/api/errors.js";
+import { LOCAL_TENANT } from "../../src/api/tenant.js";
 
 const TOKEN = "test-token-crawl-delete-0123456789abcdef";
 
@@ -161,6 +162,7 @@ async function seedCrawl(row: {
 }): Promise<string> {
   const id = `crawl_del_${createdCrawls.length}_${randomUUID().slice(0, 8)}`;
   await db.insert(crawls).values({
+    tenantId: LOCAL_TENANT,
     id,
     siteUrl: "http://seeded.example/",
     config: {

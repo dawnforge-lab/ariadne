@@ -15,6 +15,7 @@ import { crawls, frontier } from "../../src/db/schema.js";
 import { ApiService } from "../../src/api/service.js";
 import { TRIAGE } from "../../src/rules/registry/triage.js";
 import { countOtherSessions, createPruneDb, isTestHost, PRUNE_APPLICATION_NAME, pruneTestCrawls } from "../../scripts/prune-test-crawls.js";
+import { LOCAL_TENANT } from "../../src/api/tenant.js";
 
 function databaseUrl(): string {
   const url = process.env.DATABASE_URL;
@@ -81,6 +82,7 @@ describe("pruneTestCrawls", () => {
   async function seed(siteUrl: string, status: string): Promise<string> {
     const id = `crawl_prune_${randomUUID().slice(0, 8)}`;
     await db.insert(crawls).values({
+      tenantId: LOCAL_TENANT,
       id,
       siteUrl,
       config: { siteUrl, secret: "do-not-print" },

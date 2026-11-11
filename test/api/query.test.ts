@@ -60,6 +60,7 @@ function titleOf(ruleId: string): string {
   return rule.title;
 }
 import { RULESET_VERSION } from "../../src/rules/registry/registry.js";
+import { LOCAL_TENANT } from "../../src/api/tenant.js";
 
 const TOKEN = "test-token-0123456789abcdef";
 const SITE = "http://query.example";
@@ -332,6 +333,7 @@ async function seedCrawl(
   } = {},
 ): Promise<void> {
   await db.insert(crawls).values({
+    tenantId: LOCAL_TENANT,
     id,
     siteUrl: opts.siteUrl ?? `${SITE}/`,
     config: opts.config ?? { siteUrl: `${SITE}/` },
@@ -3799,8 +3801,8 @@ describe("GET /compare", () => {
   it("409s a crawl whose site URL is not a URL, rather than calling it another site", async () => {
     const broken = `crawl_cmp_broken_${Date.now()}`;
     await db.execute(sql`
-      insert into crawls (id, site_url, config_jsonb, ruleset_version, status, rules_run_at)
-      values (${broken}, 'not a url at all', '{}'::jsonb, '0.0.0-test', 'finished', now())`);
+      insert into crawls (id, tenant_id, site_url, config_jsonb, ruleset_version, status, rules_run_at)
+      values (${broken}, ${LOCAL_TENANT}, 'not a url at all', '{}'::jsonb, '0.0.0-test', 'finished', now())`);
     try {
       const res = await compare(cmpBase, broken);
       expect(res.status).toBe(409);
@@ -4148,6 +4150,7 @@ describe("GET /crawls/:id — why a failed crawl failed", () => {
   beforeAll(async () => {
     failedId = `crawl_q_failed_${Date.now()}`;
     await db.insert(crawls).values({
+      tenantId: LOCAL_TENANT,
       id: failedId,
       siteUrl: `${SITE}/`,
       config: { siteUrl: `${SITE}/` },
@@ -4161,6 +4164,7 @@ describe("GET /crawls/:id — why a failed crawl failed", () => {
     // does not cover, and every reader of this field has to handle it.
     pre0017Id = `crawl_q_pre0017_${Date.now()}`;
     await db.insert(crawls).values({
+      tenantId: LOCAL_TENANT,
       id: pre0017Id,
       siteUrl: `${SITE}/`,
       config: { siteUrl: `${SITE}/` },
@@ -4172,6 +4176,7 @@ describe("GET /crawls/:id — why a failed crawl failed", () => {
     // gone, held by nobody here, no lease on it.
     orphanId = `crawl_q_orphan_${Date.now()}`;
     await db.insert(crawls).values({
+      tenantId: LOCAL_TENANT,
       id: orphanId,
       siteUrl: `${SITE}/`,
       config: { siteUrl: `${SITE}/` },

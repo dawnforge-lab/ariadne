@@ -57,6 +57,7 @@ import { RENDER_PASS_EVIDENCE } from "../../src/rules/metric/render-metrics.js";
 import { buildRegistry } from "../../src/rules/index.js";
 import { DEFAULT_THRESHOLDS } from "../../src/rules/judgement.js";
 import { RULESET_VERSION } from "../../src/rules/registry/registry.js";
+import { LOCAL_TENANT } from "../../src/api/tenant.js";
 
 /** `crawl_status.recheck.noResponse` on a crawl with no no-response pages. */
 const NO_RESPONSE_ZERO = { pages: 0, confirmed: 0, answered: 0, inconclusive: 0, pending: 0 };
@@ -234,6 +235,7 @@ async function seedCrawl(row: {
   siteUrl?: string;
 }): Promise<string> {
   await db.insert(crawls).values({
+    tenantId: LOCAL_TENANT,
     id: row.id,
     siteUrl: row.siteUrl ?? `${SEEDED_SITE}/`,
     config: row.config ?? { siteUrl: `${SEEDED_SITE}/` },
@@ -1564,6 +1566,7 @@ describe("crawl_resume", () => {
   async function seedResumable(suffix: string, status: string): Promise<string> {
     const id = `crawl_mcp_resume_${suffix}_${Date.now()}`;
     await db.insert(crawls).values({
+      tenantId: LOCAL_TENANT,
       id,
       siteUrl: `${resumeSite}/`,
       config: {
@@ -3111,6 +3114,7 @@ describe("crawl_status — why a failed crawl failed", () => {
     // pending frontier row is what gets it past the "nothing to resume" guard.
     const id = `crawl_mcp_resume_failed_${Date.now()}`;
     await db.insert(crawls).values({
+      tenantId: LOCAL_TENANT,
       id,
       siteUrl: `${resumeSite}/`,
       config: {

@@ -25,6 +25,7 @@ import { runMigrations } from "../../src/db/migrate.js";
 import { crawls } from "../../src/db/schema.js";
 import { closeFetchAgents } from "../../src/crawl/http.js";
 import { runCrawl, type CrawlConfig } from "../../src/crawl/loop.js";
+import { LOCAL_TENANT } from "../../src/api/tenant.js";
 
 /** The message the mocked analyzer throws for the probe URL, and only for it. */
 const POISON = "poisoned analyzer: the probe body blew up";
@@ -120,7 +121,7 @@ async function crawlRow(crawlId: string) {
 
 describe("known-404 probe containment", () => {
   it("finishes the crawl and records why the probe produced no sample", async () => {
-    const summary = await runCrawl(db, config());
+    const summary = await runCrawl(db, LOCAL_TENANT, config());
     createdCrawls.push(summary.crawlId);
 
     // The crawl did its work; the probe is an epilogue, not a verdict on it.
@@ -161,7 +162,7 @@ describe("known-404 probe containment", () => {
       },
     }) as Db;
 
-    const error = await runCrawl(poisoned, config()).then(
+    const error = await runCrawl(poisoned, LOCAL_TENANT, config()).then(
       () => null,
       (e: unknown) => e,
     );
