@@ -25,6 +25,7 @@ import { ReaperLoop } from "../worker/reaper-loop.js";
 import { timingWith } from "../worker/timing.js";
 import { loadApiConfig } from "./config.js";
 import { createApiServer } from "./http.js";
+import { assertMetricsTokenDistinct } from "../ops/serve.js";
 
 const config = loadApiConfig();
 // Before anything is constructed: a missing or malformed key is a boot error
@@ -34,6 +35,7 @@ const credentialRetentionDays = parseCredentialRetentionDays(process.env);
 // `ARIADNE_METRICS_TOKEN` is the bearer `GET /metrics` takes. Unset: the route
 // answers 404 and is never open (said once at boot, below).
 const metricsToken = (process.env["ARIADNE_METRICS_TOKEN"] ?? "").trim() || null;
+assertMetricsTokenDistinct(metricsToken, config.token);
 const db = createDb(config.databaseUrl);
 const api = createApiServer({
   db,

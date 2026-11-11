@@ -25,6 +25,7 @@ import { runMigrations } from "../../src/db/migrate.js";
 import { closeFetchAgents } from "../../src/crawl/http.js";
 import { createApiServer, type ApiServer } from "../../src/api/http.js";
 import { readyz } from "../../src/ops/health.js";
+import { assertMetricsTokenDistinct } from "../../src/ops/serve.js";
 import { startWorker, type RunningWorker } from "../../src/worker/main.js";
 import { TEST_CREDENTIAL_KEYS } from "../helpers/credential-keys.js";
 
@@ -38,27 +39,31 @@ function databaseUrl(): string {
 }
 
 let db: Db;
-let scratchName: string;
-let deadDb: Db;
-let api: ApiServer;
+let scratchName: string | undefined;
+const deadLog: string[] = [];
+let deadDb: Db | undefined;
+let api: ApiServer | undefined;
 let apiBase: string;
-let deadApi: ApiServer;
+let deadApi: ApiServer | undefined;
 let deadApiBase: string;
-let worker: RunningWorker;
+let worker: RunningWorker | undefined;
 let workerBase: string;
 const quiet = { log: () => undefined };
 
 beforeAll(async () => {
-  scratchName = `ariadne_t6_${randomUUID().replace(/-/g, "").slice(0, 12)}`;
+  const name = `ariadne_t6_${randomUUID().replace(/-/g, "").slice(0, 12)}`;
   const admin = new pg.Client({ connectionString: databaseUrl() });
   await admin.connect();
   try {
-    await admin.query(`create database ${scratchName}`);
+    await admin.query(`create database ${name}`);
+    // Recorded the moment it exists, so afterAll drops it however the rest of
+    // this setup fails.
+    scratchName = name;
   } finally {
     await admin.end();
   }
   const scratchUrl = new URL(databaseUrl());
-  scratchUrl.pathname = `/${scratchName}`;
+  scratchUrl.pathname = `/${name}`;
   db = createDb(scratchUrl.toString());
   await runMigrations(db);
   // Port 1: nothing listens; connecting is refused at once.
@@ -66,7 +71,7 @@ beforeAll(async () => {
   const config = { credentialKeys: TEST_CREDENTIAL_KEYS, allowedDomains: [], token: API_TOKEN, metricsToken: METRICS_TOKEN, ...quiet };
   api = createApiServer({ db, config });
   apiBase = `http://127.0.0.1:${(await api.listen(0)).port}`;
-  deadApi = createApiServer({ db: deadDb, config });
+  deadApi = createApiServer({ db: deadDb, config: { ...config, log: (l: string) => deadLog.push(l) } });
   deadApiBase = `http://127.0.0.1:${(await deadApi.listen(0)).port}`;
   worker = await startWorker({
     db,
@@ -84,19 +89,36 @@ beforeAll(async () => {
 }, 60_000);
 
 afterAll(async () => {
-  await worker.stop();
-  await api.close();
-  await deadApi.close();
-  await closeFetchAgents();
-  await closeDb(db);
-  await closeDb(deadDb);
-  const admin = new pg.Client({ connectionString: databaseUrl() });
-  await admin.connect();
+  // Every step is independent: one that throws (or whose subject was never
+  // built because beforeAll failed) must not stop the rest, and the scratch
+  // database is dropped last, in a finally.
+  const errors: unknown[] = [];
+  const step = async (what: () => Promise<unknown> | undefined): Promise<void> => {
+    try {
+      await what();
+    } catch (error) {
+      errors.push(error);
+    }
+  };
   try {
-    await admin.query(`drop database if exists ${scratchName} with (force)`);
+    await step(() => worker?.stop());
+    await step(() => api?.close());
+    await step(() => deadApi?.close());
+    await step(() => closeFetchAgents());
+    await step(() => ((db as Db | undefined) === undefined ? undefined : closeDb(db)));
+    await step(() => (deadDb === undefined ? undefined : closeDb(deadDb)));
   } finally {
-    await admin.end();
+    if (scratchName !== undefined) {
+      const admin = new pg.Client({ connectionString: databaseUrl() });
+      try {
+        await admin.connect();
+        await admin.query(`drop database if exists ${scratchName} with (force)`);
+      } finally {
+        await admin.end();
+      }
+    }
   }
+  if (errors.length > 0) throw errors[0];
 });
 
 /** Bases are known only after `beforeAll`, so each case resolves its own by name. */
@@ -134,17 +156,16 @@ describe("/readyz", () => {
         await tx.execute(
           sql`delete from drizzle.__drizzle_migrations where id = (select max(id) from drizzle.__drizzle_migrations)`,
         );
-        answer = await readyz(tx);
+        answer = await readyz(tx, () => undefined);
         throw abort;
       }),
     ).rejects.toBe(abort);
     expect(answer?.status).toBe(503);
     expect(answer?.body).toMatchObject({ status: "not_ready" });
     const reason = (answer?.body as { reason: string }).reason;
-    expect(reason).toMatch(/migration/);
-    expect(reason).toMatch(/applied/);
+    expect(reason).toMatch(/^schema behind: \d+ of \d+ migrations applied$/);
     // The real table is untouched, as every other suite sees it.
-    expect((await readyz(db)).status).toBe(200);
+    expect((await readyz(db, () => undefined)).status).toBe(200);
   });
 
   it("answers 503 when the database is unreachable", async () => {
@@ -152,7 +173,12 @@ describe("/readyz", () => {
     expect(res.status).toBe(503);
     const body = (await res.json()) as { status: string; reason: string };
     expect(body.status).toBe("not_ready");
-    expect(body.reason).toMatch(/database/);
+    // A fixed, classified reason: no host, port or error text of the pg error.
+    expect(body).toEqual({ status: "not_ready", reason: "database unreachable" });
+    const text = JSON.stringify(body);
+    expect(text).not.toMatch(/127\.0\.0\.1|ECONNREFUSED|:1\b|connect/i);
+    // The full error went to the server's log instead.
+    expect(deadLog.some((l) => /readyz database check failed/.test(l) && /ECONNREFUSED/.test(l))).toBe(true);
   });
 });
 
@@ -215,6 +241,28 @@ describe("/metrics auth", () => {
     } finally {
       await w.stop();
     }
+  });
+});
+
+describe("the metrics token", () => {
+  it("a wrong /metrics token is refused as a wrong METRICS token, not an API token", async () => {
+    const res = await fetch(`${apiBase}/metrics`, { headers: { authorization: "Bearer nope" } });
+    expect(res.status).toBe(401);
+    expect(await res.json()).toEqual({ error: "invalid metrics token" });
+  });
+
+  it("boot refuses a metrics token equal to the API token, naming both variables and neither value", () => {
+    let message = "";
+    try {
+      assertMetricsTokenDistinct(API_TOKEN, API_TOKEN);
+    } catch (error) {
+      message = (error as Error).message;
+    }
+    expect(message).toMatch(/ARIADNE_METRICS_TOKEN/);
+    expect(message).toMatch(/ARIADNE_API_TOKEN/);
+    expect(message).not.toContain(API_TOKEN);
+    expect(() => assertMetricsTokenDistinct(METRICS_TOKEN, API_TOKEN)).not.toThrow();
+    expect(() => assertMetricsTokenDistinct(null, API_TOKEN)).not.toThrow();
   });
 });
 

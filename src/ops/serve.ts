@@ -23,6 +23,18 @@ export interface OpsOptions {
   log: (line: string) => void;
 }
 
+/**
+ * Refuse a metrics token that IS the API token: one credential would open
+ * both. Names the variables, never the values.
+ */
+export function assertMetricsTokenDistinct(metricsToken: string | null, apiToken: string): void {
+  if (metricsToken !== null && metricsToken === apiToken) {
+    throw new Error(
+      "ARIADNE_METRICS_TOKEN must differ from ARIADNE_API_TOKEN: the metrics scraper's credential must not also open the API",
+    );
+  }
+}
+
 function sendJson(res: ServerResponse, status: number, body: unknown): void {
   res.writeHead(status, { "content-type": "application/json" });
   res.end(JSON.stringify(body));
@@ -50,7 +62,7 @@ export async function serveOps(req: IncomingMessage, res: ServerResponse, opts: 
     return true;
   }
   if (path === "/readyz") {
-    const out = await readyz(opts.db);
+    const out = await readyz(opts.db, opts.log);
     sendJson(res, out.status, out.body);
     return true;
   }
@@ -62,7 +74,7 @@ export async function serveOps(req: IncomingMessage, res: ServerResponse, opts: 
     const auth = checkBearer(req.headers.authorization, opts.metricsToken);
     if (!auth.ok) {
       res.setHeader("www-authenticate", 'Bearer realm="ariadne-metrics"');
-      sendJson(res, 401, { error: auth.error });
+      sendJson(res, 401, { error: auth.error.replace("invalid API token", "invalid metrics token") });
       return true;
     }
     try {
