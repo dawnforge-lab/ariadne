@@ -45,6 +45,7 @@ import { jobs } from "../db/schema.js";
 import { ServiceError } from "../api/errors.js";
 import { EXTRACTION_VERSION } from "../crawl/versions.js";
 import { RULESET_VERSION } from "../rules/registry/registry.js";
+import { DEFAULT_TIMING } from "./timing.js";
 import type { TenantId } from "../tenant.js";
 
 export type JobKind = "crawl" | "render" | "rules";
@@ -80,6 +81,8 @@ export interface LiveJob {
   status: "queued" | "running";
   pinnedTo: string | null;
   claimedBy: string | null;
+  /** Whether the process holding it is live (`liveHolderSql`). */
+  live: boolean;
 }
 
 const LIVE_INDEX = "jobs_one_live_per_crawl";
@@ -172,26 +175,63 @@ function isLiveViolation(error: unknown): boolean {
 
 // ------------------------------------------------------------------- reading
 
-/** The crawl's live job, or null. At most one exists (the index). */
-export async function liveJobOf(reader: Reader, crawlId: string): Promise<LiveJob | null> {
-  const rows = await reader
-    .select({
-      id: jobs.id,
-      kind: jobs.kind,
-      status: jobs.status,
-      pinnedTo: jobs.pinnedTo,
-      claimedBy: jobs.claimedBy,
-    })
-    .from(jobs)
-    .where(and(eq(jobs.crawlId, crawlId), inArray(jobs.status, ["queued", "running"])));
-  const row = rows[0];
+/**
+ * WHETHER A LIVE JOB IS HELD (Ruling R10): a `queued|running` job counts as
+ * somebody's work only while the process it belongs to is LIVE — the
+ * instance that claimed it (`running`) or the one it is pinned to (`queued`):
+ * not stopped (`instances.stopped_at`, set by a graceful shutdown) and a
+ * heartbeat within `deadAfterMs`, on the database's clock. An unpinned queued
+ * job belongs to the worker pool, which no single instance stands for, and is
+ * held. A job whose process is gone is a row, not work: its queued crawl is
+ * nobody's (`queuePosition` null), `crawl_mark_failed` may retire it and
+ * `crawl_resume` adopts it. (Task 4's reaper settles such rows; until it runs
+ * they are read as what they are.) A SQL boolean over the job alias `j`.
+ */
+export function liveHolderSql(deadAfterMs: number): SQL {
+  if (!Number.isInteger(deadAfterMs) || deadAfterMs <= 0) {
+    throw new Error(`liveHolderSql: deadAfterMs must be a positive whole number, got ${String(deadAfterMs)}`);
+  }
+  return sql`(
+    (j.status = 'queued' and j.pinned_to is null)
+    or exists (
+      select 1 from instances i
+       where i.id = (case when j.status = 'running' then j.claimed_by else j.pinned_to end)
+         and i.stopped_at is null
+         and i.heartbeat_at > now() - (${deadAfterMs}::int * interval '1 millisecond')))`;
+}
+
+/**
+ * The crawl's live (`queued|running`) job, or null — at most one exists (the
+ * index) — with whether its holder is live (`liveHolderSql`). The busy guards
+ * read the row whatever its holder: the index refuses a second job either way.
+ * The "held" questions (`queuePosition`, `crawl_mark_failed`, `crawl_resume`)
+ * read `live`.
+ */
+export async function liveJobOf(
+  reader: Reader,
+  crawlId: string,
+  deadAfterMs: number = DEFAULT_TIMING.deadAfter,
+): Promise<LiveJob | null> {
+  const result = await reader.execute<{
+    id: string;
+    kind: string;
+    status: string;
+    pinned_to: string | null;
+    claimed_by: string | null;
+    live: boolean;
+  }>(sql`
+    select j.id, j.kind, j.status, j.pinned_to, j.claimed_by, ${liveHolderSql(deadAfterMs)} as live
+      from jobs j
+     where j.crawl_id = ${crawlId} and j.status in ('queued', 'running')`);
+  const row = result.rows[0];
   if (row === undefined) return null;
   return {
     id: row.id,
     kind: readKind(row.kind, row.id),
     status: row.status === "queued" ? "queued" : row.status === "running" ? "running" : badStatus(row.status, row.id),
-    pinnedTo: row.pinnedTo,
-    claimedBy: row.claimedBy,
+    pinnedTo: row.pinned_to,
+    claimedBy: row.claimed_by,
+    live: row.live === true,
   };
 }
 
@@ -225,10 +265,14 @@ export async function latestJobOf(
  * Where the crawl stands in its runner's queue: 0 when its crawl job is
  * running (the run is starting or under way), `1 + n` when it is queued behind
  * `n` crawl jobs of the same pool (the same `pinned_to`, so the queue of the
- * runner that will take it), and null when it has no live crawl job — nobody
- * will run it unless it is resumed.
+ * runner that will take it), and null when it has no crawl job a live process
+ * holds (`liveHolderSql`) — nobody will run it unless it is resumed.
  */
-export async function queuePositionOf(reader: Reader, crawlId: string): Promise<number | null> {
+export async function queuePositionOf(
+  reader: Reader,
+  crawlId: string,
+  deadAfterMs: number,
+): Promise<number | null> {
   const result = await reader.execute<{ position: number }>(sql`
     select case when j.status = 'running' then 0
                 else 1 + (select count(*)::int from jobs a
@@ -237,7 +281,8 @@ export async function queuePositionOf(reader: Reader, crawlId: string): Promise<
                             and (a.queued_at, a.id) < (j.queued_at, j.id))
            end as position
     from jobs j
-    where j.crawl_id = ${crawlId} and j.kind = 'crawl' and j.status in ('queued', 'running')`);
+    where j.crawl_id = ${crawlId} and j.kind = 'crawl' and j.status in ('queued', 'running')
+      and ${liveHolderSql(deadAfterMs)}`);
   const row = result.rows[0];
   return row === undefined ? null : Number(row.position);
 }

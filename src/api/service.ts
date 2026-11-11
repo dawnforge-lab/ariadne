@@ -33,15 +33,22 @@
  *
  * `queuePosition` is read from the jobs, not from memory: 0 while the crawl's
  * job is running, `1 + n` while it waits behind `n` crawl jobs of its runner's
- * pool, null when no live crawl job exists — a `queued` row from before 28b, or
- * one whose job was abandoned, which nobody will run: `crawl_resume` continues
- * it, `crawl_mark_failed` retires it.
+ * pool, null when no crawl job held by a LIVE process exists — a `queued` row
+ * from before 28b, one whose job was abandoned, or one whose job belongs to a
+ * process that stopped or died, which nobody will run: `crawl_resume`
+ * continues it, `crawl_mark_failed` retires it.
+ *
+ * **Liveness decides "held" (Ruling R10).** Every process heartbeats its
+ * `instances` row; `close()` marks it stopped. A job counts as somebody's work
+ * only while that instance is live (not stopped, a heartbeat within
+ * `timing.deadAfter`) — an unpinned queued job belongs to the worker pool and
+ * always counts.
  *
  * **Restart.** A queued crawl's job outlives the process that accepted it. An
- * unpinned job is claimed by whichever worker is up next; before 28b it was
- * stranded. A crawl job pinned to an in-process service that stopped stays
- * queued and pinned (the `close()` log line names it) until the reaper (Task 4)
- * releases a dead instance's work.
+ * unpinned job is claimed by whichever worker is up next. A crawl job pinned
+ * to an in-process service that stopped stays queued and pinned (the
+ * `close()` log line names it), held by nobody: `crawl_resume` from any server
+ * adopts it (re-pins it to itself and runs it). Before 28b it was stranded.
  *
  * A crawl left `running` by a killed process is the other half of the same
  * story: `markCrawlFailed`, whose lease test is the one the render driver uses
@@ -149,6 +156,7 @@ import { hostKeyOf } from "../crawl/host-key.js";
 import {
   busySentences,
   enqueueJob,
+  finishJob,
   JobBusyError,
   latestJobOf,
   liveJobOf,
@@ -160,7 +168,8 @@ import {
   type JobStatus,
   type Writer,
 } from "../worker/jobs.js";
-import { registerInstance } from "../worker/instance.js";
+import { heartbeat, registerInstance, stopInstance } from "../worker/instance.js";
+import { timingWith, type Timing } from "../worker/timing.js";
 import { JobRunner } from "../worker/runner.js";
 import { crawlJobExecutor, storedCredentialsOf } from "../worker/crawl-job.js";
 import { resolveRenderConfig } from "../crawl/render/select.js";
@@ -2499,6 +2508,10 @@ export class ApiService {
    * the render and rules jobs it runs, and their `claimed_by`.
    */
   private instance: Promise<string> | null = null;
+  /** The instance's heartbeat (Ruling R10: only a live instance's jobs are held). */
+  private beat: NodeJS.Timeout | null = null;
+  /** `ServiceConfig.timing` over the defaults: heartbeat period, liveness window. */
+  private readonly timing: Timing;
   /** The in-process runner, built with the instance on first need. */
   private runner: Promise<JobRunner> | null = null;
   private closed = false;
@@ -2548,6 +2561,7 @@ export class ApiService {
     assertRetentionDays(this.credentialRetentionDays, "ServiceConfig.credentialRetentionDays");
     this.exportDir = resolvePath(config.exportDir ?? joinPath(process.cwd(), "exports"));
     this.renderDir = resolvePath(config.renderDir ?? joinPath(process.cwd(), RENDER_HTML_DIR));
+    this.timing = timingWith(config.timing);
     this.crawlRunner = config.crawlRunner ?? "in-process";
     if (this.crawlRunner !== "in-process" && this.crawlRunner !== "workers") {
       throw new Error(
@@ -2564,7 +2578,12 @@ export class ApiService {
    */
   instanceId(): Promise<string> {
     if (this.instance === null) {
-      const registering = registerInstance(this.db, this.crawlRunner === "in-process" ? "all" : "api");
+      const registering = registerInstance(this.db, this.crawlRunner === "in-process" ? "all" : "api").then(
+        (id) => {
+          this.startHeartbeat(id);
+          return id;
+        },
+      );
       this.instance = registering;
       registering.catch(() => {
         if (this.instance === registering) this.instance = null;
@@ -2574,11 +2593,38 @@ export class ApiService {
   }
 
   /**
+   * Beat this process's instance every `timing.heartbeat`, with the ids of the
+   * crawl jobs its runner is running. The instance holds that runner's work
+   * and the render and rules jobs pinned to it, so it is beaten here, once,
+   * in either mode (the runner is built with `heartbeat: false`). A beat that
+   * fails is logged, never thrown into the void.
+   */
+  private startHeartbeat(instanceId: string): void {
+    if (this.beat !== null || this.closed) return;
+    this.beat = setInterval(() => {
+      void (async () => {
+        const runner = this.runner === null ? null : await this.runner.catch(() => null);
+        await heartbeat(this.db, instanceId, runner?.runningJobIds() ?? []);
+      })().catch((error: unknown) => {
+        this.log(`api: instance ${instanceId} heartbeat failed — ${messageOf(error)}`);
+      });
+    }, this.timing.heartbeat);
+    this.beat.unref();
+  }
+
+  /**
    * The in-process runner — one crawl at a time, over the crawl jobs pinned to
-   * this instance — started on first need. Null in `workers` mode.
+   * this instance — started on first need. Null in `workers` mode, and null
+   * once `close()` has begun: a start or resume that passed its closed check
+   * before the close reaches here later, and its job stays queued, pinned to
+   * an instance that is stopped — nobody's, and `crawl_resume` adopts it.
    */
   private crawlJobRunner(): Promise<JobRunner> | null {
     if (this.crawlRunner !== "in-process") return null;
+    if (this.closed) {
+      this.log("api: a crawl job was enqueued as this server closed; no runner is started for it");
+      return null;
+    }
     if (this.runner === null) {
       const building = this.instanceId().then((instanceId) => {
         const runner = new JobRunner(this.db, {
@@ -2588,6 +2634,9 @@ export class ApiService {
           concurrency: 1,
           execute: (job, signal) => this.runQueued(job, signal),
           log: this.log,
+          timing: this.timing,
+          // This service beats the instance itself (`startHeartbeat`).
+          heartbeat: false,
         });
         runner.start();
         return runner;
@@ -3212,7 +3261,7 @@ export class ApiService {
       // The job behind the status and the queue position, from the jobs table
       // (28b) — read beside the rest, so on a snapshot they describe its moment.
       () => latestJobOf(db, crawlId),
-      () => (row.status === "queued" ? queuePositionOf(db, crawlId) : Promise.resolve(null)),
+      () => (row.status === "queued" ? queuePositionOf(db, crawlId, this.timing.deadAfter) : Promise.resolve(null)),
     ] as const;
     const [counts, liveLeases, blockedPages, robotsBlockedRows, resourceCounts, recheckCounts, job, queuePosition] =
       db === this.db
@@ -3576,7 +3625,9 @@ export class ApiService {
    *     whatever its leases say, and a live crawl between batches momentarily
    *     holds no lease at all, which is exactly the window an impatient caller
    *     would look in. Since 28b this is a database fact (`jobs`), so it holds
-   *     for work any process is doing, not only this one.
+   *     for work any process is doing, not only this one — any LIVE process
+   *     (Ruling R10): the job of a process that stopped or died holds nothing,
+   *     and it is settled `abandoned` with this close.
    *  3. **It holds no unexpired lease.** A live worker holds leases; a dead
    *     one's expire (see `leaseSecondsFor` in the crawl loop). This is the
    *     same live/dead distinction `runRenderPass`'s guard makes, and it counts
@@ -3602,11 +3653,13 @@ export class ApiService {
           `whose worker is gone can be marked failed`,
       );
     }
-    // Held: a live job is somebody's work — a crawl job queued for a runner or
+    // Held: a job is somebody's work — a crawl job queued for a runner or
     // running on one, or a render or rules job (28b; it was this process's
-    // queue before). The job is the database's word for it, whichever process
-    // holds it.
-    if ((await liveJobOf(this.db, crawlId)) !== null) {
+    // queue before) — while the process it belongs to is LIVE (Ruling R10).
+    // A job whose process stopped or died is a row, not work: it does not
+    // hold the crawl, and it is settled with the close below.
+    const holder = await liveJobOf(this.db, crawlId, this.timing.deadAfter);
+    if (holder?.live === true) {
       throw new ServiceError(
         "CONFLICT",
         `crawl ${crawlId} is held by this server (${row.status}): cancel the server or ` +
@@ -3622,27 +3675,35 @@ export class ApiService {
       );
     }
 
-    await this.db
-      .update(crawls)
-      // THE REASON IS A FIXED SENTENCE, because this close has no error to
-      // quote: nothing threw, and the three guards above have just established
-      // the only fact there is — the row is `queued` or `running`, this server
-      // is not holding it, and no unexpired lease is on it. That is what the
-      // sentence says, and it is what distinguishes this row on the wire from
-      // one the crawl loop closed with a cause of its own (migration 0017).
-      .set({
-        status: "failed",
-        finishedAt: new Date(),
-        failureReason: MARKED_FAILED_REASON,
-        // A request pending on a `running` orphan dies with it: the column is
-        // non-null only while the row says `running` (27b column contract),
-        // and nobody is left to answer it.
-        controlRequest: null,
-      })
-      // Conditioned on the status this call READ, so a crawl that started (or
-      // was closed by its own worker) between the guard and here is left alone
-      // rather than overwritten. `getCrawl` below reports what actually stands.
-      .where(and(eq(crawls.id, crawlId), eq(crawls.status, row.status)));
+    await this.db.transaction(async (tx) => {
+      const moved = await tx
+        .update(crawls)
+        // THE REASON IS A FIXED SENTENCE, because this close has no error to
+        // quote: nothing threw, and the three guards above have just established
+        // the only fact there is — the row is `queued` or `running`, no live
+        // process holds it, and no unexpired lease is on it. That is what the
+        // sentence says, and it is what distinguishes this row on the wire from
+        // one the crawl loop closed with a cause of its own (migration 0017).
+        .set({
+          status: "failed",
+          finishedAt: new Date(),
+          failureReason: MARKED_FAILED_REASON,
+          // A request pending on a `running` orphan dies with it: the column is
+          // non-null only while the row says `running` (27b column contract),
+          // and nobody is left to answer it.
+          controlRequest: null,
+        })
+        // Conditioned on the status this call READ, so a crawl that started (or
+        // was closed by its own worker) between the guard and here is left alone
+        // rather than overwritten. `getCrawl` below reports what actually stands.
+        .where(and(eq(crawls.id, crawlId), eq(crawls.status, row.status)));
+      // The dead process's crawl job goes with the close (`abandoned`): left
+      // live, it would hold the index and refuse the resume a failed crawl is
+      // entitled to. Only the job read above, and only if still unsettled.
+      if (holder !== null && moved.rowCount !== 0) {
+        await finishJob(tx, holder.id, "abandoned");
+      }
+    });
     return this.getCrawl(tenant, crawlId);
   }
 
@@ -3933,9 +3994,11 @@ export class ApiService {
    * ## The refusals, and what each one is protecting
    *
    *  1. **No such crawl** — 404. There is nothing to continue.
-   *  2. **A crawl job holds it** — 409. A `queued` or `running` crawl job (28b,
-   *     the database's word, whichever process holds it): the crawl is running
-   *     or waiting to, and a second resume of it is refused too.
+   *  2. **A crawl job holds it** — 409. A `queued` or `running` crawl job of a
+   *     LIVE process (28b, Ruling R10): the crawl is running or waiting to, and
+   *     a second resume of it is refused too. A crawl job whose process stopped
+   *     or died holds nothing: the resume adopts it (a queued one is re-pinned
+   *     to this server, a running one abandoned and replaced).
    *  3. **A live worker holds leases** — 409, naming the count. An unexpired
    *     `leased_until` is the frontier's own live-worker detector, and it is the
    *     test `markCrawlFailed` and the render driver already make.
@@ -4052,13 +4115,19 @@ export class ApiService {
     // on a request this server was always going to refuse. The three policy
     // checks keep their own order relative to each other (allowlist before URL
     // policy, per `startCrawl`) — this is inserted ahead of them.
-    const holder = await liveJobOf(this.db, crawlId);
+    const holder = await liveJobOf(this.db, crawlId, this.timing.deadAfter);
     if (holder !== null && holder.kind !== "crawl") {
       throw new ServiceError("CONFLICT", busySentences.busy(crawlId, "crawl_resume", holder.kind));
     }
-    if (holder !== null) {
+    // Held only while the process its crawl job belongs to is live (Ruling
+    // R10). A crawl job whose process stopped or died is nobody's work, and
+    // this resume ADOPTS it (below, in the claim's transaction): a queued one
+    // is re-pinned to this server's runner, a running one is abandoned and a
+    // fresh job enqueued. Before 28b such a crawl was stranded.
+    if (holder?.live === true) {
       throw new ServiceError("CONFLICT", busySentences.held(crawlId, row.status));
     }
+    const orphanJob = holder;
 
     // Refusal 9: a request pending on a crawl nobody here holds. Read through
     // the validator, so a value this engine never writes is a 500, not a pass.
@@ -4251,13 +4320,43 @@ export class ApiService {
         );
       }
       // The run itself, in the claim's transaction (28b): a queued crawl
-      // always has the job that will run it.
-      await enqueueJob(tx, {
-        tenant,
-        crawlId,
-        kind: "crawl",
-        ...(pinnedTo === undefined ? {} : { pinnedTo }),
-      });
+      // always has the job that will run it. An orphan's queued job is
+      // ADOPTED — re-pinned to this server's pool, conditioned on still being
+      // the queued job pinned where it was read, so of two resumes racing to
+      // adopt it one wins and the other is refused. An orphan's running job
+      // (its process died mid-crawl) is abandoned, and a fresh job enqueued.
+      if (orphanJob !== null && orphanJob.status === "queued") {
+        const adopted = await tx
+          .update(jobs)
+          .set({ pinnedTo: pinnedTo ?? null })
+          .where(
+            and(
+              eq(jobs.id, orphanJob.id),
+              eq(jobs.status, "queued"),
+              orphanJob.pinnedTo === null ? isNull(jobs.pinnedTo) : eq(jobs.pinnedTo, orphanJob.pinnedTo),
+            ),
+          )
+          .returning({ id: jobs.id });
+        if (adopted.length === 0) {
+          throw new ServiceError(
+            "CONFLICT",
+            `crawl ${crawlId} changed state while this resume was being checked — its queued ` +
+              `job was taken since it was read. Nothing was queued; read crawl_status and try again`,
+          );
+        }
+        this.log(
+          `api: crawl ${crawlId}: adopted its queued job from instance ${orphanJob.pinnedTo ?? "(none)"}, ` +
+            "which is no longer live",
+        );
+      } else {
+        if (orphanJob !== null) await finishJob(tx, orphanJob.id, "abandoned");
+        await enqueueJob(tx, {
+          tenant,
+          crawlId,
+          kind: "crawl",
+          ...(pinnedTo === undefined ? {} : { pinnedTo }),
+        });
+      }
       // Credentials sent with the resume replace the stored copy (Deviation 9),
       // bumping its generation: the runner reads them when it claims the job.
       if (toStore !== undefined) await this.vault.write(tx, tenant, crawlId, toStore);
@@ -6924,18 +7023,37 @@ export class ApiService {
    *
    * The abort is the crawl loop's own graceful path — the run ends `paused`
    * (reason `shutdown`) with its frontier intact, resumable, and its job
-   * `abandoned` in the same close. Crawl jobs still queued for this service
-   * stay `queued`, pinned to it, and are logged by id: this process will not
-   * run them and says so (the module header's restart contract; the reaper,
-   * Task 4, releases a dead instance's work).
+   * `abandoned` in the same close. Then the instance is marked STOPPED: it is
+   * not live from that moment (Ruling R10), so the crawl jobs still queued
+   * for it — they stay `queued`, pinned to it, and are logged by id — are
+   * nobody's: `queuePosition` null, `crawl_mark_failed` retires one and
+   * `crawl_resume` from any server adopts it. Before 28b they were stranded.
    */
   async close(): Promise<void> {
     this.closed = true;
+    if (this.beat !== null) clearInterval(this.beat);
+    this.beat = null;
     const building = this.runner;
-    if (building === null) return;
-    const runner = await building;
-    await runner.stop();
-    const instanceId = await this.instanceId();
+    // A runner whose build failed told its caller so; there is nothing to stop.
+    const runner = building === null ? null : await building.catch(() => null);
+    if (runner !== null) await runner.stop();
+    const registering = this.instance;
+    if (registering === null) return;
+    // A registration that failed told its caller so; no instance to stop.
+    const instanceId = await registering.catch(() => null);
+    if (instanceId === null) return;
+    try {
+      await stopInstance(this.db, instanceId);
+    } catch (error) {
+      // Said, not thrown: the shutdown itself has happened (the runner is
+      // stopped, the beat is cleared), and what the failed write costs is
+      // bounded and named — the instance reads live until its last beat is
+      // `deadAfter` old, and only then is its queued work nobody's.
+      this.log(
+        `api: instance ${instanceId} could not be marked stopped — ${messageOf(error)}; its ` +
+          `queued crawls read as held until its last heartbeat is ${this.timing.deadAfter} ms old`,
+      );
+    }
     const waiting = await this.db
       .select({ crawlId: jobs.crawlId })
       .from(jobs)
@@ -6945,7 +7063,8 @@ export class ApiService {
       this.log(
         `api: ${waiting.length} crawl(s) left queued and unstarted ` +
           `(${waiting.map((w) => w.crawlId).join(", ")}); their rows and their crawl jobs stay ` +
-          `queued, pinned to this instance (${instanceId}), and this process will not run them`,
+          `queued, pinned to this instance (${instanceId}), which is now stopped: this process ` +
+          `will not run them, and crawl_resume from any server adopts them`,
       );
     }
   }
@@ -6989,7 +7108,7 @@ export class ApiService {
    * queued behind `n` crawl jobs of the same pool, null with no live crawl job.
    */
   async queuePosition(crawlId: string): Promise<number | null> {
-    return queuePositionOf(this.db, crawlId);
+    return queuePositionOf(this.db, crawlId, this.timing.deadAfter);
   }
 
   /**

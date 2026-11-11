@@ -29,6 +29,7 @@ import { and, eq } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import { jobs } from "../db/schema.js";
 import { claimNextJob, finishJob, type ClaimedJob, type JobKind, type JobOutcome } from "./jobs.js";
+import { heartbeat } from "./instance.js";
 import { timingWith, type Timing } from "./timing.js";
 
 export interface JobRunnerOptions {
@@ -43,6 +44,13 @@ export interface JobRunnerOptions {
   timing?: Partial<Timing>;
   /** Where the runner reports what it could not do. Defaults to `console.error`. */
   log?: (line: string) => void;
+  /**
+   * Whether the runner heartbeats its instance (and its running jobs) every
+   * `timing.heartbeat`. Default true. False only for an owner that beats the
+   * same instance itself (the API service, whose instance also holds its
+   * pinned render and rules jobs, beats it with this runner's job ids).
+   */
+  heartbeat?: boolean;
 }
 
 interface Running {
@@ -57,6 +65,7 @@ export class JobRunner {
   /** Claims run one after another: a wake during a claim queues behind it. */
   private chain: Promise<void> = Promise.resolve();
   private timer: NodeJS.Timeout | null = null;
+  private beat: NodeJS.Timeout | null = null;
   private started = false;
   private stopped = false;
   private stopping: Promise<void> | null = null;
@@ -80,6 +89,15 @@ export class JobRunner {
     this.timer = setInterval(() => void this.wake(), this.timing.claimPoll);
     // The poll alone never keeps a process alive: running work does.
     this.timer.unref();
+    if (this.opts.heartbeat !== false) {
+      // Liveness: only a live instance's jobs count as held (Ruling R10).
+      this.beat = setInterval(() => {
+        heartbeat(this.db, this.opts.instanceId, this.runningJobIds()).catch((error: unknown) => {
+          this.log(`runner ${this.opts.instanceId}: heartbeat failed — ${messageOf(error)}`);
+        });
+      }, this.timing.heartbeat);
+      this.beat.unref();
+    }
     void this.wake();
   }
 
@@ -103,6 +121,7 @@ export class JobRunner {
     if (this.stopping !== null) return this.stopping;
     this.stopped = true;
     if (this.timer !== null) clearInterval(this.timer);
+    if (this.beat !== null) clearInterval(this.beat);
     this.stopping = (async () => {
       await this.chain;
       const current = [...this.running.values()];

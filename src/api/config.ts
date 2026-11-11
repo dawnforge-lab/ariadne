@@ -20,6 +20,7 @@ import { domainToASCII } from "node:url";
 import type { CredentialKeys } from "../crawl/credential-vault.js";
 import type { CrawlConfig } from "../crawl/loop.js";
 import type { AddressResolver } from "../crawl/url-policy.js";
+import type { Timing } from "../worker/timing.js";
 import { ServiceError } from "./errors.js";
 import { parseTenant, type TenantId } from "../tenant.js";
 
@@ -160,6 +161,14 @@ export interface ServiceConfig {
    * job pinned to this process.
    */
   crawlRunner?: "in-process" | "workers";
+  /**
+   * The worker clock this service runs on (src/worker/timing.ts): how often it
+   * heartbeats its instance, and how long a silent instance stays live for the
+   * "held" questions (`queuePosition`, `crawl_mark_failed`, `crawl_resume`).
+   * Code-only, like `crawlDefaults`: the entrypoints never set it from the
+   * environment; a test injects a short clock.
+   */
+  timing?: Partial<Timing>;
   /**
    * Where the server writes its own diagnostics — a queue pick-up, a crawl that
    * threw, the stack behind a 500. Never the response body (a stack trace in a

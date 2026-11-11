@@ -288,6 +288,13 @@
       "when": 1794419063280,
       "tag": "0040_jobs_instances",
       "breakpoints": true
+    },
+    {
+      "idx": 41,
+      "version": "7",
+      "when": 1794422176264,
+      "tag": "0041_jobs_crawl_index",
+      "breakpoints": true
     }
   ]
 }

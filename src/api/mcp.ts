@@ -485,11 +485,12 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "behind the status: {kind: crawl|render|rules, status: queued|running|done|failed|" +
         "abandoned, claimedBy?} for the crawl's latest job (claimedBy names the engine " +
         "process that took it), or null when no job ever ran it. queuePosition is a number " +
-        "only while the crawl is 'queued' with a crawl job waiting or starting (0 = starting " +
-        "now, n = n-1 crawls ahead of it) and null otherwise; liveLeases counts unexpired " +
-        "worker leases. A 'queued' crawl with queuePosition null has no job to run it — " +
-        "nobody will; hand it to crawl_resume, which continues the same crawl, or retire it " +
-        "with crawl_mark_failed. queuePosition null with liveLeases 0 also answers a " +
+        "only while the crawl is 'queued' with a crawl job that a live engine process holds, " +
+        "waiting or starting (0 = starting now, n = n-1 crawls ahead of it), and null " +
+        "otherwise; liveLeases counts unexpired worker leases. A 'queued' crawl with " +
+        "queuePosition null has no live process to run it — the one that accepted it stopped " +
+        "or died, and nobody will; hand it to crawl_resume, which adopts and continues the same " +
+        "crawl, or retire it with crawl_mark_failed. queuePosition null with liveLeases 0 also answers a " +
         "'running' row long after its process died. A paused or " +
         "failed crawl that stopped with work owed is finished by crawl_resume, or " +
         "ended for good by crawl_cancel (paused) — never by crawl_mark_failed, " +

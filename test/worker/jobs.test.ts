@@ -25,9 +25,11 @@ import {
   claimNextJob,
   enqueueJob,
   finishJob,
+  liveJobOf,
+  queuePositionOf,
   withPinnedJob,
 } from "../../src/worker/jobs.js";
-import { heartbeat, registerInstance } from "../../src/worker/instance.js";
+import { heartbeat, registerInstance, stopInstance } from "../../src/worker/instance.js";
 import { DEFAULT_TIMING, timingWith } from "../../src/worker/timing.js";
 
 function databaseUrl(): string {
@@ -360,5 +362,59 @@ describe("crawls.host_key", () => {
       );
       expect((result.rows[0] as { k: string }).k, `backfill of ${url}`).toBe(key);
     }
+  });
+});
+
+describe("liveness decides held (Ruling R10)", () => {
+  const deadAfter = 60_000;
+
+  async function instanceAt(ageMs: number): Promise<string> {
+    const id = await registerInstance(db, "all");
+    createdInstances.push(id);
+    await db.execute(
+      sql`update instances set heartbeat_at = now() - (${ageMs}::int * interval '1 millisecond') where id = ${id}`,
+    );
+    return id;
+  }
+
+  it("counts a queued job as held only while the instance it is pinned to is live", async () => {
+    const fresh = await instanceAt(0);
+    const crawlId = await seedCrawl();
+    await enqueueJob(db, { tenant: LOCAL_TENANT, crawlId, kind: "crawl", pinnedTo: fresh });
+    expect(await queuePositionOf(db, crawlId, deadAfter)).toBe(1);
+    expect((await liveJobOf(db, crawlId, deadAfter))?.live).toBe(true);
+
+    // Stopped (a graceful shutdown): not live from that moment.
+    await stopInstance(db, fresh);
+    expect(await queuePositionOf(db, crawlId, deadAfter)).toBeNull();
+    expect(await liveJobOf(db, crawlId, deadAfter)).toMatchObject({ status: "queued", pinnedTo: fresh, live: false });
+    await expect(heartbeat(db, fresh, [])).rejects.toThrow(/still running/);
+  });
+
+  it("calls an instance silent for longer than deadAfter dead, one inside it live, and a heartbeat revives it", async () => {
+    const silent = await instanceAt(deadAfter + 5_000);
+    const crawlId = await seedCrawl();
+    await enqueueJob(db, { tenant: LOCAL_TENANT, crawlId, kind: "crawl", pinnedTo: silent });
+    expect(await queuePositionOf(db, crawlId, deadAfter)).toBeNull();
+
+    const recent = await instanceAt(deadAfter - 10_000);
+    const other = await seedCrawl();
+    await enqueueJob(db, { tenant: LOCAL_TENANT, crawlId: other, kind: "crawl", pinnedTo: recent });
+    expect(await queuePositionOf(db, other, deadAfter)).toBe(1);
+
+    await heartbeat(db, silent, []);
+    expect(await queuePositionOf(db, crawlId, deadAfter)).toBe(1);
+  });
+
+  it("holds a running job by the instance that claimed it", async () => {
+    const claimer = await instanceAt(0);
+    const pinnedTo = pin();
+    const crawlId = await seedCrawl();
+    await enqueueJob(db, { tenant: LOCAL_TENANT, crawlId, kind: "crawl", pinnedTo });
+    await claimNextJob(db, { instanceId: claimer, kinds: ["crawl"], pinnedTo });
+    expect(await queuePositionOf(db, crawlId, deadAfter)).toBe(0);
+    await stopInstance(db, claimer);
+    expect(await queuePositionOf(db, crawlId, deadAfter)).toBeNull();
+    expect((await liveJobOf(db, crawlId, deadAfter))?.live).toBe(false);
   });
 });

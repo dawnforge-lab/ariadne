@@ -1521,6 +1521,10 @@ export const jobs = pgTable("jobs", {
   index("jobs_running_by_instance")
     .on(t.claimedBy)
     .where(sql`${t.status} = 'running'`),
+  // A crawl's jobs, newest last: `crawl_status.job` (the latest), the live-job
+  // guards, and `crawl_delete`'s cascade, without scanning every crawl's
+  // settled history (migration 0041).
+  index("jobs_crawl_queued").on(t.crawlId, t.queuedAt),
 ]);
 
 /**
@@ -1528,7 +1532,11 @@ export const jobs = pgTable("jobs", {
  * server, a worker, or a local all-in-one MCP server. `id` is generated at
  * boot; `version` is `engineVersion()` (package version + `ARIADNE_GIT_SHA`).
  * `heartbeat_at` is the process's last sign of life — the reaper (Task 4)
- * reads it to tell a dead instance's jobs from a live one's.
+ * reads it to tell a dead instance's jobs from a live one's. `stopped_at`
+ * (migration 0041) is set by a graceful shutdown: a stopped instance is not
+ * live from that moment, whatever its last heartbeat. LIVE = not stopped and
+ * a heartbeat within `timing.deadAfter` (`liveHolderSql`, src/worker/jobs.ts);
+ * only a live instance's jobs count as held.
  */
 export const instances = pgTable("instances", {
   id: text("id").primaryKey(),
@@ -1538,4 +1546,5 @@ export const instances = pgTable("instances", {
   version: text("version").notNull(),
   startedAt: timestamp("started_at", { withTimezone: true }).notNull().defaultNow(),
   heartbeatAt: timestamp("heartbeat_at", { withTimezone: true }).notNull().defaultNow(),
+  stoppedAt: timestamp("stopped_at", { withTimezone: true }),
 });

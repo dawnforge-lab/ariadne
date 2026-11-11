@@ -364,11 +364,21 @@ describe("restart", () => {
 
     const instanceId = await registerInstance(db, "worker");
     createdInstances.push(instanceId);
+    // ISOLATED: a runner over the whole unpinned pool takes it oldest-first,
+    // so a job some interrupted earlier run left there would be claimed before
+    // this one. The test hands this job, and only it, to runner B by pinning
+    // it to B — the claim, the run and the settle are the pool's own.
+    const moved = await db
+      .update(jobs)
+      .set({ pinnedTo: instanceId })
+      .where(eq(jobs.crawlId, crawlId))
+      .returning({ id: jobs.id });
+    expect(moved).toHaveLength(1);
     const bLog: string[] = [];
     const runner = new JobRunner(db, {
       instanceId,
       kinds: ["crawl"],
-      pinnedTo: null,
+      pinnedTo: instanceId,
       concurrency: 1,
       log: (line) => bLog.push(line),
       execute: crawlJobExecutor({
@@ -389,9 +399,109 @@ describe("restart", () => {
       );
       expect(done.status).toBe("finished");
       expect(done.pagesCrawled).toBe(3);
-      expect(await jobsOf(crawlId)).toMatchObject([{ status: "done", claimedBy: instanceId, pinnedTo: null }]);
+      expect(await jobsOf(crawlId)).toMatchObject([{ status: "done", claimedBy: instanceId, pinnedTo: instanceId }]);
     } finally {
       await runner.stop();
     }
   }, 120_000);
+});
+
+describe("liveness decides held (Ruling R10)", () => {
+  it("a closed in-process server's queued crawls are nobody's: position null, crawl_mark_failed retires one, crawl_resume elsewhere adopts and finishes one", async () => {
+    const a = newService([]);
+    const x = await start(a);
+    const y = await start(a, 3);
+    const z = await start(a, 3);
+    expect([x.queuePosition, y.queuePosition, z.queuePosition]).toEqual([0, 1, 2]);
+    await until("x running", () => crawlRow(x.crawlId), (row) => row.status === "running");
+    const aInstance = await a.instanceId();
+    await a.close();
+    // Never claimed: queued, pinned to A, which is stopped.
+    for (const id of [y.crawlId, z.crawlId]) {
+      expect(await jobsOf(id)).toMatchObject([{ status: "queued", pinnedTo: aInstance, claimedBy: null }]);
+    }
+
+    const bLog: string[] = [];
+    const b = newService(bLog);
+    expect(await b.queuePosition(y.crawlId)).toBeNull();
+    const zStatus = await b.getCrawl(LOCAL_TENANT, z.crawlId);
+    expect(zStatus).toMatchObject({ status: "queued", queuePosition: null, job: { kind: "crawl", status: "queued" } });
+
+    // crawl_mark_failed: not "held by this server" — nobody holds it.
+    const failed = await b.markCrawlFailed(LOCAL_TENANT, y.crawlId);
+    expect(failed.status).toBe("failed");
+    expect((await jobsOf(y.crawlId)).map((j) => j.status)).toEqual(["abandoned"]);
+
+    // crawl_resume: B adopts the queued job (re-pinned to B) and runs it.
+    const resumed = await b.resumeCrawl(LOCAL_TENANT, z.crawlId);
+    expect(resumed).toMatchObject({ crawlId: z.crawlId, status: "queued" });
+    const bInstance = await b.instanceId();
+    const adopted = await jobsOf(z.crawlId);
+    expect(adopted).toHaveLength(1);
+    expect(adopted[0]?.pinnedTo).toBe(bInstance);
+    expect(bLog.some((l) => l.includes(z.crawlId) && l.includes("adopted"))).toBe(true);
+    const done = await until(
+      "B finished the adopted crawl",
+      () => crawlRow(z.crawlId),
+      (row) => row.status !== "queued" && row.status !== "running",
+    );
+    expect(done).toMatchObject({ status: "finished", pagesCrawled: 3 });
+    expect(await jobsOf(z.crawlId)).toMatchObject([{ status: "done", claimedBy: bInstance, pinnedTo: bInstance }]);
+  }, 90_000);
+
+  it("a live server's queued crawl is still held: another server's crawl_mark_failed and crawl_resume refuse", async () => {
+    const s = newService([]);
+    const x = await start(s);
+    const y = await start(s, 3);
+    expect(y.queuePosition).toBe(1);
+    const t = newService([]);
+    expect(await t.queuePosition(y.crawlId)).toBe(1);
+    await expect(t.markCrawlFailed(LOCAL_TENANT, y.crawlId)).rejects.toThrow(/held by this server/);
+    await expect(t.resumeCrawl(LOCAL_TENANT, y.crawlId)).rejects.toThrow(/already held by this server/);
+    expect(await jobsOf(y.crawlId)).toMatchObject([{ status: "queued", pinnedTo: await s.instanceId() }]);
+    await s.cancelCrawl(LOCAL_TENANT, y.crawlId);
+    await s.cancelCrawl(LOCAL_TENANT, x.crawlId);
+    await until("x closed", () => crawlRow(x.crawlId), (row) => row.status === "cancelled");
+  }, 60_000);
+
+  it("a runner heartbeats its instance every timing.heartbeat", async () => {
+    const id = await registerInstance(db, "worker");
+    createdInstances.push(id);
+    await db.execute(sql`update instances set heartbeat_at = now() - interval '1 hour' where id = ${id}`);
+    const runner = new JobRunner(db, {
+      instanceId: id,
+      kinds: ["rules"],
+      pinnedTo: `test-pin-${randomUUID()}`,
+      concurrency: 1,
+      execute: async () => {},
+      log: () => {},
+      timing: { heartbeat: 50, deadAfter: 300, claimPoll: 1_000 },
+    });
+    runner.start();
+    try {
+      await until(
+        "a heartbeat",
+        async () => {
+          const [row] = await db
+            .select({ age: sql<number>`extract(epoch from now() - heartbeat_at)::float` })
+            .from(instances)
+            .where(eq(instances.id, id));
+          return row?.age ?? Number.POSITIVE_INFINITY;
+        },
+        (age) => age < 5,
+        10_000,
+      );
+    } finally {
+      await runner.stop();
+    }
+  });
+
+  it("a service that has begun closing starts no runner for a job enqueued as it closed", async () => {
+    const log: string[] = [];
+    const service = newService(log);
+    await service.close();
+    await (service as unknown as { afterEnqueue(): Promise<void> }).afterEnqueue();
+    expect(log.some((l) => l.includes("no runner is started"))).toBe(true);
+    expect((service as unknown as { runner: unknown }).runner).toBeNull();
+  });
 });
