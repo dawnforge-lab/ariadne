@@ -17,6 +17,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import { eq } from "drizzle-orm";
+import { randomUUID } from "node:crypto";
 
 import { setControlRequest } from "../../src/crawl/control.js";
 import { closeFetchAgents } from "../../src/crawl/http.js";
@@ -27,6 +28,7 @@ import {
   type CrawlSummary,
   type DiscoveryEvidence,
   type LoopTestHooks,
+  markEvidenceInterrupted,
 } from "../../src/crawl/loop.js";
 import { closeDb, createDb, type Db } from "../../src/db/client.js";
 import { runMigrations } from "../../src/db/migrate.js";
@@ -347,4 +349,37 @@ describe("a resume that finds robots.txt unreachable walks nothing, and replaces
     expect(evidence.truncation.interrupted).toBeUndefined();
     expect(await stagingCounts(id)).toEqual({ memberships: 0, hreflang: 0 });
   }, 60_000);
+});
+
+describe("the write-ahead interrupted mark (28a T5)", () => {
+  async function insertCrawl(discovery: unknown): Promise<string> {
+    const id = randomUUID();
+    await db.insert(crawls).values({
+      tenantId: LOCAL_TENANT,
+      id,
+      siteUrl: "http://mark.invalid/",
+      config: {},
+      rulesetVersion: "test",
+      status: "completed",
+      discovery: discovery as never,
+    });
+    createdCrawls.push(id);
+    return id;
+  }
+
+  it("lands on legacy evidence that has no truncation object", async () => {
+    const id = await insertCrawl({ robots: { outcome: "ok" } });
+    await markEvidenceInterrupted(db, id);
+    const row = await crawlRow(id);
+    const d = row.discovery as unknown as Record<string, any>;
+    expect(d.truncation.interrupted).toBe(true);
+    expect(d.robots).toEqual({ outcome: "ok" });
+  });
+
+  it("keeps the other truncation keys when the object exists", async () => {
+    const id = await insertCrawl({ truncation: { sitemapUrlsCapped: true, extra: 3 } });
+    await markEvidenceInterrupted(db, id);
+    const d = (await crawlRow(id)).discovery as unknown as Record<string, any>;
+    expect(d.truncation).toEqual({ sitemapUrlsCapped: true, extra: 3, interrupted: true });
+  });
 });

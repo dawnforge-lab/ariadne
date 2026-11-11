@@ -3119,11 +3119,11 @@ async function writeUnreachableRobotsEvidence(
  * with no evidence yet — a fresh one — has nothing to mark: the update matches
  * no row. Idempotent.
  */
-async function markEvidenceInterrupted(db: Db, crawlId: string): Promise<void> {
+export async function markEvidenceInterrupted(db: Db, crawlId: string): Promise<void> {
   await db
     .update(crawls)
     .set({
-      discovery: sql`jsonb_set(${crawls.discovery}, '{truncation,interrupted}', 'true'::jsonb)`,
+      discovery: sql`jsonb_set(${crawls.discovery}, '{truncation}', coalesce(${crawls.discovery}->'truncation', '{}'::jsonb) || '{"interrupted": true}'::jsonb)`,
     })
     .where(and(eq(crawls.id, crawlId), isNotNull(crawls.discovery)));
 }
