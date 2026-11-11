@@ -34,6 +34,7 @@ import {
 } from "../../src/rules/query/resources.js";
 import type { Finding, QueryRule, RuleCaps } from "../../src/rules/registry/types.js";
 import { LOCAL_TENANT } from "../../src/tenant.js";
+import { hostKeyOf } from "../../src/crawl/host-key.js";
 
 function databaseUrl(): string {
   const url = process.env.DATABASE_URL;
@@ -161,7 +162,7 @@ describe("resourceRules against the database", () => {
 
   async function newCrawl(): Promise<string> {
     const id = `crawl_${randomUUID()}`;
-    await db.insert(crawls).values({ tenantId: LOCAL_TENANT, id, siteUrl: SITE, config: {}, rulesetVersion: "test" });
+    await db.insert(crawls).values({ tenantId: LOCAL_TENANT, id, siteUrl: SITE, hostKey: hostKeyOf(SITE), config: {}, rulesetVersion: "test" });
     createdCrawls.push(id);
     return id;
   }

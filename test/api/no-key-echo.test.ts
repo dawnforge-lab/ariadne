@@ -46,6 +46,7 @@ import { RULESET_VERSION } from "../../src/rules/registry/registry.js";
 import { mkDiscovery } from "../rules/mk-discovery.js";
 import { LOCAL_TENANT } from "../../src/tenant.js";
 import { TEST_CREDENTIAL_KEYS } from "../helpers/credential-keys.js";
+import { hostKeyOf } from "../../src/crawl/host-key.js";
 
 const SENTINEL = "sk_live_27d_SENTINEL";
 const TOKEN = "test-token-no-key-echo-0123456789";
@@ -154,7 +155,7 @@ beforeAll(async () => {
   await db.insert(crawls).values({
     tenantId: LOCAL_TENANT,
     id: crawlId,
-    siteUrl: `${SITE}/`,
+    siteUrl: `${SITE}/`, hostKey: hostKeyOf(`${SITE}/`),
     config: { siteUrl: `${SITE}/`, maxPages: 100, userAgent: "AriadneBot-test" },
     discovery: mkDiscovery(),
     rulesetVersion: "test",
@@ -164,7 +165,7 @@ beforeAll(async () => {
   await db.insert(crawls).values({
     tenantId: LOCAL_TENANT,
     id: brokenId,
-    siteUrl: `${SITE}/`,
+    siteUrl: `${SITE}/`, hostKey: hostKeyOf(`${SITE}/`),
     config: { siteUrl: `${SITE}/`, maxPages: 100, userAgent: "AriadneBot-test" },
     discovery: mkDiscovery(),
     judgement: { thresholds: { [SENTINEL]: 3 } },

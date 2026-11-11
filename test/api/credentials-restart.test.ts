@@ -34,6 +34,7 @@ import { CredentialVault, type CredentialKeys } from "../../src/crawl/credential
 import { mkDiscovery } from "../rules/mk-discovery.js";
 import { LOCAL_TENANT } from "../../src/tenant.js";
 import { otherKey, TEST_CREDENTIAL_KEYS } from "../helpers/credential-keys.js";
+import { hostKeyOf } from "../../src/crawl/host-key.js";
 
 const TOKEN = "test-token-credentials-restart-0123456789";
 const PAGE_DELAY_MS = 60;
@@ -197,7 +198,7 @@ async function seedPaused(
   await db.insert(crawls).values({
     tenantId: LOCAL_TENANT,
     id,
-    siteUrl: `${site}/auth/`,
+    siteUrl: `${site}/auth/`, hostKey: hostKeyOf(`${site}/auth/`),
     config: {
       siteUrl: `${site}/auth/`,
       maxPages: 30,

@@ -148,6 +148,7 @@ import {
 } from "./credentials.js";
 import { storableCap, storableDeep } from "./storable-text.js";
 import type { TenantId } from "../tenant.js";
+import { hostKeyOf } from "./host-key.js";
 
 /**
  * `RenderSelectionConfig` is extended rather than restated: the render pass's
@@ -803,7 +804,29 @@ export interface ResumeOpts {
   reclaimLeases?: boolean;
   /** TEST ONLY — see `LoopTestHooks`. */
   testHooks?: LoopTestHooks;
+  /**
+   * Awaited inside the transaction of the run's closing write — every close:
+   * finished, paused, cancelled, failed — with what that write recorded. A
+   * throw rolls the close back (and the run fails loudly, as any close that
+   * cannot be written does). The job runner settles the crawl's job here
+   * (src/worker/crawl-job.ts), so the crawl reading closed and its job still
+   * holding it are never both true at once.
+   */
+  onClose?: CloseHook;
 }
+
+/** What a run's close wrote, as `ResumeOpts.onClose` is told it. */
+export interface ClosedRecord {
+  status: CrawlSummary["status"];
+  pauseReason: PauseReason | null;
+  /** The sentence a `failed` close wrote; null on every other close. */
+  failureReason: string | null;
+}
+
+type CloseTx = Parameters<Parameters<Db["transaction"]>[0]>[0];
+
+/** See `ResumeOpts.onClose`. */
+export type CloseHook = (tx: CloseTx, closed: ClosedRecord) => Promise<void>;
 
 /**
  * A resume's claim found the row in another status than the one it expected
@@ -860,12 +883,13 @@ export async function runCrawl(
     id: crawlId,
     tenantId: tenant,
     siteUrl: config.siteUrl,
+    hostKey: hostKeyOf(config.siteUrl),
     config: storableConfig(config),
     rulesetVersion: RULESET_VERSION,
     status: "running",
   });
 
-  return execute(db, crawlId, config, signal, testHooks);
+  return execute(db, crawlId, config, signal, testHooks, undefined);
 }
 
 /**
@@ -1008,7 +1032,7 @@ export async function resumeCrawl(
     await releaseLeases(db, crawlId, null);
   }
 
-  return execute(db, crawlId, config, opts.signal, opts.testHooks);
+  return execute(db, crawlId, config, opts.signal, opts.testHooks, opts.onClose);
 }
 
 /**
@@ -1460,6 +1484,7 @@ async function execute(
   config: CrawlConfig,
   signal: AbortSignal | undefined,
   testHooks: LoopTestHooks | undefined,
+  onClose: CloseHook | undefined,
 ): Promise<CrawlSummary> {
   // THE ONE SIGNAL THE RUN STOPS ON (Phase 27b). It fires on an agent's pause
   // or cancel (polled off `crawls.control_request`), on the process's own
@@ -1492,7 +1517,7 @@ async function execute(
         engineVersion: engineVersion(),
       })
       .where(eq(crawls.id, crawlId));
-    return await runToCompletion(db, crawlId, config, watcher, testHooks);
+    return await runToCompletion(db, crawlId, config, watcher, testHooks, onClose);
   } catch (caught) {
     // A control poll that failed on the way down is surfaced beside whatever
     // ended the run, never lost to it (rule 7). The run's own paths already
@@ -1516,6 +1541,8 @@ async function execute(
         crawledRows(await frontierCounts(db, crawlId)),
         null,
         failureReasonOf(error),
+        null,
+        onClose,
       );
     } catch (closeError) {
       throw new AggregateError(
@@ -1643,6 +1670,7 @@ async function runToCompletion(
   config: CrawlConfig,
   watcher: ControlWatcher,
   testHooks: LoopTestHooks | undefined,
+  onClose: CloseHook | undefined,
 ): Promise<CrawlSummary> {
   const allowPrivate = config.allowPrivate === true;
   const listMode = config.mode === "list";
@@ -1722,7 +1750,7 @@ async function runToCompletion(
       });
     } catch (error) {
       if (error instanceof FetchAbortedError && signal.aborted) {
-        return closeStoppedBeforePages(db, crawlId, watcher);
+        return closeStoppedBeforePages(db, crawlId, watcher, onClose);
       }
       throw error;
     }
@@ -1792,7 +1820,7 @@ async function runToCompletion(
     });
   } catch (error) {
     if (error instanceof DiscoveryAbortedError && signal.aborted) {
-      return closeStoppedBeforePages(db, crawlId, watcher);
+      return closeStoppedBeforePages(db, crawlId, watcher, onClose);
     }
     throw error;
   }
@@ -1817,7 +1845,7 @@ async function runToCompletion(
   // the robots refusal keeps its note beside it (27b M7), and the page loop
   // stops on the signal and raises it before any close.
   if (signal.aborted && watcher.failure() === null) {
-    return closeStoppedBeforePages(db, crawlId, watcher);
+    return closeStoppedBeforePages(db, crawlId, watcher, onClose);
   }
 
   // THE SITEMAP'S ENTRIES, ON RECORD BEFORE THE EVIDENCE THAT COUNTS THEM
@@ -1827,7 +1855,7 @@ async function runToCompletion(
   // does not hold. A resume writes them again (the rows are keyed). A failed
   // poll stops it too; the close then raises it and the row closes failed.
   if (!(await persistSitemap(db, crawlId, discovery, signal, testHooks?.onSeedingBatch, walkStartedAt))) {
-    return closeStoppedBeforePages(db, crawlId, watcher);
+    return closeStoppedBeforePages(db, crawlId, watcher, onClose);
   }
 
   // INSERTION 2 — discovery's own findings, written before anything branches on
@@ -1875,7 +1903,7 @@ async function runToCompletion(
         `crawl ${crawlId} failed: ${note}; and its control poll failed too`,
       );
     }
-    const closed = await closeCrawl(db, crawlId, "failed", crawled, null, note);
+    const closed = await closeCrawl(db, crawlId, "failed", crawled, null, note, null, onClose);
     return summarise(
       db,
       crawlId,
@@ -3057,6 +3085,7 @@ async function runToCompletion(
     { delta: writer.stats().resourceRefsCappedPages, resumed },
     null,
     outcome === "stopped" ? watcher.stopReason() : null,
+    onClose,
   );
   return summarise(
     db,
@@ -3164,11 +3193,12 @@ async function closeStoppedBeforePages(
   db: Db,
   crawlId: string,
   watcher: ControlWatcher,
+  onClose: CloseHook | undefined,
 ): Promise<CrawlSummary> {
   await settleControl(watcher);
   await writeNotFoundProbe(db, crawlId, { skipped: STOPPED_BEFORE_404_PROBE });
   const crawled = crawledRows(await frontierCounts(db, crawlId));
-  const closed = await closeCrawl(db, crawlId, "stopped", crawled, null, null, watcher.stopReason());
+  const closed = await closeCrawl(db, crawlId, "stopped", crawled, null, null, watcher.stopReason(), onClose);
   return summarise(
     db,
     crawlId,
@@ -4065,6 +4095,33 @@ async function closeCrawl(
   refsCapped: { delta: number; resumed: boolean } | null = null,
   failureReason: string | null = null,
   stop: StopReason | null = null,
+  onClose: CloseHook | undefined = undefined,
+): Promise<ClosedAs> {
+  if (onClose === undefined) {
+    return closeCrawlOn(db, crawlId, outcome, pagesCrawled, refsCapped, failureReason, stop);
+  }
+  // The close and whatever the caller records with it (the job runner's
+  // settle, `ResumeOpts.onClose`) commit together or not at all.
+  return db.transaction(async (tx) => {
+    const closed = await closeCrawlOn(tx, crawlId, outcome, pagesCrawled, refsCapped, failureReason, stop);
+    await onClose(tx, {
+      status: closed.status,
+      pauseReason: closed.pauseReason,
+      failureReason: failureReason === null ? null : storableCap(failureReason),
+    });
+    return closed;
+  });
+}
+
+/** `closeCrawl`'s write, on the pool or inside the transaction it shares with `onClose`. */
+async function closeCrawlOn(
+  db: Db | CloseTx,
+  crawlId: string,
+  outcome: "finished" | "stopped" | "failed",
+  pagesCrawled: number,
+  refsCapped: { delta: number; resumed: boolean } | null,
+  failureReason: string | null,
+  stop: StopReason | null,
 ): Promise<ClosedAs> {
   if (outcome === "failed" && failureReason === null) {
     throw new Error(

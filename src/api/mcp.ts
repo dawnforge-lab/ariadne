@@ -321,7 +321,7 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
       description:
         "One crawl in full: status, siteUrl, timings, pagesCrawled, the frontier " +
         "counts (queued/leased/done/failed), the ruleset version it was judged " +
-        "with, failureReason, queuePosition, liveLeases, blockedPages, robotsBlocked, " +
+        "with, failureReason, queuePosition, job, liveLeases, blockedPages, robotsBlocked, " +
         "hostSpacingMs, throttle, platform, platformProfile, " +
         "legacyHosts, sitemapUrls, findingCap, rulesRunAt, judgementStale, " +
         "findingsCount, pagesScanned, fetchResources, resources and recheck.\n\n" +
@@ -480,14 +480,17 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "final — crawl_resume refuses it; cancelledAt says when, and neverFetched " +
         "counts the URLs it never asked for (null on a crawl cancelled before it ran: " +
         "nothing was seen, which is not zero). controlRequested is a pause or cancel " +
-        "asked of a running crawl and not yet acted on (null otherwise). Two fields answer the " +
-        "question 'is anybody actually working on this': queuePosition is a " +
-        "number only while THIS server holds the crawl (null otherwise), and " +
-        "liveLeases counts unexpired worker leases. A 'queued' crawl with " +
-        "queuePosition null was accepted by a server process that is now gone — " +
-        "nobody will run it; hand it to crawl_resume, which continues the same " +
-        "crawl, or retire it with crawl_mark_failed. The same pair answers a " +
-        "'running' row with liveLeases 0 long after its server died. A paused or " +
+        "asked of a running crawl and not yet acted on (null otherwise). Three fields answer the " +
+        "question 'is anybody actually working on this'. job is the engine's work item " +
+        "behind the status: {kind: crawl|render|rules, status: queued|running|done|failed|" +
+        "abandoned, claimedBy?} for the crawl's latest job (claimedBy names the engine " +
+        "process that took it), or null when no job ever ran it. queuePosition is a number " +
+        "only while the crawl is 'queued' with a crawl job waiting or starting (0 = starting " +
+        "now, n = n-1 crawls ahead of it) and null otherwise; liveLeases counts unexpired " +
+        "worker leases. A 'queued' crawl with queuePosition null has no job to run it — " +
+        "nobody will; hand it to crawl_resume, which continues the same crawl, or retire it " +
+        "with crawl_mark_failed. queuePosition null with liveLeases 0 also answers a " +
+        "'running' row long after its process died. A paused or " +
         "failed crawl that stopped with work owed is finished by crawl_resume, or " +
         "ended for good by crawl_cancel (paused) — never by crawl_mark_failed, " +
         "which closes only an orphaned queued or running row.\n\n" +

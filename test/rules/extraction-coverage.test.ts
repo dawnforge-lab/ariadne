@@ -7,6 +7,7 @@ import { runMigrations } from "../../src/db/migrate.js";
 import { crawls, pages } from "../../src/db/schema.js";
 import { extractionCoverage } from "../../src/rules/helpers.js";
 import { LOCAL_TENANT } from "../../src/tenant.js";
+import { hostKeyOf } from "../../src/crawl/host-key.js";
 
 function databaseUrl(): string {
   const url = process.env.DATABASE_URL;
@@ -32,7 +33,7 @@ async function seed(versions: Array<number | null>): Promise<string> {
   await db.insert(crawls).values({
     tenantId: LOCAL_TENANT,
     id,
-    siteUrl: "https://cov.example",
+    siteUrl: "https://cov.example", hostKey: hostKeyOf("https://cov.example"),
     config: {},
     rulesetVersion: "test",
   });

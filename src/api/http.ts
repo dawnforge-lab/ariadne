@@ -21,7 +21,9 @@
  *                                      apex/www family, any scheme, any port
  *                                      (`listCrawls`) — which is the project
  *                                      history a date picker is built on
- *   GET  /crawls/:id                   one crawl: status, counts, frontier, timings
+ *   GET  /crawls/:id                   one crawl: status, counts, frontier, timings,
+ *                                      and `job` — the work item behind the
+ *                                      status (`{kind, status, claimedBy?}`, 28b)
  *   POST /crawls/:id/fail              close a crawl nobody is working
  *   POST /crawls/:id/resume            continue a crawl that stopped with work
  *                                      still owed — the same crawl, the same id,

@@ -415,6 +415,83 @@ export function describeLaunchFailure(
 }
 
 /**
+ * STEP 1 of `runRenderPass`, exported (Phase 28b): the refusals that say somebody
+ * else is working this crawl — a crawl worker's leases, another pass's render
+ * leases, a crawl that is `queued` or `running` — each with its own sentence,
+ * in this order. Reads only. Answers the crawl row's facts the pass goes on to
+ * use. The API service asks it directly when a `crawl_render` call meets the
+ * crawl's own crawl job (`jobs_one_live_per_crawl`), so that call answers in
+ * the same words the pass always did.
+ */
+export async function refuseLiveCrawl(db: Db, crawlId: string): Promise<Awaited<ReturnType<typeof crawlRow>>> {
+  // STEP 1. NOBODY ELSE MAY BE WORKING THIS CRAWL. `selectRenderSet` promotes
+  // rows into `render_pending` and demotes the ones it does not name, in one
+  // statement, and it is allowed to assume it is alone (see its header). Three
+  // separate ways that assumption can be false, each with its own message —
+  // "someone else is here" is not an actionable error, "a crawl worker holds 4
+  // URLs" is. Nothing is written before all three pass.
+  const before = await frontierCounts(db, crawlId);
+  if (before.leased > 0) {
+    throw new RenderPassRefusal(
+      `runRenderPass: crawl ${crawlId} has ${before.leased} leased URL(s) — the render ` +
+        `pass may not run over a live crawl (it would steal the crawler's rows). ` +
+        `Wait for the crawl to finish, or release its leases if its workers are known dead.`,
+      "live",
+    );
+  }
+  // A render lease leaves the row's state at `render_pending`, so it is
+  // invisible to the check above and to `frontierCounts` alike — a concurrent
+  // render pass is the ONE conflict neither of them can see. Its rows would be
+  // demoted to `done` by our selection while its workers went on rendering and
+  // completing them.
+  const heldRenders = await heldRenderLeases(db, crawlId);
+  if (heldRenders > 0) {
+    throw new RenderPassRefusal(
+      `runRenderPass: crawl ${crawlId} has ${heldRenders} render URL(s) leased by another ` +
+        `render pass — two passes may not share a crawl (this one's selection would ` +
+        `demote rows that one is rendering). Wait for it, or call releaseRenderLeases ` +
+        `if its worker is known dead.`,
+      "live",
+    );
+  }
+  // And the crawl must have STOPPED. Not "must have drained": a crawl that hit
+  // `maxPages` is `finished` with a frontier full of `pending` rows by design,
+  // and on a real site that is the normal outcome, so refusing a queued
+  // frontier would refuse most crawls there are. What is actually unsafe is a
+  // crawl whose row still says `running` — either a live one between leases
+  // (its next `leaseBatch` is coming for rows we would have promoted) or one
+  // that died mid-run and was never resumed or marked failed. Both leave a
+  // frontier in flight; `finished`, `paused`, `cancelled` and `failed` do not
+  // (a pause releases its leases before the row says `paused`).
+  const row = await crawlRow(db, crawlId);
+  const { status } = row;
+  // A crawl that has not started yet is unsafe for the same reason a live one
+  // is, one step earlier: `queued` is the API queue's accepted-but-not-yet-run
+  // state (src/api/service.ts), and the worker that picks it up will seed a
+  // frontier straight over the rows this pass promoted. It is also empty, so
+  // there is nothing to render — but "nothing selected" is the wrong answer to
+  // give for it, because it reads like a crawl with no suspects.
+  if (status === "queued") {
+    throw new RenderPassRefusal(
+      `runRenderPass: crawl ${crawlId} is 'queued' — it has not run yet, so there is ` +
+        `nothing to render, and the worker that dequeues it would seed a frontier over ` +
+        `this pass's selection. Wait for it to finish.`,
+      "live",
+    );
+  }
+  if (status === "running") {
+    throw new RenderPassRefusal(
+      `runRenderPass: crawl ${crawlId} is still marked 'running' — the render pass may ` +
+        `not run over a crawl that has not stopped (a live worker's next lease would ` +
+        `take rows this pass promoted, and a crashed crawl's frontier is mid-flight). ` +
+        `Resume it to completion, pause or cancel it, or mark it failed first.`,
+      "live",
+    );
+  }
+  return row;
+}
+
+/**
  * Run the render pass for `crawlId`.
  *
  * Throws — loudly, before touching the frontier — if the crawl is still live,
@@ -456,72 +533,9 @@ export async function runRenderPass(
     });
   }
 
-  // STEP 1. NOBODY ELSE MAY BE WORKING THIS CRAWL. `selectRenderSet` promotes
-  // rows into `render_pending` and demotes the ones it does not name, in one
-  // statement, and it is allowed to assume it is alone (see its header). Three
-  // separate ways that assumption can be false, each with its own message —
-  // "someone else is here" is not an actionable error, "a crawl worker holds 4
-  // URLs" is. Nothing is written before all three pass.
-  const before = await frontierCounts(db, crawlId);
-  if (before.leased > 0) {
-    throw new RenderPassRefusal(
-      `runRenderPass: crawl ${crawlId} has ${before.leased} leased URL(s) — the render ` +
-        `pass may not run over a live crawl (it would steal the crawler's rows). ` +
-        `Wait for the crawl to finish, or release its leases if its workers are known dead.`,
-      "live",
-    );
-  }
-  // A render lease leaves the row's state at `render_pending`, so it is
-  // invisible to the check above and to `frontierCounts` alike — a concurrent
-  // render pass is the ONE conflict neither of them can see. Its rows would be
-  // demoted to `done` by our selection while its workers went on rendering and
-  // completing them.
-  const heldRenders = await heldRenderLeases(db, crawlId);
-  if (heldRenders > 0) {
-    throw new RenderPassRefusal(
-      `runRenderPass: crawl ${crawlId} has ${heldRenders} render URL(s) leased by another ` +
-        `render pass — two passes may not share a crawl (this one's selection would ` +
-        `demote rows that one is rendering). Wait for it, or call releaseRenderLeases ` +
-        `if its worker is known dead.`,
-      "live",
-    );
-  }
-  // And the crawl must have STOPPED. Not "must have drained": a crawl that hit
-  // `maxPages` is `finished` with a frontier full of `pending` rows by design,
-  // and on a real site that is the normal outcome, so refusing a queued
-  // frontier would refuse most crawls there are. What is actually unsafe is a
-  // crawl whose row still says `running` — either a live one between leases
-  // (its next `leaseBatch` is coming for rows we would have promoted) or one
-  // that died mid-run and was never resumed or marked failed. Both leave a
-  // frontier in flight; `finished`, `paused`, `cancelled` and `failed` do not
-  // (a pause releases its leases before the row says `paused`).
-  const { status, hostSpacingMs, hostSpacingJsonb, platformProfile } = await crawlRow(
-    db,
-    crawlId,
-  );
-  // A crawl that has not started yet is unsafe for the same reason a live one
-  // is, one step earlier: `queued` is the API queue's accepted-but-not-yet-run
-  // state (src/api/service.ts), and the worker that picks it up will seed a
-  // frontier straight over the rows this pass promoted. It is also empty, so
-  // there is nothing to render — but "nothing selected" is the wrong answer to
-  // give for it, because it reads like a crawl with no suspects.
-  if (status === "queued") {
-    throw new RenderPassRefusal(
-      `runRenderPass: crawl ${crawlId} is 'queued' — it has not run yet, so there is ` +
-        `nothing to render, and the worker that dequeues it would seed a frontier over ` +
-        `this pass's selection. Wait for it to finish.`,
-      "live",
-    );
-  }
-  if (status === "running") {
-    throw new RenderPassRefusal(
-      `runRenderPass: crawl ${crawlId} is still marked 'running' — the render pass may ` +
-        `not run over a crawl that has not stopped (a live worker's next lease would ` +
-        `take rows this pass promoted, and a crashed crawl's frontier is mid-flight). ` +
-        `Resume it to completion, pause or cancel it, or mark it failed first.`,
-      "live",
-    );
-  }
+  // STEP 1. NOBODY ELSE MAY BE WORKING THIS CRAWL — see `refuseLiveCrawl`.
+  // Nothing is written before it passes.
+  const { hostSpacingMs, hostSpacingJsonb, platformProfile } = await refuseLiveCrawl(db, crawlId);
 
   // THE CRAWL'S PLATFORM PROFILE binds the render pass too (Phase 24a §3.1):
   // a site that tolerates one request at a time tolerates one browser at a

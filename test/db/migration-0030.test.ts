@@ -18,6 +18,7 @@ import { closeDb, createDb, type Db } from "../../src/db/client.js";
 import { runMigrations } from "../../src/db/migrate.js";
 import { crawls, pageResources, pages, resources } from "../../src/db/schema.js";
 import { LOCAL_TENANT } from "../../src/tenant.js";
+import { hostKeyOf } from "../../src/crawl/host-key.js";
 
 function databaseUrl(): string {
   const url = process.env.DATABASE_URL;
@@ -49,7 +50,7 @@ describe("0030 — share images of pre-26c crawls are marked", () => {
       .transaction(async (tx) => {
         await tx.insert(crawls).values({
           tenantId: LOCAL_TENANT,
-          id: crawlId, siteUrl: "https://m30.example", config: {}, rulesetVersion: "test",
+          id: crawlId, siteUrl: "https://m30.example", hostKey: hostKeyOf("https://m30.example"), config: {}, rulesetVersion: "test",
         });
         await tx.insert(pages).values({
           id: `${crawlId}_p`, crawlId, url: "https://m30.example/",

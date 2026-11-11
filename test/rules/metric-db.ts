@@ -23,6 +23,7 @@ import type { Db } from "../../src/db/client.js";
 import { crawls } from "../../src/db/schema.js";
 import type { Metric, MetricRule } from "../../src/rules/registry/types.js";
 import { LOCAL_TENANT } from "../../src/tenant.js";
+import { hostKeyOf } from "../../src/crawl/host-key.js";
 
 /** The dev-container URL, refused rather than defaulted (hard rule 7). */
 export function databaseUrl(): string {
@@ -75,7 +76,7 @@ export async function newMetricCrawl(
   await db.insert(crawls).values({
     tenantId: LOCAL_TENANT,
     id,
-    siteUrl,
+    siteUrl, hostKey: hostKeyOf(siteUrl),
     config: { maxPages: 500 },
     rulesetVersion: "test",
     status: "finished",

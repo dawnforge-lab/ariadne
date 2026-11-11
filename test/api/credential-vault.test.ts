@@ -29,6 +29,7 @@ import {
 import type { CrawlCredentials } from "../../src/crawl/credentials.js";
 import { LOCAL_TENANT, parseTenant } from "../../src/tenant.js";
 import { otherKey, TEST_CREDENTIAL_KEY, TEST_CREDENTIAL_KEYS } from "../helpers/credential-keys.js";
+import { hostKeyOf } from "../../src/crawl/host-key.js";
 
 const TOKEN = "test-token-credential-vault-0123456789";
 const OLD_VALUE = "old-hdr-S3CRET";
@@ -58,7 +59,7 @@ async function seedCrawl(
   await db.insert(crawls).values({
     id,
     tenantId: tenant,
-    siteUrl: "https://vault.test/",
+    siteUrl: "https://vault.test/", hostKey: hostKeyOf("https://vault.test/"),
     config: { siteUrl: "https://vault.test/" },
     rulesetVersion: "0.0.0-test",
     status,

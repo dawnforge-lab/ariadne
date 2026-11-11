@@ -42,6 +42,7 @@ import { createMcpServer, type AriadneMcpServer } from "../../src/api/mcp.js";
 import type { ServiceConfig } from "../../src/api/config.js";
 import { LOCAL_TENANT } from "../../src/tenant.js";
 import { TEST_CREDENTIAL_KEYS } from "../helpers/credential-keys.js";
+import { hostKeyOf } from "../../src/crawl/host-key.js";
 
 const TOKEN = "test-token-transport-parity-0123456789";
 const PAGE_DELAY_MS = 100;
@@ -518,7 +519,7 @@ describe("the issues overview over both transports (27d)", () => {
     await db.insert(crawls).values({
       tenantId: LOCAL_TENANT,
       id,
-      siteUrl: "https://parity-overview.example/",
+      siteUrl: "https://parity-overview.example/", hostKey: hostKeyOf("https://parity-overview.example/"),
       config: { siteUrl: "https://parity-overview.example/", maxPages: 10, userAgent: "AriadneBot-test" },
       discovery: mkDiscovery(),
       rulesetVersion: "test",

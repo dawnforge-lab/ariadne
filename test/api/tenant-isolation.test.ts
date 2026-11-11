@@ -22,12 +22,15 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 
 import { closeDb, createDb, type Db } from "../../src/db/client.js";
 import { runMigrations } from "../../src/db/migrate.js";
-import { crawls, issues, links, metrics, pages } from "../../src/db/schema.js";
+import { crawls, issues, jobs, links, metrics, pages } from "../../src/db/schema.js";
+import { EXTRACTION_VERSION } from "../../src/crawl/versions.js";
+import { RULESET_VERSION } from "../../src/rules/registry/registry.js";
 import { closeFetchAgents } from "../../src/crawl/http.js";
 import { createApiServer, routeSignatures, type ApiServer } from "../../src/api/http.js";
 import { createMcpServer, TOOL_NAMES, type AriadneMcpServer } from "../../src/api/mcp.js";
 import { parseTenant, type TenantId } from "../../src/tenant.js";
 import { TEST_CREDENTIAL_KEYS } from "../helpers/credential-keys.js";
+import { hostKeyOf } from "../../src/crawl/host-key.js";
 
 const TOKEN = "test-token-isolation-0123456789abcdef";
 const RUN = randomUUID().slice(0, 8);
@@ -266,7 +269,7 @@ beforeAll(async () => {
   await db.insert(crawls).values({
     id: betaCrawl,
     tenantId: BETA,
-    siteUrl: `http://${BETA_ONLY_HOST}/`,
+    siteUrl: `http://${BETA_ONLY_HOST}/`, hostKey: hostKeyOf(`http://${BETA_ONLY_HOST}/`),
     config: { siteUrl: `http://${BETA_ONLY_HOST}/` },
     rulesetVersion: "0.0.0-test",
     status: "finished",
@@ -416,12 +419,27 @@ describe("compare, three ways", () => {
   });
 });
 
-describe("ownership precedes the in-process busy refusals", () => {
-  // The service's holds are private sets with no public seam; holding a crawl
-  // busy without racing a real run means reaching in. This is the one place a
-  // test does, and it only adds and removes acme's crawl id.
-  const holds = (): { judging: Set<string>; rendering: Set<string> } =>
-    api.service as unknown as { judging: Set<string>; rendering: Set<string> };
+describe("ownership precedes the busy refusals", () => {
+  // The holds are `running` rules and render jobs since 28b (they were
+  // private in-process sets). Holding a crawl busy without racing a real run
+  // means writing one: acme's own job, pinned to the server's instance as
+  // `withPinnedJob` writes it, and removed after.
+  async function hold(kind: "rules" | "render"): Promise<string> {
+    const id = `job_${randomUUID()}`;
+    const instanceId = await api.service.instanceId();
+    await db.insert(jobs).values({
+      id,
+      tenantId: ACME,
+      crawlId: acmeCrawl,
+      kind,
+      status: "running",
+      pinnedTo: instanceId,
+      claimedBy: instanceId,
+      rulesetVersion: RULESET_VERSION,
+      extractionVersion: EXTRACTION_VERSION,
+    });
+    return id;
+  }
 
   const busyCases: [string, (id: string) => HttpCase][] = [
     ["POST /crawls/:id/rules", (id) => ({ method: "POST", path: `/crawls/${id}/rules` })],
@@ -439,11 +457,10 @@ describe("ownership precedes the in-process busy refusals", () => {
     ["DELETE /crawls/:id", (id) => ({ method: "DELETE", path: `/crawls/${id}?confirm=${id}` })],
   ];
 
-  it.each(["judging", "rendering"] as const)(
-    "while acme's crawl is held in `%s`, beta still gets the missing answer",
-    async (hold) => {
-      const set = holds()[hold];
-      set.add(acmeCrawl);
+  it.each(["rules", "render"] as const)(
+    "while acme's crawl is held by a running `%s` job, beta still gets the missing answer",
+    async (kind) => {
+      const held = await hold(kind);
       try {
         // Sanity: the hold is real. Acme itself is refused 409 by it.
         const own = await http(ACME, { method: "POST", path: `/crawls/${acmeCrawl}/cancel` });
@@ -459,7 +476,7 @@ describe("ownership precedes the in-process busy refusals", () => {
         }
         expect(await snapshot(acmeCrawl)).toEqual(before);
       } finally {
-        set.delete(acmeCrawl);
+        await db.delete(jobs).where(eq(jobs.id, held));
       }
     },
   );

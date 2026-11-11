@@ -31,6 +31,7 @@ import {
 } from "../../src/crawl/loop.js";
 import { RULESET_VERSION } from "../../src/rules/registry/registry.js";
 import { LOCAL_TENANT } from "../../src/tenant.js";
+import { hostKeyOf } from "../../src/crawl/host-key.js";
 
 function databaseUrl(): string {
   const url = process.env.DATABASE_URL;
@@ -468,7 +469,7 @@ describe("refileOutOfScope", () => {
     await db.insert(crawls).values({
       tenantId: LOCAL_TENANT,
       id,
-      siteUrl: "https://refile.example/",
+      siteUrl: "https://refile.example/", hostKey: hostKeyOf("https://refile.example/"),
       config: {},
       rulesetVersion: RULESET_VERSION,
       status: "paused",
@@ -816,7 +817,7 @@ describe("refileOutOfScope, the final wave (27c)", () => {
     await db.insert(crawls).values({
       tenantId: LOCAL_TENANT,
       id,
-      siteUrl: "https://refile.example/",
+      siteUrl: "https://refile.example/", hostKey: hostKeyOf("https://refile.example/"),
       config: {},
       rulesetVersion: RULESET_VERSION,
       status: "paused",

@@ -27,6 +27,7 @@ import { startAssetHost, type AssetHost } from "../fixtures/assets.js";
 import { allFixtures } from "../fixtures/fixture.js";
 import { startOffsiteHost, type OffsiteHost } from "../fixtures/pages/render-p5.js";
 import { LOCAL_TENANT } from "../../src/tenant.js";
+import { hostKeyOf } from "../../src/crawl/host-key.js";
 
 describe("control readers", () => {
   it("readControlRequest passes null and the two requests, refuses anything else naming the crawl", () => {
@@ -410,7 +411,7 @@ describe("cancel", () => {
     await db.insert(crawls).values({
       tenantId: LOCAL_TENANT,
       id,
-      siteUrl: `${stallBase}/`,
+      siteUrl: `${stallBase}/`, hostKey: hostKeyOf(`${stallBase}/`),
       config: storableConfig(stallConfig()),
       rulesetVersion: "test",
       status: "paused",
@@ -533,7 +534,7 @@ describe("the claim", () => {
     await db.insert(crawls).values({
       tenantId: LOCAL_TENANT,
       id,
-      siteUrl: `${stallBase}/`,
+      siteUrl: `${stallBase}/`, hostKey: hostKeyOf(`${stallBase}/`),
       config: storableConfig(stallConfig()),
       rulesetVersion: "test",
       status: "paused",
@@ -558,7 +559,7 @@ describe("the claim", () => {
     await db.insert(crawls).values({
       tenantId: LOCAL_TENANT,
       id,
-      siteUrl: `${stallBase}/`,
+      siteUrl: `${stallBase}/`, hostKey: hostKeyOf(`${stallBase}/`),
       config: storableConfig(stallConfig()),
       rulesetVersion: "test",
       status: "cancelled",

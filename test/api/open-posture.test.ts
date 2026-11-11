@@ -28,6 +28,7 @@ import { createApiServer, type ApiServer } from "../../src/api/http.js";
 import { loadApiConfig } from "../../src/api/config.js";
 import { LOCAL_TENANT } from "../../src/tenant.js";
 import { TEST_CREDENTIAL_KEYS } from "../helpers/credential-keys.js";
+import { hostKeyOf } from "../../src/crawl/host-key.js";
 
 const TOKEN = "test-token-0123456789abcdef";
 
@@ -121,7 +122,7 @@ async function seedFailedCrawl(siteUrl: string): Promise<string> {
   await db.insert(crawls).values({
     tenantId: LOCAL_TENANT,
     id,
-    siteUrl,
+    siteUrl, hostKey: hostKeyOf(siteUrl),
     config: {
       siteUrl,
       maxPages: 10,

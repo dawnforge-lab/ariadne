@@ -14,6 +14,7 @@ import { createApiServer, type ApiServer } from "../../src/api/http.js";
 import { PAGE_FIELDS } from "../../src/api/service.js";
 import { LOCAL_TENANT } from "../../src/tenant.js";
 import { TEST_CREDENTIAL_KEYS } from "../helpers/credential-keys.js";
+import { hostKeyOf } from "../../src/crawl/host-key.js";
 
 const TOKEN = "test-token-0123456789abcdef";
 const SITE = "https://surface-unchanged.test";
@@ -22,6 +23,9 @@ const FORBIDDEN_CRAWL_KEYS = [
   "engine_version", "engineVersion",
   "render_launch_error", "renderLaunchError",
   "credential_generation", "credentialGeneration",
+  // 28b T3: engine bookkeeping, never surface (`job` is, and is a block of its own).
+  "host_key", "hostKey",
+  "auto_resume_count", "autoResumeCount",
 ];
 
 let db: Db;
@@ -35,7 +39,7 @@ beforeAll(async () => {
   await db.insert(crawls).values({
     tenantId: LOCAL_TENANT,
     id,
-    siteUrl: `${SITE}/`,
+    siteUrl: `${SITE}/`, hostKey: hostKeyOf(`${SITE}/`),
     config: { siteUrl: `${SITE}/` },
     rulesetVersion: "0.0.0-test",
     status: "finished",

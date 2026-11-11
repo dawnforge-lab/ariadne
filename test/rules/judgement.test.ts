@@ -45,6 +45,7 @@ import { DEEP_DEPTH, SLOW_MS, THIN_WORDS, TITLE_MAX } from "../../src/rules/thre
 import { mkDiscovery } from "./mk-discovery.js";
 import { CLEAN_META, mkPage } from "./mk-page.js";
 import { LOCAL_TENANT } from "../../src/tenant.js";
+import { hostKeyOf } from "../../src/crawl/host-key.js";
 
 const reg = buildRegistry();
 
@@ -354,7 +355,7 @@ describe("runRules stamps what it judged with", () => {
     await db.insert(crawls).values({
       tenantId: LOCAL_TENANT,
       id,
-      siteUrl: SITE,
+      siteUrl: SITE, hostKey: hostKeyOf(SITE),
       config: { maxPages: 100, userAgent: "AriadneBot-test", ...config },
       judgement,
       discovery: mkDiscovery(),

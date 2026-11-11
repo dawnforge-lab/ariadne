@@ -80,6 +80,7 @@ import {
 } from "../../src/rules/registry/registry.js";
 import { LOCAL_TENANT } from "../../src/tenant.js";
 import { TEST_CREDENTIAL_KEYS } from "../helpers/credential-keys.js";
+import { hostKeyOf } from "../../src/crawl/host-key.js";
 
 let db: Db;
 
@@ -913,7 +914,7 @@ describe("a client that leaves mid-export", () => {
     await db.insert(crawls).values({
       tenantId: LOCAL_TENANT,
       id,
-      siteUrl: "http://seeded.example/",
+      siteUrl: "http://seeded.example/", hostKey: hostKeyOf("http://seeded.example/"),
       config: {
         siteUrl: "http://seeded.example/",
         maxPages: 10,

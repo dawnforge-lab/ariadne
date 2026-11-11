@@ -17,6 +17,19 @@ export const crawls = pgTable("crawls", {
   // The tenant that owns the crawl (28a). NOT NULL with no default: every writer
   // says whose crawl it is. Migration 0037 backfilled pre-28a rows to `local`.
   tenantId: text("tenant_id").notNull(),
+  // THE CRAWL'S HOST FOOTPRINT (migration 0040, Phase 28b): the seed's host,
+  // lower-cased, without a leading `www.` (`hostKeyOf`, src/crawl/host-key.ts).
+  // The frontier admits only that host and its www twin, so two crawls with one
+  // host key are two crawls of one site. Claim eligibility reads it (Task 4: no
+  // two running crawl or render jobs per host). Written by every insert with
+  // the site URL; 0040 backfilled older rows from `site_url` in SQL. Not
+  // surface: no reader answers it.
+  hostKey: text("host_key").notNull(),
+  // How many times the reaper has re-queued this crawl after a system pause
+  // (`shutdown`, `worker_lost`) without an agent asking (migration 0040,
+  // Phase 28b). Capped at 3 so a crawl that kills its worker every time stops;
+  // `crawl_resume` resets it. Not surface.
+  autoResumeCount: integer("auto_resume_count").notNull().default(0),
   config: jsonb("config_jsonb").notNull(),
   rulesetVersion: text("ruleset_version").notNull(),
   // queued|running|paused|finished|failed|cancelled. `running`, `paused` and
@@ -396,6 +409,8 @@ export const crawls = pgTable("crawls", {
 }, (t) => [
   // The order `listCrawls` pages by, scoped to a tenant (28a).
   index("crawls_tenant_started").on(t.tenantId, t.startedAt.desc(), t.id.desc()),
+  // Claim eligibility joins running jobs to their crawls by host (28b Task 4).
+  index("crawls_host_key").on(t.hostKey),
 ]);
 
 export const pages = pgTable("pages", {
@@ -1453,4 +1468,74 @@ export const crawlCredentials = pgTable("crawl_credentials", {
   nonce: bytea("nonce").notNull(),
   ciphertext: bytea("ciphertext").notNull(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+/**
+ * The engine's work queue (migration 0040, Phase 28b item 6): one row per piece
+ * of work on a crawl — a crawl run, a render pass, a rules run — replacing the
+ * in-process queue and busy sets the API service held before 28b. Written and
+ * claimed only through src/worker/jobs.ts.
+ *
+ *  - `kind`: crawl | render | rules. `status`: queued | running | done |
+ *    failed | abandoned. Free text, the closed sets live in jobs.ts (the
+ *    `crawls.status` precedent).
+ *  - `pinned_to`: the instance that must run it, or null for any runner. A
+ *    synchronous render or rules call pins its job to the API process that
+ *    received it; an in-process service pins the crawl jobs it accepted.
+ *  - `claimed_by` / `claimed_at`: the instance that took it, and when.
+ *    `heartbeat_at`: its runner's last sign of life for it.
+ *  - `ruleset_version` / `extraction_version`: the code that enqueued it. A
+ *    runner claims only jobs whose versions equal its own, so a rolling deploy
+ *    never judges with a stale ruleset.
+ *  - `error`: one line saying why a `failed` job failed. Never a credential
+ *    value, never a stack.
+ *
+ * AT MOST ONE `queued|running` JOB PER CRAWL (`jobs_one_live_per_crawl`): the
+ * busy guard is this index, a database fact rather than process memory.
+ */
+export const jobs = pgTable("jobs", {
+  id: text("id").primaryKey(),
+  tenantId: text("tenant_id").notNull(),
+  crawlId: text("crawl_id").notNull().references(() => crawls.id, { onDelete: "cascade" }),
+  kind: text("kind").notNull(),
+  status: text("status").notNull(),
+  pinnedTo: text("pinned_to"),
+  claimedBy: text("claimed_by"),
+  claimedAt: timestamp("claimed_at", { withTimezone: true }),
+  heartbeatAt: timestamp("heartbeat_at", { withTimezone: true }),
+  queuedAt: timestamp("queued_at", { withTimezone: true }).notNull().defaultNow(),
+  finishedAt: timestamp("finished_at", { withTimezone: true }),
+  error: text("error"),
+  rulesetVersion: text("ruleset_version").notNull(),
+  extractionVersion: integer("extraction_version").notNull(),
+}, (t) => [
+  uniqueIndex("jobs_one_live_per_crawl")
+    .on(t.crawlId)
+    .where(sql`${t.status} in ('queued', 'running')`),
+  // The claim's scan: queued jobs in claim order.
+  index("jobs_claim_order")
+    .on(t.queuedAt, t.id)
+    .where(sql`${t.status} = 'queued'`),
+  // The reaper's scan (Task 4) and a runner's own heartbeat: running jobs by
+  // the instance that holds them.
+  index("jobs_running_by_instance")
+    .on(t.claimedBy)
+    .where(sql`${t.status} = 'running'`),
+]);
+
+/**
+ * One row per engine process (migration 0040, Phase 28b item 8): an API
+ * server, a worker, or a local all-in-one MCP server. `id` is generated at
+ * boot; `version` is `engineVersion()` (package version + `ARIADNE_GIT_SHA`).
+ * `heartbeat_at` is the process's last sign of life — the reaper (Task 4)
+ * reads it to tell a dead instance's jobs from a live one's.
+ */
+export const instances = pgTable("instances", {
+  id: text("id").primaryKey(),
+  role: text("role").notNull(),
+  hostname: text("hostname").notNull(),
+  pid: integer("pid").notNull(),
+  version: text("version").notNull(),
+  startedAt: timestamp("started_at", { withTimezone: true }).notNull().defaultNow(),
+  heartbeatAt: timestamp("heartbeat_at", { withTimezone: true }).notNull().defaultNow(),
 });

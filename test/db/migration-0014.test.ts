@@ -52,6 +52,7 @@ import { runMigrations } from "../../src/db/migrate.js";
 import { MAX_RESOURCE_REFS } from "../../src/crawl/parse/page-analyzer.js";
 import { crawls, pages } from "../../src/db/schema.js";
 import { LOCAL_TENANT } from "../../src/tenant.js";
+import { hostKeyOf } from "../../src/crawl/host-key.js";
 
 function databaseUrl(): string {
   const url = process.env.DATABASE_URL;
@@ -236,7 +237,7 @@ describe("0014 — resource_refs_capped_pages", () => {
     await db.insert(crawls).values({
       tenantId: LOCAL_TENANT,
       id,
-      siteUrl: "https://pre-0014.example/",
+      siteUrl: "https://pre-0014.example/", hostKey: hostKeyOf("https://pre-0014.example/"),
       config: {},
       rulesetVersion: "test",
     });

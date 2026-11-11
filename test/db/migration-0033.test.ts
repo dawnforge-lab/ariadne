@@ -61,6 +61,7 @@ describe("0033 — a stamp holds the effective thresholds", () => {
           id,
           tenantId: LOCAL_TENANT,
           siteUrl: "https://m33.example",
+          hostKey: "m33.example",
           config: { maxPages: 10 },
           rulesetVersion: "test",
           rulesRunAt,

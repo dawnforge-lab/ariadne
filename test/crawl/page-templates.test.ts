@@ -28,6 +28,7 @@ import {
   type TemplateMember,
 } from "../../src/crawl/page-type.js";
 import { LOCAL_TENANT } from "../../src/tenant.js";
+import { hostKeyOf } from "../../src/crawl/host-key.js";
 
 const SITE = "https://lavishalice.com";
 
@@ -304,7 +305,7 @@ describe("inferPageTemplates", () => {
     await db.insert(crawls).values({
       tenantId: LOCAL_TENANT,
       id,
-      siteUrl: SITE,
+      siteUrl: SITE, hostKey: hostKeyOf(SITE),
       config: { maxPages: 1000 },
       rulesetVersion: "test",
       status: "finished",
@@ -418,7 +419,7 @@ describe("inferPageTemplates — the collapse in SQL (27d)", () => {
     await db.insert(crawls).values({
       tenantId: LOCAL_TENANT,
       id,
-      siteUrl: SITE,
+      siteUrl: SITE, hostKey: hostKeyOf(SITE),
       config: { maxPages: 100_000 },
       rulesetVersion: "test",
       status: "finished",

@@ -17,6 +17,7 @@ import { TRIAGE } from "../../src/rules/registry/triage.js";
 import { countOtherSessions, createPruneDb, isTestHost, PRUNE_APPLICATION_NAME, pruneTestCrawls } from "../../scripts/prune-test-crawls.js";
 import { LOCAL_TENANT } from "../../src/tenant.js";
 import { TEST_CREDENTIAL_KEYS } from "../helpers/credential-keys.js";
+import { hostKeyOf } from "../../src/crawl/host-key.js";
 
 function databaseUrl(): string {
   const url = process.env.DATABASE_URL;
@@ -85,7 +86,7 @@ describe("pruneTestCrawls", () => {
     await db.insert(crawls).values({
       tenantId: LOCAL_TENANT,
       id,
-      siteUrl,
+      siteUrl, hostKey: hostKeyOf(siteUrl),
       config: { siteUrl, secret: "do-not-print" },
       rulesetVersion: "0.0.0-test",
       status,

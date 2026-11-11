@@ -29,6 +29,7 @@ import { hreflangIntegrityRules } from "../../src/rules/query/hreflang-integrity
 import type { Finding, QueryRule } from "../../src/rules/registry/types.js";
 import { mkDiscovery } from "./mk-discovery.js";
 import { LOCAL_TENANT } from "../../src/tenant.js";
+import { hostKeyOf } from "../../src/crawl/host-key.js";
 
 function databaseUrl(): string {
   const url = process.env.DATABASE_URL;
@@ -94,7 +95,7 @@ describe("hreflang.declarations-incomplete against the database", () => {
     await db.insert(crawls).values({
       tenantId: LOCAL_TENANT,
       id,
-      siteUrl: SITE,
+      siteUrl: SITE, hostKey: hostKeyOf(SITE),
       config: {},
       rulesetVersion: "test",
       discovery: discovery ?? null,

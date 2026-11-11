@@ -311,7 +311,7 @@ target is not something this skill can crawl.
  renderPassCount, rulesetVersion, controlRequested, pauseReason, cancelledAt,
  neverFetched, failureReason, legacyHosts, sitemapUrls, findingCap,
  frontier: {pending, leased, done, failed, renderPending},
- queuePosition, liveLeases, blockedPages, hostSpacingMs, throttle,
+ queuePosition, job, liveLeases, blockedPages, hostSpacingMs, throttle,
  platform, platformProfile,
  robotsBlocked: {recorded, dropped}, excludedDropped,
  rulesRunAt, judgementStale, findingsCount, pagesScanned, fetchResources,
@@ -359,11 +359,15 @@ What the fields mean when you are waiting:
   is not stuck. **`frontier.done` is the live number**; watch that one.
 - **`liveLeases`** — unexpired worker leases. A live crawl BETWEEN BATCHES
   momentarily holds none, which is exactly the window an impatient caller looks in.
-- **`queuePosition`** — a number only while THIS server holds the crawl, null
-  otherwise. `status: "queued"` with `queuePosition: null` is the one genuinely broken
-  state: the server that accepted the crawl is gone and nobody will run it. Hand it to
-  `crawl_resume`, which picks up the same crawl, or retire it with
+- **`queuePosition`** — a number only while the crawl is `queued` with a job waiting
+  to run it (0 = starting now), null otherwise. `status: "queued"` with
+  `queuePosition: null` is the one genuinely broken state: no job will run it. Hand it
+  to `crawl_resume`, which picks up the same crawl, or retire it with
   `crawl_mark_failed`.
+- **`job`** — the engine's work item behind the status: the crawl's latest crawl run,
+  render pass or rules run, with its own status and the engine process that took it,
+  or null when none ever ran. `status` stays the crawl's truth; `job` says who is (or
+  was last) working on it.
 - **`rulesetVersion`** — stamped when the crawl was ACCEPTED. It does not tell you
   whether the rules have run.
 - **`renderPassCount`** — despite the name, it is **how many pages the last render

@@ -46,6 +46,7 @@ import {
   type CrawlConfig,
 } from "../../src/crawl/loop.js";
 import { LOCAL_TENANT } from "../../src/tenant.js";
+import { hostKeyOf } from "../../src/crawl/host-key.js";
 
 function databaseUrl(): string {
   const url = process.env.DATABASE_URL;
@@ -545,7 +546,7 @@ describe("resumeCrawl: the row's stored shape decides", () => {
     await db.insert(crawls).values({
       tenantId: LOCAL_TENANT,
       id: crawlId,
-      siteUrl: stored.siteUrl,
+      siteUrl: stored.siteUrl, hostKey: hostKeyOf(stored.siteUrl),
       config: stored,
       rulesetVersion: "test",
       status: "paused",

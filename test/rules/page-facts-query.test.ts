@@ -19,6 +19,7 @@ import {
 } from "../../src/rules/query/page-facts.js";
 import type { QueryRule } from "../../src/rules/registry/types.js";
 import { LOCAL_TENANT } from "../../src/tenant.js";
+import { hostKeyOf } from "../../src/crawl/host-key.js";
 
 function databaseUrl(): string {
   const url = process.env.DATABASE_URL;
@@ -64,7 +65,7 @@ describe("extraction.not-recorded and v2Gate", () => {
       opts.sitemapFacts === false ? { docsFetched: 0 } : { docsFetched: 0, sitemapFacts: SITEMAP_FACTS };
     await db
       .insert(crawls)
-      .values({ id, tenantId: LOCAL_TENANT, siteUrl: SITE, config: {}, rulesetVersion: "test", discovery });
+      .values({ id, tenantId: LOCAL_TENANT, siteUrl: SITE, hostKey: hostKeyOf(SITE), config: {}, rulesetVersion: "test", discovery });
     created.push(id);
     return id;
   }
@@ -229,7 +230,7 @@ describe("extraction.not-recorded and v2Gate", () => {
 
   it("a crawl with no discovery at all has no sitemapFacts, and fires even with no pages", async () => {
     const id = `crawl_${randomUUID()}`;
-    await db.insert(crawls).values({ tenantId: LOCAL_TENANT, id, siteUrl: SITE, config: {}, rulesetVersion: "test" });
+    await db.insert(crawls).values({ tenantId: LOCAL_TENANT, id, siteUrl: SITE, hostKey: hostKeyOf(SITE), config: {}, rulesetVersion: "test" });
     created.push(id);
     expect(await sitemapFactsRecorded(db, id)).toBe(false);
     expect((await marker().run(db, id)).map((f) => f.evidence)).toEqual([

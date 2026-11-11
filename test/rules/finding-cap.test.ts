@@ -40,6 +40,7 @@ import { runRules } from "../../src/rules/run.js";
 import { mkDiscovery } from "./mk-discovery.js";
 import { CLEAN_META, mkPage } from "./mk-page.js";
 import { LOCAL_TENANT } from "../../src/tenant.js";
+import { hostKeyOf } from "../../src/crawl/host-key.js";
 
 /**
  * The triage a synthetic rule is registered with. The real table
@@ -155,7 +156,7 @@ describe("the finding cap against the database", () => {
     await db.insert(crawls).values({
       tenantId: LOCAL_TENANT,
       id,
-      siteUrl: SITE,
+      siteUrl: SITE, hostKey: hostKeyOf(SITE),
       config: { maxPages: 10_000, userAgent: "AriadneBot-test", ...config },
       discovery: mkDiscovery(),
       rulesetVersion: "test",

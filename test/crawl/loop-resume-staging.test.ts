@@ -34,6 +34,7 @@ import { closeDb, createDb, type Db } from "../../src/db/client.js";
 import { runMigrations } from "../../src/db/migrate.js";
 import { crawls, sitemapHreflang, sitemapMemberships, sitemapUrls } from "../../src/db/schema.js";
 import { LOCAL_TENANT } from "../../src/tenant.js";
+import { hostKeyOf } from "../../src/crawl/host-key.js";
 
 function databaseUrl(): string {
   const url = process.env.DATABASE_URL;
@@ -357,7 +358,7 @@ describe("the write-ahead interrupted mark (28a T5)", () => {
     await db.insert(crawls).values({
       tenantId: LOCAL_TENANT,
       id,
-      siteUrl: "http://mark.invalid/",
+      siteUrl: "http://mark.invalid/", hostKey: hostKeyOf("http://mark.invalid/"),
       config: {},
       rulesetVersion: "test",
       status: "completed",

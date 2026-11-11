@@ -147,6 +147,20 @@ export interface ServiceConfig {
    */
   renderDir?: string;
   /**
+   * Who runs the crawls this service accepts (Phase 28b):
+   *
+   *  - `"in-process"` (the default): the service owns a `JobRunner` and runs
+   *    them itself, one at a time — the crawl jobs it accepts are pinned to its
+   *    own instance and it runs only those. Today's behaviour, the local MCP
+   *    server's, and every test's.
+   *  - `"workers"`: crawl jobs are left unpinned for the worker processes
+   *    (`worker:serve`, Task 5) and this service runs none. `api:serve` sets it.
+   *
+   * Either way `crawl_render` and `crawl_rules` run synchronously here, under a
+   * job pinned to this process.
+   */
+  crawlRunner?: "in-process" | "workers";
+  /**
    * Where the server writes its own diagnostics — a queue pick-up, a crawl that
    * threw, the stack behind a 500. Never the response body (a stack trace in a
    * tenant-visible response is obligation 6's failure). Defaults to

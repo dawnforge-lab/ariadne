@@ -18,6 +18,7 @@ import { mkDiscovery } from "../rules/mk-discovery.js";
 import { mkPage } from "../rules/mk-page.js";
 import { LOCAL_TENANT } from "../../src/tenant.js";
 import { TEST_CREDENTIAL_KEYS } from "../helpers/credential-keys.js";
+import { hostKeyOf } from "../../src/crawl/host-key.js";
 
 function databaseUrl(): string {
   const url = process.env.DATABASE_URL;
@@ -46,7 +47,7 @@ async function seedCrawl(id: string, paths: string[]): Promise<void> {
   await db.insert(crawls).values({
     tenantId: LOCAL_TENANT,
     id,
-    siteUrl: `${SITE}/`,
+    siteUrl: `${SITE}/`, hostKey: hostKeyOf(`${SITE}/`),
     config: { siteUrl: `${SITE}/`, maxPages: 100, userAgent: "AriadneBot-test" },
     discovery: mkDiscovery(),
     rulesetVersion: "test",
@@ -323,7 +324,7 @@ describe("a list crawl names what it did not measure as {id, reason} (27d)", () 
     await db.insert(crawls).values({
       tenantId: LOCAL_TENANT,
       id: listId,
-      siteUrl: `${SITE}/`,
+      siteUrl: `${SITE}/`, hostKey: hostKeyOf(`${SITE}/`),
       config: { siteUrl: `${SITE}/`, maxPages: 100, userAgent: "AriadneBot-test", mode: "list" },
       discovery: { ...mkDiscovery(), sitemapsRead: false },
       rulesetVersion: "test",

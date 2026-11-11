@@ -52,8 +52,8 @@ describe("0037 — crawls carry a tenant", () => {
         await tx.execute(sql`alter table crawls drop column tenant_id`);
         for (const id of ids) {
           await tx.execute(sql`
-            insert into crawls (id, site_url, config_jsonb, ruleset_version)
-            values (${id}, 'https://m37.example', '{}'::jsonb, 'test')`);
+            insert into crawls (id, site_url, host_key, config_jsonb, ruleset_version)
+            values (${id}, 'https://m37.example', 'm37.example', '{}'::jsonb, 'test')`);
         }
 
         await tx.execute(sql.raw(file));
@@ -70,8 +70,8 @@ describe("0037 — crawls carry a tenant", () => {
         const refused = await tx
           .transaction(async (inner) => {
             await inner.execute(sql`
-              insert into crawls (id, site_url, config_jsonb, ruleset_version)
-              values (${`crawl_0037_c_${tag}`}, 'https://m37.example', '{}'::jsonb, 'test')`);
+              insert into crawls (id, site_url, host_key, config_jsonb, ruleset_version)
+              values (${`crawl_0037_c_${tag}`}, 'https://m37.example', 'm37.example', '{}'::jsonb, 'test')`);
           })
           .then(
             () => null,

@@ -12,50 +12,50 @@
  * It is also the only place in the API layer where SQL lives (the plan's rule).
  * A route that needs a number asks a method here; it does not reach for a table.
  *
- * ## The crawl queue, and what a restart means
+ * ## The crawl queue, and what a restart means (Phase 28b)
  *
  * A crawl is started by `POST /crawls`, which must answer immediately with an
  * id — so the `crawls` row is created **when the crawl is accepted**, in status
- * `queued`, and the run happens later. One crawl runs at a time per server
- * process; the rest wait in FIFO order.
+ * `queued`, and the run happens later. The run is a `crawl` job in the `jobs`
+ * table (src/worker/jobs.ts), written in the transaction that writes the row,
+ * so the work is as durable as the crawl: a job, its crawl, its config and its
+ * ruleset stamp, all in the database.
  *
- * The queue is crawl-row-backed (Talos obligation 3: crawl rows are the
- * isolation unit, nothing assumes "the one current crawl"). The row carries the
- * site, the config and the ruleset stamp from the moment of acceptance, so a
- * queued crawl is durable, listable and inspectable exactly like a running one.
- * What is held in memory is only this process's *intent*: an ordered list of
- * ids it means to run.
+ * WHO RUNS IT is `ServiceConfig.crawlRunner`:
  *
- * **Restart behaviour, stated rather than discovered.** A server that dies with
- * work queued leaves `queued` rows behind. This server does NOT adopt them at
- * boot, and the reason is not caution about our own state — it is that another
- * engine process may be running that very crawl right now (multi-instance is
- * the deployment obligation 3 anticipates), and a boot-time sweep cannot tell
- * "my orphan" from "someone else's live work". So:
+ *  - `"in-process"` (the default; the local MCP server and every test): this
+ *    service owns a `JobRunner`, one crawl at a time, and pins the crawl jobs
+ *    it accepts to its own instance. It runs only those — exactly the pre-28b
+ *    contract "only crawls enqueued by this process are run by it" — so two
+ *    services over one database never run each other's crawls.
+ *  - `"workers"` (the API server, Task 5): jobs are unpinned and the service
+ *    runs none; any worker claims them (`FOR UPDATE SKIP LOCKED`).
  *
- *  - the work is **not silently lost**: the row stands, with its config, in
- *    status `queued`, and `GET /crawls` lists it;
- *  - it is **not silently started**: only crawls enqueued by THIS process are
- *    ever run by it;
- *  - and the difference is **visible**: `queuePosition` is a number for a crawl
- *    this process is holding and `null` for a queued row nobody is holding. A
- *    caller that finds `status: "queued"` with `queuePosition: null` is looking
- *    at abandoned work and can re-submit it.
+ * `queuePosition` is read from the jobs, not from memory: 0 while the crawl's
+ * job is running, `1 + n` while it waits behind `n` crawl jobs of its runner's
+ * pool, null when no live crawl job exists — a `queued` row from before 28b, or
+ * one whose job was abandoned, which nobody will run: `crawl_resume` continues
+ * it, `crawl_mark_failed` retires it.
+ *
+ * **Restart.** A queued crawl's job outlives the process that accepted it. An
+ * unpinned job is claimed by whichever worker is up next; before 28b it was
+ * stranded. A crawl job pinned to an in-process service that stopped stays
+ * queued and pinned (the `close()` log line names it) until the reaper (Task 4)
+ * releases a dead instance's work.
  *
  * A crawl left `running` by a killed process is the other half of the same
- * story, and it already had an answer: `markCrawlFailed`, whose lease test is
- * the same one the render driver uses to tell a live crawl from a dead one.
+ * story: `markCrawlFailed`, whose lease test is the one the render driver uses
+ * to tell a live crawl from a dead one, and from Task 4 the reaper.
  *
  * **A paused crawl is not queued work (27b).** `crawl_pause` on a queued crawl
- * takes it out of this process's queue and moves the row to `paused` in one
- * step; on a running crawl it asks the loop, through `crawls.control_request`,
- * to stop. A graceful shutdown (`close()`) is a pause too: the crawl in flight
- * closes `paused` with reason `shutdown`, its frontier intact. Either way the
- * row stays `paused` across a restart and is never adopted — not at boot, and
- * not by a runner that later finds it in its own queue (`runQueued` skips any
- * row that has left `queued`). `crawl_resume` continues it, and only that.
- * `crawl_cancel` ends a crawl for good: `cancelled` is final, and resume
- * refuses it.
+ * moves the row to `paused` and abandons its queued job in one transaction; on
+ * a running crawl it asks the loop, through `crawls.control_request`, to stop.
+ * A graceful shutdown (`close()`) is a pause too: the crawl in flight closes
+ * `paused` with reason `shutdown`, its frontier intact, and its job abandoned.
+ * A runner that claimed a crawl at the instant it was paused finds the row no
+ * longer `queued` (`ClaimLostError`) and writes nothing. `crawl_resume`
+ * continues a paused crawl, and only that. `crawl_cancel` ends a crawl for
+ * good: `cancelled` is final, and resume refuses it.
  */
 import { randomUUID } from "node:crypto";
 import { once } from "node:events";
@@ -69,14 +69,11 @@ import { createGzip } from "node:zlib";
 import { and, asc, desc, eq, getTableColumns, gt, inArray, isNotNull, isNull, sql, type SQL } from "drizzle-orm";
 
 import type { Db } from "../db/client.js";
-import { crawls, frontier, issues, listUrls, pages } from "../db/schema.js";
+import { crawls, frontier, issues, jobs, listUrls, pages } from "../db/schema.js";
 import { deleteCrawlFiles, deleteCrawlRows } from "./crawl-delete.js";
 import {
-  ClaimLostError,
   CRAWL_DEFAULTS,
-  failureReasonOf,
   parseStoredConfig,
-  resumeCrawl,
   storableConfig,
   storedCredentialShape,
   validateCrawlConfig,
@@ -142,11 +139,30 @@ import {
 } from "../crawl/platform.js";
 import { NO_RESPONSE, NO_RESPONSE_ANSWERED, RECHECK_CLEARED } from "../rules/page/status.js";
 import {
+  refuseLiveCrawl,
   RENDER_HTML_DIR,
   RenderPassRefusal,
   runRenderPass,
   type RenderPassSummary,
 } from "../crawl/render/run-render.js";
+import { hostKeyOf } from "../crawl/host-key.js";
+import {
+  busySentences,
+  enqueueJob,
+  JobBusyError,
+  latestJobOf,
+  liveJobOf,
+  queuePositionOf,
+  settleCrawlJob,
+  withPinnedJob,
+  type ClaimedJob,
+  type JobKind,
+  type JobStatus,
+  type Writer,
+} from "../worker/jobs.js";
+import { registerInstance } from "../worker/instance.js";
+import { JobRunner } from "../worker/runner.js";
+import { crawlJobExecutor, storedCredentialsOf } from "../worker/crawl-job.js";
 import { resolveRenderConfig } from "../crawl/render/select.js";
 import {
   hostProbeStarts,
@@ -485,7 +501,10 @@ export interface CrawlAccepted {
   crawlId: string;
   /** The row's status at acceptance. Always `queued`; poll for the live one. */
   status: string;
-  /** Crawls this process must finish first. 0 = it is starting now. */
+  /**
+   * Crawl jobs ahead of this one in its runner's queue, plus one; 0 = it is
+   * starting now (`queuePositionOf`, src/worker/jobs.ts).
+   */
   queuePosition: number;
   /** A list crawl's distinct listed URLs (27c). Absent on a spider crawl. */
   listUrlCount?: number;
@@ -583,13 +602,22 @@ export interface CrawlDetail extends CrawlListItem {
   failureReason: string | null;
   frontier: FrontierCounts;
   /**
-   * This process's queue position, or null.
-   *
-   * Null for every crawl that is not `queued` — and, importantly, null for a
-   * `queued` row this process is NOT holding: work a dead process accepted and
-   * nobody will run. See the module header.
+   * Where the crawl stands in its runner's queue, read from its crawl job: 0
+   * while the job is running (the crawl is starting), `1 + n` while it waits
+   * behind `n` others. Null for every crawl that is not `queued` — and,
+   * importantly, null for a `queued` row with no live crawl job: work nobody
+   * will run (a row older than 28b, or one whose job was abandoned). See the
+   * module header.
    */
   queuePosition: number | null;
+  /**
+   * The engine's bookkeeping behind `status` (Phase 28b): the crawl's latest
+   * job — a `crawl` run, a `render` pass or a `rules` run — its status
+   * (`queued | running | done | failed | abandoned`), and the instance that
+   * claimed it once one has. Null for a crawl no job ever ran. `status` stays
+   * the crawl's truth; this says who is (or was last) working on it.
+   */
+  job: { kind: JobKind; status: JobStatus; claimedBy?: string } | null;
   /**
    * Unexpired leases the crawl holds right now — crawl leases and render leases
    * alike. Non-zero means somebody is working it; zero on a `running` row means
@@ -2391,21 +2419,6 @@ function crawlViewOf(
   };
 }
 
-interface QueueEntry {
-  crawlId: string;
-  /**
-   * Whether this entry CONTINUES a crawl that has already run, rather than
-   * starting one that has not.
-   *
-   * The runner treats the two identically — `resumeCrawl` is what it has always
-   * called, because a queued crawl's frontier is empty and continuing an empty
-   * frontier is a fresh run — so this exists for the log line and nothing else.
-   * "crawl X starting" against a row with 4,000 pages already in it is the kind
-   * of small lie that costs an operator an hour.
-   */
-  resuming: boolean;
-}
-
 /**
  * What a resume of one crawl would have to do — see `owedWork`, which is the
  * only place these numbers are produced and the docblock that argues them.
@@ -2423,12 +2436,6 @@ interface OwedWork {
   renderPending: number;
   /** `pending + expired + resources`: what a continuation would consume. */
   total: number;
-}
-
-interface RunningCrawl {
-  crawlId: string;
-  controller: AbortController;
-  done: Promise<void>;
 }
 
 export class ApiService {
@@ -2462,20 +2469,6 @@ export class ApiService {
   private readonly renderDir: string;
 
   /**
-   * Crawls this process is currently judging — one rules run at a time, per
-   * crawl. See `runRulesForCrawl` for why the serialisation lives here rather
-   * than in the database.
-   */
-  private readonly judging = new Set<string>();
-
-  /**
-   * Crawls this process is currently rendering — one render pass at a time,
-   * per crawl, claimed and released exactly as `judging` is (see
-   * `renderCrawl`). In-process for `judging`'s reasons.
-   */
-  private readonly rendering = new Set<string>();
-
-  /**
    * The crawls' credential VALUES, encrypted in `crawl_credentials` (Phase 28b
    * item 10; it replaced the in-memory store of 27c/27d). The row of a crawl
    * keeps `credentialShape` (names only); the values are written through the
@@ -2495,9 +2488,19 @@ export class ApiService {
    */
   readonly credentialRetentionDays: number;
 
-  /** Crawls accepted by this process and not yet started, in FIFO order. */
-  private readonly waiting: QueueEntry[] = [];
-  private running: RunningCrawl | null = null;
+  /**
+   * Who runs the crawls this service accepts (`ServiceConfig.crawlRunner`):
+   * its own `JobRunner` (`in-process`, the default) or the workers.
+   */
+  private readonly crawlRunner: "in-process" | "workers";
+  /**
+   * This process's `instances` row, registered on first need (a constructor
+   * cannot wait for a database): the pin of its in-process crawl jobs and of
+   * the render and rules jobs it runs, and their `claimed_by`.
+   */
+  private instance: Promise<string> | null = null;
+  /** The in-process runner, built with the instance on first need. */
+  private runner: Promise<JobRunner> | null = null;
   private closed = false;
 
   constructor(
@@ -2545,6 +2548,71 @@ export class ApiService {
     assertRetentionDays(this.credentialRetentionDays, "ServiceConfig.credentialRetentionDays");
     this.exportDir = resolvePath(config.exportDir ?? joinPath(process.cwd(), "exports"));
     this.renderDir = resolvePath(config.renderDir ?? joinPath(process.cwd(), RENDER_HTML_DIR));
+    this.crawlRunner = config.crawlRunner ?? "in-process";
+    if (this.crawlRunner !== "in-process" && this.crawlRunner !== "workers") {
+      throw new Error(
+        `ServiceConfig.crawlRunner must be "in-process" or "workers", got ${JSON.stringify(this.crawlRunner)}`,
+      );
+    }
+  }
+
+  /**
+   * This process's instance id (`instances`), registering it on first call:
+   * role `all` when it runs its own crawls, `api` when the workers do. A failed
+   * registration is not kept: the next call tries again, and this one's caller
+   * sees the error.
+   */
+  instanceId(): Promise<string> {
+    if (this.instance === null) {
+      const registering = registerInstance(this.db, this.crawlRunner === "in-process" ? "all" : "api");
+      this.instance = registering;
+      registering.catch(() => {
+        if (this.instance === registering) this.instance = null;
+      });
+    }
+    return this.instance;
+  }
+
+  /**
+   * The in-process runner — one crawl at a time, over the crawl jobs pinned to
+   * this instance — started on first need. Null in `workers` mode.
+   */
+  private crawlJobRunner(): Promise<JobRunner> | null {
+    if (this.crawlRunner !== "in-process") return null;
+    if (this.runner === null) {
+      const building = this.instanceId().then((instanceId) => {
+        const runner = new JobRunner(this.db, {
+          instanceId,
+          kinds: ["crawl"],
+          pinnedTo: instanceId,
+          concurrency: 1,
+          execute: (job, signal) => this.runQueued(job, signal),
+          log: this.log,
+        });
+        runner.start();
+        return runner;
+      });
+      this.runner = building;
+      building.catch(() => {
+        if (this.runner === building) this.runner = null;
+      });
+    }
+    return this.runner;
+  }
+
+  /**
+   * After a crawl job of this service was enqueued: in-process, wake the runner
+   * and wait for its claim, so an idle server answers `queuePosition: 0` for a
+   * crawl it has just started (before 28b the queue started it synchronously).
+   */
+  private async afterEnqueue(): Promise<void> {
+    const runner = this.crawlJobRunner();
+    if (runner !== null) await (await runner).wake();
+  }
+
+  /** The pin of a crawl job this service enqueues: itself in-process, nobody for the workers. */
+  private async crawlJobPin(): Promise<string | undefined> {
+    return this.crawlRunner === "in-process" ? await this.instanceId() : undefined;
   }
 
   /**
@@ -2882,8 +2950,8 @@ export class ApiService {
 
   /**
    * Accept a crawl: check the body (`checkStartBody`), create its row — and a
-   * list crawl's `list_urls` rows, in the same transaction — and put it in
-   * this process's queue. Takes the body as it arrived — both transports hand
+   * list crawl's `list_urls` rows and its `crawl` job, in the same transaction
+   * — and wake this process's runner when it has one. Takes the body as it arrived — both transports hand
    * it over unparsed, so both are refused by the one parser.
    *
    * Credential values go to the vault, encrypted, in the transaction that
@@ -2903,11 +2971,13 @@ export class ApiService {
     const { judgement, ...config } = check.effective;
 
     const crawlId = `crawl_${randomUUID()}`;
+    const pinnedTo = await this.crawlJobPin();
     await this.db.transaction(async (tx) => {
       await tx.insert(crawls).values({
         id: crawlId,
         tenantId: tenant,
         siteUrl: config.siteUrl,
+        hostKey: hostKeyOf(config.siteUrl),
         config,
         // Null when the request named no judgement — "no overrides", the state
         // every crawl before 27a is in.
@@ -2919,23 +2989,32 @@ export class ApiService {
       // `credentialShape` names them: a reader sees both or neither (28b).
       if (credentials !== undefined) await this.vault.write(tx, tenant, crawlId, credentials);
       // The distinct listed URLs, `position` from 0 in list order (Deviation 2).
-      if (listed === null) return;
-      for (let start = 0; start < listed.urls.length; start += LIST_INSERT_CHUNK) {
-        await tx.insert(listUrls).values(
-          listed.urls
-            .slice(start, start + LIST_INSERT_CHUNK)
-            .map((url, offset) => ({ crawlId, position: start + offset, url })),
-        );
+      if (listed !== null) {
+        for (let start = 0; start < listed.urls.length; start += LIST_INSERT_CHUNK) {
+          await tx.insert(listUrls).values(
+            listed.urls
+              .slice(start, start + LIST_INSERT_CHUNK)
+              .map((url, offset) => ({ crawlId, position: start + offset, url })),
+          );
+        }
       }
+      // The run, as a job in the same transaction: an accepted crawl always
+      // has the work that will run it (28b).
+      await enqueueJob(tx, {
+        tenant,
+        crawlId,
+        kind: "crawl",
+        ...(pinnedTo === undefined ? {} : { pinnedTo }),
+      });
     });
 
-    const entry: QueueEntry = { crawlId, resuming: false };
-    this.waiting.push(entry);
-    this.pump();
+    await this.afterEnqueue();
     return {
       crawlId,
       status: "queued",
-      queuePosition: this.queuePosition(crawlId) ?? 0,
+      // `?? 0`: a job already settled by the time this reads it (a crawl
+      // paused for its credentials at once) started — it is not queued.
+      queuePosition: (await this.queuePosition(crawlId)) ?? 0,
       ...(listed === null
         ? {}
         : { listUrlCount: listed.urls.length, listDuplicates: listed.duplicates }),
@@ -3130,11 +3209,15 @@ export class ApiService {
       // came out of the statement above, so the block's `passAt` and its
       // counts cannot describe two different runs of the pass.
       () => this.recheckCoverage(crawlId, row.recheckPassAt, db),
+      // The job behind the status and the queue position, from the jobs table
+      // (28b) — read beside the rest, so on a snapshot they describe its moment.
+      () => latestJobOf(db, crawlId),
+      () => (row.status === "queued" ? queuePositionOf(db, crawlId) : Promise.resolve(null)),
     ] as const;
-    const [counts, liveLeases, blockedPages, robotsBlockedRows, resourceCounts, recheckCounts] =
+    const [counts, liveLeases, blockedPages, robotsBlockedRows, resourceCounts, recheckCounts, job, queuePosition] =
       db === this.db
         ? await Promise.all([
-            reads[0](), reads[1](), reads[2](), reads[3](), reads[4](), reads[5](),
+            reads[0](), reads[1](), reads[2](), reads[3](), reads[4](), reads[5](), reads[6](), reads[7](),
           ])
         : ([
             await reads[0](),
@@ -3143,6 +3226,8 @@ export class ApiService {
             await reads[3](),
             await reads[4](),
             await reads[5](),
+            await reads[6](),
+            await reads[7](),
           ] as const);
     return {
       crawlId: row.id,
@@ -3168,7 +3253,8 @@ export class ApiService {
       // those words by the surfaces that render it, never invented here.
       failureReason: row.failureReason,
       frontier: counts,
-      queuePosition: row.status === "queued" ? this.queuePosition(crawlId) : null,
+      queuePosition,
+      job,
       liveLeases,
       blockedPages,
       // The overflow is STAMPED on the crawl row (null kept: nobody counted),
@@ -3485,12 +3571,12 @@ export class ApiService {
    *
    *  1. **The row says `running` or `queued`.** Anything else is already
    *     closed, and a terminal crawl is not a crash to clean up after.
-   *  2. **This process is not holding it.** A crawl this server is running, or
-   *     is holding in its queue to run next, is live work whatever the database
-   *     says — and a live crawl between batches momentarily holds no lease at
-   *     all, which is exactly the window an impatient caller would look in.
-   *     `queuePosition` is the same process-truth this server reports on every
-   *     crawl detail, used here as a guard.
+   *  2. **No job is holding it.** A crawl with a `queued` or `running` job —
+   *     waiting for a runner, being run, rendered or judged — is live work
+   *     whatever its leases say, and a live crawl between batches momentarily
+   *     holds no lease at all, which is exactly the window an impatient caller
+   *     would look in. Since 28b this is a database fact (`jobs`), so it holds
+   *     for work any process is doing, not only this one.
    *  3. **It holds no unexpired lease.** A live worker holds leases; a dead
    *     one's expire (see `leaseSecondsFor` in the crawl loop). This is the
    *     same live/dead distinction `runRenderPass`'s guard makes, and it counts
@@ -3498,16 +3584,14 @@ export class ApiService {
    *     to a working render pass and is invisible to the frontier's `leased`
    *     count (see `heldRenderLeases`).
    *
-   * WHY `queued` IS HERE. The queue's restart contract (module header) leaves a
-   * dead process's accepted work as `queued` rows that no process is holding:
-   * visible in `GET /crawls`, `queuePosition: null`, and — until this widening
-   * — un-actionable, because the endpoint asked for `running`. That left the
-   * only orphan the surface could not close, so a caller cleaning up after a
-   * crash had a listing full of work they could neither run nor retire. The
-   * process-truth test in (2) is what makes it safe: this server refuses to
-   * close what it is holding, and it never claims to know about another
-   * process's queue — which is why the row it closes is the one whose status it
-   * read, and the update is conditioned on that status still being there.
+   * WHY `queued` IS HERE. Before 28b a dead process's accepted work was left as
+   * `queued` rows that no process held: visible in `GET /crawls`,
+   * `queuePosition: null`, and — until this widening — un-actionable, because
+   * the endpoint asked for `running`. Such rows still exist (every one older
+   * than 28b, and any whose job was abandoned), and this closes them. The test
+   * in (2) is what makes it safe: a crawl with a live job is refused — and the
+   * row it closes is the one whose status it read, the update conditioned on
+   * that status still being there.
    */
   async markCrawlFailed(tenant: TenantId, crawlId: string): Promise<CrawlDetail> {
     const row = await this.crawlRow(tenant, crawlId);
@@ -3518,7 +3602,11 @@ export class ApiService {
           `whose worker is gone can be marked failed`,
       );
     }
-    if (this.queuePosition(crawlId) !== null) {
+    // Held: a live job is somebody's work — a crawl job queued for a runner or
+    // running on one, or a render or rules job (28b; it was this process's
+    // queue before). The job is the database's word for it, whichever process
+    // holds it.
+    if ((await liveJobOf(this.db, crawlId)) !== null) {
       throw new ServiceError(
         "CONFLICT",
         `crawl ${crawlId} is held by this server (${row.status}): cancel the server or ` +
@@ -3564,12 +3652,10 @@ export class ApiService {
    * The control table, applied with a compare-and-swap on the status this call
    * read (and, on a running crawl, on the request it read):
    *
-   *  - **queued** → `paused` (reason `request`) now, `immediate: true`, and out
-   *    of this process's queue. The removal and the CAS's dispatch are one
-   *    synchronous step after the read, as in `pump`, so the runner cannot
-   *    dequeue the crawl between them. A queued row this process does not hold
-   *    is decided by the CAS alone, and a runner elsewhere that later reaches it
-   *    skips it (`runQueued`, `ClaimLostError`).
+   *  - **queued** → `paused` (reason `request`) now, `immediate: true`, and its
+   *    queued job abandoned in the same transaction (28b), so no runner claims
+   *    it afterwards. A runner that claimed it an instant before finds the row
+   *    `paused` at the loop's own claim (`ClaimLostError`) and writes nothing.
    *  - **running**, nothing pending → `control_request = 'pause'`,
    *    `immediate: false`: the loop stops at its next poll. With a pause
    *    already pending, the same answer and no write. With a cancel pending,
@@ -3589,19 +3675,24 @@ export class ApiService {
     const pending = readControlRequest(row.controlRequest, crawlId);
     switch (row.status) {
       case "queued": {
-        // From here to the UPDATE's dispatch there is no `await`.
-        this.dropFromQueue(crawlId);
-        const moved = await this.db
-          .update(crawls)
-          .set({
-            status: "paused",
-            pauseReason: "request",
-            // As the loop's own stopped close writes it: when the crawl stopped.
-            finishedAt: new Date(),
-            controlRequest: null,
-          })
-          .where(and(eq(crawls.id, crawlId), eq(crawls.status, "queued")));
-        requireMoved(moved, crawlId, row.status, "pause");
+        // The status and the queued job in one transaction (Review Focus 3): a
+        // runner either claimed the job before this — and its loop's claim then
+        // finds the row `paused` (`ClaimLostError`) and writes nothing — or
+        // finds no queued job to claim. Never both paused and running.
+        await this.db.transaction(async (tx) => {
+          const moved = await tx
+            .update(crawls)
+            .set({
+              status: "paused",
+              pauseReason: "request",
+              // As the loop's own stopped close writes it: when the crawl stopped.
+              finishedAt: new Date(),
+              controlRequest: null,
+            })
+            .where(and(eq(crawls.id, crawlId), eq(crawls.status, "queued")));
+          requireMoved(moved, crawlId, row.status, "pause");
+          await settleCrawlJob(tx, crawlId, "abandoned", ["queued"]);
+        });
         return { crawlId, status: "paused", controlRequested: null, immediate: true };
       }
       case "running": {
@@ -3653,19 +3744,20 @@ export class ApiService {
    * cancel is FINAL: `crawl_resume` refuses a cancelled crawl, and what it
    * crawled stays judgeable.
    *
-   * The control table, with `pauseCrawl`'s compare-and-swap and its one
-   * synchronous step for a queued crawl this process holds:
+   * The control table, with `pauseCrawl`'s compare-and-swap:
    *
-   *  - **queued** → `cancelled` now (`cancelled_at`), out of the queue.
+   *  - **queued** → `cancelled` now (`cancelled_at`), its queued job abandoned
+   *    in the same transaction (28b).
    *  - **running** → `control_request = 'cancel'`, `immediate: false`, whether
    *    nothing or a pause was pending (a cancel outranks a pause). With a cancel
    *    already pending, the same answer and no write.
    *  - **paused** → `cancelled` now, `cancelled_at` set, `pause_reason` null.
    *  - **finished / failed / cancelled** → 409 naming the status.
    *
-   * Refused (409) while this process renders or judges the crawl
-   * (`refuseWhileBusy`): neither can be interrupted, and a cancel would change
-   * the crawl under a pass that has already read it.
+   * Refused (409) while a render pass or a rules run holds the crawl
+   * (`refuseWhileBusy`, a running `render` or `rules` job): neither can be
+   * interrupted, and a cancel would change the crawl under a pass that has
+   * already read it.
    */
   async cancelCrawl(tenant: TenantId, crawlId: string): Promise<CrawlControlOut> {
     const row = await this.crawlRow(tenant, crawlId);
@@ -3673,14 +3765,17 @@ export class ApiService {
     if (row.status !== "queued" && row.status !== "running" && row.status !== "paused") {
       throw settledRefusal(crawlId, row.status, "cancelled");
     }
-    this.refuseWhileBusy(crawlId, "crawl_cancel");
+    await this.refuseWhileBusy(this.db, crawlId, "crawl_cancel");
     switch (row.status) {
       case "queued":
       case "paused": {
-        // From here to the transaction's dispatch there is no `await`.
-        if (row.status === "queued") this.dropFromQueue(crawlId);
         const now = new Date();
         await this.db.transaction(async (tx) => {
+          // Again, under the row lock: a render pass or a rules run that took
+          // the crawl since the check above is seen here, and one that comes
+          // after waits for this transaction (its job's key lock on the row).
+          await lockCrawlRow(tx, crawlId);
+          await this.refuseWhileBusy(tx, crawlId, "crawl_cancel");
           const moved = await tx
             .update(crawls)
             .set({
@@ -3695,8 +3790,10 @@ export class ApiService {
             .where(and(eq(crawls.id, crawlId), eq(crawls.status, row.status)));
           requireMoved(moved, crawlId, row.status, "cancel");
           // A cancelled crawl never runs again: its credentials go with the
-          // status, in one transaction (Deviation 9, 28b).
+          // status, in one transaction (Deviation 9, 28b) — and so does a
+          // queued crawl's job (Review Focus 3, as `pauseCrawl`).
           await this.vault.remove(tx, crawlId);
+          await settleCrawlJob(tx, crawlId, "abandoned", ["queued"]);
         });
         return { crawlId, status: "cancelled", controlRequested: null, immediate: true };
       }
@@ -3722,9 +3819,11 @@ export class ApiService {
    *
    * Refusals, in order: confirm (400), no such crawl (404), `queued` or
    * `running` (409), a pending control request (409), a render pass or rules
-   * run on this server (409), live leases (409). The transaction locks the
-   * crawl row and checks the status and the request again, so a crawl that was
-   * resumed between the check and the delete is refused, not deleted.
+   * run holding it (409, a running `render` or `rules` job), live leases
+   * (409). The transaction locks the crawl row and checks the status, the
+   * request and the jobs again, so a crawl that was resumed, rendered or
+   * judged between the check and the delete is refused, not deleted. Its
+   * settled jobs are among its rows (`jobs`, 28b).
    *
    * The files go after the commit; a file that cannot be removed throws with
    * every path left on disk (`deleteCrawlFiles`), the rows already being gone.
@@ -3739,7 +3838,7 @@ export class ApiService {
     }
     const row = await this.crawlRow(tenant, crawlId);
     refuseDeleteWhile(crawlId, row.status, readControlRequest(row.controlRequest, crawlId));
-    this.refuseWhileBusy(crawlId, "crawl_delete");
+    await this.refuseWhileBusy(this.db, crawlId, "crawl_delete");
     const live = await this.liveLeaseCount(crawlId);
     if (live > 0) {
       throw new ServiceError(
@@ -3761,6 +3860,10 @@ export class ApiService {
         throw new ServiceError("NOT_FOUND", `no such crawl '${clip(crawlId)}'`);
       }
       refuseDeleteWhile(crawlId, current.status, readControlRequest(current.controlRequest, crawlId));
+      // And the passes, again under the row lock: a render or rules job that
+      // started since the check above is seen here, and one that comes after
+      // waits on this lock and then finds no crawl (28b).
+      await this.refuseWhileBusy(tx, crawlId, "crawl_delete");
       // `crawl_credentials` is one of the crawl's child tables, so the stored
       // credentials go in this transaction with every other row (Deviation 9).
       return await deleteCrawlRows(tx, crawlId);
@@ -3768,12 +3871,6 @@ export class ApiService {
 
     const files = await deleteCrawlFiles(crawlId, slug(crawlId), this.renderDir, this.exportDir, tenant);
     return { crawlId, rows, files };
-  }
-
-  /** Take a crawl out of this process's wait queue, if it is there. Synchronous. */
-  private dropFromQueue(crawlId: string): void {
-    const index = this.waiting.findIndex((e) => e.crawlId === crawlId);
-    if (index >= 0) this.waiting.splice(index, 1);
   }
 
   /**
@@ -3836,9 +3933,9 @@ export class ApiService {
    * ## The refusals, and what each one is protecting
    *
    *  1. **No such crawl** — 404. There is nothing to continue.
-   *  2. **This server is holding it** — 409. `queuePosition` is the same
-   *     process-truth every crawl detail reports, and it also refuses a second
-   *     resume of a crawl already waiting in this queue.
+   *  2. **A crawl job holds it** — 409. A `queued` or `running` crawl job (28b,
+   *     the database's word, whichever process holds it): the crawl is running
+   *     or waiting to, and a second resume of it is refused too.
    *  3. **A live worker holds leases** — 409, naming the count. An unexpired
    *     `leased_until` is the frontier's own live-worker detector, and it is the
    *     test `markCrawlFailed` and the render driver already make.
@@ -3858,9 +3955,9 @@ export class ApiService {
    *  7. **The crawl is `cancelled`** — 409, first of all the checks after the
    *     read. A cancel is final (27b): it is what an agent asks for when it
    *     wants the crawl to stop for good, and a resume would undo it.
-   *  8. **A render pass or a rules run holds it** — 409 naming which
-   *     (`refuseWhileBusy`): a resume would change the crawl under a pass that
-   *     has already read it.
+   *  8. **A render pass or a rules run holds it** — 409 naming which (a
+   *     running `render` or `rules` job): a resume would change the crawl under
+   *     a pass that has already read it.
    *  9. **A pause or cancel is pending on it** — 409 naming the request. A
    *     request lives only on a `running` row, and one this server does not
    *     hold is an orphan whose worker died before answering it. Queueing it
@@ -3948,21 +4045,19 @@ export class ApiService {
           `What it crawled stays judgeable; start a new crawl to continue the site`,
       );
     }
-    this.refuseWhileBusy(crawlId, "crawl_resume");
-
-    // FIRST, BECAUSE IT IS FREE AND BECAUSE THE NEXT CHECKS ARE NOT. This one is
-    // an array lookup in this process; `isUrlAllowed` below resolves the host,
-    // which is a DNS round trip spent on a request this server was always going
-    // to refuse. The three policy checks keep their own order relative to each
-    // other (allowlist before URL policy, per `startCrawl`) — this is inserted
-    // ahead of them, not shuffled among them.
-    if (this.queuePosition(crawlId) !== null) {
-      throw new ServiceError(
-        "CONFLICT",
-        `crawl ${crawlId} is already held by this server ('${row.status}'): it is ` +
-          `running now or waiting to run, and a resume would be a second worker on ` +
-          `the same crawl`,
-      );
+    // Refusals 8 and 2, from one read of the crawl's live job (28b): a render
+    // pass or a rules run holding it, then a crawl job queued or running for
+    // it. FIRST, BECAUSE IT IS CHEAP AND BECAUSE THE NEXT CHECKS ARE NOT:
+    // `isUrlAllowed` below resolves the host, which is a DNS round trip spent
+    // on a request this server was always going to refuse. The three policy
+    // checks keep their own order relative to each other (allowlist before URL
+    // policy, per `startCrawl`) — this is inserted ahead of them.
+    const holder = await liveJobOf(this.db, crawlId);
+    if (holder !== null && holder.kind !== "crawl") {
+      throw new ServiceError("CONFLICT", busySentences.busy(crawlId, "crawl_resume", holder.kind));
+    }
+    if (holder !== null) {
+      throw new ServiceError("CONFLICT", busySentences.held(crawlId, row.status));
     }
 
     // Refusal 9: a request pending on a crawl nobody here holds. Read through
@@ -4069,11 +4164,13 @@ export class ApiService {
     // that is refused stores nothing. A mistyped password sent with a refused
     // resume never replaces the right one.
     const toStore = sent !== undefined && shapeOf(sent) !== null ? sent : undefined;
+    const pinnedTo = await this.crawlJobPin();
     await this.db.transaction(async (tx) => {
-      // Again, synchronously before the claim: the check at the top was several
-      // `await`s ago, and a render pass or a rules run may have claimed the crawl
-      // since. Once the row says `queued`, both refuse it.
-      this.refuseWhileBusy(crawlId, "crawl_resume");
+      // The check at the top was several `await`s ago, and a render pass or a
+      // rules run may have taken the crawl since: the job enqueued below is
+      // refused by the database then (one live job per crawl), with the same
+      // sentence, and this transaction — the claim with it — rolls back. Once
+      // it commits the row says `queued` with a job, and both refuse it.
       const claimed = await tx
         .update(crawls)
         .set({
@@ -4153,14 +4250,20 @@ export class ApiService {
             `Nothing was queued; read crawl_status and try again`,
         );
       }
+      // The run itself, in the claim's transaction (28b): a queued crawl
+      // always has the job that will run it.
+      await enqueueJob(tx, {
+        tenant,
+        crawlId,
+        kind: "crawl",
+        ...(pinnedTo === undefined ? {} : { pinnedTo }),
+      });
       // Credentials sent with the resume replace the stored copy (Deviation 9),
-      // bumping its generation: the runner reads them at dequeue.
+      // bumping its generation: the runner reads them when it claims the job.
       if (toStore !== undefined) await this.vault.write(tx, tenant, crawlId, toStore);
     });
-    const entry: QueueEntry = { crawlId, resuming: true };
-    this.waiting.push(entry);
-    this.pump();
-    return { crawlId, status: "queued", queuePosition: this.queuePosition(crawlId) ?? 0 };
+    await this.afterEnqueue();
+    return { crawlId, status: "queued", queuePosition: (await this.queuePosition(crawlId)) ?? 0 };
   }
 
   /**
@@ -4214,42 +4317,13 @@ export class ApiService {
     return held.credentials;
   }
 
-  /**
-   * A vault read, for a crawl whose row names `required`: the values, or why
-   * there are none this server can use, as a phrase an answer can carry (no
-   * value, no key). An unreadable copy is logged with its reason, once per
-   * read. A readable copy of another shape than the row's is our defect —
-   * both are written in one transaction — and throws, naming the shapes only.
-   */
+  /** `storedCredentialsOf` (src/worker/crawl-job.ts), logged to this server's log. */
   private storedCredentials(
     crawlId: string,
     required: CredentialShape,
     read: CredentialRead,
   ): { kind: "ok"; credentials: CrawlCredentials } | { kind: "missing"; why: string } {
-    switch (read.kind) {
-      case "none":
-        return { kind: "missing", why: "this server has no stored copy of them" };
-      case "unreadable":
-        this.log(`api: crawl ${crawlId}: its stored credentials cannot be read (${read.reason})`);
-        return {
-          kind: "missing",
-          why:
-            read.reason === "unknown-key"
-              ? "the stored copy was encrypted under a key this server does not hold"
-              : "the stored copy does not authenticate under this server's keys",
-        };
-      case "ok": {
-        const found = shapeOf(read.credentials);
-        if (!sameShape(found, required)) {
-          throw new Error(
-            `crawl ${crawlId}: its stored credentials are ${found === null ? "empty" : describeShape(found)}, ` +
-              `and its row names ${describeShape(required)}; the two are written together, so this ` +
-              "is a defect, not a request to fix",
-          );
-        }
-        return { kind: "ok", credentials: read.credentials };
-      }
-    }
+    return storedCredentialsOf(crawlId, required, read, this.log);
   }
 
   /**
@@ -4335,11 +4409,12 @@ export class ApiService {
    * sentence rather than a database question: see `checkRenderUrls`.
    *
    * The list is validated BEFORE the driver's own three refusals are reached,
-   * but AFTER the in-process claim: `rendering` is taken first (27b I3,
-   * claim-first), so a crawl already rendering on this server is refused 409
-   * before a malformed `urls` list is refused 400. Past the claim, a malformed
-   * request is refused as a malformed request; whether the crawl is live is a
-   * fact about the world and is the driver's to state.
+   * but AFTER the claim: the `render` job is taken first (27b I3, claim-first;
+   * a job row since 28b), so a crawl already rendering is refused 409 before a
+   * malformed `urls` list is refused 400. Past the claim, a malformed request is
+   * refused as a malformed request; whether the crawl is live is a fact about
+   * the world and is the driver's to state — and when the claim itself meets
+   * the crawl's own crawl job, the driver's guard (`refuseLiveCrawl`) states it.
    */
   async renderCrawl(
     tenant: TenantId,
@@ -4353,24 +4428,76 @@ export class ApiService {
     // Ownership BEFORE the busy check below: "a render pass is running for
     // crawl X" is a fact about X, and another tenant's X answers as missing.
     await this.assertCrawl(tenant, crawlId);
-    // The ownership read comes first; the check and the claim are then adjacent
-    // and synchronous, with no `await` between them, as
-    // `runRulesForCrawl` claims `judging` (see there for the window a claim
-    // taken after the reads left open): while the call runs, `refuseWhileBusy`
-    // refuses the commands that would change the crawl under it (resume,
-    // cancel, a crawl config change). The driver's own render-lease check
-    // would also refuse a second pass, but only once the first has leased a
-    // row; this hold covers the whole call, reads included.
-    if (this.rendering.has(crawlId)) {
-      throw new ServiceError(
-        "CONFLICT",
-        `crawl ${crawlId}: a render pass is running for it on this server, and two ` +
-          `passes may not share a crawl. Wait for crawl_render to answer, then ask again`,
-      );
-    }
-    this.rendering.add(crawlId);
+    // The ownership read comes first; then the claim, before any other read,
+    // as `runRulesForCrawl` claims (see there for the window a claim taken
+    // after the reads left open): a `render` job pinned to this process (28b,
+    // `withPinnedJob`), whose insert IS the busy check — one live job per
+    // crawl. While the call runs, `refuseWhileBusy` refuses the commands that
+    // would change the crawl under it (resume, cancel, a crawl config change).
+    // The driver's own render-lease check would also refuse a second pass, but
+    // only once the first has leased a row; this hold covers the whole call,
+    // reads included.
+    const instanceId = await this.instanceId();
     let summary: RenderPassSummary;
     try {
+      summary = await withPinnedJob(this.db, { tenant, crawlId, kind: "render", instanceId }, () =>
+        this.renderUnderJob(tenant, crawlId, input, sent),
+      );
+    } catch (error) {
+      // The crawl's own crawl job holds it: it is queued or running, and the
+      // pass refuses it in the driver's own words, as it always did.
+      if (error instanceof JobBusyError && error.holder.kind === "crawl") {
+        try {
+          await refuseLiveCrawl(this.db, crawlId);
+        } catch (refusal) {
+          throw mapRenderPassError(refusal, crawlId, this.log);
+        }
+      }
+      throw error;
+    }
+
+    return {
+      crawlId: summary.crawlId,
+      rendered: summary.rendered,
+      failures: summary.failures,
+      unrendered: summary.unrendered,
+      elapsedMs: summary.elapsedMs,
+      requests: summary.requests,
+      // PROJECTED, not passed through: `detail` is the resolver's own message
+      // (`UnpinnedHost.detail`) and goes to the log under this crawl's id,
+      // the way the launch refusal's does below. The caller gets the host and
+      // the sentence url-policy wrote for them.
+      unpinnedHosts: summary.unpinnedHosts.map(({ host, reason, detail }) => {
+        if (detail !== null) {
+          this.log(`api: render launch crawl ${crawlId} did not pin ${host} — ${reason}: ${detail}`);
+        }
+        return { host, reason };
+      }),
+      // The selection's URL list is a page list, and a page list is not a
+      // response body (obligation 1: never a full export inline). Its size is.
+      // `mode` rides beside it because the four numbers under it mean nothing
+      // without it: on an explicit pass they are null, and a caller that reads
+      // `budget: null` as "no budget was enforced" is reading it correctly.
+      selection: {
+        mode: summary.selection.mode,
+        selected: summary.selection.selected.length,
+        budget: summary.selection.budget,
+        suspects: summary.selection.suspects,
+        sampled: summary.selection.sampled,
+        truncated: summary.selection.truncated,
+      },
+    };
+  }
+
+  /** `renderCrawl`'s work, under its `render` job. */
+  private async renderUnderJob(
+    tenant: TenantId,
+    crawlId: string,
+    input: RenderCrawlInput,
+    sent: CrawlCredentials | undefined,
+  ): Promise<RenderPassSummary> {
+    let summary: RenderPassSummary;
+    {
       const row = await this.crawlRow(tenant, crawlId);
 
       let config: CrawlConfig;
@@ -4423,43 +4550,10 @@ export class ApiService {
           await this.vault.write(tx, tenant, crawlId, credentials);
         });
       }
-    } finally {
-      // Released on every path — a refused read, a refused list, a failed
-      // pass — for `judging`'s reason.
-      this.rendering.delete(crawlId);
     }
-
-    return {
-      crawlId: summary.crawlId,
-      rendered: summary.rendered,
-      failures: summary.failures,
-      unrendered: summary.unrendered,
-      elapsedMs: summary.elapsedMs,
-      requests: summary.requests,
-      // PROJECTED, not passed through: `detail` is the resolver's own message
-      // (`UnpinnedHost.detail`) and goes to the log under this crawl's id,
-      // the way the launch refusal's does below. The caller gets the host and
-      // the sentence url-policy wrote for them.
-      unpinnedHosts: summary.unpinnedHosts.map(({ host, reason, detail }) => {
-        if (detail !== null) {
-          this.log(`api: render launch crawl ${crawlId} did not pin ${host} — ${reason}: ${detail}`);
-        }
-        return { host, reason };
-      }),
-      // The selection's URL list is a page list, and a page list is not a
-      // response body (obligation 1: never a full export inline). Its size is.
-      // `mode` rides beside it because the four numbers under it mean nothing
-      // without it: on an explicit pass they are null, and a caller that reads
-      // `budget: null` as "no budget was enforced" is reading it correctly.
-      selection: {
-        mode: summary.selection.mode,
-        selected: summary.selection.selected.length,
-        budget: summary.selection.budget,
-        suspects: summary.selection.suspects,
-        sampled: summary.selection.sampled,
-        truncated: summary.selection.truncated,
-      },
-    };
+    // The job is settled by `withPinnedJob` on every path — a refused read, a
+    // refused list, a failed pass — for `runRulesForCrawl`'s reason.
+    return summary;
   }
 
   /**
@@ -4487,30 +4581,22 @@ export class ApiService {
    * holds only for a single writer. The friendlier outcome — both runs abort
    * on `issues_dedupe` — is luck, not a guard.
    *
-   * ## Why the lock is in this process and not in Postgres
+   * ## The hold is a row, not a lock
    *
-   * A `pg_advisory_xact_lock` was the obvious answer and it does not work
-   * here: it is released when its transaction ends, and a rules run is not one
-   * transaction. `runRules` issues its `ANALYZE`s, its delete, its page-cursor
-   * selects and its finding inserts as separate autocommitted statements, and
-   * wraps only each metric rule's delete+insert pair. A lock taken inside any
-   * one of those covers that statement and nothing else.
+   * A `pg_advisory_xact_lock` does not work here: it is released when its
+   * transaction ends, and a rules run is not one transaction. `runRules` issues
+   * its `ANALYZE`s, its delete, its page-cursor selects and its finding inserts
+   * as separate autocommitted statements. A SESSION-level `pg_advisory_lock`
+   * spans statements only for the connection that took it, and `Db` is a pool.
+   * Until 28b the hold was therefore an in-process set, which serialised runs
+   * within one process only.
    *
-   * A SESSION-level `pg_advisory_lock` does span statements — but only for the
-   * connection that took it, and `Db` is a pool that hands out a connection
-   * per statement. Holding one across the run would mean pinning a client for
-   * the run's whole duration and threading it through `runRules`, changing the
-   * rules runner's contract to buy a guard for a case a single-process server
-   * does not have. So the hold lives here, in memory, keyed by crawl id.
-   *
-   * WHAT THAT IS HONEST ABOUT: this serialises runs **within this process
-   * only**. Two Ariadne servers pointed at one database can still interleave
-   * two runs over one crawl, and nothing here would notice. That is the same
-   * boundary the queue already stands on — `markCrawlFailed` refuses work
-   * "held by this server" from process truth and explicitly never claims to
-   * know another process's queue — so this adds no assumption the surface did
-   * not already make. A multi-process deployment needs a database-level lock,
-   * and the place for it is a pinned client inside `runRules`, not here.
+   * Since 28b it is a `rules` job pinned to this process (`withPinnedJob`): a
+   * row inserted `running` before the status read, refused by the database's
+   * one-live-job-per-crawl index when anything already holds the crawl — a
+   * rules run or a render pass on any process, or the crawl's own crawl job —
+   * and settled when the run ends, whichever way. Two servers over one
+   * database can no longer interleave two runs over one crawl.
    *
    * The refusal is a 409 rather than a wait, matching the render path: the
    * caller asked for a run that would produce a judgement, and the answer
@@ -4522,9 +4608,8 @@ export class ApiService {
     // crawl, and another tenant's crawl answers as missing. The claim below
     // still precedes the status read, which is the window it closes.
     await this.assertCrawl(tenant, crawlId);
-    // The ownership read comes first; the check and the claim are then adjacent
-    // and synchronous, with no `await` between them, and the status read still
-    // follows the claim. Two
+    // The ownership read comes first; then the claim (the job insert, which is
+    // the check), and the status read follows the claim. Two
     // callers cannot both see an unheld crawl, and — the reason the claim
     // comes before the status read rather than after it — no command that
     // `refuseWhileBusy` guards (resume, cancel, a crawl config change) can
@@ -4532,23 +4617,33 @@ export class ApiService {
     // in flight already meets the hold. A claim taken after the read left that
     // window open, and a resume landing in it moved the crawl to `queued`
     // under a run that had read it `paused`.
-    if (this.judging.has(crawlId)) {
-      throw new ServiceError(
-        "CONFLICT",
-        `crawl ${crawlId} is already being judged by this server: a rules run rewrites ` +
-          `the crawl's issues, so two runs would leave the table holding half of each. ` +
-          `Wait for the run in flight and read its summary, or ask again when it ends`,
+    const instanceId = await this.instanceId();
+    try {
+      return await withPinnedJob(this.db, { tenant, crawlId, kind: "rules", instanceId }, () =>
+        this.judgeUnderJob(tenant, crawlId),
       );
+    } catch (error) {
+      // The crawl's own crawl job holds it: the crawl is queued or running,
+      // and the answer is the status refusal it always was.
+      if (error instanceof JobBusyError && error.holder.kind === "crawl") {
+        const [now] = await this.db
+          .select({ status: crawls.status })
+          .from(crawls)
+          .where(eq(crawls.id, crawlId));
+        if (now !== undefined && (now.status === "queued" || now.status === "running")) {
+          throw rulesWhileLive(crawlId, now.status);
+        }
+      }
+      throw error;
     }
-    this.judging.add(crawlId);
+  }
+
+  /** `runRulesForCrawl`'s work, under its `rules` job. */
+  private async judgeUnderJob(tenant: TenantId, crawlId: string): Promise<RunSummary> {
     try {
       const row = await this.crawlRow(tenant, crawlId);
       if (row.status === "queued" || row.status === "running") {
-        throw new ServiceError(
-          "CONFLICT",
-          `crawl ${crawlId} is '${row.status}': the rules may only run over a crawl that ` +
-            `has stopped, or they would judge a site that is still being fetched`,
-        );
+        throw rulesWhileLive(crawlId, row.status);
       }
       // Ruling 11: a crawl with no discovery evidence and no pages never ran —
       // it was paused or cancelled while still queued — so there is nothing to
@@ -4597,12 +4692,11 @@ export class ApiService {
         throw new ServiceError("NOT_FOUND", `no such crawl '${crawlId}'`);
       }
       throw error;
-    } finally {
-      // Released on the failure path too: a run that threw is a run that is no
-      // longer writing, and a crawl no one could ever judge again because one
-      // run died would be a worse failure than the one being guarded against.
-      this.judging.delete(crawlId);
     }
+    // The job is released on the failure path too (`withPinnedJob` settles it
+    // `failed`): a run that threw is a run that is no longer writing, and a
+    // crawl no one could ever judge again because one run died would be a
+    // worse failure than the one being guarded against.
   }
 
   /**
@@ -4754,7 +4848,7 @@ export class ApiService {
     // doing to the crawl is a fact about it, and another tenant's crawl
     // answers as missing.
     await this.assertCrawl(tenant, crawlId);
-    this.refuseWhileConfigBusy(crawlId, crawlSet !== null);
+    await this.refuseWhileConfigBusy(this.db, crawlId, crawlSet !== null);
 
     const { findingCap: capPatch, ...blockPatch } = judgementPatch ?? {};
     await this.db.transaction(async (tx) => {
@@ -4861,7 +4955,7 @@ export class ApiService {
             );
           }
         }
-        this.refuseWhileStarting(crawlId, row.status, changed.length > 0);
+        await this.refuseWhileStarting(tx, crawlId, row.status, changed.length > 0);
         const maxPages = changes["maxPages"];
         if (typeof maxPages === "number" && maxPages < row.pagesCrawled) {
           throw new ServiceError(
@@ -4958,11 +5052,12 @@ export class ApiService {
         judgementWrite = { judgement: storableBlock(block) };
       }
 
-      // Again, synchronously before the write: the check above was before an
-      // `await`, and a pass may have claimed the crawl since — or the runner
-      // may have dequeued it.
-      this.refuseWhileConfigBusy(crawlId, crawlSet !== null);
-      this.refuseWhileStarting(crawlId, row.status, crawlChanges);
+      // Again, before the write: the check above was several `await`s ago, and
+      // a pass may have claimed the crawl since — or a runner its crawl job.
+      // Read under this transaction's row lock, which a new job's key lock on
+      // the row waits behind, so none can start between here and the commit.
+      await this.refuseWhileConfigBusy(tx, crawlId, crawlSet !== null);
+      await this.refuseWhileStarting(tx, crawlId, row.status, crawlChanges);
       // The values with the shape that names them, in this transaction (28b).
       if (credentialWrite?.kind === "write") {
         await this.vault.write(tx, tenant, crawlId, credentialWrite.values);
@@ -5140,46 +5235,49 @@ export class ApiService {
    * either pass for a `crawl` change (`refuseWhileBusy`), a rules run alone for
    * a judgement-only one, which a render pass does not read.
    */
-  private refuseWhileConfigBusy(crawlId: string, touchesCrawl: boolean): void {
-    if (touchesCrawl) this.refuseWhileBusy(crawlId, "crawl_config_set");
-    else this.refuseWhileJudging(crawlId);
+  private async refuseWhileConfigBusy(reader: Writer, crawlId: string, touchesCrawl: boolean): Promise<void> {
+    if (touchesCrawl) await this.refuseWhileBusy(reader, crawlId, "crawl_config_set");
+    else await this.refuseWhileJudging(reader, crawlId);
   }
 
   /**
-   * The refusal `crawl_resume` and `crawl_cancel` give while this process
-   * renders or judges the crawl (27b). Neither pass can be interrupted in this
-   * phase, and each has already read the crawl it is working on, so a command
-   * that would change the crawl under it is refused (409), naming the
-   * operation and every pass that holds it. In-process, as the holds are (see
-   * `runRulesForCrawl` for why).
+   * The refusal `crawl_resume`, `crawl_cancel`, `crawl_delete` and a crawl
+   * config change give while a render pass or a rules run holds the crawl
+   * (27b). Neither pass can be interrupted, and each has already read the
+   * crawl it is working on, so a command that would change the crawl under it
+   * is refused (409), naming the operation and the pass. Since 28b the hold is
+   * the crawl's `running` render or rules job, read on `reader` — the pool, or
+   * a transaction that has locked the crawl row so no new job can start.
    */
-  private refuseWhileBusy(crawlId: string, operation: string): void {
-    const holds: string[] = [];
-    if (this.judging.has(crawlId)) holds.push("rules are running");
-    if (this.rendering.has(crawlId)) holds.push("a render pass is running");
-    if (holds.length === 0) return;
-    throw new ServiceError(
-      "CONFLICT",
-      `${operation} is refused for crawl ${crawlId}: ${holds.join(" and ")} on this ` +
-        `server, and neither can be interrupted. Wait for it to answer, then ask again`,
-    );
+  private async refuseWhileBusy(reader: Writer, crawlId: string, operation: string): Promise<void> {
+    const holder = await liveJobOf(reader, crawlId);
+    if (holder === null || holder.kind === "crawl") return;
+    throw new ServiceError("CONFLICT", busySentences.busy(crawlId, operation, holder.kind));
   }
 
   /**
    * The refusal `setCrawlConfig` gives for a crawl change to a `queued` crawl
-   * this server's runner has already dequeued (27b). `runQueued` reads the
-   * stored config at dequeue, while the row still says `queued`, so a change
-   * accepted now would answer 200 and not apply to the run that is starting.
-   * Checked after the row read and again synchronously before the write.
+   * whose crawl job a runner has already claimed (27b; a job fact since 28b).
+   * The runner reads the stored config when it claims, while the row still
+   * says `queued`, so a change accepted now would answer 200 and not apply to
+   * the run that is starting. Checked after the row read and again inside the
+   * write's transaction, after the row lock.
    *
-   * WHAT IT DOES NOT CLOSE: a dequeue between that last check and this
+   * WHAT IT DOES NOT CLOSE: a claim between that last check and this
    * transaction's commit reads the config as committed before it. Postgres
    * would have to hold the runner's read behind this row lock to close that,
    * and a plain read is not blocked by one; the window is the write's own
-   * round trip. In-process, as the queue is.
+   * round trip.
    */
-  private refuseWhileStarting(crawlId: string, status: string, changes: boolean): void {
-    if (changes && status === "queued" && this.running?.crawlId === crawlId) {
+  private async refuseWhileStarting(
+    reader: Writer,
+    crawlId: string,
+    status: string,
+    changes: boolean,
+  ): Promise<void> {
+    if (!changes || status !== "queued") return;
+    const holder = await liveJobOf(reader, crawlId);
+    if (holder?.kind === "crawl" && holder.status === "running") {
       throw new ServiceError(
         "CONFLICT",
         `crawl ${crawlId} is starting now: this server has taken it off its queue and ` +
@@ -5189,14 +5287,11 @@ export class ApiService {
     }
   }
 
-  /** The refusal `setCrawlConfig` gives while this process is judging the crawl. */
-  private refuseWhileJudging(crawlId: string): void {
-    if (this.judging.has(crawlId)) {
-      throw new ServiceError(
-        "CONFLICT",
-        `rules are running for crawl ${crawlId}: its judgement cannot change under a run ` +
-          "that has already read it. Wait for crawl_rules to answer, then set it again",
-      );
+  /** The refusal `setCrawlConfig` gives while a rules run holds the crawl. */
+  private async refuseWhileJudging(reader: Writer, crawlId: string): Promise<void> {
+    const holder = await liveJobOf(reader, crawlId);
+    if (holder?.kind === "rules") {
+      throw new ServiceError("CONFLICT", busySentences.judgingConfig(crawlId));
     }
   }
 
@@ -6824,26 +6919,33 @@ export class ApiService {
   }
 
   /**
-   * Stop the queue: abort the crawl in flight and wait for it to close its row.
+   * Stop the queue: stop this service's runner, which aborts the crawl in
+   * flight and waits for it to close its row.
    *
    * The abort is the crawl loop's own graceful path — the run ends `paused`
-   * (reason `shutdown`) with its frontier intact, resumable. Crawls still waiting are left as
-   * `queued` rows and logged: this process will not run them and says so, which
-   * is the restart contract in the module header.
+   * (reason `shutdown`) with its frontier intact, resumable, and its job
+   * `abandoned` in the same close. Crawl jobs still queued for this service
+   * stay `queued`, pinned to it, and are logged by id: this process will not
+   * run them and says so (the module header's restart contract; the reaper,
+   * Task 4, releases a dead instance's work).
    */
   async close(): Promise<void> {
     this.closed = true;
-    const abandoned = this.waiting.splice(0, this.waiting.length);
-    const current = this.running;
-    if (current !== null) {
-      current.controller.abort();
-      await current.done;
-    }
-    if (abandoned.length > 0) {
+    const building = this.runner;
+    if (building === null) return;
+    const runner = await building;
+    await runner.stop();
+    const instanceId = await this.instanceId();
+    const waiting = await this.db
+      .select({ crawlId: jobs.crawlId })
+      .from(jobs)
+      .where(and(eq(jobs.pinnedTo, instanceId), eq(jobs.kind, "crawl"), eq(jobs.status, "queued")))
+      .orderBy(asc(jobs.queuedAt), asc(jobs.id));
+    if (waiting.length > 0) {
       this.log(
-        `api: ${abandoned.length} crawl(s) left queued and unstarted ` +
-          `(${abandoned.map((e) => e.crawlId).join(", ")}); their rows stay 'queued' and ` +
-          `no process is holding them`,
+        `api: ${waiting.length} crawl(s) left queued and unstarted ` +
+          `(${waiting.map((w) => w.crawlId).join(", ")}); their rows and their crawl jobs stay ` +
+          `queued, pinned to this instance (${instanceId}), and this process will not run them`,
       );
     }
   }
@@ -6851,230 +6953,25 @@ export class ApiService {
   // ---------------------------------------------------------------- internals
 
   /**
-   * Start the next crawl if nothing is running.
-   *
-   * `this.running` is assigned in the same synchronous step that removes the
-   * entry from `waiting`, before the run's first `await` can yield, so two
-   * `startCrawl` calls in the same tick cannot both find the runner idle.
+   * Run one claimed crawl job: the in-process runner's `execute`
+   * (`crawlJobExecutor`, src/worker/crawl-job.ts, with this service's vault,
+   * process trust and log). Named as the pre-28b queue runner was.
    */
-  private pump(): void {
-    if (this.closed || this.running !== null) return;
-    const next = this.waiting.shift();
-    if (next === undefined) return;
-
-    const controller = new AbortController();
-    const entry: RunningCrawl = {
-      crawlId: next.crawlId,
-      controller,
-      done: Promise.resolve(),
-    };
-    this.running = entry;
-    // NOTHING AWAITS THIS PROMISE UNTIL `close()`, so it must not be able to
-    // reject. `runQueued` already catches the crawl's own errors — but its
-    // catch block writes to the database, and a database that is gone makes
-    // BOTH the run and its own record-keeping throw. That rejection would then
-    // sit unhandled on a promise nobody is holding, and an unhandled rejection
-    // ends the process in Node 22: one bad crawl would take the whole API
-    // server down with it.
-    //
-    // The catch is before the `finally` deliberately, so `entry.done` is a
-    // settled, non-rejecting promise by the time `close()` awaits it.
-    entry.done = this.runQueued(next, controller.signal)
-      .catch((error: unknown) => {
-        this.log(
-          `api: crawl ${entry.crawlId} — the queue runner itself failed and could not ` +
-            `record it: ${messageOf(error)}`,
-        );
-      })
-      .finally(() => {
-        if (this.running === entry) this.running = null;
-        this.pump();
-      });
-  }
-
-  /**
-   * Run one queued crawl.
-   *
-   * `resumeCrawl` rather than `runCrawl` because the row already exists — it
-   * was created when the crawl was accepted. A queued crawl's frontier is
-   * empty, so a resume of it does exactly what a fresh run does: discover,
-   * seed, loop.
-   *
-   * THE CONFIG IS READ HERE, AT DEQUEUE, from the row — not carried from
-   * acceptance — so a change made while the crawl waited is the one it runs
-   * with. The two test-only fields the row never holds (`storableConfig`) are
-   * re-asserted from this process (`processTrustConfig`), and
-   * `ResumeOpts.config` is the documented place to do it.
-   *
-   * THE CRAWL MAY HAVE LEFT THE QUEUE STATE WHILE IT WAITED: paused or
-   * cancelled by an agent (this process takes a crawl it holds out of its
-   * queue when it does that, but another process cannot), retired by
-   * `crawl_mark_failed` elsewhere. The read here skips such a row, and the
-   * loop's claim (`expectStatus: "queued"`) skips one that moves between this
-   * read and the claim; both are the same `ClaimLostError`. Either is logged
-   * and the row is left exactly as the other writer left it — it is not a
-   * failure of this crawl, and closing it `failed` would overwrite a decision
-   * somebody made.
-   *
-   * That identity is why `crawl_resume` needed no new runner: an entry put here
-   * by `ApiService.resumeCrawl` differs only in that its frontier is NOT empty,
-   * and the loop has continued non-empty frontiers since Phase 1. `entry.resuming`
-   * changes the log line and nothing else.
-   *
-   * `reclaimLeases` is not passed, on either path. See `ApiService.resumeCrawl`:
-   * it would hand every live lease in the crawl back to pending, which is right
-   * after a crash and wrong while another process is working, and this server
-   * cannot tell those apart from outside.
-   */
-  private async runQueued(entry: QueueEntry, signal: AbortSignal): Promise<void> {
-    try {
-      // THE ROW AND ITS CREDENTIALS FROM ONE SNAPSHOT (28b). Both are written
-      // in one transaction by every change (`credential_generation` counts
-      // them), so a repeatable-read pair is a config and the values written
-      // with it — never a new shape beside old values, nor the reverse.
-      const { row, read } = await this.db.transaction(
-        async (tx) => {
-          const [found] = await tx
-            .select({ status: crawls.status, config: crawls.config })
-            .from(crawls)
-            .where(eq(crawls.id, entry.crawlId));
-          return { row: found, read: found === undefined ? null : await this.vault.read(entry.crawlId, tx) };
-        },
-        { isolationLevel: "repeatable read", accessMode: "read only" },
-      );
-      if (row === undefined || read === null) throw new Error(`queue runner: no crawl ${entry.crawlId}`);
-      if (row.status !== "queued") throw new ClaimLostError(entry.crawlId, row.status, "queued");
-      const parsed = parseStoredConfig(row.config, entry.crawlId);
-      const required = parsed.credentialShape ?? null;
-      let credentials: CrawlCredentials | undefined;
-      if (required === null) {
-        // A crawl with no credentials has no stored copy: one would be a
-        // write this engine never makes, and it is not run on a guess.
-        if (read.kind !== "none") {
-          throw new Error(
-            `queue runner: crawl ${entry.crawlId} names no credentials and has a stored copy; ` +
-              "the two are written together, so this is a defect",
-          );
-        }
-      } else {
-        const stored = this.storedCredentials(entry.crawlId, required, read);
-        if (stored.kind === "missing") {
-          // NOT RUN, AND NOT FAILED: paused, before a single request, until
-          // the values are sent again (28b item 10). The loop would refuse
-          // the crawl too (`requireCredentials`), but as `failed` — and a
-          // crawl whose site never saw a request did not fail.
-          await this.pauseUnreadable(entry.crawlId, stored.why);
-          return;
-        }
-        credentials = stored.credentials;
-      }
-      const config: CrawlConfig = {
-        ...parsed,
-        ...this.processTrustConfig(),
-        ...(credentials === undefined ? {} : { credentials }),
-      };
-      this.log(
-        `api: crawl ${entry.crawlId} ${entry.resuming ? "resuming" : "starting"} ` +
-          `(${config.siteUrl})`,
-      );
-      const summary = await resumeCrawl(this.db, entry.crawlId, {
-        config,
-        signal,
-        expectStatus: "queued",
-      });
-      // A run that ended cancelled (an agent's cancel of a running crawl)
-      // releases its credentials, as a cancel of a queued or paused one does
-      // (Deviation 9). A finished crawl keeps them: a render pass needs them.
-      if (summary.status === "cancelled") await this.vault.remove(this.db, entry.crawlId);
-      // The template inference beside the page count, because the pair is the
-      // whole of "what shape is this site" and the alternative is a second
-      // census over `pages` to find out. `pageTemplates` is null only when the
-      // pass did not run (a crawl that failed before it had a population), and
-      // that is said in those words rather than printed as a zero.
-      const templates =
-        summary.pageTemplates === null
-          ? "page types not inferred"
-          : `${summary.pageTemplates.typesBefore} URL shape(s) -> ` +
-            `${summary.pageTemplates.typesAfter} page type(s), ` +
-            `${summary.pageTemplates.pagesRetyped} retyped`;
-      this.log(
-        `api: crawl ${entry.crawlId} ${summary.status} — ` +
-          `${summary.pagesCrawled} page(s), ${templates}`,
-      );
-    } catch (error) {
-      if (error instanceof ClaimLostError) {
-        // Not a failure, and nothing to write: see the docblock. Matched on the
-        // type, never on the sentence.
-        this.log(
-          `api: crawl ${entry.crawlId} left the queue state ('${error.status}') before it ` +
-            `ran; not started`,
-        );
-        return;
-      }
-      // The crawl's own failure path has already closed the row as `failed`
-      // (see `execute` in the crawl loop) for anything thrown inside the run.
-      // A throw BEFORE that — a row deleted underneath us, a config the loop
-      // will not take — would leave the row `queued`, which is a lie: nobody
-      // will ever run it. Closing it is transparency, not recovery; the error
-      // is logged either way and never swallowed into a clean-looking row.
-      // AND THE ROW SAYS WHY, not only this process's log (migration 0017).
-      // The `where` is what keeps the two writers from arguing: a row the loop
-      // already closed `failed` — with the loop's own, more specific reason —
-      // is no longer `queued`, so this update passes over it and leaves that
-      // sentence alone. Only the throws that never reached the loop land here.
-      this.log(`api: crawl ${entry.crawlId} threw — ${messageOf(error)}`);
-      await this.db
-        .update(crawls)
-        .set({
-          status: "failed",
-          finishedAt: new Date(),
-          // The crawl loop's own helper, imported rather than re-implemented:
-          // one rule for what may go in this column, on both sides of the seam.
-          // It composes a sentence for an error with no message rather than
-          // throwing, because a throw here would abandon this close and leave
-          // the row `queued` for ever — the lie this catch exists to prevent.
-          failureReason: failureReasonOf(error),
-        })
-        .where(and(eq(crawls.id, entry.crawlId), eq(crawls.status, "queued")));
-    }
-  }
-
-  /**
-   * Close a queued crawl `paused` with `pause_reason = 'credentials_unreadable'`
-   * (28b item 10): its row names credentials and this process has none it can
-   * use — no stored copy, or one it cannot decrypt. Nothing was fetched. The
-   * row says so, `crawl_resume` with the values continues it, and the log line
-   * gives the reason in words (never a value). Conditioned on `queued`, as the
-   * runner's other closes are: a row another writer moved is left as it is.
-   */
-  private async pauseUnreadable(crawlId: string, why: string): Promise<void> {
-    const moved = await this.db
-      .update(crawls)
-      .set({
-        status: "paused",
-        pauseReason: "credentials_unreadable",
-        // As every pause writes it: when the crawl stopped.
-        finishedAt: new Date(),
-        controlRequest: null,
-      })
-      .where(and(eq(crawls.id, crawlId), eq(crawls.status, "queued")));
-    if (moved.rowCount === null) {
-      throw new Error(`queue runner: the pause of crawl ${crawlId} reported no row count`);
-    }
-    this.log(
-      moved.rowCount === 0
-        ? `api: crawl ${crawlId} left the queue state before it could be paused for its ` +
-            `credentials (${why}); not started`
-        : `api: crawl ${crawlId} paused (credentials_unreadable) before any request: it needs ` +
-            `credentials and ${why}. crawl_resume with them continues it`,
-    );
+  private runQueued(job: ClaimedJob, signal: AbortSignal): Promise<void> {
+    return crawlJobExecutor({
+      db: this.db,
+      vault: this.vault,
+      processTrust: this.processTrustConfig(),
+      log: this.log,
+      logPrefix: "api",
+    })(job, signal);
   }
 
   /**
    * The two TEST-ONLY crawl-config fields `storableConfig` strips from every
    * row (`allowPrivate`, `recheckMinGapMs`), re-asserted from this process's
    * `crawlDefaults` — the process-trust seam, never a row or a request. The
-   * queue runner adds them to the stored config it reads at dequeue.
+   * queue runner adds them to the stored config it reads when it claims.
    */
   private processTrustConfig(): Pick<CrawlConfig, "allowPrivate" | "recheckMinGapMs"> {
     const defaults = this.config.crawlDefaults;
@@ -7086,12 +6983,13 @@ export class ApiService {
     };
   }
 
-  /** 0 = running now or next; null = this process is not holding this crawl. */
-  private queuePosition(crawlId: string): number | null {
-    if (this.running?.crawlId === crawlId) return 0;
-    const index = this.waiting.findIndex((e) => e.crawlId === crawlId);
-    if (index < 0) return null;
-    return this.running === null ? index : index + 1;
+  /**
+   * Where a crawl stands in its runner's queue, from the jobs table (28b,
+   * `queuePositionOf`): 0 while its crawl job is running, `1 + n` while it is
+   * queued behind `n` crawl jobs of the same pool, null with no live crawl job.
+   */
+  async queuePosition(crawlId: string): Promise<number | null> {
+    return queuePositionOf(this.db, crawlId);
   }
 
   /**
@@ -8942,6 +8840,25 @@ function parseDataset(value: string | undefined): ExportDataset {
 export function slug(value: string): string {
   const cleaned = value.replace(/[^A-Za-z0-9_.-]/g, "_").replace(/^\.+/, "_");
   return cleaned.length > 80 ? cleaned.slice(0, 80) : cleaned;
+}
+
+/** `crawl_rules` on a crawl that has not stopped — the same sentence from the claim and from the run. */
+function rulesWhileLive(crawlId: string, status: string): ServiceError {
+  return new ServiceError(
+    "CONFLICT",
+    `crawl ${crawlId} is '${status}': the rules may only run over a crawl that ` +
+      `has stopped, or they would judge a site that is still being fetched`,
+  );
+}
+
+/**
+ * Lock the crawl row for the rest of the caller's transaction. A job inserted
+ * for the crawl takes a key-share lock on the row (its foreign key), which
+ * waits behind this one: so a busy check read after it holds until the
+ * commit — no render pass or rules run can take the crawl in between.
+ */
+async function lockCrawlRow(tx: Writer, crawlId: string): Promise<void> {
+  await tx.select({ id: crawls.id }).from(crawls).where(eq(crawls.id, crawlId)).for("update");
 }
 
 /** The lifecycle refusals of `deleteCrawl`: a live crawl, or one with a request pending. */

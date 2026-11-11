@@ -24,6 +24,7 @@ import { socialQueryRules } from "../../src/rules/query/social.js";
 import type { MetricRule, QueryRule, RuleCaps } from "../../src/rules/registry/types.js";
 import { SOCIAL_IMAGE_MAX_BYTES } from "../../src/rules/thresholds.js";
 import { LOCAL_TENANT } from "../../src/tenant.js";
+import { hostKeyOf } from "../../src/crawl/host-key.js";
 
 function databaseUrl(): string {
   const url = process.env.DATABASE_URL;
@@ -148,7 +149,7 @@ describe("social query rules against the database", () => {
     resourceSpecs: ResourceSpec[] = [],
   ): Promise<{ crawlId: string; ids: Map<string, string> }> {
     const crawlId = `crawl_${randomUUID()}`;
-    await db.insert(crawls).values({ tenantId: LOCAL_TENANT, id: crawlId, siteUrl: SITE, config: {}, rulesetVersion: "test" });
+    await db.insert(crawls).values({ tenantId: LOCAL_TENANT, id: crawlId, siteUrl: SITE, hostKey: hostKeyOf(SITE), config: {}, rulesetVersion: "test" });
     created.push(crawlId);
     const rows = pageSpecs.map((s) => ({
       id: `page_${randomUUID()}`,

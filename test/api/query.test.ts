@@ -62,6 +62,7 @@ function titleOf(ruleId: string): string {
 import { RULESET_VERSION } from "../../src/rules/registry/registry.js";
 import { LOCAL_TENANT } from "../../src/tenant.js";
 import { TEST_CREDENTIAL_KEYS } from "../helpers/credential-keys.js";
+import { hostKeyOf } from "../../src/crawl/host-key.js";
 
 const TOKEN = "test-token-0123456789abcdef";
 const SITE = "http://query.example";
@@ -336,7 +337,7 @@ async function seedCrawl(
   await db.insert(crawls).values({
     tenantId: LOCAL_TENANT,
     id,
-    siteUrl: opts.siteUrl ?? `${SITE}/`,
+    siteUrl: opts.siteUrl ?? `${SITE}/`, hostKey: hostKeyOf(opts.siteUrl ?? `${SITE}/`),
     config: opts.config ?? { siteUrl: `${SITE}/` },
     rulesetVersion: "0.0.0-test",
     status: "finished",
@@ -3803,8 +3804,8 @@ describe("GET /compare", () => {
   it("409s a crawl whose site URL is not a URL, rather than calling it another site", async () => {
     const broken = `crawl_cmp_broken_${Date.now()}`;
     await db.execute(sql`
-      insert into crawls (id, tenant_id, site_url, config_jsonb, ruleset_version, status, rules_run_at)
-      values (${broken}, ${LOCAL_TENANT}, 'not a url at all', '{}'::jsonb, '0.0.0-test', 'finished', now())`);
+      insert into crawls (id, tenant_id, site_url, host_key, config_jsonb, ruleset_version, status, rules_run_at)
+      values (${broken}, ${LOCAL_TENANT}, 'not a url at all', 'not a url at all', '{}'::jsonb, '0.0.0-test', 'finished', now())`);
     try {
       const res = await compare(cmpBase, broken);
       expect(res.status).toBe(409);
@@ -4154,7 +4155,7 @@ describe("GET /crawls/:id — why a failed crawl failed", () => {
     await db.insert(crawls).values({
       tenantId: LOCAL_TENANT,
       id: failedId,
-      siteUrl: `${SITE}/`,
+      siteUrl: `${SITE}/`, hostKey: hostKeyOf(`${SITE}/`),
       config: { siteUrl: `${SITE}/` },
       rulesetVersion: "0.0.0-test",
       status: "failed",
@@ -4168,7 +4169,7 @@ describe("GET /crawls/:id — why a failed crawl failed", () => {
     await db.insert(crawls).values({
       tenantId: LOCAL_TENANT,
       id: pre0017Id,
-      siteUrl: `${SITE}/`,
+      siteUrl: `${SITE}/`, hostKey: hostKeyOf(`${SITE}/`),
       config: { siteUrl: `${SITE}/` },
       rulesetVersion: "0.0.0-test",
       status: "failed",
@@ -4180,7 +4181,7 @@ describe("GET /crawls/:id — why a failed crawl failed", () => {
     await db.insert(crawls).values({
       tenantId: LOCAL_TENANT,
       id: orphanId,
-      siteUrl: `${SITE}/`,
+      siteUrl: `${SITE}/`, hostKey: hostKeyOf(`${SITE}/`),
       config: { siteUrl: `${SITE}/` },
       rulesetVersion: "0.0.0-test",
       status: "queued",

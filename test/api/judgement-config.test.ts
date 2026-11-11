@@ -37,6 +37,7 @@ import { mkDiscovery } from "../rules/mk-discovery.js";
 import { mkPage } from "../rules/mk-page.js";
 import { LOCAL_TENANT } from "../../src/tenant.js";
 import { TEST_CREDENTIAL_KEYS } from "../helpers/credential-keys.js";
+import { hostKeyOf } from "../../src/crawl/host-key.js";
 
 /** The test-controlled hold on a rules run (see the module header). */
 const gate = vi.hoisted(() => ({
@@ -136,7 +137,7 @@ async function seedJudgeable(crawlId: string): Promise<void> {
   await db.insert(crawls).values({
     tenantId: LOCAL_TENANT,
     id: crawlId,
-    siteUrl: `${SITE}/`,
+    siteUrl: `${SITE}/`, hostKey: hostKeyOf(`${SITE}/`),
     config: { siteUrl: `${SITE}/`, maxPages: 100, userAgent: "AriadneBot-test" },
     discovery: mkDiscovery(),
     rulesetVersion: "test",
@@ -777,7 +778,7 @@ describe("the crawl part of crawl_config_get / crawl_config_set (27b T7)", () =>
     await db.insert(crawls).values({
       tenantId: LOCAL_TENANT,
       id,
-      siteUrl: `${SITE}/`,
+      siteUrl: `${SITE}/`, hostKey: hostKeyOf(`${SITE}/`),
       config: {
         siteUrl: `${SITE}/`,
         maxPages: 100,
@@ -978,7 +979,7 @@ describe("judgement refusal wording: the start body and crawl_config_set say the
     await db.insert(crawls).values({
       tenantId: LOCAL_TENANT,
       id,
-      siteUrl: `${SITE}/`,
+      siteUrl: `${SITE}/`, hostKey: hostKeyOf(`${SITE}/`),
       config: { siteUrl: `${SITE}/`, maxPages: 10, maxDepth: 3, userAgent: "AriadneBot-test", perHostDelayMs: 1000, maxConcurrency: 1 },
       rulesetVersion: "test",
       status: "finished",
@@ -1002,7 +1003,7 @@ describe("judgement refusal wording: the start body and crawl_config_set say the
     await db.insert(crawls).values({
       tenantId: LOCAL_TENANT,
       id,
-      siteUrl: `${SITE}/`,
+      siteUrl: `${SITE}/`, hostKey: hostKeyOf(`${SITE}/`),
       config: { siteUrl: `${SITE}/`, maxPages: 10, maxDepth: 3, userAgent: "AriadneBot-test", perHostDelayMs: 1000, maxConcurrency: 1 },
       rulesetVersion: "test",
       status: "finished",
@@ -1023,7 +1024,7 @@ describe("the whole crawl object from crawl_config_get, redacted, sent back (27c
     await db.insert(crawls).values({
       tenantId: LOCAL_TENANT,
       id,
-      siteUrl: `${SITE}/`,
+      siteUrl: `${SITE}/`, hostKey: hostKeyOf(`${SITE}/`),
       config: {
         siteUrl: `${SITE}/`,
         maxPages: 100,

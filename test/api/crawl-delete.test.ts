@@ -25,7 +25,9 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 
 import { closeDb, createDb, type Db } from "../../src/db/client.js";
 import { runMigrations } from "../../src/db/migrate.js";
-import { crawls, frontier, listUrls } from "../../src/db/schema.js";
+import { crawls, frontier, jobs, listUrls } from "../../src/db/schema.js";
+import { EXTRACTION_VERSION } from "../../src/crawl/versions.js";
+import { RULESET_VERSION } from "../../src/rules/registry/registry.js";
 import { closeFetchAgents } from "../../src/crawl/http.js";
 import { createApiServer, type ApiServer } from "../../src/api/http.js";
 import { createMcpServer, type AriadneMcpServer } from "../../src/api/mcp.js";
@@ -34,6 +36,7 @@ import { ApiService, slug } from "../../src/api/service.js";
 import { ServiceError } from "../../src/api/errors.js";
 import { LOCAL_TENANT } from "../../src/tenant.js";
 import { TEST_CREDENTIAL_KEYS } from "../helpers/credential-keys.js";
+import { hostKeyOf } from "../../src/crawl/host-key.js";
 
 const TOKEN = "test-token-crawl-delete-0123456789abcdef";
 
@@ -165,7 +168,7 @@ async function seedCrawl(row: {
   await db.insert(crawls).values({
     tenantId: LOCAL_TENANT,
     id,
-    siteUrl: "http://seeded.example/",
+    siteUrl: "http://seeded.example/", hostKey: hostKeyOf("http://seeded.example/"),
     config: {
       siteUrl: "http://seeded.example/",
       maxPages: 10,
@@ -282,6 +285,7 @@ describe("CRAWL_CHILD_TABLES", () => {
       "frontier",
       "list_urls",
       "crawl_credentials",
+      "jobs",
     ]);
   });
 });
@@ -390,23 +394,40 @@ describe("crawl_delete refusals", () => {
   it("refuses while rules or a render pass hold the crawl on this server", async () => {
     const id = await seedCrawl({ status: "finished" });
     const before = await rowCounts(id);
-    const holds = service as unknown as { judging: Set<string>; rendering: Set<string> };
-    holds.judging.add(id);
+    // The hold is a `running` rules or render job since 28b (it was a private
+    // in-process set): one is written for the crawl, as `withPinnedJob` writes
+    // it, and removed after, so the row counts compare as before.
+    const hold = async (kind: "rules" | "render"): Promise<string> => {
+      const jobId = `job_${randomUUID()}`;
+      await db.insert(jobs).values({
+        id: jobId,
+        tenantId: LOCAL_TENANT,
+        crawlId: id,
+        kind,
+        status: "running",
+        pinnedTo: await service.instanceId(),
+        claimedBy: await service.instanceId(),
+        rulesetVersion: RULESET_VERSION,
+        extractionVersion: EXTRACTION_VERSION,
+      });
+      return jobId;
+    };
+    let held = await hold("rules");
     try {
       const err = await refusal(service.deleteCrawl(LOCAL_TENANT, id, id));
       expect(err.code).toBe("CONFLICT");
       expect(err.message).toContain("crawl_delete");
       expect(err.message).toContain("rules are running");
     } finally {
-      holds.judging.delete(id);
+      await db.delete(jobs).where(eq(jobs.id, held));
     }
-    holds.rendering.add(id);
+    held = await hold("render");
     try {
       const err = await refusal(service.deleteCrawl(LOCAL_TENANT, id, id));
       expect(err.code).toBe("CONFLICT");
       expect(err.message).toContain("a render pass is running");
     } finally {
-      holds.rendering.delete(id);
+      await db.delete(jobs).where(eq(jobs.id, held));
     }
     expect(await rowCounts(id)).toEqual(before);
   });

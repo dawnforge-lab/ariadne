@@ -113,8 +113,8 @@ beforeAll(async () => {
   await runMigrations(db);
   await db.delete(crawls).where(eq(crawls.id, CRAWL_ID));
   await db.execute(sql`
-    insert into crawls (id, tenant_id, site_url, config_jsonb, ruleset_version)
-    values (${CRAWL_ID}, ${LOCAL_TENANT}, 'https://bands.example', '{}'::jsonb, '0.0.0')`);
+    insert into crawls (id, tenant_id, site_url, host_key, config_jsonb, ruleset_version)
+    values (${CRAWL_ID}, ${LOCAL_TENANT}, 'https://bands.example', 'bands.example', '{}'::jsonb, '0.0.0')`);
   // One statement, because 4,000 round trips would be a memory-contract joke
   // and a slow test. The fingerprints are random over the full signed 64-bit
   // range, built from two 32-bit halves so all four bands are independently

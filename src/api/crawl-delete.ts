@@ -26,6 +26,7 @@ import {
   frontier,
   hreflang,
   issues,
+  jobs,
   links,
   listUrls,
   metrics,
@@ -43,9 +44,10 @@ import { tenantExportDir, type TenantId } from "../tenant.js";
 type CrawlChildTable = PgTable & { crawlId: PgColumn };
 
 /**
- * The 15 tables with a `crawl_id`, in deletion order: what points at `pages`
- * and `resources` goes before them, then `frontier`, `list_urls`, and the
- * crawl's encrypted credentials (28b).
+ * The 16 tables with a `crawl_id`, in deletion order: what points at `pages`
+ * and `resources` goes before them, then `frontier`, `list_urls`, the crawl's
+ * encrypted credentials and its settled jobs (28b; `crawl_delete` refuses a
+ * crawl that has a live one).
  */
 export const CRAWL_CHILD_TABLES: readonly CrawlChildTable[] = [
   issues,
@@ -63,6 +65,7 @@ export const CRAWL_CHILD_TABLES: readonly CrawlChildTable[] = [
   frontier,
   listUrls,
   crawlCredentials,
+  jobs,
 ];
 
 type Tx = Parameters<Parameters<Db["transaction"]>[0]>[0];

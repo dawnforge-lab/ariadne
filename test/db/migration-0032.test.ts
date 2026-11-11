@@ -63,6 +63,7 @@ describe("0032 — crawls judged before 27a carry a stamp", () => {
           id,
           tenantId: LOCAL_TENANT,
           siteUrl: "https://m32.example",
+          hostKey: "m32.example",
           config,
           rulesetVersion: "test",
           rulesRunAt,

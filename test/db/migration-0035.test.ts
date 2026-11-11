@@ -50,6 +50,7 @@ describe("0035 — cancelled becomes paused/shutdown", () => {
           id,
           tenantId: LOCAL_TENANT,
           siteUrl: "https://m35.example",
+          hostKey: "m35.example",
           config: { maxPages: 10 },
           rulesetVersion: "test",
           status,
