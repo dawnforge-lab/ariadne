@@ -66,7 +66,7 @@ import { readFileSync } from "node:fs";
 import type { Db } from "../db/client.js";
 import { createApiServer, type ApiServer } from "../api/http.js";
 import type { ServiceConfig } from "../api/config.js";
-import { LOCAL_TENANT } from "../api/tenant.js";
+import { LOCAL_TENANT } from "../tenant.js";
 
 /**
  * The page, read once at import.

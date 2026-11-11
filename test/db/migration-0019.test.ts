@@ -49,7 +49,7 @@ import { closeDb, createDb, type Db } from "../../src/db/client.js";
 import { runMigrations } from "../../src/db/migrate.js";
 import { crawls, pages } from "../../src/db/schema.js";
 import { CANONICALISED_ELSEWHERE } from "../../src/rules/helpers.js";
-import { LOCAL_TENANT } from "../../src/api/tenant.js";
+import { LOCAL_TENANT } from "../../src/tenant.js";
 import {
   NEAR_DUPLICATE_HAMMING,
   NEAR_DUPLICATE_MIN_MAIN_WORDS,

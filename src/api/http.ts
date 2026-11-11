@@ -173,7 +173,7 @@ import { randomUUID } from "node:crypto";
 import type { Db } from "../db/client.js";
 import type { ApiServerConfig } from "./config.js";
 import { checkBearer } from "./auth.js";
-import { parseTenant, type TenantId } from "./tenant.js";
+import { parseTenant, type TenantId } from "../tenant.js";
 import { unknownQueryParameterMessage } from "./errors.js";
 import {
   ApiService,

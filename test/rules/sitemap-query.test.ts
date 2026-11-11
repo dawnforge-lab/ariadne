@@ -23,7 +23,7 @@ import { sitemapRules } from "../../src/rules/query/sitemap.js";
 import type { Finding, QueryRule } from "../../src/rules/registry/types.js";
 import { mkDiscovery } from "./mk-discovery.js";
 import { normalised, writerIndexable, type IndexabilitySpec } from "./mk-page.js";
-import { LOCAL_TENANT } from "../../src/api/tenant.js";
+import { LOCAL_TENANT } from "../../src/tenant.js";
 
 function databaseUrl(): string {
   const url = process.env.DATABASE_URL;
@@ -154,6 +154,7 @@ describe("the sitemap rules against the database", () => {
         // every join below reads.
         urlNormalised: normalised(published(path)),
         sitemapSource: `${SITE}/sitemap.xml`,
+        seenAt: new Date(),
         lastmod: null,
       })),
     );
@@ -713,6 +714,7 @@ describe("the sitemap rules against the database", () => {
       crawlId,
       url: url("/listed"),
       sitemapSource: `${SITE}/sitemap.xml`,
+      seenAt: new Date(),
       lastmod: null,
     });
 

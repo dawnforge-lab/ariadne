@@ -22,7 +22,7 @@ import { eq } from "drizzle-orm";
 import type { Db } from "../../src/db/client.js";
 import { crawls } from "../../src/db/schema.js";
 import type { Metric, MetricRule } from "../../src/rules/registry/types.js";
-import { LOCAL_TENANT } from "../../src/api/tenant.js";
+import { LOCAL_TENANT } from "../../src/tenant.js";
 
 /** The dev-container URL, refused rather than defaulted (hard rule 7). */
 export function databaseUrl(): string {

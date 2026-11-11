@@ -32,7 +32,7 @@ import { createApiServer, type ApiServer } from "../../src/api/http.js";
 import { createMcpServer, TOOL_NAMES, type AriadneMcpServer } from "../../src/api/mcp.js";
 import { mkDiscovery } from "../rules/mk-discovery.js";
 import { mkPage } from "../rules/mk-page.js";
-import { LOCAL_TENANT, type TenantId } from "../../src/api/tenant.js";
+import { LOCAL_TENANT, type TenantId } from "../../src/tenant.js";
 
 /** Test-controlled holds on a rules run and on a render pass (module header). */
 const gates = vi.hoisted(() => ({

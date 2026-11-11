@@ -26,7 +26,7 @@ import { startFixtureApp, type FixtureApp } from "../fixtures/app.js";
 import { startAssetHost, type AssetHost } from "../fixtures/assets.js";
 import { allFixtures } from "../fixtures/fixture.js";
 import { startOffsiteHost, type OffsiteHost } from "../fixtures/pages/render-p5.js";
-import { LOCAL_TENANT } from "../../src/api/tenant.js";
+import { LOCAL_TENANT } from "../../src/tenant.js";
 
 describe("control readers", () => {
   it("readControlRequest passes null and the two requests, refuses anything else naming the crawl", () => {

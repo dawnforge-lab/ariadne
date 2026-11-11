@@ -17,7 +17,7 @@ import { URL_FINDING_CAP } from "../../src/rules/query/crawl-evidence.js";
 import { MAX_REDIRECT_HOPS, redirectRules } from "../../src/rules/query/redirects.js";
 import type { Finding, QueryRule } from "../../src/rules/registry/types.js";
 import { normalised } from "./mk-page.js";
-import { LOCAL_TENANT } from "../../src/api/tenant.js";
+import { LOCAL_TENANT } from "../../src/tenant.js";
 
 function databaseUrl(): string {
   const url = process.env.DATABASE_URL;

@@ -230,7 +230,14 @@ export const sitemapRules: QueryRule[] = [
       // and discovery records one "not fetched" failure per declared source.
       // Those documents were never opened, so nothing about them is invalid —
       // reporting them here would blame the site for our own refusal.
-      if (discovery.robots.outcome === "unreachable") return [];
+      //
+      // What says "a walk ran" is `truncation.docsFetched`, the documents the
+      // walk attempted, and not the robots outcome: a resume that finds robots
+      // unreachable keeps the earlier walk's evidence and replaces only `robots`
+      // and `sitemapSources` (28a ruling R5), so its `truncation.failures` are
+      // that walk's real ones. (`sitemapsRead` cannot say: the refusal records
+      // it true, and a spider crawl always does.) No attempt, no judgement.
+      if (discovery.truncation.docsFetched === 0) return [];
       const failures = discovery.truncation.failures;
       if (failures.length === 0) return [];
       return [

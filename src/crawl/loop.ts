@@ -50,7 +50,7 @@
  * done and the row was still in a buffer (build plan §7).
  */
 import { randomUUID } from "node:crypto";
-import { and, asc, eq, gt, isNotNull, ne, sql } from "drizzle-orm";
+import { and, asc, eq, gt, isNotNull, lt, ne, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import { crawls, frontier, listUrls, sitemapHreflang, sitemapMemberships, sitemapUrls } from "../db/schema.js";
 // Ruleset provenance for the `crawls` row: the registry owns the number, the
@@ -147,7 +147,7 @@ import {
   type CredentialTarget,
 } from "./credentials.js";
 import { storableCap, storableDeep } from "./storable-text.js";
-import type { TenantId } from "../api/tenant.js";
+import type { TenantId } from "../tenant.js";
 
 /**
  * `RenderSelectionConfig` is extended rather than restated: the render pass's
@@ -1760,6 +1760,10 @@ async function runToCompletion(
   // evidence with a partial staging. A fresh crawl has no evidence yet, and
   // the mark matches no row.
   let discovery: DiscoveryResult;
+  // When this run's walk began: the stamp every entry it persists carries
+  // (`sitemap_urls.seen_at`), so the sweep after the last batch can tell the
+  // rows this walk listed from the ones an earlier walk left behind.
+  const walkStartedAt = new Date();
   const onSitemapFlush = testHooks?.onSitemapFlush;
   const sitemapSink = new SitemapRowSink(
     db,
@@ -1820,7 +1824,7 @@ async function runToCompletion(
   // `sitemap_urls`, so no reader is shown evidence counting entries the table
   // does not hold. A resume writes them again (the rows are keyed). A failed
   // poll stops it too; the close then raises it and the row closes failed.
-  if (!(await persistSitemap(db, crawlId, discovery, signal, testHooks?.onSeedingBatch))) {
+  if (!(await persistSitemap(db, crawlId, discovery, signal, testHooks?.onSeedingBatch, walkStartedAt))) {
     return closeStoppedBeforePages(db, crawlId, watcher);
   }
 
@@ -3504,6 +3508,10 @@ async function persistSitemap(
   // every entry was written, false when a stop came first.
   signal: AbortSignal,
   onBatch: LoopTestHooks["onSeedingBatch"],
+  // When this run's walk began. Each entry is stamped with it, and the rows an
+  // earlier walk wrote that this one did not list (`seen_at` older) are removed
+  // after the last batch (Phase 28b: a site that dropped a URL no longer lists it).
+  walkStartedAt: Date,
 ): Promise<boolean> {
   const entries = discovery.sitemapEntries;
   for (let i = 0; i < entries.length; i += SITEMAP_BATCH) {
@@ -3519,13 +3527,31 @@ async function persistSitemap(
         urlNormalised: normalised,
         sitemapSource: entry.source,
         lastmod: entry.lastmod,
+        seenAt: walkStartedAt,
       };
     });
     // discover() dedupes by URL, so a conflict here means a resume re-reading
-    // the same sitemap. The first read's row stands. `lastmod` is the sitemap's
-    // own text, so the batch passes the storability boundary (ruling R10).
-    await db.insert(sitemapUrls).values(storableDeep(batch)).onConflictDoNothing();
+    // the same sitemap: the first read's row stands and is re-stamped with this
+    // walk's start, which keeps the sweep below from removing it. `lastmod` is
+    // the sitemap's own text, so the batch passes the storability boundary
+    // (ruling R10).
+    await db
+      .insert(sitemapUrls)
+      .values(storableDeep(batch))
+      .onConflictDoUpdate({
+        target: [sitemapUrls.crawlId, sitemapUrls.url],
+        set: { seenAt: walkStartedAt },
+      });
     await onBatch?.("sitemap_urls", signal);
+  }
+  // Only a persist that wrote every batch gets here (a stop returned above), and
+  // only a walk that read something: robots.txt unreachable walks nothing, so its
+  // empty entry list says nothing about what the site lists and the earlier
+  // walk's rows stand beside its kept evidence.
+  if (discovery.robots.outcome !== "unreachable") {
+    await db
+      .delete(sitemapUrls)
+      .where(and(eq(sitemapUrls.crawlId, crawlId), lt(sitemapUrls.seenAt, walkStartedAt)));
   }
   return true;
 }

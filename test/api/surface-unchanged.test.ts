@@ -12,7 +12,7 @@ import { runMigrations } from "../../src/db/migrate.js";
 import { crawls } from "../../src/db/schema.js";
 import { createApiServer, type ApiServer } from "../../src/api/http.js";
 import { PAGE_FIELDS } from "../../src/api/service.js";
-import { LOCAL_TENANT } from "../../src/api/tenant.js";
+import { LOCAL_TENANT } from "../../src/tenant.js";
 
 const TOKEN = "test-token-0123456789abcdef";
 const SITE = "https://surface-unchanged.test";

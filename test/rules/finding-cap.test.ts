@@ -39,7 +39,7 @@ import type { Finding, QueryRule, RuleCaps } from "../../src/rules/registry/type
 import { runRules } from "../../src/rules/run.js";
 import { mkDiscovery } from "./mk-discovery.js";
 import { CLEAN_META, mkPage } from "./mk-page.js";
-import { LOCAL_TENANT } from "../../src/api/tenant.js";
+import { LOCAL_TENANT } from "../../src/tenant.js";
 
 /**
  * The triage a synthetic rule is registered with. The real table

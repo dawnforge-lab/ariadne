@@ -15,7 +15,7 @@ import { crawls, frontier } from "../../src/db/schema.js";
 import { ApiService } from "../../src/api/service.js";
 import { TRIAGE } from "../../src/rules/registry/triage.js";
 import { countOtherSessions, createPruneDb, isTestHost, PRUNE_APPLICATION_NAME, pruneTestCrawls } from "../../scripts/prune-test-crawls.js";
-import { LOCAL_TENANT } from "../../src/api/tenant.js";
+import { LOCAL_TENANT } from "../../src/tenant.js";
 
 function databaseUrl(): string {
   const url = process.env.DATABASE_URL;

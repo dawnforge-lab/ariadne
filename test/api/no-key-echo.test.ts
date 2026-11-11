@@ -44,7 +44,7 @@ import { buildRegistry } from "../../src/rules/index.js";
 import { JudgementError, parseJudgement, readStoredJudgement } from "../../src/rules/judgement.js";
 import { RULESET_VERSION } from "../../src/rules/registry/registry.js";
 import { mkDiscovery } from "../rules/mk-discovery.js";
-import { LOCAL_TENANT } from "../../src/api/tenant.js";
+import { LOCAL_TENANT } from "../../src/tenant.js";
 
 const SENTINEL = "sk_live_27d_SENTINEL";
 const TOKEN = "test-token-no-key-echo-0123456789";

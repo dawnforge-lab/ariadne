@@ -224,7 +224,7 @@ import {
   type ExportFormat,
 } from "./csv.js";
 import { ServiceError, clip, unknownKeysMessage } from "./errors.js";
-import { tenantExportDir, type TenantId } from "./tenant.js";
+import { tenantExportDir, type TenantId } from "../tenant.js";
 import {
   buildCrawlOverview,
   buildIssuesOverview,

@@ -27,7 +27,7 @@ import {
   MIN_COHORT,
   type TemplateMember,
 } from "../../src/crawl/page-type.js";
-import { LOCAL_TENANT } from "../../src/api/tenant.js";
+import { LOCAL_TENANT } from "../../src/tenant.js";
 
 const SITE = "https://lavishalice.com";
 

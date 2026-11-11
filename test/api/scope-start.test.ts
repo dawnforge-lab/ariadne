@@ -29,7 +29,7 @@ import { createApiServer, type ApiServer } from "../../src/api/http.js";
 import { createMcpServer, type AriadneMcpServer } from "../../src/api/mcp.js";
 import { LIST_MAX_URLS } from "../../src/api/config-schema.js";
 import type { ServiceConfig } from "../../src/api/config.js";
-import { LOCAL_TENANT } from "../../src/api/tenant.js";
+import { LOCAL_TENANT } from "../../src/tenant.js";
 
 const TOKEN = "test-token-scope-start-0123456789";
 const PAGE_DELAY_MS = 100;

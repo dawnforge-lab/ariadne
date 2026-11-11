@@ -33,7 +33,7 @@ import type {
 } from "../../src/rules/registry/types.js";
 import { mkDiscovery, mkHostProbe } from "./mk-discovery.js";
 import { CLEAN_META, mkPage } from "./mk-page.js";
-import { LOCAL_TENANT } from "../../src/api/tenant.js";
+import { LOCAL_TENANT } from "../../src/tenant.js";
 
 /**
  * The triage a synthetic rule is registered with. The real table

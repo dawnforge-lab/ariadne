@@ -25,7 +25,7 @@ import {
   ROOT_REDIRECT_HOPS,
 } from "../../src/rules/derive/click-depth.js";
 import { mkDiscovery } from "./mk-discovery.js";
-import { LOCAL_TENANT } from "../../src/api/tenant.js";
+import { LOCAL_TENANT } from "../../src/tenant.js";
 
 function databaseUrl(): string {
   const url = process.env.DATABASE_URL;

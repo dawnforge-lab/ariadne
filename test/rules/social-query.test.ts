@@ -23,7 +23,7 @@ import { DEFAULT_RULE_CAPS } from "../../src/rules/query/crawl-evidence.js";
 import { socialQueryRules } from "../../src/rules/query/social.js";
 import type { MetricRule, QueryRule, RuleCaps } from "../../src/rules/registry/types.js";
 import { SOCIAL_IMAGE_MAX_BYTES } from "../../src/rules/thresholds.js";
-import { LOCAL_TENANT } from "../../src/api/tenant.js";
+import { LOCAL_TENANT } from "../../src/tenant.js";
 
 function databaseUrl(): string {
   const url = process.env.DATABASE_URL;

@@ -22,7 +22,7 @@ import { DEFAULT_RULE_CAPS } from "../../src/rules/query/crawl-evidence.js";
 import { BROKEN_SAMPLE_RESOURCES } from "../../src/rules/query/resources.js";
 import { missingSecurityHeaders, securityRules } from "../../src/rules/query/security.js";
 import type { Finding, QueryRule } from "../../src/rules/registry/types.js";
-import { LOCAL_TENANT } from "../../src/api/tenant.js";
+import { LOCAL_TENANT } from "../../src/tenant.js";
 
 function databaseUrl(): string {
   const url = process.env.DATABASE_URL;

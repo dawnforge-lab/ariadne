@@ -22,7 +22,7 @@ import { sitemapRules } from "../../src/rules/query/sitemap.js";
 import { SITEMAP_LOC_MAX, SITEMAP_URL_CAP } from "../../src/rules/thresholds.js";
 import { mkDiscovery } from "./mk-discovery.js";
 import { normalised } from "./mk-page.js";
-import { LOCAL_TENANT } from "../../src/api/tenant.js";
+import { LOCAL_TENANT } from "../../src/tenant.js";
 
 function databaseUrl(): string {
   const url = process.env.DATABASE_URL;
@@ -93,6 +93,7 @@ describe("the sitemap entry rules against the database", () => {
         url: e.url,
         urlNormalised: normalised(e.url),
         sitemapSource: e.source ?? SOURCE,
+        seenAt: new Date(),
         lastmod: e.lastmod ?? null,
       })),
     );
@@ -197,8 +198,8 @@ describe("the sitemap entry rules against the database", () => {
   it("refuses a crawl without sitemapFacts (returns nothing) and the marker speaks", async () => {
     const crawlId = await newCrawl(undefined, undefined, mkDiscovery({ sitemapFacts: null }));
     await db.execute(sql`
-      insert into sitemap_urls (crawl_id, url, url_normalised, sitemap_source)
-      select ${crawlId}, ${SITE + "/p/"} || g, ${SITE + "/p/"} || g, ${SOURCE}
+      insert into sitemap_urls (crawl_id, url, url_normalised, sitemap_source, seen_at)
+      select ${crawlId}, ${SITE + "/p/"} || g, ${SITE + "/p/"} || g, ${SOURCE}, now()
       from generate_series(1, ${SITEMAP_URL_CAP + 1}) g`);
     expect(await run("sitemap.over-50k-urls", crawlId)).toEqual([]);
     expect(await run("sitemap.oversized", crawlId)).toEqual([]);
@@ -365,6 +366,45 @@ describe("the sitemap entry rules against the database", () => {
     expect(await invalid.run(db, fresh)).toEqual([]);
   });
 
+  // 28b T1: a resume that finds robots.txt unreachable keeps the earlier walk's
+  // evidence (28a ruling R5) and replaces only `robots`, so the earlier walk's
+  // failed document is still a fact about the site.
+  it("sitemap.invalid judges a kept earlier walk's failures beside an unreachable robots.txt", async () => {
+    const failures = [{ url: `${SITE}/broken.xml`, reason: "HTTP 500" }];
+    const crawlId = await newCrawl(
+      undefined,
+      undefined,
+      mkDiscovery({
+        robots: { outcome: "unreachable", raw: null },
+        truncation: { docsFetched: 2, failures },
+      }),
+    );
+    const invalid = sitemapRules.find((r) => r.id === "sitemap.invalid");
+    if (invalid === undefined) throw new Error("no sitemap.invalid");
+    const found = await invalid.run(db, crawlId);
+    expect(found).toHaveLength(1);
+    expect(found[0]!.evidence).toEqual({ failures, failureCount: 1 });
+  });
+
+  it("sitemap.invalid stays silent when robots.txt was unreachable and no walk ran", async () => {
+    const crawlId = await newCrawl(
+      undefined,
+      undefined,
+      mkDiscovery({
+        robots: { outcome: "unreachable", raw: null },
+        truncation: {
+          docsFetched: 0,
+          failures: [
+            { url: `${SITE}/sitemap.xml`, reason: "not fetched: robots.txt unreachable, complete disallow in force" },
+          ],
+        },
+      }),
+    );
+    const invalid = sitemapRules.find((r) => r.id === "sitemap.invalid");
+    if (invalid === undefined) throw new Error("no sitemap.invalid");
+    expect(await invalid.run(db, crawlId)).toEqual([]);
+  });
+
   // ------------------------------------------------------ url-too-long
 
   it("fires on a loc past the limit, not at it", async () => {
@@ -393,7 +433,7 @@ describe("the sitemap entry rules against the database", () => {
       fetchClass: "ok", statusCode: 200, depth: 0, discoveredVia: "sitemap",
     });
     await db.insert(sitemapUrls).values({
-      crawlId, url: over, urlNormalised: `${SITE}/x`, sitemapSource: SOURCE, lastmod: null,
+      crawlId, url: over, urlNormalised: `${SITE}/x`, sitemapSource: SOURCE, seenAt: new Date(), lastmod: null,
     });
     const found = await run("sitemap.url-too-long", crawlId);
     expect(found).toHaveLength(1);

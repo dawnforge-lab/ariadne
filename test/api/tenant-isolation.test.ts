@@ -26,7 +26,7 @@ import { crawls, issues, links, metrics, pages } from "../../src/db/schema.js";
 import { closeFetchAgents } from "../../src/crawl/http.js";
 import { createApiServer, routeSignatures, type ApiServer } from "../../src/api/http.js";
 import { createMcpServer, TOOL_NAMES, type AriadneMcpServer } from "../../src/api/mcp.js";
-import { parseTenant, type TenantId } from "../../src/api/tenant.js";
+import { parseTenant, type TenantId } from "../../src/tenant.js";
 
 const TOKEN = "test-token-isolation-0123456789abcdef";
 const RUN = randomUUID().slice(0, 8);

@@ -78,7 +78,7 @@ import {
   metricTableSummary,
   SITE_SCOPE_VALUE,
 } from "../../src/rules/registry/registry.js";
-import { LOCAL_TENANT } from "../../src/api/tenant.js";
+import { LOCAL_TENANT } from "../../src/tenant.js";
 
 let db: Db;
 

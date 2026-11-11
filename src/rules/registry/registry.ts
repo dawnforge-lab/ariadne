@@ -999,7 +999,7 @@ const KINDS = ["page", "query", "metric"] as const satisfies readonly AnyRule["k
 //     `truncation.interrupted` on the evidence it keeps, read the same way
 //     (evidence `interrupted`, a column and a sentence); the next complete
 //     walk clears it, and a crawl without the key reads as false.
-export const RULESET_VERSION = "0.25.0";
+export const RULESET_VERSION = "0.25.1";
 
 /**
  * The 47 crawl-derived checks (sf-audit checklist, Pre-Crawl + sections 1–11):

@@ -22,7 +22,7 @@ import { crawls, frontier, issues, pages, resources, sitemapUrls } from "../../s
 import type { PageRecord } from "../../src/rules/registry/types.js";
 import { mkDiscovery } from "../rules/mk-discovery.js";
 import { mkPage } from "../rules/mk-page.js";
-import { LOCAL_TENANT } from "../../src/api/tenant.js";
+import { LOCAL_TENANT } from "../../src/tenant.js";
 
 function databaseUrl(): string {
   const url = process.env.DATABASE_URL;
@@ -195,6 +195,7 @@ beforeAll(async () => {
     url: `${SITE}/a`,
     urlNormalised: `${SITE}/a`,
     sitemapSource: `${SITE}/sitemap.xml`,
+    seenAt: new Date(),
   });
   await db.insert(resources).values([
     { crawlId, url: `${SITE}/i1.png`, kind: "image" },

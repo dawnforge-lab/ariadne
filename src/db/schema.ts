@@ -1298,6 +1298,12 @@ export const sitemapUrls = pgTable("sitemap_urls", {
   sitemapSource: text("sitemap_source").notNull(),
   lastmod: text("lastmod"),
   pageId: text("page_id"),
+  // When the walk that last listed this URL began (Phase 28b). A resumed walk
+  // re-stamps every entry it lists; the rows left with an older stamp after its
+  // last batch are URLs the site no longer lists, and are removed. Migration
+  // 0038 backfilled existing rows to their crawl's `started_at`. No default:
+  // every writer says which walk it is.
+  seenAt: timestamp("seen_at", { withTimezone: true }).notNull(),
 }, (t) => [
   primaryKey({ columns: [t.crawlId, t.url] }),
   // The join column of five rules (the four sitemap ⋈ pages rules and

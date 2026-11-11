@@ -60,7 +60,7 @@ function titleOf(ruleId: string): string {
   return rule.title;
 }
 import { RULESET_VERSION } from "../../src/rules/registry/registry.js";
-import { LOCAL_TENANT } from "../../src/api/tenant.js";
+import { LOCAL_TENANT } from "../../src/tenant.js";
 
 const TOKEN = "test-token-0123456789abcdef";
 const SITE = "http://query.example";

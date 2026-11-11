@@ -26,7 +26,7 @@ import { closeFetchAgents } from "../../src/crawl/http.js";
 import { createApiServer, type ApiServer } from "../../src/api/http.js";
 import { createMcpServer, type AriadneMcpServer } from "../../src/api/mcp.js";
 import { loadMcpConfig } from "../../src/api/config.js";
-import { parseTenant, type TenantId } from "../../src/api/tenant.js";
+import { parseTenant, type TenantId } from "../../src/tenant.js";
 
 const TOKEN = "test-token-tenancy-0123456789abcdef";
 const RUN = randomUUID().slice(0, 8);

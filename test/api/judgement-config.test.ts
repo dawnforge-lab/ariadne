@@ -35,7 +35,7 @@ import { mergePatch } from "../../src/api/judgement-view.js";
 import { DEFAULT_THRESHOLDS, OVERRIDABLE_THRESHOLDS } from "../../src/rules/judgement.js";
 import { mkDiscovery } from "../rules/mk-discovery.js";
 import { mkPage } from "../rules/mk-page.js";
-import { LOCAL_TENANT } from "../../src/api/tenant.js";
+import { LOCAL_TENANT } from "../../src/tenant.js";
 
 /** The test-controlled hold on a rules run (see the module header). */
 const gate = vi.hoisted(() => ({

@@ -24,7 +24,7 @@ import type { FetchResult } from "../../src/crawl/fetch-page.js";
 import { analyzePage, type PageAnalysis, type PageLink } from "../../src/crawl/parse/page-analyzer.js";
 import { HEAD_SNIPPET_MAX } from "../../src/crawl/parse/page-facts.js";
 import { fitsIndex, INDEXED_URL_MAX } from "../../src/crawl/parse/url-utils.js";
-import { LOCAL_TENANT } from "../../src/api/tenant.js";
+import { LOCAL_TENANT } from "../../src/tenant.js";
 
 function databaseUrl(): string {
   const url = process.env.DATABASE_URL;

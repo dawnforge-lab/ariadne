@@ -34,7 +34,7 @@ import {
   metricLookup,
   newMetricCrawl,
 } from "./metric-db.js";
-import { LOCAL_TENANT } from "../../src/api/tenant.js";
+import { LOCAL_TENANT } from "../../src/tenant.js";
 
 const SITE = "https://health-metrics.example";
 const url = (path: string): string => `${SITE}${path}`;

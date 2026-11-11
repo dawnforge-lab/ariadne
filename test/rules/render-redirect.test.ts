@@ -18,7 +18,7 @@ import { crawls, pages } from "../../src/db/schema.js";
 import { renderRedirectRules } from "../../src/rules/query/render-redirect.js";
 import type { QueryRule } from "../../src/rules/registry/types.js";
 import { databaseUrl } from "./metric-db.js";
-import { LOCAL_TENANT } from "../../src/api/tenant.js";
+import { LOCAL_TENANT } from "../../src/tenant.js";
 
 const SITE = "https://jsredirect.example";
 const url = (path: string): string => `${SITE}${path}`;

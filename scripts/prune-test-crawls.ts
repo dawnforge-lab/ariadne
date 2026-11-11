@@ -42,7 +42,7 @@ import { and, eq, gt, inArray, notExists, sql } from "drizzle-orm";
 import { closeDb, createDb, type Db } from "../src/db/client.js";
 import { crawls, frontier } from "../src/db/schema.js";
 import { ApiService } from "../src/api/service.js";
-import { parseTenant } from "../src/api/tenant.js";
+import { parseTenant } from "../src/tenant.js";
 
 const RESERVED_LABELS = ["localhost", "test", "example", "invalid"] as const;
 

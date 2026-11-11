@@ -32,8 +32,8 @@ import {
 } from "../../src/crawl/loop.js";
 import { closeDb, createDb, type Db } from "../../src/db/client.js";
 import { runMigrations } from "../../src/db/migrate.js";
-import { crawls, sitemapHreflang, sitemapMemberships } from "../../src/db/schema.js";
-import { LOCAL_TENANT } from "../../src/api/tenant.js";
+import { crawls, sitemapHreflang, sitemapMemberships, sitemapUrls } from "../../src/db/schema.js";
+import { LOCAL_TENANT } from "../../src/tenant.js";
 
 function databaseUrl(): string {
   const url = process.env.DATABASE_URL;
@@ -382,4 +382,59 @@ describe("the write-ahead interrupted mark (28a T5)", () => {
     const d = (await crawlRow(id)).discovery as unknown as Record<string, any>;
     expect(d.truncation).toEqual({ sitemapUrlsCapped: true, extra: 3, interrupted: true });
   });
+});
+
+describe("a resumed walk sweeps the sitemap entries the site no longer lists (28b T1)", () => {
+  /** The paths `sitemap_urls` holds for the crawl, sorted. */
+  async function entryPaths(s: MutableSite, id: string): Promise<string[]> {
+    const rows = await db
+      .select({ url: sitemapUrls.url })
+      .from(sitemapUrls)
+      .where(eq(sitemapUrls.crawlId, id));
+    return rows.map((r) => r.url.slice(s.base.length)).sort();
+  }
+
+  it("(a) a URL the site dropped is no longer a sitemap entry after the whole resumed walk", async () => {
+    const s = await mutableSite(["/a", "/b"]);
+    s.pageDelayMs = 15_000;
+    const first = await runCrawl(db, LOCAL_TENANT, config(s), undefined, pauseAtFirstSlot(s));
+    createdCrawls.push(first.crawlId);
+    expect(first.status).toBe("paused");
+    const id = first.crawlId;
+    expect(await entryPaths(s, id)).toEqual(["/a", "/b"]);
+
+    s.listed = ["/a"];
+    s.pageDelayMs = 0;
+    const resumed = await resumeCrawl(db, id, { config: config(s) });
+    expect(resumed.status).toBe("finished");
+
+    expect(await entryPaths(s, id)).toEqual(["/a"]);
+  }, 60_000);
+
+  it("(b) a resumed persist stopped between batches removes nothing", async () => {
+    const many = Array.from({ length: 600 }, (_, i) => `/p${i}`);
+    const s = await mutableSite(many);
+    const id = await finishedCrawl(s);
+    expect(await db.$count(sitemapUrls, eq(sitemapUrls.crawlId, id))).toBe(600);
+
+    // The site now lists 550 of them: two batches (500 + 50), so a completed
+    // persist would sweep the 50 dropped rows. The resume is stopped after the
+    // first batch, so the sweep never runs and all 600 earlier rows stand.
+    s.listed = many.slice(0, 550);
+    let asked = false;
+    const stopped = await resumeCrawl(db, id, {
+      config: config(s),
+      testHooks: {
+        onSeedingBatch: async (stage, stop) => {
+          if (stage !== "sitemap_urls" || asked) return;
+          asked = true;
+          expect(await setControlRequest(db, id, "pause")).toBe(true);
+          await until("the stop signal", () => stop.aborted, 5_000);
+        },
+      },
+    });
+    expect(stopped.status).toBe("paused");
+    expect(asked).toBe(true);
+    expect(await db.$count(sitemapUrls, eq(sitemapUrls.crawlId, id))).toBe(600);
+  }, 60_000);
 });

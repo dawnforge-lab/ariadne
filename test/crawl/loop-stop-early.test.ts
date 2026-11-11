@@ -40,7 +40,7 @@ import { deriveSitemapHreflang } from "../../src/rules/derive/sitemap-hreflang.j
 import { hreflangIntegrityRules } from "../../src/rules/query/hreflang-integrity.js";
 import { hreflangRules } from "../../src/rules/query/hreflang.js";
 import type { Finding } from "../../src/rules/registry/types.js";
-import { LOCAL_TENANT } from "../../src/api/tenant.js";
+import { LOCAL_TENANT } from "../../src/tenant.js";
 
 /** The spec's stop target: one poll interval, plus one second for the close. */
 const STOP_TARGET_MS = CONTROL_POLL_MS + 1_000;

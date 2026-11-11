@@ -37,7 +37,7 @@ import {
   structuredData,
   urlParams,
 } from "../db/schema.js";
-import { tenantExportDir, type TenantId } from "./tenant.js";
+import { tenantExportDir, type TenantId } from "../tenant.js";
 
 type CrawlChildTable = PgTable & { crawlId: PgColumn };
 

@@ -20,7 +20,7 @@ import { domainToASCII } from "node:url";
 import type { CrawlConfig } from "../crawl/loop.js";
 import type { AddressResolver } from "../crawl/url-policy.js";
 import { ServiceError } from "./errors.js";
-import { parseTenant, type TenantId } from "./tenant.js";
+import { parseTenant, type TenantId } from "../tenant.js";
 
 /**
  * What one engine instance may do, whoever is asking: POLICY, not identity.

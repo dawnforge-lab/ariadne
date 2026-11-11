@@ -18,7 +18,7 @@ import type { Finding, QueryRule } from "../../src/rules/registry/types.js";
 import { HIGH_EXTERNAL_OUTLINKS, HIGH_INTERNAL_OUTLINKS } from "../../src/rules/thresholds.js";
 import { mkDiscovery } from "./mk-discovery.js";
 import { writerIndexable, type IndexabilitySpec } from "./mk-page.js";
-import { LOCAL_TENANT } from "../../src/api/tenant.js";
+import { LOCAL_TENANT } from "../../src/tenant.js";
 
 function databaseUrl(): string {
   const url = process.env.DATABASE_URL;

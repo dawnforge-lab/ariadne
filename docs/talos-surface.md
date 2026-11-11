@@ -925,7 +925,7 @@ Two properties make the double-transport claim below cheap to trust:
   tools Phase 27a added are not among the thirteen pairs; each has its own
   route-equals-tool test instead (`test/api/judgement-config.test.ts:654`
   "crawl_config_get answers what GET /crawls/:id/config answers",
-  `test/api/crawl-overview.test.ts:470` "serves the same answer at GET
+  `test/api/crawl-overview.test.ts:471` "serves the same answer at GET
   /crawls/:id/overview/crawl"). `GET /crawls/:id/overview/issues` has no
   route test of its own: it is the same service call as the tool, and the
   Phase 27a gate compared the two live, with and without `includeZero`, and
@@ -2060,12 +2060,12 @@ back with `click-depth`, `issues-grid`, `render` and `robots-blocked-dropped`
 named, and those sections and that entry absent rather than written as zeros
 (§5.7).
 
-Pinned: `test/api/crawl-overview.test.ts:244` "crawl_overview on a judged,
-unrendered crawl" (9 tests, among them `test/api/crawl-overview.test.ts:263`
+Pinned: `test/api/crawl-overview.test.ts:245` "crawl_overview on a judged,
+unrendered crawl" (9 tests, among them `test/api/crawl-overview.test.ts:264`
 "takes every urls entry from the crawl_status field it names"),
-`test/api/crawl-overview.test.ts:415` "crawl_overview on other crawls" (7 tests:
+`test/api/crawl-overview.test.ts:416` "crawl_overview on other crawls" (7 tests:
 the unjudged, rendered and pre-0020 crawls, and the route), and
-`test/api/crawl-overview.test.ts:504` "the overviews read the judgement inside
+`test/api/crawl-overview.test.ts:505` "the overviews read the judgement inside
 their snapshot".
 
 ### 4.4 `issue_urls` → `{columns, items, nextCursor}` — one rule as a table
@@ -2157,7 +2157,7 @@ a reader acts on", `test/rules/helpers.test.ts:717` "names a block a block,
 whatever status the challenge was served with",
 `test/fixtures/harness.test.ts:1293` "declares a column for every evidence key it
 writes, and writes every column it declares",
-`test/rules/registry.test.ts:774` "finds one defining file per rule, and the key
+`test/rules/registry.test.ts:776` "finds one defining file per rule, and the key
 spelled inside it".
 
 **A rule the crawl's judgement disables is refused, 409** (Deviation 3), and so
@@ -3087,13 +3087,13 @@ measurement (pages no internal link reaches); and the dropped entry's `null`
 percent means "not a share of Encountered", not "not measured". In the CSV view
 each `notMeasured` item is a row after the entries, `<id>,Not measured:
 <reason>,,` with empty Value and Percent cells. Pinned:
-`test/api/crawl-overview.test.ts:245` "lists the measured sections in order and
-names render as not measured", `test/api/crawl-overview.test.ts:438` "names
+`test/api/crawl-overview.test.ts:246` "lists the measured sections in order and
+names render as not measured", `test/api/crawl-overview.test.ts:439` "names
 render coverage as not measured on a rendered crawl no rules run judged",
-`test/api/crawl-overview.test.ts:449` "names an uncounted robots overflow
-(pre-0020 crawl) instead of writing 0", `test/api/crawl-overview.test.ts:542`
+`test/api/crawl-overview.test.ts:450` "names an uncounted robots overflow
+(pre-0020 crawl) instead of writing 0", `test/api/crawl-overview.test.ts:543`
 "crawl_overview names issues-grid and click-depth as not measured, never zeros",
-`test/api/crawl-overview.test.ts:563` "has the exact header and one row per JSON
+`test/api/crawl-overview.test.ts:564` "has the exact header and one row per JSON
 entry, then the not-measured rows".
 
 ---
