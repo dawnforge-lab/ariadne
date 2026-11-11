@@ -3072,9 +3072,14 @@ async function runToCompletion(
  * it staged nothing and replaces nothing.
  *
  *  - A crawl that already holds evidence — a resume of a walked crawl — keeps
- *    it, and only its `robots` key becomes this run's outcome: the walk's keys
- *    (its sitemaps, facts and truncation, an `interrupted` mark included) still
- *    describe the staging the earlier walk left, which stands.
+ *    the walk's keys (`suppliedSitemaps`, `truncation` with any `interrupted`
+ *    mark, `docsFetched`, `sitemapFacts`, `sitemapsRead`): they still describe
+ *    the staging the earlier walk left, which stands. The keys robots.txt
+ *    itself decides come from THIS read (controller ruling R5): `robots`, and
+ *    `sitemapSources` — the `Sitemap:` lines the file declared, which an
+ *    unreachable file declared none of. Keeping the earlier file's lines beside
+ *    an `unreachable` outcome would have `robots_get` say this read declared
+ *    them.
  *  - A crawl with none gets this run's evidence whole, as a fresh crawl always
  *    has. Its staging is cleared first (`prepare`; the mark matches no row):
  *    rows on it can only be a walk stopped before it wrote evidence, and the
@@ -3089,7 +3094,11 @@ async function writeUnreachableRobotsEvidence(
   const merged = await db
     .update(crawls)
     .set({
-      discovery: sql`${crawls.discovery} || jsonb_build_object('robots', ${JSON.stringify(evidence.robots)}::jsonb)`,
+      // The robots-derived keys only; the walk's keys stand (see above).
+      discovery: sql`${crawls.discovery} || jsonb_build_object(
+        'robots', ${JSON.stringify(evidence.robots)}::jsonb,
+        'sitemapSources', ${JSON.stringify(evidence.sitemapSources)}::jsonb
+      )`,
     })
     .where(and(eq(crawls.id, crawlId), isNotNull(crawls.discovery)))
     .returning({ id: crawls.id });

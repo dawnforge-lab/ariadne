@@ -67,14 +67,17 @@ const servers: Server[] = [];
  * robots.txt declares one sitemap, `/sitemap.xml`, which lists `listed` (paths)
  * — `/a` with alternates `en` → `/a` and `fr` → `/b` whenever it is listed, so
  * the walk stages hreflang rows. While `robotsDown` is set, robots.txt answers
- * 503 to every request: unreachable, a complete disallow. Pages answer after
- * `pageDelayMs` (0: at once), so a pause written at the first page slot finds
- * that page in flight rather than the crawl already finished.
+ * 503 to every request: unreachable, a complete disallow. While `sitemapDown`
+ * is set, `/sitemap.xml` answers 500: the walk completes having read no
+ * document, so it never flushes the sink. Pages answer after `pageDelayMs`
+ * (0: at once), so a pause written at the first page slot finds that page in
+ * flight rather than the crawl already finished.
  */
 interface MutableSite {
   base: string;
   listed: string[];
   robotsDown: boolean;
+  sitemapDown: boolean;
   pageDelayMs: number;
 }
 
@@ -102,7 +105,7 @@ function sitemapXml(s: MutableSite): string {
 }
 
 async function mutableSite(listed: string[]): Promise<MutableSite> {
-  const s: MutableSite = { base: "", listed, robotsDown: false, pageDelayMs: 0 };
+  const s: MutableSite = { base: "", listed, robotsDown: false, sitemapDown: false, pageDelayMs: 0 };
   const server = createServer((req, res: ServerResponse) => {
     const p = path(req);
     if (p === "/robots.txt") {
@@ -116,6 +119,11 @@ async function mutableSite(listed: string[]): Promise<MutableSite> {
       return;
     }
     if (p === "/sitemap.xml") {
+      if (s.sitemapDown) {
+        res.writeHead(500, { "content-type": "text/plain" });
+        res.end("down");
+        return;
+      }
       res.writeHead(200, { "content-type": "application/xml" });
       res.end(sitemapXml(s));
       return;
@@ -247,10 +255,32 @@ describe("a resumed walk replaces the staging (R17)", () => {
     expect(evidence.truncation.interrupted).toBeUndefined();
     expect((await stagingCounts(id)).hreflang).toBe(evidence.sitemapFacts?.hreflangRows);
   }, 60_000);
+
+  it("(e) a resumed walk that completes without staging a row (its sitemap answers 500) replaces the staging with nothing", async () => {
+    const s = await mutableSite(["/a", "/b"]);
+    const id = await finishedCrawl(s);
+    expect(await stagingCounts(id)).toEqual({ memberships: 2, hreflang: 2 });
+
+    // robots.txt still reads and still declares the sitemap; the document
+    // fails, so the walk completes having flushed nothing — the clear is the
+    // crawl's own call after `discover` returns, not the sink's.
+    s.sitemapDown = true;
+    const resumed = await resumeCrawl(db, id, { config: config(s) });
+    expect(resumed.status).toBe("finished");
+
+    expect(await stagingCounts(id)).toEqual({ memberships: 0, hreflang: 0 });
+    const evidence = await evidenceOf(id);
+    expect(evidence.robots.outcome).toBe("read");
+    expect(evidence.sitemapFacts).toEqual(
+      expect.objectContaining({ memberships: 0, hreflangRows: 0 }),
+    );
+    expect(evidence.truncation.failures.map((f) => f.url)).toEqual([`${s.base}/sitemap.xml`]);
+    expect(evidence.truncation.interrupted).toBeUndefined();
+  }, 60_000);
 });
 
 describe("a resume that finds robots.txt unreachable walks nothing, and replaces nothing (R17)", () => {
-  it("(b) the earlier walk's staging and evidence stand; only the robots key is the new outcome, and the crawl closes failed", async () => {
+  it("(b) the earlier walk's staging and evidence stand; only the robots-derived keys are this read's, and the crawl closes failed", async () => {
     const s = await mutableSite(["/a", "/b"]);
     const id = await finishedCrawl(s);
     const before = await stagingCounts(id);
@@ -258,6 +288,7 @@ describe("a resume that finds robots.txt unreachable walks nothing, and replaces
     expect(before.hreflang).toBe(2);
     const kept = await evidenceOf(id);
     expect(kept.robots.outcome).toBe("read");
+    expect(kept.sitemapSources).toEqual([`${s.base}/sitemap.xml`]);
 
     s.robotsDown = true;
     const resumed = await resumeCrawl(db, id, { config: config(s) });
@@ -271,11 +302,13 @@ describe("a resume that finds robots.txt unreachable walks nothing, and replaces
     expect(await stagingCounts(id)).toEqual(before);
     const after = await evidenceOf(id);
     // Every key the walk wrote, unchanged — no `interrupted` mark among them.
-    const { robots: _keptRobots, ...keptWalk } = kept;
-    const { robots: newRobots, ...afterWalk } = after;
+    const { robots: _keptRobots, sitemapSources: _keptSources, ...keptWalk } = kept;
+    const { robots: newRobots, sitemapSources: newSources, ...afterWalk } = after;
     expect(afterWalk).toEqual(keptWalk);
     expect(after.truncation.interrupted).toBeUndefined();
-    // The robots key is this run's outcome.
+    // The keys robots.txt decides are this read's (ruling R5): an unreachable
+    // file declared no `Sitemap:` line, so the earlier file's are not kept.
+    expect(newSources).toEqual([]);
     expect(newRobots.outcome).toBe("unreachable");
     expect(newRobots.note).toMatch(/robots\.txt unreachable/);
     expect(newRobots.note).toBe(resumed.note);
