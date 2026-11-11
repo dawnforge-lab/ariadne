@@ -293,14 +293,14 @@ describe("coverage: every route and tool is scoped or explicitly global", () => 
   });
 
   it.each(signatures)("route %s has a scoped case or is global", (signature) => {
-    const scoped = signature in SCOPED_CASES;
+    const scoped = Object.hasOwn(SCOPED_CASES, signature);
     const global = GLOBAL_ROUTES.has(signature);
     expect(scoped || global, `${signature} has no tenancy case: add it to SCOPED_ROUTES or GLOBAL_ROUTES`).toBe(true);
     expect(scoped && global, `${signature} is both scoped and global`).toBe(false);
   });
 
   it.each([...TOOL_NAMES])("tool %s has a scoped case or is global", (name) => {
-    const scoped = name in SCOPED_CASES;
+    const scoped = Object.hasOwn(SCOPED_CASES, name);
     const global = GLOBAL_TOOLS.has(name);
     expect(scoped || global, `tool ${name} has no tenancy case: add it to SCOPED_TOOLS or GLOBAL_TOOLS`).toBe(true);
     expect(scoped && global, `tool ${name} is both scoped and global`).toBe(false);

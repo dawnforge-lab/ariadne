@@ -3024,7 +3024,7 @@ export class ApiService {
       })
       .from(crawls)
       .where(sql.join(where, sql` and `))
-      .orderBy(desc(crawls.startedAt), desc(crawls.id))
+      .orderBy(sql`${crawls.startedAt} desc nulls last`, sql`${crawls.id} desc nulls last`)
       .limit(limit + 1);
 
     // One row past the page is what says whether there IS a next page. It is
@@ -4292,7 +4292,8 @@ export class ApiService {
     // Ownership BEFORE the busy check below: "a render pass is running for
     // crawl X" is a fact about X, and another tenant's X answers as missing.
     await this.assertCrawl(tenant, crawlId);
-    // Check and claim in ONE synchronous step, before the first `await`, as
+    // The ownership read comes first; the check and the claim are then adjacent
+    // and synchronous, with no `await` between them, as
     // `runRulesForCrawl` claims `judging` (see there for the window a claim
     // taken after the reads left open): while the call runs, `refuseWhileBusy`
     // refuses the commands that would change the crawl under it (resume,
@@ -4456,7 +4457,9 @@ export class ApiService {
     // crawl, and another tenant's crawl answers as missing. The claim below
     // still precedes the status read, which is the window it closes.
     await this.assertCrawl(tenant, crawlId);
-    // Check and claim in ONE synchronous step, BEFORE the first `await`. Two
+    // The ownership read comes first; the check and the claim are then adjacent
+    // and synchronous, with no `await` between them, and the status read still
+    // follows the claim. Two
     // callers cannot both see an unheld crawl, and — the reason the claim
     // comes before the status read rather than after it — no command that
     // `refuseWhileBusy` guards (resume, cancel, a crawl config change) can

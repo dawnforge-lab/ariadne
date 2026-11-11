@@ -34,18 +34,22 @@ $ docker exec ariadne-pg psql -U ariadne -d ariadne -Atc "select count(*), count
 9|9|1
 ```
 
-Nine crawls, all nine `tenant_id = 'local'`, one distinct tenant. The migration only adds a
-column and updates it, so the crawl count is unchanged by it (the table is never deleted
-from); the 9 above is the count after. `crawl_list` over a real stdio MCP server
-(`src/api/mcp-serve.ts` as a child process, driven by the SDK's stdio client, run from a
-scratch script that is not committed), `DATABASE_URL` on the dev database:
+Before = 9 (8 left by the Phase 27d prune plus the 27d Hurtigruten gate crawl
+`crawl_d5207a58-e431-44b7-8f56-9b095e8a1c8b`, 2026-11-10); after = 9, all nine
+`tenant_id = 'local'`, one distinct tenant. The migration only adds a column and updates it,
+so the crawl count is unchanged by it (the table is never deleted from). `crawl_list` over a
+real stdio MCP server (`src/api/mcp-serve.ts` as a child process, driven by the SDK's stdio
+client, run from a scratch script that is not committed), `DATABASE_URL` on the dev database:
 
 ```
 ARIADNE_TENANT=local  -> crawl_list isError=false, 9 crawls listed
 ARIADNE_TENANT=other  -> crawl_list isError=false, 0 crawls listed
 ```
 
-No dev data was modified.
+No dev data was modified. The committed, reproducible proofs: the stdio spawn of
+`mcp-serve.ts` with `ARIADNE_TENANT` set is `test/api/mcp.test.ts:2916`, and that
+`crawl_list` lists only the server's tenant's crawls is the test in `test/api/tenancy.test.ts`
+named "crawl_list lists only the server's tenant's crawls".
 
 ## 3. The carried loop fixes have failing-first tests
 
@@ -84,6 +88,10 @@ Both are 27d carries, paid in this phase.
    predicate, which is the guarantee; a timing test would be flaky.
 4. **Render files stay at `<renderDir>/<crawlId>/`.** The spec moves only exports under the
    tenant; render documents are an operator artifact that 28b drops from workers.
+5. **Exports are flat files, not a per-crawl directory.** They are
+   `<exportDir>/<tenant>/<slug>-<dataset>…`, not the spec's `<exportDir>/<tenant>/<crawlId>/`.
+   The isolation is the same (a direct-child containment check under the tenant directory),
+   and `crawl_delete` finds a crawl's exports by its slug.
 
 ## Rulings
 
@@ -112,6 +120,14 @@ mkdir -p <exportDir>/local && mv <exportDir>/<crawl files> <exportDir>/local/
 - **R4:** a re-walk never clears `sitemap_urls`, so a URL dropped from a changed site stays a
   sitemap entry and sitemap rules on a resumed crawl of that site can count it. Carried to
   the 28b plan.
+- **`sitemap.invalid` with an unreachable robots.txt** (`src/rules/query/sitemap.ts`, the
+  `unreachable` branch, ~229-233) returns `[]` because "those documents were never opened".
+  Since ruling R5 a resumed crawl's merged evidence can keep an earlier walk's real
+  `truncation.failures` beside an `unreachable` outcome. The output is unchanged from pre-28a,
+  but the rule should refuse explicitly or judge the kept failures. Carried to 28b.
+- **The HTTP tenant check runs before routing for every request.** 28b's `/healthz`,
+  `/readyz` and `/metrics` therefore need an explicit pre-tenant exemption, and that exemption
+  must be the sentinel test's global list, not an ad-hoc bypass. Carried to 28b.
 - **Talos must send `X-Ariadne-Tenant` before it upgrades to 28a**
   (`docs/talos-integration.md` obligation 9).
 - The PR's first CI run is green: not yet shown.
