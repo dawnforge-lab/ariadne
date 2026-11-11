@@ -28,9 +28,29 @@ import { and, eq } from "drizzle-orm";
 
 import type { Db } from "../db/client.js";
 import { jobs } from "../db/schema.js";
-import { claimNextJob, finishJob, type ClaimedJob, type JobKind, type JobOutcome } from "./jobs.js";
+import { assertTenantCap, claimNextJob, finishJob, type ClaimedJob, type JobKind, type JobOutcome } from "./jobs.js";
 import { heartbeat } from "./instance.js";
 import { timingWith, type Timing } from "./timing.js";
+
+/** `ARIADNE_TENANT_MAX_RUNNING` when it is not set (R9). */
+export const DEFAULT_TENANT_MAX_RUNNING = 1;
+
+/**
+ * `ARIADNE_TENANT_MAX_RUNNING`: how many unpinned crawl jobs one tenant may
+ * have running across the worker pool. Unset is the default, 1; anything set
+ * must be a positive whole number written plainly (`4`, not `04`, ` 4` or
+ * `4e0`), or it is refused naming the variable — never read as the default.
+ */
+export function parseTenantMaxRunning(raw: string | undefined): number {
+  if (raw === undefined) return DEFAULT_TENANT_MAX_RUNNING;
+  const value = Number(raw);
+  if (!/^[1-9][0-9]*$/.test(raw) || !Number.isSafeInteger(value)) {
+    throw new Error(
+      `ARIADNE_TENANT_MAX_RUNNING must be a positive whole number, got ${JSON.stringify(raw.slice(0, 40))}`,
+    );
+  }
+  return value;
+}
 
 export interface JobRunnerOptions {
   /** The `instances` row this runner claims as (`claimed_by`). */
@@ -38,6 +58,13 @@ export interface JobRunnerOptions {
   kinds: readonly JobKind[];
   /** Claim jobs pinned to this instance id, or (null) the unpinned pool. */
   pinnedTo: string | null;
+  /**
+   * How many unpinned crawl jobs one tenant may have running across the pool
+   * (R9; `parseTenantMaxRunning` reads `ARIADNE_TENANT_MAX_RUNNING` where a
+   * worker-pool runner is built). Required when `pinnedTo` is null; refused
+   * otherwise — a pinned runner is not capped per tenant.
+   */
+  maxRunningPerTenant?: number;
   /** How many jobs run at once. A positive whole number. */
   concurrency: number;
   execute: (job: ClaimedJob, signal: AbortSignal) => Promise<void>;
@@ -78,6 +105,7 @@ export class JobRunner {
       throw new Error(`JobRunner: concurrency must be a positive whole number, got ${String(opts.concurrency)}`);
     }
     if (opts.kinds.length === 0) throw new Error("JobRunner: a runner must run at least one kind of job");
+    assertTenantCap(opts.pinnedTo, opts.maxRunningPerTenant, "JobRunner");
     this.timing = timingWith(opts.timing);
     this.log = opts.log ?? ((line) => console.error(line));
   }
@@ -139,6 +167,7 @@ export class JobRunner {
           instanceId: this.opts.instanceId,
           kinds: this.opts.kinds,
           pinnedTo: this.opts.pinnedTo,
+          ...(this.opts.maxRunningPerTenant === undefined ? {} : { maxRunningPerTenant: this.opts.maxRunningPerTenant }),
         });
       } catch (error) {
         this.log(`runner ${this.opts.instanceId}: claiming a job failed — ${messageOf(error)}; retrying at the next tick`);

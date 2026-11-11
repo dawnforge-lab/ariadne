@@ -25,7 +25,8 @@ ruleset is unchanged; migration 0037 adds `crawls.tenant_id`. The gate evidence 
   crawl is busy, and `crawl_compare` / `compare_urls` never name the other site's host.
   `crawl_list` lists only the caller's crawls; `crawl_start` creates for the caller.
   `config_schema`, `config_validate` and the no-`crawlId` form of `rules_catalog` are
-  global; `queuePosition` stays a position in the global queue.
+  global. `queuePosition` (since 28b) counts only the caller's own queued crawls ahead:
+  another tenant's backlog is never visible in it.
 - **Exports sit under the tenant.** `export_crawl` writes `<exportDir>/<tenant>/…`, and
   `crawl_delete` looks there. Exports written before 28a at `<exportDir>/<file>` are no
   longer found: the operator moves them once (`mkdir -p <exportDir>/local && mv
@@ -1002,11 +1003,15 @@ Two properties make the double-transport claim below cheap to trust:
 | No such crawl / rule / route | 404 `{error}` | tool error `{error}` |
 | The row's own state forbids it (still running, retired rule id, unreadable stored evidence; since Phase 27a also: a rule the crawl's judgement disables, asked for by `issue_urls` / `issue_inlinks`; a stored judgement that overrides a retired rule; `crawl_config_set` while the crawl's rules run; `issues_overview` on an unjudged crawl) | 409 `{error}` | tool error `{error}` |
 | The crawl needs credentials this server does not hold (Phase 27c: after a restart; `crawl_resume`, `crawl_render`, a credential patch to `crawl_config_set`) | 409 `{error, code: "CREDENTIALS_REQUIRED"}` | tool error, same body |
+| `crawl_render` while another crawl or render pass fetches the same site — the same host and port, whoever's crawl it is (Phase 28b; the sentence names the caller's crawl and that host only) | 409 `{error, code: "HOST_BUSY"}` | tool error, same body |
 | A body over the route's cap (64 KiB; 1 MiB on `POST /crawls`, `POST /config/validate`, `POST /crawls/:id/resume`, `POST /crawls/:id/render`, `PATCH /crawls/:id/config`) | 413 `{error}` (no `code`: the transport's own refusal) | n/a (stdio) |
 | A defect of ours | 500 `{error: "internal error", correlationId}` | `{error: "internal error", correlationId}` |
 
 **Phase 28a adds two 400 codes**, `TENANT_REQUIRED` and `INVALID_TENANT`, both from the
-transport's tenant check (HTTP only; stdio fails at boot instead).
+transport's tenant check (HTTP only; stdio fails at boot instead). **Phase 28b adds
+`HOST_BUSY` (409)**: one site is fetched by one crawl or render pass at a time across
+every tenant (hard rule 9), so a synchronous `crawl_render` refuses rather than wait;
+a crawl start waits in the queue instead.
 
 **`code` (Phase 27c, additive).** Every refusal the service raises carries `code` beside
 the sentence: `VALIDATION` (400), `FORBIDDEN` (403), `NOT_FOUND` (404), `CONFLICT` (409)
@@ -1193,7 +1198,7 @@ vocabulary each field enumerates"). `crawl_start`'s field set is not a second
 declaration to keep in step: its input schema IS the crawl-start body schema
 (`src/api/config-schema.ts`), and a test walks that schema's published form and
 drives every field through both transports
-(`test/api/transport-parity.test.ts:357` "walks the published schema and drives
+(`test/api/transport-parity.test.ts:368` "walks the published schema and drives
 every body through POST /crawls and crawl_start"). `crawl_render`'s is asserted
 against the service's own `RENDER_CRAWL_FIELDS` table.
 
@@ -1211,7 +1216,7 @@ transports (§4.1b): over MCP a body that does not fit it is refused by the SDK
 before the tool runs, in the schema's own words with the path appended, rather
 than as `{error}` JSON. `config_validate` answers every one of these without
 starting anything, with the same first message
-(`test/api/transport-parity.test.ts:386` "answers valid: false exactly when POST
+(`test/api/transport-parity.test.ts:397` "answers valid: false exactly when POST
 /crawls refuses"). The body refusals themselves are pinned in
 `test/api/config-schema.test.ts:241` ("refuses a perHostDelayMs under the
 politeness floor rather than raising it").
@@ -1271,18 +1276,18 @@ each does are in the Phase 27c summary at the top of this document; this is what
   holding `:`, more than 20 headers or 50 cookies (400). **No refusal quotes a value**: the
   message names the field and the header or cookie name only — and a name that is not
   a token, or an unknown key, only by its position, never quoted (pinned:
-  `test/api/scope-start.test.ts:542` "is never echoed: each refusal names the position,
+  `test/api/scope-start.test.ts:555` "is never echoed: each refusal names the position,
   on HTTP and MCP, start, validate, set and resume").
 
 A list crawl's answer adds `listUrlCount` (distinct URLs) and `listDuplicates` (how
 many were collapsed as another's spelling); a spider crawl's has neither. Pinned:
-`test/api/scope-start.test.ts:282` "refuses an off-site URL, an excluded listed URL,
+`test/api/scope-start.test.ts:295` "refuses an off-site URL, an excluded listed URL,
 an excluded seed, a typo'd host and maxPages below the list",
-`test/api/scope-start.test.ts:378` "collapses two spellings of one URL, counts it, and
-stores the distinct URLs in order", `test/api/scope-start.test.ts:241` "413s a 1.5 MiB
+`test/api/scope-start.test.ts:391` "collapses two spellings of one URL, counts it, and
+stores the distinct URLs in order", `test/api/scope-start.test.ts:254` "413s a 1.5 MiB
 body to POST /crawls, and accepts 900 KiB carrying 10,000 URLs",
-`test/api/scope-start.test.ts:400` "refuses an invalid credential set with a body that
-quotes no secret, on both transports" and `test/api/scope-start.test.ts:434` "accepts
+`test/api/scope-start.test.ts:413` "refuses an invalid credential set with a body that
+quotes no secret, on both transports" and `test/api/scope-start.test.ts:447` "accepts
 a valid set and shows no value in crawl_status, effective, crawl_config_get, the row
 or the log". The crawl side: `test/crawl/list-mode.test.ts:181` "fetches every listed
 URL at depth 0 and follows redirects but no link", `test/crawl/scope-admission.test.ts:245`
@@ -1385,9 +1390,9 @@ resume also re-applies the crawl's current `exclude`/`include` before its first 
 both ways (the Phase 27c summary at the top). Pinned:
 `test/api/credentials-restart.test.ts:347` "answers crawl_resume and crawl_render 409
 CREDENTIALS_REQUIRED and writes nothing; resumed with them, it finishes",
-`test/api/credentials-restart.test.ts:626` "a maximal credential set is re-supplied
+`test/api/credentials-restart.test.ts:632` "a maximal credential set is re-supplied
 over HTTP after a restart (1 MiB cap); a 64 KiB route still 413s",
-`test/api/credentials-restart.test.ts:661` "a refused render leaves the stored
+`test/api/credentials-restart.test.ts:667` "a refused render leaves the stored
 credentials as they were", `test/crawl/scope-admission.test.ts:376` "re-files pending
 URLs a changed scope refuses as excluded rows before any lease, leaving fetched ones
 alone" and `test/crawl/scope-admission.test.ts:681` "re-admits an excluded URL the
@@ -1554,7 +1559,7 @@ same checks `crawl_start` does, allowlist and URL policy on `siteUrl`, every
 lookup**. `errors[0]` is the refusal `crawl_start` would answer with, in the
 same words; `effective`, on a valid body, is exactly what the crawl would store
 in `config_jsonb` plus the parsed `judgement` (null when none was given), and
-is null on an invalid one (`test/api/transport-parity.test.ts:386` "answers
+is null on an invalid one (`test/api/transport-parity.test.ts:397` "answers
 valid: false exactly when POST /crawls refuses").
 
 ### 4.2 `crawl_status` → the crawl in full
@@ -1897,7 +1902,7 @@ the `issue_urls` CSV view) of one is refused 409 naming `crawl.list-mode`, and
 `metric_table` of a skipped metric says in its `note` that it was not measured (its
 JSON carries no `notMeasured`). The MCP answer of an `export_csv` over a findings view
 carries the same `{id, reason}` list. Before 27d every one of these was a bare list of ids.
-Pinned: `test/api/scope-start.test.ts:582` "issues_list and metrics_get name a
+Pinned: `test/api/scope-start.test.ts:595` "issues_list and metrics_get name a
 skipped rule in notMeasured, on HTTP and MCP, and never read it as clean".
 
 Pinned: `test/api/query.test.ts:1087` "groups by rule, orders by severity then

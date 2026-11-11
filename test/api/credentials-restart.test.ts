@@ -578,9 +578,11 @@ describe("a cancel or a delete removes the stored credentials (Deviation 9)", ()
     expect(await stored(paused)).toBe(true);
     expect((await call("POST", `/crawls/${paused}/cancel`)).status).toBe(200);
     expect(await stored(paused)).toBe(false);
-    const render = await call("POST", `/crawls/${paused}/render`);
-    expect(render.status, render.text).toBe(409);
-    expect(render.body["code"]).toBe("CREDENTIALS_REQUIRED");
+    // While the blocker crawls the same site, a render is refused for the host
+    // first (28b T4a: a busy refusal comes before the request's own checks).
+    const busy = await call("POST", `/crawls/${paused}/render`);
+    expect(busy.status, busy.text).toBe(409);
+    expect(busy.body["code"]).toBe("HOST_BUSY");
 
     const deleted = await start({ siteUrl: `${site}/auth/`, maxPages: 5, httpAuth: AUTH });
     expect((await call("POST", `/crawls/${deleted}/pause`)).status).toBe(200);
@@ -592,6 +594,10 @@ describe("a cancel or a delete removes the stored credentials (Deviation 9)", ()
 
     expect([200, 202]).toContain((await call("POST", `/crawls/${blocker}/cancel`)).status);
     await until("the blocker closes", blocker, settled);
+    // The host free, the cancelled crawl's render meets its removed credentials.
+    const render = await call("POST", `/crawls/${paused}/render`);
+    expect(render.status, render.text).toBe(409);
+    expect(render.body["code"]).toBe("CREDENTIALS_REQUIRED");
 
     const running = await start({ siteUrl: `${site}/auth/`, maxPages: 1000, httpAuth: AUTH });
     await until("running", running, (b) => b["status"] === "running");

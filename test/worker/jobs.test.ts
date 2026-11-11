@@ -6,10 +6,19 @@
  * claim names that pin: a claim takes only jobs pinned exactly as it asks, so
  * no runner of another file — the in-process services claim only their own
  * pins, and nothing in this file claims the unpinned pool — can take one of
- * these jobs, and nothing here can take theirs.
+ * these jobs, and nothing here can take theirs. (The unpinned pool's own
+ * fairness, the per-tenant cap, is tested in test/worker/runner.test.ts, the
+ * one file that claims it.)
+ *
+ * Task 4a: fair claims — one running crawl or render job per host, pinned or
+ * not; a tenant-scoped queue position; `HOST_BUSY` for a synchronous render.
+ * So every seeded crawl has a HOST OF ITS OWN unless a test names one: two of
+ * this file's crawls on one host would wait on each other — and on any other
+ * file's crawl of that host.
  */
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
+import { createServer, type Server } from "node:http";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { eq, inArray, sql } from "drizzle-orm";
 
@@ -20,15 +29,18 @@ import { ServiceError } from "../../src/api/errors.js";
 import { hostKeyOf } from "../../src/crawl/host-key.js";
 import { EXTRACTION_VERSION } from "../../src/crawl/versions.js";
 import { RULESET_VERSION } from "../../src/rules/registry/registry.js";
-import { LOCAL_TENANT } from "../../src/tenant.js";
+import { LOCAL_TENANT, parseTenant, type TenantId } from "../../src/tenant.js";
 import {
   claimNextJob,
   enqueueJob,
   finishJob,
+  JobBusyError,
   liveJobOf,
   queuePositionOf,
   withPinnedJob,
+  type ClaimedJob,
 } from "../../src/worker/jobs.js";
+import { JobRunner, parseTenantMaxRunning } from "../../src/worker/runner.js";
 import { heartbeat, registerInstance, stopInstance } from "../../src/worker/instance.js";
 import { DEFAULT_TIMING, timingWith } from "../../src/worker/timing.js";
 
@@ -53,11 +65,14 @@ afterAll(async () => {
   await closeDb(db);
 });
 
-async function seedCrawl(status = "queued"): Promise<string> {
+async function seedCrawl(
+  status = "queued",
+  siteUrl = `https://jobs-${randomUUID()}.example/`,
+  tenant: TenantId = LOCAL_TENANT,
+): Promise<string> {
   const id = `crawl_jobs_${randomUUID()}`;
-  const siteUrl = "https://jobs-test.example/";
   await db.insert(crawls).values({
-    tenantId: LOCAL_TENANT,
+    tenantId: tenant,
     id,
     siteUrl,
     hostKey: hostKeyOf(siteUrl),
@@ -341,26 +356,56 @@ describe("timing", () => {
 });
 
 describe("crawls.host_key", () => {
-  it("is the seed host lower-cased without a leading www., in code and in migration 0040's backfill alike", async () => {
-    const cases: [string, string][] = [
-      ["https://WWW.Example.COM/shop", "example.com"],
-      ["http://www.a.test:8080/", "a.test"],
-      ["https://shop.example.com/", "shop.example.com"],
-      ["http://127.0.0.1:5555/", "127.0.0.1"],
-      ["http://[::1]:8080/x", "[::1]"],
-      ["https://user:pw@www.b.test/", "b.test"],
-      ["https://wwwx.c.test/", "wwwx.c.test"],
-    ];
-    const file = readFileSync(new URL("../../drizzle/0040_jobs_instances.sql", import.meta.url), "utf8");
-    const match = /SET "host_key" = ([\s\S]*?) WHERE "host_key" IS NULL/.exec(file);
-    if (match === null) throw new Error("migration 0040 no longer backfills host_key the way this test reads it");
-    const expression = match[1]!.replaceAll('"site_url"', "v.site_url");
+  // [site URL, host key]: the host lower-cased without a leading `www.`, plus
+  // the port when the URL names one that is not its scheme's default (R8).
+  const cases: [string, string][] = [
+    ["https://WWW.Example.COM/shop", "example.com"],
+    ["http://www.a.test:8080/", "a.test:8080"],
+    ["https://shop.example.com/", "shop.example.com"],
+    ["http://127.0.0.1:5555/", "127.0.0.1:5555"],
+    ["http://[::1]:8080/x", "[::1]:8080"],
+    ["http://[::1]/x", "[::1]"],
+    ["https://user:pw@www.b.test/", "b.test"],
+    ["https://user:pw@www.b.test:8443/", "b.test:8443"],
+    ["https://wwwx.c.test/", "wwwx.c.test"],
+    // A scheme's default port, named or not, is no port.
+    ["https://x.com:443/", "x.com"],
+    ["http://x.com:80/", "x.com"],
+    ["HTTP://X.COM:80/", "x.com"],
+    ["http://x.com:0080/", "x.com"],
+    ["http://x.com:/", "x.com"],
+    // The other scheme's default is a port like any other.
+    ["http://x.com:443/", "x.com:443"],
+    ["https://x.com:80/", "x.com:80"],
+    ["https://x.com:08443?q=1", "x.com:8443"],
+    ["https://x.com:8443#top", "x.com:8443"],
+    // A trailing dot is kept, in code and in SQL alike (`hostKeyOf` does not
+    // strip it, and neither does the frontier's same-origin test).
+    ["https://example.com./", "example.com."],
+    ["https://example.com.:8443/", "example.com.:8443"],
+  ];
+
+  it("is the seed host lower-cased without a leading www., plus a non-default port (R8)", () => {
+    for (const [url, key] of cases) expect(hostKeyOf(url), url).toBe(key);
+  });
+
+  it("is what migration 0040's backfill then 0042's port suffix compute in SQL, case for case", async () => {
+    const m40 = readFileSync(new URL("../../drizzle/0040_jobs_instances.sql", import.meta.url), "utf8");
+    const backfill = /SET "host_key" = ([\s\S]*?) WHERE "host_key" IS NULL/.exec(m40);
+    if (backfill === null) throw new Error("migration 0040 no longer backfills host_key the way this test reads it");
+    const m42 = readFileSync(new URL("../../drizzle/0042_host_key_port.sql", import.meta.url), "utf8");
+    const port = /SELECT "id", ([\s\S]*?) AS "port_suffix" FROM "crawls"/.exec(m42);
+    if (port === null) throw new Error("migration 0042 no longer computes the port suffix the way this test reads it");
+    const key40 = backfill[1]!.replaceAll('"site_url"', "v.site_url");
+    const suffix42 = port[1]!.replaceAll('"site_url"', "v.site_url");
     for (const [url, key] of cases) {
-      expect(hostKeyOf(url), url).toBe(key);
-      const result = await db.execute(
-        sql`select ${sql.raw(expression)} as k from (select ${url}::text as site_url) v`,
-      );
-      expect((result.rows[0] as { k: string }).k, `backfill of ${url}`).toBe(key);
+      // A row older than R8 carries the port-less key (0040's backfill, or the
+      // `hostKeyOf` of its day); 0042 appends the port where the URL names one.
+      const result = await db.execute(sql`
+        select w.k || coalesce(w.s, '') as k
+          from (select ${sql.raw(key40)} as k, ${sql.raw(suffix42)} as s
+                  from (select ${url}::text as site_url) v) w`);
+      expect((result.rows[0] as { k: string }).k, `0040 + 0042 over ${url}`).toBe(key);
     }
   });
 });
@@ -416,5 +461,232 @@ describe("liveness decides held (Ruling R10)", () => {
     await stopInstance(db, claimer);
     expect(await queuePositionOf(db, crawlId, deadAfter)).toBeNull();
     expect((await liveJobOf(db, crawlId, deadAfter))?.live).toBe(false);
+  });
+});
+
+describe("fair claims (28b T4a)", () => {
+  const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+
+  async function until<T>(what: string, read: () => Promise<T> | T, done: (value: T) => boolean): Promise<T> {
+    const deadline = Date.now() + 10_000;
+    for (;;) {
+      const value = await read();
+      if (done(value)) return value;
+      if (Date.now() > deadline) throw new Error(`never happened: ${what} (last: ${JSON.stringify(value)})`);
+      await sleep(10);
+    }
+  }
+
+  /** A pinned runner over fake crawl work that ends when the test says. */
+  function heldRunner(pinnedTo: string, release: Map<string, () => void>): JobRunner {
+    return new JobRunner(db, {
+      instanceId: `${pinnedTo}-runner-${randomUUID()}`,
+      kinds: ["crawl"],
+      pinnedTo,
+      concurrency: 1,
+      heartbeat: false,
+      log: () => {},
+      timing: { claimPoll: 20 },
+      execute: (job: ClaimedJob, signal: AbortSignal) =>
+        new Promise<void>((resolve) => {
+          release.set(job.id, resolve);
+          signal.addEventListener("abort", () => resolve());
+        }),
+    });
+  }
+
+  const sorted = (ids: readonly string[]): string[] => [...ids].sort();
+
+  it("two crawls of one host never run at once: with a.test twice and b.test once queued, two runners run a.test's first and b.test, and a.test's second waits for the first to finish", async () => {
+    const pinnedTo = pin();
+    const a = `https://a-${randomUUID()}.test/`;
+    const b = `https://b-${randomUUID()}.test/`;
+    const a1 = await enqueueJob(db, { tenant: LOCAL_TENANT, crawlId: await seedCrawl("queued", a), kind: "crawl", pinnedTo });
+    const a2 = await enqueueJob(db, { tenant: LOCAL_TENANT, crawlId: await seedCrawl("queued", a), kind: "crawl", pinnedTo });
+    const b1 = await enqueueJob(db, { tenant: LOCAL_TENANT, crawlId: await seedCrawl("queued", b), kind: "crawl", pinnedTo });
+    const release = new Map<string, () => void>();
+    const runners = [heldRunner(pinnedTo, release), heldRunner(pinnedTo, release)];
+    const running = (): string[] => sorted(runners.flatMap((r) => r.runningJobIds()));
+    for (const runner of runners) runner.start();
+    try {
+      await until("a.test's first and b.test running", running, (ids) => ids.join() === sorted([a1, b1]).join());
+      // Many claim polls later, a.test's second still waits: its host is busy.
+      await sleep(200);
+      expect(running()).toEqual(sorted([a1, b1]));
+      expect((await jobRow(a2)).status).toBe("queued");
+
+      release.get(a1)!();
+      await until("a.test's second running", running, (ids) => ids.join() === sorted([a2, b1]).join());
+      expect((await jobRow(a1)).status).toBe("done");
+    } finally {
+      await Promise.all(runners.map((r) => r.stop()));
+    }
+  });
+
+  it("racing claims over queued crawls of one host start exactly one of them", async () => {
+    for (let round = 0; round < 5; round += 1) {
+      const pinnedTo = pin();
+      const site = `https://race-${randomUUID()}.test/`;
+      for (let i = 0; i < 3; i += 1) {
+        await enqueueJob(db, { tenant: LOCAL_TENANT, crawlId: await seedCrawl("queued", site), kind: "crawl", pinnedTo });
+      }
+      const claims = await Promise.all(
+        Array.from({ length: 6 }, (_, i) => claimNextJob(db, { instanceId: `racer-${i}`, kinds: ["crawl"], pinnedTo })),
+      );
+      expect(claims.filter((c) => c !== null), `round ${round}`).toHaveLength(1);
+    }
+  });
+
+  it("two crawls of 127.0.0.1 on two ports run at once; two of one 127.0.0.1:port take turns (R8)", async () => {
+    // Two ports nobody else can be serving while this test holds them.
+    const servers: Server[] = [createServer(), createServer()];
+    const ports: number[] = [];
+    for (const server of servers) {
+      await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
+      const address = server.address();
+      if (address === null || typeof address === "string") throw new Error("bound oddly");
+      ports.push(address.port);
+    }
+    try {
+      const pinnedTo = pin();
+      const one = `http://127.0.0.1:${ports[0]}/`;
+      const two = `http://127.0.0.1:${ports[1]}/`;
+      const one1 = await enqueueJob(db, { tenant: LOCAL_TENANT, crawlId: await seedCrawl("queued", one), kind: "crawl", pinnedTo });
+      const one2 = await enqueueJob(db, { tenant: LOCAL_TENANT, crawlId: await seedCrawl("queued", one), kind: "crawl", pinnedTo });
+      const two1 = await enqueueJob(db, { tenant: LOCAL_TENANT, crawlId: await seedCrawl("queued", two), kind: "crawl", pinnedTo });
+      const claim = (): Promise<ClaimedJob | null> => claimNextJob(db, { instanceId: "runner-ports", kinds: ["crawl"], pinnedTo });
+      expect((await claim())?.id).toBe(one1);
+      expect((await claim())?.id).toBe(two1);
+      expect(await claim()).toBeNull();
+      await finishJob(db, one1, "done");
+      expect((await claim())?.id).toBe(one2);
+    } finally {
+      for (const server of servers) await new Promise<void>((r) => server.close(() => r()));
+    }
+  });
+
+  it("a render pass holds its host: a crawl of that host is not claimed until it ends, and a rules job of that host is", async () => {
+    const site = `https://render-held-${randomUUID()}.test/`;
+    const pinnedTo = pin();
+    const hold = deferred();
+    const entered = deferred();
+    const rendering = withPinnedJob(
+      db,
+      { tenant: LOCAL_TENANT, crawlId: await seedCrawl("finished", site), kind: "render", instanceId: pin() },
+      async () => {
+        entered.resolve();
+        await hold.promise;
+      },
+    );
+    await entered.promise;
+    try {
+      const crawlJob = await enqueueJob(db, { tenant: LOCAL_TENANT, crawlId: await seedCrawl("queued", site), kind: "crawl", pinnedTo });
+      // Rules fetch nothing: a busy host does not hold them.
+      const rulesJob = await enqueueJob(db, { tenant: LOCAL_TENANT, crawlId: await seedCrawl("finished", site), kind: "rules", pinnedTo });
+      expect((await claimNextJob(db, { instanceId: "runner-r", kinds: ["crawl", "rules"], pinnedTo }))?.id).toBe(rulesJob);
+      expect(await claimNextJob(db, { instanceId: "runner-r", kinds: ["crawl", "rules"], pinnedTo })).toBeNull();
+      hold.resolve();
+      await rendering;
+      expect((await claimNextJob(db, { instanceId: "runner-r", kinds: ["crawl"], pinnedTo }))?.id).toBe(crawlJob);
+    } finally {
+      hold.resolve();
+    }
+  });
+
+  it("refuses a render HOST_BUSY while another crawl of its host runs — any tenant's — naming the host key and nothing of that crawl", async () => {
+    const host = `busy-${randomUUID()}.test`;
+    const site = `http://${host}:8080/`;
+    const other = parseTenant(`t-other-${randomUUID().slice(0, 8)}`);
+    const pinnedTo = pin();
+    const theirs = await seedCrawl("running", site, other);
+    await enqueueJob(db, { tenant: other, crawlId: theirs, kind: "crawl", pinnedTo });
+    expect((await claimNextJob(db, { instanceId: "runner-h", kinds: ["crawl"], pinnedTo }))?.crawlId).toBe(theirs);
+
+    const mine = await seedCrawl("finished", site);
+    let ran = false;
+    const err = await refusal(
+      withPinnedJob(db, { tenant: LOCAL_TENANT, crawlId: mine, kind: "render", instanceId: pin() }, async () => {
+        ran = true;
+      }),
+    );
+    expect(err.code).toBe("HOST_BUSY");
+    expect(err.message).toBe(
+      `crawl_render is refused for crawl ${mine}: ${host}:8080 is being crawled or rendered by ` +
+        "another job, and two at once would together break the site's politeness limits. " +
+        "Wait for it to end, then ask again",
+    );
+    expect(err.message).not.toContain(theirs);
+    expect(err.message).not.toContain(other);
+    expect(ran).toBe(false);
+    expect(await db.select().from(jobs).where(eq(jobs.crawlId, mine))).toEqual([]);
+
+    // A rules run fetches nothing: the busy host does not refuse it.
+    expect(
+      await withPinnedJob(db, { tenant: LOCAL_TENANT, crawlId: mine, kind: "rules", instanceId: pin() }, async () => "judged"),
+    ).toBe("judged");
+  });
+
+  it("a render of a crawl whose OWN crawl job runs is the busy guard's refusal, not HOST_BUSY", async () => {
+    const pinnedTo = pin();
+    const crawlId = await seedCrawl("running");
+    await enqueueJob(db, { tenant: LOCAL_TENANT, crawlId, kind: "crawl", pinnedTo });
+    await claimNextJob(db, { instanceId: "runner-own", kinds: ["crawl"], pinnedTo });
+    const err = await refusal(
+      withPinnedJob(db, { tenant: LOCAL_TENANT, crawlId, kind: "render", instanceId: pin() }, async () => {}),
+    );
+    expect(err).toBeInstanceOf(JobBusyError);
+    expect(err.code).toBe("CONFLICT");
+  });
+
+  it("a queue position counts only the caller's tenant's crawls ahead (R12)", async () => {
+    const live = await registerInstance(db, "all");
+    createdInstances.push(live);
+    const t1 = parseTenant(`t1-${randomUUID().slice(0, 8)}`);
+    const t2 = parseTenant(`t2-${randomUUID().slice(0, 8)}`);
+    const queue: string[] = [];
+    for (const tenant of [t1, t2, t2, t1]) {
+      const crawlId = await seedCrawl("queued", undefined, tenant);
+      await enqueueJob(db, { tenant, crawlId, kind: "crawl", pinnedTo: live });
+      queue.push(crawlId);
+    }
+    const positions = await Promise.all(queue.map((crawlId) => queuePositionOf(db, crawlId, 60_000)));
+    // t1's second job is second in t1's queue, not fourth in everybody's.
+    expect(positions).toEqual([1, 1, 2, 2]);
+    await stopInstance(db, live);
+  });
+
+  it("the tenant cap is the unpinned pool's: pinned claims of one tenant run side by side, and a pinned runner refuses a cap", async () => {
+    const pinnedTo = pin();
+    const first = await enqueueJob(db, { tenant: LOCAL_TENANT, crawlId: await seedCrawl(), kind: "crawl", pinnedTo });
+    const second = await enqueueJob(db, { tenant: LOCAL_TENANT, crawlId: await seedCrawl(), kind: "crawl", pinnedTo });
+    expect((await claimNextJob(db, { instanceId: "runner-p", kinds: ["crawl"], pinnedTo }))?.id).toBe(first);
+    expect((await claimNextJob(db, { instanceId: "runner-p", kinds: ["crawl"], pinnedTo }))?.id).toBe(second);
+    expect(
+      () =>
+        new JobRunner(db, {
+          instanceId: pinnedTo,
+          kinds: ["crawl"],
+          pinnedTo,
+          concurrency: 1,
+          maxRunningPerTenant: 1,
+          execute: async () => {},
+        }),
+    ).toThrow(/maxRunningPerTenant applies only to the unpinned pool/);
+    expect(
+      () => new JobRunner(db, { instanceId: pinnedTo, kinds: ["crawl"], pinnedTo: null, concurrency: 1, execute: async () => {} }),
+    ).toThrow(/maxRunningPerTenant/);
+    // Refused before any statement: an unpinned claim says how many a tenant may run.
+    await expect(claimNextJob(db, { instanceId: "runner-p", kinds: ["crawl"], pinnedTo: null })).rejects.toThrow(
+      /maxRunningPerTenant/,
+    );
+  });
+
+  it("ARIADNE_TENANT_MAX_RUNNING is a positive whole number, 1 when unset", () => {
+    expect(parseTenantMaxRunning(undefined)).toBe(1);
+    expect(parseTenantMaxRunning("1")).toBe(1);
+    expect(parseTenantMaxRunning("4")).toBe(4);
+    for (const bad of ["", "0", "-1", "1.5", "two", " 2", "2 ", "1e3", "01"]) {
+      expect(() => parseTenantMaxRunning(bad), JSON.stringify(bad)).toThrow(/ARIADNE_TENANT_MAX_RUNNING/);
+    }
   });
 });

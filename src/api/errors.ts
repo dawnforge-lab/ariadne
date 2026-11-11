@@ -16,6 +16,11 @@
  * `CREDENTIALS_REQUIRED`: a crawl whose stored shape says it needs credentials
  * was asked to run without them, and no readable stored copy exists (28b: the
  * key changed, or the copy was swept or never written); re-supply them.
+ * `HOST_BUSY` (28b, a 409): a synchronous `crawl_render` whose crawl's host
+ * another crawl or render pass is fetching right now — two at once would
+ * together break the site's politeness limits (hard rule 9). Nothing about
+ * the crawl is wrong; ask again when that work ends. The sentence names the
+ * host key only, never the other crawl.
  */
 export type ServiceErrorCode =
   | "VALIDATION"
@@ -23,6 +28,7 @@ export type ServiceErrorCode =
   | "NOT_FOUND"
   | "CONFLICT"
   | "CREDENTIALS_REQUIRED"
+  | "HOST_BUSY"
   | "TENANT_REQUIRED"
   | "INVALID_TENANT";
 

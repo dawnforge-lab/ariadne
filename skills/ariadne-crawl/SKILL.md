@@ -360,7 +360,9 @@ What the fields mean when you are waiting:
 - **`liveLeases`** — unexpired worker leases. A live crawl BETWEEN BATCHES
   momentarily holds none, which is exactly the window an impatient caller looks in.
 - **`queuePosition`** — a number only while the crawl is `queued` with a job waiting
-  to run it (0 = starting now), null otherwise. `status: "queued"` with
+  to run it (0 = starting now; otherwise its place among YOUR queued crawls, and it
+  waits while another crawl of the same site runs, whatever the number), null
+  otherwise. `status: "queued"` with
   `queuePosition: null` is the one genuinely broken state: no job will run it. Hand it
   to `crawl_resume`, which picks up the same crawl, or retire it with
   `crawl_mark_failed`.

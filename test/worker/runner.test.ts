@@ -15,7 +15,10 @@
  * other suite pin the crawl jobs they accept to themselves and claim only
  * those, so the only runner anywhere in the suite that claims unpinned jobs is
  * runner B below, and the only unpinned jobs are the ones this file's
- * `workers`-mode services enqueue. Tests run in order within a file.
+ * `workers`-mode services enqueue. Tests run in order within a file. The
+ * pool's fairness tests (28b T4a: the per-tenant cap, positions of another
+ * engine version's jobs) claim it too, and clear it of claimable leftovers an
+ * interrupted earlier run may have left first (`clearPool`).
  */
 import { randomUUID } from "node:crypto";
 import { createServer, type Server } from "node:http";
@@ -23,7 +26,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { eq, inArray, sql } from "drizzle-orm";
+import { and, eq, inArray, isNull, sql } from "drizzle-orm";
 
 import { closeDb, createDb, type Db } from "../../src/db/client.js";
 import { runMigrations } from "../../src/db/migrate.js";
@@ -36,10 +39,11 @@ import { RULESET_VERSION } from "../../src/rules/registry/registry.js";
 import { EXTRACTION_VERSION } from "../../src/crawl/versions.js";
 import { ApiService } from "../../src/api/service.js";
 import type { ServiceConfig } from "../../src/api/config.js";
-import { LOCAL_TENANT } from "../../src/tenant.js";
-import { claimNextJob, enqueueJob, type ClaimedJob } from "../../src/worker/jobs.js";
+import { LOCAL_TENANT, parseTenant, type TenantId } from "../../src/tenant.js";
+import { createApiServer } from "../../src/api/http.js";
+import { claimNextJob, enqueueJob, queuePositionOf, type ClaimedJob } from "../../src/worker/jobs.js";
 import { registerInstance } from "../../src/worker/instance.js";
-import { JobRunner } from "../../src/worker/runner.js";
+import { JobRunner, parseTenantMaxRunning } from "../../src/worker/runner.js";
 import { crawlJobExecutor } from "../../src/worker/crawl-job.js";
 import { TEST_CREDENTIAL_KEYS } from "../helpers/credential-keys.js";
 
@@ -110,11 +114,15 @@ async function until<T>(what: string, read: () => Promise<T>, done: (value: T) =
   }
 }
 
-async function seedCrawl(status = "finished"): Promise<string> {
+/** A crawl row on a host of its own unless `siteUrl` names one (host exclusivity, 28b T4a). */
+async function seedCrawl(
+  status = "finished",
+  siteUrl = `https://runner-${randomUUID()}.example/`,
+  tenant: TenantId = LOCAL_TENANT,
+): Promise<string> {
   const id = `crawl_runner_${randomUUID()}`;
-  const siteUrl = "https://runner-test.example/";
   await db.insert(crawls).values({
-    tenantId: LOCAL_TENANT,
+    tenantId: tenant,
     id,
     siteUrl,
     hostKey: hostKeyOf(siteUrl),
@@ -520,4 +528,166 @@ describe("liveness decides held (Ruling R10)", () => {
     expect(log.some((l) => l.includes("no runner is started"))).toBe(true);
     expect((service as unknown as { runner: unknown }).runner).toBeNull();
   });
+});
+
+describe("fair claims over the unpinned pool, and HOST_BUSY (28b T4a)", () => {
+  const short = (): string => randomUUID().slice(0, 8);
+
+  /**
+   * The unpinned pool is this file's alone, but an interrupted earlier run can
+   * leave claimable jobs in it, and a claim takes the oldest first. Settled
+   * before a test that claims the pool reads it. (Jobs of another engine
+   * version are nobody's claim here, and are left.)
+   */
+  async function clearPool(): Promise<void> {
+    await db
+      .update(jobs)
+      .set({ status: "abandoned", finishedAt: new Date() })
+      .where(
+        and(
+          eq(jobs.status, "queued"),
+          isNull(jobs.pinnedTo),
+          eq(jobs.rulesetVersion, RULESET_VERSION),
+          eq(jobs.extractionVersion, EXTRACTION_VERSION),
+        ),
+      );
+  }
+
+  async function queueUnpinned(tenant: TenantId): Promise<string> {
+    return enqueueJob(db, { tenant, crawlId: await seedCrawl("queued", undefined, tenant), kind: "crawl" });
+  }
+
+  const sorted = (ids: readonly string[]): string[] => [...ids].sort();
+
+  it("with ARIADNE_TENANT_MAX_RUNNING = 1, tenant t1's second crawl waits while t2's runs", async () => {
+    await clearPool();
+    const t1 = parseTenant(`t1-${short()}`);
+    const t2 = parseTenant(`t2-${short()}`);
+    const t1a = await queueUnpinned(t1);
+    const t1b = await queueUnpinned(t1);
+    const t2a = await queueUnpinned(t2);
+    const instanceId = await registerInstance(db, "worker");
+    createdInstances.push(instanceId);
+    const release = new Map<string, () => void>();
+    const runner = new JobRunner(db, {
+      instanceId,
+      kinds: ["crawl"],
+      pinnedTo: null,
+      concurrency: 3,
+      maxRunningPerTenant: parseTenantMaxRunning("1"),
+      log: () => {},
+      timing: { claimPoll: 20 },
+      execute: (job: ClaimedJob, signal: AbortSignal) =>
+        new Promise<void>((resolve) => {
+          release.set(job.id, resolve);
+          signal.addEventListener("abort", () => resolve());
+        }),
+    });
+    const running = async (): Promise<string[]> => sorted(runner.runningJobIds());
+    runner.start();
+    try {
+      await until("t1's first and t2's running", running, (ids) => ids.join() === sorted([t1a, t2a]).join(), 10_000);
+      // The runner has room for a third, and many claim polls pass: t1 is at its cap.
+      await sleep(200);
+      expect(await running()).toEqual(sorted([t1a, t2a]));
+      expect((await db.select().from(jobs).where(eq(jobs.id, t1b)))[0]?.status).toBe("queued");
+
+      release.get(t1a)!();
+      await until("t1's second running", running, (ids) => ids.join() === sorted([t1b, t2a]).join(), 10_000);
+    } finally {
+      await runner.stop();
+    }
+  });
+
+  it("a cap of 2 runs two of a tenant's crawls; a tenant's pinned (in-process) running crawls do not count against it", async () => {
+    await clearPool();
+    const t = parseTenant(`tc-${short()}`);
+    // A pinned crawl of t running: an in-process service's, not the pool's.
+    const pinnedTo = `test-pin-${randomUUID()}`;
+    const pinned = await enqueueJob(db, { tenant: t, crawlId: await seedCrawl("queued", undefined, t), kind: "crawl", pinnedTo });
+    expect((await claimNextJob(db, { instanceId: pinnedTo, kinds: ["crawl"], pinnedTo }))?.id).toBe(pinned);
+
+    const x = await queueUnpinned(t);
+    const y = await queueUnpinned(t);
+    const z = await queueUnpinned(t);
+    const claim = (max: number): Promise<ClaimedJob | null> =>
+      claimNextJob(db, { instanceId: "pool-runner", kinds: ["crawl"], pinnedTo: null, maxRunningPerTenant: max });
+    expect((await claim(1))?.id).toBe(x);
+    expect(await claim(1)).toBeNull();
+    expect((await claim(2))?.id).toBe(y);
+    expect(await claim(2)).toBeNull();
+    await db.update(jobs).set({ status: "abandoned" }).where(inArray(jobs.id, [pinned, x, y, z]));
+  });
+
+  it("a queued unpinned crawl job of another engine version is not positioned, and is not ahead of this version's", async () => {
+    await clearPool();
+    const t = parseTenant(`tv-${short()}`);
+    const older = await seedCrawl("queued", undefined, t);
+    await db.insert(jobs).values({
+      id: `job_${randomUUID()}`,
+      tenantId: t,
+      crawlId: older,
+      kind: "crawl",
+      status: "queued",
+      rulesetVersion: "0.0.0-another-deploy",
+      extractionVersion: EXTRACTION_VERSION,
+    });
+    const current = await seedCrawl("queued", undefined, t);
+    await enqueueJob(db, { tenant: t, crawlId: current, kind: "crawl" });
+    // No runner of this code will take it: "waiting" would read as forever.
+    expect(await queuePositionOf(db, older, 60_000)).toBeNull();
+    expect(await queuePositionOf(db, current, 60_000)).toBe(1);
+    // Not positioned is nobody's, as the crawl_status description tells the
+    // agent: crawl_mark_failed retires it, and still refuses this version's.
+    const service = newService([], { crawlRunner: "workers" });
+    await expect(service.markCrawlFailed(t, current)).rejects.toThrow(/held by this server/);
+    expect((await service.markCrawlFailed(t, older)).status).toBe("failed");
+    expect((await jobsOf(older)).map((j) => j.status)).toEqual(["abandoned"]);
+    await db.update(jobs).set({ status: "abandoned" }).where(inArray(jobs.crawlId, [older, current]));
+  });
+
+  it("crawl_render on a crawl whose host has a running crawl job answers 409 HOST_BUSY, naming the host and not the crawl", async () => {
+    const token = `test-token-runner-${randomUUID()}`;
+    const log: string[] = [];
+    const api = createApiServer({ db, config: { ...serviceConfig(log), token } });
+    const base = `http://127.0.0.1:${(await api.listen(0)).port}`;
+    const call = async (method: string, path: string, tenant: string, body?: unknown) => {
+      const res = await fetch(`${base}${path}`, {
+        method,
+        headers: {
+          authorization: `Bearer ${token}`,
+          "x-ariadne-tenant": tenant,
+          ...(body === undefined ? {} : { "content-type": "application/json" }),
+        },
+        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+      });
+      const text = await res.text();
+      return { status: res.status, text, body: (text === "" ? {} : JSON.parse(text)) as Record<string, unknown> };
+    };
+    try {
+      const started = await call("POST", "/crawls", "local", { siteUrl: `${site}/`, maxPages: 400, maxConcurrency: 1 });
+      expect(started.status, started.text).toBe(202);
+      const running = String(started.body["crawlId"]);
+      createdCrawls.push(running);
+      await until("the crawl running", () => crawlRow(running), (row) => row.status === "running");
+
+      // Another tenant's finished crawl of the same site.
+      const other = parseTenant(`th-${short()}`);
+      const finished = await seedCrawl("finished", `${site}/`, other);
+      const refused = await call("POST", `/crawls/${finished}/render`, other);
+      expect(refused.status, refused.text).toBe(409);
+      expect(refused.body["code"]).toBe("HOST_BUSY");
+      const error = String(refused.body["error"]);
+      expect(error).toContain(finished);
+      expect(error).toContain(hostKeyOf(site));
+      expect(error).not.toContain(running);
+      expect(error).not.toContain("local");
+      expect(await jobsOf(finished)).toEqual([]);
+
+      expect((await call("POST", `/crawls/${running}/cancel`, "local")).status).toBe(202);
+      await until("the crawl closed", () => crawlRow(running), (row) => row.status === "cancelled");
+    } finally {
+      await api.close();
+    }
+  }, 60_000);
 });

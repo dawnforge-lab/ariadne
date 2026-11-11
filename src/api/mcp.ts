@@ -486,10 +486,13 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "abandoned, claimedBy?} for the crawl's latest job (claimedBy names the engine " +
         "process that took it), or null when no job ever ran it. queuePosition is a number " +
         "only while the crawl is 'queued' with a crawl job that a live engine process holds, " +
-        "waiting or starting (0 = starting now, n = n-1 crawls ahead of it), and null " +
-        "otherwise; liveLeases counts unexpired worker leases. A 'queued' crawl with " +
+        "waiting or starting (0 = starting now, n = n-1 of YOUR crawls ahead of it; other " +
+        "tenants' crawls are not counted, and a crawl whose site another crawl is fetching " +
+        "waits for it whatever its position), and null otherwise; liveLeases counts " +
+        "unexpired worker leases. A 'queued' crawl with " +
         "queuePosition null has no live process to run it — the one that accepted it stopped " +
-        "or died, and nobody will; hand it to crawl_resume, which adopts and continues the same " +
+        "or died, or it was queued by another engine version than the one running now, and " +
+        "nobody will; hand it to crawl_resume, which adopts and continues the same " +
         "crawl, or retire it with crawl_mark_failed. queuePosition null with liveLeases 0 also answers a " +
         "'running' row long after its process died. A paused or " +
         "failed crawl that stopped with work owed is finished by crawl_resume, or " +
@@ -779,7 +782,10 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "the rules to judge rendered evidence. It is refused on a crawl that is " +
         "still queued or running, on one another worker is rendering, and on one " +
         "with no discovery evidence (there would be no robots crawl-delay to " +
-        "honour). It is also refused before any page is rendered when the browser " +
+        "honour). It is refused with code HOST_BUSY (409) while another crawl or " +
+        "render pass is fetching the same site (the same host and port): two at " +
+        "once would together break its politeness limits; ask again when that ends. " +
+        "It is also refused before any page is rendered when the browser " +
         "cannot be pointed at the site: the error starts 'the render pass could not " +
         "start:' and ends with (CRAWL_TARGET_BLOCKED) — the crawl's own name " +
         "resolves to a private or internal address — or (DNS_RESOLUTION_FAILED) — " +

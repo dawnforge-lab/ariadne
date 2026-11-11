@@ -231,6 +231,9 @@ const STATUS_FOR: Record<ServiceErrorCode, number> = {
   // A conflict with the crawl's state like any other 409; the body's `code`
   // is what tells the two apart (27c Deviation 10).
   CREDENTIALS_REQUIRED: 409,
+  // 28b: another crawl or render pass holds the crawl's host — a conflict
+  // with the world's state, and `code` says which one.
+  HOST_BUSY: 409,
   // 28a: no tenant named, or a tenant that is not a valid key — both 400.
   TENANT_REQUIRED: 400,
   INVALID_TENANT: 400,

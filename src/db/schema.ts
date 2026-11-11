@@ -18,12 +18,15 @@ export const crawls = pgTable("crawls", {
   // says whose crawl it is. Migration 0037 backfilled pre-28a rows to `local`.
   tenantId: text("tenant_id").notNull(),
   // THE CRAWL'S HOST FOOTPRINT (migration 0040, Phase 28b): the seed's host,
-  // lower-cased, without a leading `www.` (`hostKeyOf`, src/crawl/host-key.ts).
-  // The frontier admits only that host and its www twin, so two crawls with one
-  // host key are two crawls of one site. Claim eligibility reads it (Task 4: no
-  // two running crawl or render jobs per host). Written by every insert with
-  // the site URL; 0040 backfilled older rows from `site_url` in SQL. Not
-  // surface: no reader answers it.
+  // lower-cased, without a leading `www.`, plus `:port` when the seed names a
+  // non-default one (Ruling R8, migration 0042) — `hostKeyOf`,
+  // src/crawl/host-key.ts. The frontier admits only that host and its www
+  // twin, so two crawls with one host key are two crawls of one site. Claim
+  // eligibility reads it (28b T4a: no two running crawl or render jobs per
+  // host), and so does `crawl_render`'s HOST_BUSY. Written by every insert with
+  // the site URL; 0040 backfilled older rows from `site_url` in SQL and 0042
+  // appended their ports. Not surface: no reader answers it, though a HOST_BUSY
+  // refusal names the caller's own crawl's.
   hostKey: text("host_key").notNull(),
   // How many times the reaper has re-queued this crawl after a system pause
   // (`shutdown`, `worker_lost`) without an agent asking (migration 0040,
@@ -1525,6 +1528,18 @@ export const jobs = pgTable("jobs", {
   // guards, and `crawl_delete`'s cascade, without scanning every crawl's
   // settled history (migration 0041).
   index("jobs_crawl_queued").on(t.crawlId, t.queuedAt),
+  // Claim eligibility (28b T4a, migration 0042): the running jobs — a set as
+  // small as the engine's total concurrency — by kind, for the busy hosts
+  // (running crawl and render jobs, joined to their crawls) and the per-tenant
+  // count of running crawl jobs; also `crawl_render`'s HOST_BUSY check.
+  index("jobs_running_kind_tenant")
+    .on(t.kind, t.tenantId)
+    .where(sql`${t.status} = 'running'`),
+  // `queuePosition` (R12): a tenant's queued jobs in claim order, so the
+  // count of the caller's crawls ahead reads that tenant's queue only.
+  index("jobs_queued_tenant")
+    .on(t.tenantId, t.queuedAt, t.id)
+    .where(sql`${t.status} = 'queued'`),
 ]);
 
 /**

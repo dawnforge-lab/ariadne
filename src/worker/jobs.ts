@@ -36,6 +36,36 @@
  * enqueued it, and a runner claims only jobs whose versions are its own: on a
  * rolling deploy old runners drain old jobs, and nothing is judged or
  * extracted by a ruleset other than the one that accepted it.
+ *
+ * ## Fair claims (Task 4a)
+ *
+ * A claim takes the oldest job that is also ELIGIBLE:
+ *
+ *  - **One fetcher per host, every claim.** A `crawl` or `render` job is not
+ *    claimed while a `running` crawl or render job exists for a crawl with the
+ *    same `crawls.host_key` (hard rule 9: two crawls of one site would each
+ *    obey their own per-host delay and together break it). Pinned or not: an
+ *    in-process service's crawl and a worker's are the same load on the site.
+ *    A `rules` job fetches nothing and is never held by a host.
+ *  - **A per-tenant cap, the unpinned pool only (R9).** An unpinned `crawl`
+ *    job is not claimed while its tenant has `maxRunningPerTenant` unpinned
+ *    crawl jobs running, so one tenant's backlog cannot hold every worker. A
+ *    pinned claim belongs to the one process that accepted the crawl and runs
+ *    as that process decides; its running jobs are not the pool's and do not
+ *    count against the cap.
+ *
+ * "Running" is the row's status, whoever holds it: a job whose process died is
+ * still running until the reaper (Task 4b) settles it, and its host stays held
+ * till then — never a second fetcher on a site because a heartbeat was late.
+ *
+ * **The claims take turns.** Under READ COMMITTED two claims racing over two
+ * queued jobs of ONE host each see the other's job still queued (neither
+ * update has committed), so `SKIP LOCKED` alone — which only stops two claims
+ * of one ROW — would start both. Every claim that can start a fetch, and every
+ * synchronous render's start, therefore takes one transaction-level advisory
+ * lock (`HOST_CLAIM_LOCK`) before its statement: the next one's statement sees
+ * the last one's committed claim. A claim is one indexed statement held for
+ * milliseconds, so the turns cost nothing a caller can see.
  */
 import { randomUUID } from "node:crypto";
 import { and, eq, inArray, sql, type SQL } from "drizzle-orm";
@@ -125,7 +155,31 @@ export const busySentences = {
     `crawl ${crawlId} is already held by this server ('${status}'): it is ` +
     `running now or waiting to run, and a resume would be a second worker on ` +
     `the same crawl`,
+  /**
+   * `crawl_render` while another crawl's crawl or render job fetches the same
+   * host (`HOST_BUSY`, 28b T4a). Names the caller's own crawl and its host key
+   * only: the job holding the host may be another tenant's, and a foreign
+   * crawl is never named (28a).
+   */
+  hostBusy: (crawlId: string, hostKey: string): string =>
+    `crawl_render is refused for crawl ${crawlId}: ${hostKey} is being crawled or rendered ` +
+    "by another job, and two at once would together break the site's politeness limits. " +
+    "Wait for it to end, then ask again",
 } as const;
+
+/**
+ * The transaction-level advisory lock every fetching claim and every
+ * synchronous render's start takes before reading host eligibility (module
+ * header, "the claims take turns"). One key for the whole engine.
+ */
+export const HOST_CLAIM_LOCK = 2_028_004_001;
+
+/** The job kinds that fetch from the site, and so hold its host while running. */
+const FETCHING_KINDS: readonly JobKind[] = ["crawl", "render"];
+
+async function takeHostClaimLock(tx: Writer): Promise<void> {
+  await tx.execute(sql`select pg_advisory_xact_lock(${HOST_CLAIM_LOCK}::bigint)`);
+}
 
 /**
  * A second live job for a crawl, refused. A `ServiceError` (CONFLICT) whose
@@ -182,17 +236,23 @@ function isLiveViolation(error: unknown): boolean {
  * not stopped (`instances.stopped_at`, set by a graceful shutdown) and a
  * heartbeat within `deadAfterMs`, on the database's clock. An unpinned queued
  * job belongs to the worker pool, which no single instance stands for, and is
- * held. A job whose process is gone is a row, not work: its queued crawl is
- * nobody's (`queuePosition` null), `crawl_mark_failed` may retire it and
- * `crawl_resume` adopts it. (Task 4's reaper settles such rows; until it runs
- * they are read as what they are.) A SQL boolean over the job alias `j`.
+ * held — when it was enqueued by THIS code's ruleset and extraction versions
+ * (28b T4a). One of another version is claimed only by a runner of that
+ * version, and the process asking cannot see one: on a rolling deploy whose
+ * old runners are gone none is left, so it is read as nobody's, like a dead
+ * process's job. A job whose process is gone is a row, not work: its queued
+ * crawl is nobody's (`queuePosition` null), `crawl_mark_failed` may retire it
+ * and `crawl_resume` adopts it (a fresh job, stamped with this code's
+ * versions). (Task 4's reaper settles such rows; until it runs they are read
+ * as what they are.) A SQL boolean over the job alias `j`.
  */
 export function liveHolderSql(deadAfterMs: number): SQL {
   if (!Number.isInteger(deadAfterMs) || deadAfterMs <= 0) {
     throw new Error(`liveHolderSql: deadAfterMs must be a positive whole number, got ${String(deadAfterMs)}`);
   }
   return sql`(
-    (j.status = 'queued' and j.pinned_to is null)
+    (j.status = 'queued' and j.pinned_to is null
+       and j.ruleset_version = ${RULESET_VERSION} and j.extraction_version = ${EXTRACTION_VERSION})
     or exists (
       select 1 from instances i
        where i.id = (case when j.status = 'running' then j.claimed_by else j.pinned_to end)
@@ -262,11 +322,25 @@ export async function latestJobOf(
 }
 
 /**
- * Where the crawl stands in its runner's queue: 0 when its crawl job is
- * running (the run is starting or under way), `1 + n` when it is queued behind
- * `n` crawl jobs of the same pool (the same `pinned_to`, so the queue of the
- * runner that will take it), and null when it has no crawl job a live process
- * holds (`liveHolderSql`) — nobody will run it unless it is resumed.
+ * Where the crawl stands in its tenant's queue (R12):
+ *
+ *  - 0 when its crawl job is running (the run is starting or under way);
+ *  - `1 + n` when it is queued behind `n` crawl jobs OF ITS OWN TENANT in the
+ *    same runner's queue — the same pool (`pinned_to`) and the same engine
+ *    versions, since a runner claims only its own versions. Other tenants'
+ *    crawls are never counted: how much work another tenant has queued is not
+ *    the caller's to learn (the automated security review on 28a's tenancy);
+ *  - null when it is not positioned: no crawl job a live process holds
+ *    (`liveHolderSql`) — nobody will run it unless it is resumed. That
+ *    includes an unpinned queued job enqueued by ANOTHER engine version than
+ *    this code's: only a runner of that version claims it, and on a rolling
+ *    deploy whose old runners are gone none is left, so a position would read
+ *    as "waiting" forever. (A pinned job's holder is the process that enqueued
+ *    it, of its own version, and is positioned as ever.)
+ *
+ * The position is an order, not a promise: a crawl whose host is busy, or
+ * whose tenant is at its cap, waits while jobs behind it of other hosts or
+ * tenants are claimed (`claimNextJob`).
  */
 export async function queuePositionOf(
   reader: Reader,
@@ -276,8 +350,10 @@ export async function queuePositionOf(
   const result = await reader.execute<{ position: number }>(sql`
     select case when j.status = 'running' then 0
                 else 1 + (select count(*)::int from jobs a
-                          where a.kind = 'crawl' and a.status = 'queued'
+                          where a.tenant_id = j.tenant_id and a.status = 'queued' and a.kind = 'crawl'
                             and a.pinned_to is not distinct from j.pinned_to
+                            and a.ruleset_version = j.ruleset_version
+                            and a.extraction_version = j.extraction_version
                             and (a.queued_at, a.id) < (j.queued_at, j.id))
            end as position
     from jobs j
@@ -361,8 +437,19 @@ async function insertLive(
  * that finds the oldest queued row locked by another's claim skips it rather
  * than waiting and then re-claiming it. The claim takes the oldest eligible
  * job (`queued_at`, then `id`): queued, of one of `kinds`, pinned exactly as
- * `pinnedTo` asks, and enqueued by this code's ruleset and extraction
- * versions. Task 4 adds host and tenant eligibility here.
+ * `pinnedTo` asks, enqueued by this code's ruleset and extraction versions,
+ * and fair (module header, "Fair claims"): no running crawl or render job on
+ * its host, and — unpinned only — its tenant under `maxRunningPerTenant`.
+ *
+ * The eligibility reads only RUNNING jobs, a set bounded by the engine's
+ * total concurrency, through `jobs_running_kind_tenant` (each read once per
+ * statement, as a materialised CTE); the candidates walk `jobs_claim_order`
+ * and join their crawl by primary key. A claim that can start a fetch takes
+ * `HOST_CLAIM_LOCK` first, in the same transaction (module header).
+ *
+ * `maxRunningPerTenant`: required for an unpinned claim (a positive whole
+ * number, `parseTenantMaxRunning` reads it from `ARIADNE_TENANT_MAX_RUNNING`),
+ * refused for a pinned one, which the cap does not apply to (R9).
  *
  * A `crawl` job then does the loop's own compare-and-swap on `crawls.status`
  * (`queued → running`); a crawl paused or cancelled between this claim and
@@ -371,12 +458,53 @@ async function insertLive(
  */
 export async function claimNextJob(
   db: Writer,
-  opts: { instanceId: string; kinds: readonly JobKind[]; pinnedTo: string | null },
+  opts: { instanceId: string; kinds: readonly JobKind[]; pinnedTo: string | null; maxRunningPerTenant?: number },
 ): Promise<ClaimedJob | null> {
   if (opts.kinds.length === 0) throw new Error("claimNextJob: a runner must claim at least one kind");
+  assertTenantCap(opts.pinnedTo, opts.maxRunningPerTenant, "claimNextJob");
   const pinned: SQL =
-    opts.pinnedTo === null ? sql`pinned_to is null` : sql`pinned_to = ${opts.pinnedTo}`;
-  const result = await db.execute<{
+    opts.pinnedTo === null ? sql`q.pinned_to is null` : sql`q.pinned_to = ${opts.pinnedTo}`;
+  const kinds = sql.join(opts.kinds.map((k) => sql`${k}`), sql`, `);
+  // The tenant cap: the pool's running crawl jobs per tenant (R9). Pinned
+  // claims neither read nor feed it.
+  const unpinned = opts.pinnedTo === null;
+  const tenantRunning: SQL = unpinned
+    ? sql`, tenant_running as materialized (
+          select r.tenant_id, count(*)::int as n
+            from jobs r
+           where r.status = 'running' and r.kind = 'crawl' and r.pinned_to is null
+           group by r.tenant_id)`
+    : sql``;
+  const underCap: SQL = unpinned
+    ? sql`and (q.kind <> 'crawl' or not exists (
+            select 1 from tenant_running t
+             where t.tenant_id = q.tenant_id and t.n >= ${opts.maxRunningPerTenant}::int))`
+    : sql``;
+  const statement = sql`
+    with busy_hosts as materialized (
+      select distinct c.host_key
+        from jobs r join crawls c on c.id = r.crawl_id
+       where r.status = 'running' and r.kind in ('crawl', 'render'))
+      ${tenantRunning}
+    update jobs
+       set status = 'running', claimed_by = ${opts.instanceId},
+           claimed_at = now(), heartbeat_at = now()
+     where id = (
+       select q.id from jobs q join crawls qc on qc.id = q.crawl_id
+        where q.status = 'queued'
+          and q.kind in (${kinds})
+          and ${pinned}
+          and q.ruleset_version = ${RULESET_VERSION}
+          and q.extraction_version = ${EXTRACTION_VERSION}
+          and (q.kind not in ('crawl', 'render')
+               or not exists (select 1 from busy_hosts b where b.host_key = qc.host_key))
+          ${underCap}
+        order by q.queued_at, q.id
+        for update of q skip locked
+        limit 1)
+       and status = 'queued'
+    returning id, tenant_id, crawl_id, kind, pinned_to, claimed_by, claimed_at`;
+  type Row = {
     id: string;
     tenant_id: string;
     crawl_id: string;
@@ -384,22 +512,14 @@ export async function claimNextJob(
     pinned_to: string | null;
     claimed_by: string;
     claimed_at: Date | string;
-  }>(sql`
-    update jobs
-       set status = 'running', claimed_by = ${opts.instanceId},
-           claimed_at = now(), heartbeat_at = now()
-     where id = (
-       select id from jobs
-        where status = 'queued'
-          and kind in (${sql.join(opts.kinds.map((k) => sql`${k}`), sql`, `)})
-          and ${pinned}
-          and ruleset_version = ${RULESET_VERSION}
-          and extraction_version = ${EXTRACTION_VERSION}
-        order by queued_at, id
-        for update skip locked
-        limit 1)
-       and status = 'queued'
-    returning id, tenant_id, crawl_id, kind, pinned_to, claimed_by, claimed_at`);
+  };
+  const fetches = opts.kinds.some((k) => FETCHING_KINDS.includes(k));
+  const result = fetches
+    ? await db.transaction(async (tx) => {
+        await takeHostClaimLock(tx);
+        return tx.execute<Row>(statement);
+      })
+    : await db.execute<Row>(statement);
   const row = result.rows[0];
   if (row === undefined) return null;
   return {
@@ -476,6 +596,12 @@ export async function settleCrawlJob(
  * It replaced the `judging` and `rendering` sets: the hold is now a row every
  * process over the database can see, and the reaper (Task 4) can tell a dead
  * holder's from a live one.
+ *
+ * A `render` job fetches, so it is also a claim on its host (28b T4a): under
+ * `HOST_CLAIM_LOCK`, the insert first (the crawl's own busy guard keeps its
+ * sentence), then the host — a running crawl or render job of ANOTHER crawl
+ * with the same `host_key` refuses `HOST_BUSY` and the insert rolls back.
+ * A `rules` job fetches nothing and is inserted as before.
  */
 export async function withPinnedJob<T>(
   db: Db,
@@ -484,7 +610,7 @@ export async function withPinnedJob<T>(
 ): Promise<T> {
   const id = `job_${randomUUID()}`;
   const now = new Date();
-  await insertLive(db, input.crawlId, input.kind, {
+  const values: typeof jobs.$inferInsert = {
     id,
     tenantId: input.tenant,
     crawlId: input.crawlId,
@@ -496,7 +622,16 @@ export async function withPinnedJob<T>(
     heartbeatAt: now,
     rulesetVersion: RULESET_VERSION,
     extractionVersion: EXTRACTION_VERSION,
-  });
+  };
+  if (input.kind === "render") {
+    await db.transaction(async (tx) => {
+      await takeHostClaimLock(tx);
+      await insertLive(tx, input.crawlId, input.kind, values);
+      await refuseBusyHost(tx, input.crawlId);
+    });
+  } else {
+    await insertLive(db, input.crawlId, input.kind, values);
+  }
   let result: T;
   try {
     result = await run();
@@ -514,6 +649,46 @@ export async function withPinnedJob<T>(
   }
   await finishJob(db, id, "done");
   return result;
+}
+
+/**
+ * `HOST_BUSY` when a running crawl or render job of another crawl holds this
+ * crawl's host. Called under `HOST_CLAIM_LOCK`, so no claim of that host can
+ * land between this read and the caller's commit.
+ */
+async function refuseBusyHost(tx: Writer, crawlId: string): Promise<void> {
+  const result = await tx.execute<{ host_key: string; busy: boolean }>(sql`
+    select c.host_key,
+           exists (select 1 from jobs r join crawls rc on rc.id = r.crawl_id
+                    where r.status = 'running' and r.kind in ('crawl', 'render')
+                      and rc.host_key = c.host_key and r.crawl_id <> c.id) as busy
+      from crawls c
+     where c.id = ${crawlId}`);
+  const row = result.rows[0];
+  if (row === undefined) throw new Error(`refuseBusyHost: no crawl ${crawlId}`);
+  if (row.busy === true) throw new ServiceError("HOST_BUSY", busySentences.hostBusy(crawlId, row.host_key));
+}
+
+/**
+ * The per-tenant cap's contract (R9): an unpinned claim names it, a positive
+ * whole number; a pinned one does not, because the cap is not applied to it.
+ */
+export function assertTenantCap(pinnedTo: string | null, maxRunningPerTenant: number | undefined, where: string): void {
+  if (pinnedTo !== null) {
+    if (maxRunningPerTenant !== undefined) {
+      throw new Error(
+        `${where}: maxRunningPerTenant applies only to the unpinned pool; a claim pinned to ` +
+          `${pinnedTo} is not capped per tenant`,
+      );
+    }
+    return;
+  }
+  if (maxRunningPerTenant === undefined || !Number.isInteger(maxRunningPerTenant) || maxRunningPerTenant < 1) {
+    throw new Error(
+      `${where}: an unpinned claim needs maxRunningPerTenant, a positive whole number ` +
+        `(ARIADNE_TENANT_MAX_RUNNING), got ${String(maxRunningPerTenant)}`,
+    );
+  }
 }
 
 /** A job's `error`: the first line of a message, bounded. Never a stack. */
