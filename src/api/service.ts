@@ -2520,6 +2520,10 @@ export class ApiService {
   private readonly timing: Timing;
   /** The in-process runner, built with the instance on first need. */
   private runner: Promise<JobRunner> | null = null;
+  /** The in-process credential retention sweep's timer (R15); null in `workers` mode. */
+  private sweepTimer: NodeJS.Timeout | null = null;
+  /** The sweep in flight, if any: sweeps never overlap, and `close()` waits for one. */
+  private sweeping: Promise<void> | null = null;
   private closed = false;
 
   constructor(
@@ -2574,6 +2578,34 @@ export class ApiService {
         `ServiceConfig.crawlRunner must be "in-process" or "workers", got ${JSON.stringify(this.crawlRunner)}`,
       );
     }
+    if (this.crawlRunner === "in-process") this.startCredentialSweep();
+  }
+
+  /**
+   * The credential retention sweep of an in-process service (R15): every
+   * `timing.reapEvery`, `vault.sweepExpired` deletes the stored credentials of
+   * crawls settled more than `credentialRetentionDays` ago. It is NEVER a
+   * reaper — no abandon, no pause, no requeue — because an in-process service
+   * runs none (R10); in `workers` mode the reaper of a worker or of
+   * `api:serve` sweeps. A failed sweep is logged loudly and tried again at the
+   * next tick; the first is one period after construction, never at it.
+   */
+  private startCredentialSweep(): void {
+    this.sweepTimer = setInterval(() => {
+      if (this.closed || this.sweeping !== null) return;
+      this.sweeping = this.vault
+        .sweepExpired(new Date(), this.credentialRetentionDays)
+        .then((swept) => {
+          if (swept > 0) this.log(`api: credential retention sweep removed ${swept} expired row(s)`);
+        })
+        .catch((error: unknown) => {
+          this.log(`api: the credential retention sweep failed — ${messageOf(error)}; retrying at the next tick`);
+        })
+        .finally(() => {
+          this.sweeping = null;
+        });
+    }, this.timing.reapEvery);
+    this.sweepTimer.unref();
   }
 
   /**
@@ -7064,6 +7096,9 @@ export class ApiService {
     this.closed = true;
     if (this.beat !== null) clearInterval(this.beat);
     this.beat = null;
+    if (this.sweepTimer !== null) clearInterval(this.sweepTimer);
+    this.sweepTimer = null;
+    if (this.sweeping !== null) await this.sweeping;
     const building = this.runner;
     // A runner whose build failed told its caller so; there is nothing to stop.
     const runner = building === null ? null : await building.catch(() => null);
@@ -7111,6 +7146,8 @@ export class ApiService {
     return crawlJobExecutor({
       db: this.db,
       vault: this.vault,
+      // The same gate that accepted the crawl, asked again where it runs.
+      hostAllowed: (host) => this.crawlHostAllowed(host),
       processTrust: this.processTrustConfig(),
       log: this.log,
       logPrefix: "api",

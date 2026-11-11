@@ -13,6 +13,7 @@
     "db:migrate": "tsx src/db/migrate.ts",
     "api:serve": "tsx src/api/serve.ts",
     "mcp:serve": "tsx src/api/mcp-serve.ts",
+    "worker:serve": "tsx src/worker/serve.ts",
     "demo": "tsx src/demo/serve.ts"
   },
   "dependencies": {

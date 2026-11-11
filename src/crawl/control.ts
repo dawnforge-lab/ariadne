@@ -24,8 +24,12 @@ export type ControlRequest = (typeof CONTROL_REQUESTS)[number];
  * reaper.ts). `shutdown` and `worker_lost` are SYSTEM pauses: a worker-pool
  * crawl paused by one is requeued by the reaper — after `shutdown` always (a
  * deploy), after `worker_lost` at most three times in a row (Ruling R17).
+ * `not_allowed` (Phase 28b) is the runner's refusal: the process that claimed
+ * the crawl's job does not allow its site, a legacy host or a sitemap host
+ * (its own `ARIADNE_ALLOWED_DOMAINS`), so nothing was fetched. It is NOT a
+ * system pause and nothing requeues it; `crawl_resume` re-checks at the API.
  */
-export const PAUSE_REASONS = ["request", "shutdown", "credentials_unreadable", "worker_lost"] as const;
+export const PAUSE_REASONS = ["request", "shutdown", "credentials_unreadable", "worker_lost", "not_allowed"] as const;
 export type PauseReason = (typeof PAUSE_REASONS)[number];
 
 function readOf<T extends string>(

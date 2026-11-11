@@ -42,7 +42,7 @@ import { hostKeyOf } from "../../src/crawl/host-key.js";
 import { RULESET_VERSION } from "../../src/rules/registry/registry.js";
 import { EXTRACTION_VERSION } from "../../src/crawl/versions.js";
 import { ApiService } from "../../src/api/service.js";
-import type { ServiceConfig } from "../../src/api/config.js";
+import { isHostAllowed, type ServiceConfig } from "../../src/api/config.js";
 import { LOCAL_TENANT, parseTenant, type TenantId } from "../../src/tenant.js";
 import { createApiServer } from "../../src/api/http.js";
 import { claimNextJob, enqueueJob, queuePositionOf, type ClaimedJob } from "../../src/worker/jobs.js";
@@ -52,6 +52,7 @@ import { crawlJobExecutor } from "../../src/worker/crawl-job.js";
 import { reapOnce, type ReapSummary } from "../../src/worker/reaper.js";
 import { timingWith } from "../../src/worker/timing.js";
 import { TEST_CREDENTIAL_KEYS } from "../helpers/credential-keys.js";
+import { acquirePoolLock, type PoolLock } from "../helpers/pool-lock.js";
 
 const PAGE_DELAY_MS = 100;
 
@@ -64,6 +65,7 @@ function databaseUrl(): string {
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
 let db: Db;
+let poolLock: PoolLock;
 let siteServer: Server;
 let site: string;
 let exportDir: string;
@@ -161,6 +163,8 @@ async function clearPool(): Promise<void> {
 }
 
 beforeAll(async () => {
+  // The unpinned pool is one file at a time (serve.test.ts runs real workers over it).
+  poolLock = await acquirePoolLock(databaseUrl());
   db = createDb(databaseUrl());
   await runMigrations(db);
   exportDir = await mkdtemp(join(tmpdir(), "ariadne-runner-export-"));
@@ -192,7 +196,7 @@ beforeAll(async () => {
   const address = siteServer.address();
   if (address === null || typeof address === "string") throw new Error("site server bound oddly");
   site = `http://127.0.0.1:${address.port}`;
-}, 60_000);
+}, 900_000); // waits for the pool lock behind serve.test.ts
 
 afterAll(async () => {
   for (const service of services) await service.close();
@@ -201,6 +205,7 @@ afterAll(async () => {
   if (createdCrawls.length > 0) await db.delete(crawls).where(inArray(crawls.id, createdCrawls));
   if (createdInstances.length > 0) await db.delete(instances).where(inArray(instances.id, createdInstances));
   await closeDb(db);
+  await poolLock.release();
   await rm(exportDir, { recursive: true, force: true });
   await rm(renderDir, { recursive: true, force: true });
 }, 60_000);
@@ -361,6 +366,7 @@ describe("pause and cancel of a queued crawl (Review Focus 3)", () => {
 
       const runnerLog: string[] = [];
       const execute = crawlJobExecutor({
+        hostAllowed: (host) => isHostAllowed(host, ["127.0.0.1"]),
         db,
         vault: new CredentialVault(db, TEST_CREDENTIAL_KEYS),
         processTrust: { allowPrivate: true },
@@ -417,6 +423,7 @@ describe("restart", () => {
       concurrency: 1,
       log: (line) => bLog.push(line),
       execute: crawlJobExecutor({
+        hostAllowed: (host) => isHostAllowed(host, ["127.0.0.1"]),
         db,
         vault: new CredentialVault(db, TEST_CREDENTIAL_KEYS),
         processTrust: { allowPrivate: true },
@@ -796,6 +803,7 @@ describe("reaping and auto-resume over the pool (28b T4b)", () => {
       concurrency: 1,
       log: () => {},
       execute: crawlJobExecutor({
+        hostAllowed: (host) => isHostAllowed(host, ["127.0.0.1"]),
         db,
         vault: new CredentialVault(db, TEST_CREDENTIAL_KEYS),
         processTrust: { allowPrivate: true },

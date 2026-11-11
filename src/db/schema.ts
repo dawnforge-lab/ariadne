@@ -58,7 +58,8 @@ export const crawls = pgTable("crawls", {
   //  - control_request: "pause" | "cancel", non-null only while status='running'
   //    (a request the loop has not yet acted on);
   //  - pause_reason: "request" | "shutdown" | "credentials_unreadable" |
-  //    "worker_lost" (both 28b; `PAUSE_REASONS`, src/crawl/control.ts),
+  //    "worker_lost" | "not_allowed" (the last three 28b; `PAUSE_REASONS`,
+  //    src/crawl/control.ts),
   //    non-null exactly when status='paused';
   //  - cancelled_at: set only when status='cancelled'.
   controlRequest: text("control_request"),

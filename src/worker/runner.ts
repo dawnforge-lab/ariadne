@@ -47,7 +47,7 @@ import { jobs } from "../db/schema.js";
 import type { CredentialVault } from "../crawl/credential-vault.js";
 import { assertTenantCap, claimNextJob, finishJob, type ClaimedJob, type JobKind, type JobOutcome } from "./jobs.js";
 import { heartbeat, InstanceGoneError } from "./instance.js";
-import { reapOnce, type ReapSummary } from "./reaper.js";
+import { ReaperLoop } from "./reaper-loop.js";
 import { timingWith, type Timing } from "./timing.js";
 
 /** `ARIADNE_TENANT_MAX_RUNNING` when it is not set (R9). */
@@ -101,9 +101,13 @@ export interface JobRunnerOptions {
    * in workers mode. Absent in an in-process service, which never reaps.
    * `retentionDays` is the credential retention the tick's sweep enforces.
    * `onlyInstances` is TEST ONLY (`ReapOptions.onlyInstances`): production
-   * never passes it.
+   * never passes it; a function is read at every tick (`ReaperLoopOptions`).
    */
-  reaper?: { vault: CredentialVault; retentionDays: number; onlyInstances?: readonly string[] };
+  reaper?: {
+    vault: CredentialVault;
+    retentionDays: number;
+    onlyInstances?: readonly string[] | (() => readonly string[]);
+  };
 }
 
 interface Running {
@@ -119,9 +123,8 @@ export class JobRunner {
   private chain: Promise<void> = Promise.resolve();
   private timer: NodeJS.Timeout | null = null;
   private beat: NodeJS.Timeout | null = null;
-  private reapTimer: NodeJS.Timeout | null = null;
-  /** The reaper tick in flight, if any: ticks never overlap. */
-  private reaping: Promise<void> | null = null;
+  /** The reaper's timer, in a runner built with `reaper`. */
+  private reaperLoop: ReaperLoop | null = null;
   private started = false;
   private stopped = false;
   /** The instance is stopped or gone (`instanceGone`): nothing more is claimed. */
@@ -158,8 +161,16 @@ export class JobRunner {
       this.beat.unref();
     }
     if (this.opts.reaper !== undefined) {
-      this.reapTimer = setInterval(() => this.reapTick(), this.timing.reapEvery);
-      this.reapTimer.unref();
+      const { vault, retentionDays, onlyInstances } = this.opts.reaper;
+      this.reaperLoop = new ReaperLoop(this.db, {
+        vault,
+        retentionDays,
+        timing: this.timing,
+        label: `runner ${this.opts.instanceId}`,
+        log: this.log,
+        ...(onlyInstances === undefined ? {} : { onlyInstances }),
+      });
+      this.reaperLoop.start();
     }
     void this.wake();
   }
@@ -205,7 +216,7 @@ export class JobRunner {
     this.gone = true;
     if (this.timer !== null) clearInterval(this.timer);
     if (this.beat !== null) clearInterval(this.beat);
-    if (this.reapTimer !== null) clearInterval(this.reapTimer);
+    this.reaperLoop?.halt();
     this.log(
       `runner ${this.opts.instanceId}: its instance is stopped or gone — every job it ran is ` +
         "stopped, and it claims, heartbeats and reaps nothing more until its owner stops it",
@@ -221,29 +232,6 @@ export class JobRunner {
     if (job === undefined || job.controller.signal.aborted) return;
     this.log(`runner ${this.opts.instanceId}: job ${jobId} stopped: ${why}`);
     job.controller.abort();
-  }
-
-  private reapTick(): void {
-    const reaper = this.opts.reaper;
-    if (reaper === undefined || this.stopped || this.gone || this.reaping !== null) return;
-    this.reaping = reapOnce(this.db, {
-      now: new Date(),
-      timing: this.timing,
-      vault: reaper.vault,
-      retentionDays: reaper.retentionDays,
-      ...(reaper.onlyInstances === undefined ? {} : { onlyInstances: reaper.onlyInstances }),
-    })
-      .then((summary) => {
-        if (reapedSomething(summary)) this.log(`runner ${this.opts.instanceId}: reaper — ${describeReap(summary)}`);
-      })
-      .catch((error: unknown) => {
-        this.log(
-          `runner ${this.opts.instanceId}: the reaper's tick failed — ${messageOf(error)}; retrying at the next tick`,
-        );
-      })
-      .finally(() => {
-        this.reaping = null;
-      });
   }
 
   /**
@@ -267,11 +255,11 @@ export class JobRunner {
     this.stopped = true;
     if (this.timer !== null) clearInterval(this.timer);
     if (this.beat !== null) clearInterval(this.beat);
-    if (this.reapTimer !== null) clearInterval(this.reapTimer);
+    this.reaperLoop?.halt();
     this.stopping = (async () => {
       await this.chain;
       // A tick in flight finishes first: its transactions settle what they took.
-      if (this.reaping !== null) await this.reaping;
+      if (this.reaperLoop !== null) await this.reaperLoop.stop();
       const current = [...this.running.values()];
       for (const job of current) job.controller.abort();
       await Promise.all(current.map((job) => job.done));
@@ -348,19 +336,6 @@ export class JobRunner {
       );
     }
   }
-}
-
-function reapedSomething(summary: ReapSummary): boolean {
-  return Object.values(summary).some((n) => n > 0);
-}
-
-function describeReap(summary: ReapSummary): string {
-  return (
-    `${summary.abandonedJobs} dead job(s) abandoned, ${summary.pausedCrawls} crawl(s) paused, ` +
-    `${summary.cancelledCrawls} cancelled, ${summary.requeuedCrawls} requeued, ` +
-    `${summary.credentialsSwept} expired credential row(s) swept, ` +
-    `${summary.instancesDeleted} dead instance(s) deleted`
-  );
 }
 
 function messageOf(error: unknown): string {

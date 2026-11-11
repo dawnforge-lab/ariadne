@@ -22,6 +22,15 @@
  * left exactly as the other writer left it — closing it `failed` would
  * overwrite a decision somebody made.
  *
+ * THE ALLOWLIST IS RE-CHECKED HERE, WHERE THE CRAWL RUNS (28b T5). A crawl is
+ * accepted by one process and may run on another — a worker with an allowlist
+ * of its own (`ARIADNE_ALLOWED_DOMAINS`) — so a runner checks the site, every
+ * `legacyHosts` entry and every `sitemapUrls` entry against ITS allowlist
+ * before the loop starts (`crawlAllowlistRefusal`). A refusal closes the crawl
+ * `paused` (`not_allowed`) and settles the job in one transaction, exactly as
+ * the unreadable-credentials pause does, with nothing fetched. It is not a
+ * system pause: no reaper requeues it, and `crawl_resume` re-checks at the API.
+ *
  * THE JOB MAY BE TAKEN FROM THE RUNNER (28b T4b): a reaper that read its
  * process as dead abandons it, `crawl_resume` adopts it. Every write here and
  * in the loop is conditioned on the job still being this runner's
@@ -53,6 +62,7 @@ import {
   type CloseHook,
   type CrawlConfig,
 } from "../crawl/loop.js";
+import { hostProbeStarts } from "../crawl/parse/url-utils.js";
 import { describeShape, sameShape, shapeOf, type CrawlCredentials, type CredentialShape } from "../crawl/credentials.js";
 import type { CredentialRead, CredentialVault } from "../crawl/credential-vault.js";
 import { finishJob, type ClaimedJob, type JobOutcome } from "./jobs.js";
@@ -60,6 +70,13 @@ import { finishJob, type ClaimedJob, type JobOutcome } from "./jobs.js";
 export interface CrawlJobDeps {
   db: Db;
   vault: CredentialVault;
+  /**
+   * This process's crawl allowlist, as the question the claim asks: may a
+   * fetch be pointed at this host (`isHostAllowed` over the process's
+   * `ARIADNE_ALLOWED_DOMAINS`; the API service's gate in-process). Required:
+   * a runner with no answer would run what it was handed.
+   */
+  hostAllowed: (host: string) => boolean;
   /** `allowPrivate` / `recheckMinGapMs`: the process-trust seam, code only. */
   processTrust: Pick<CrawlConfig, "allowPrivate" | "recheckMinGapMs">;
   log: (line: string) => void;
@@ -127,6 +144,38 @@ export function storedCredentialsOf(
   }
 }
 
+/**
+ * Why this process may not run a crawl, or null when it may: the site's host,
+ * each `legacyHosts` host and each `sitemapUrls` host must satisfy
+ * `hostAllowed`, except the site's own spellings (apex/www x http/https,
+ * `hostProbeStarts`), which the site's own entry authorises as it does at the
+ * API. The hosts are named, the allowlist never is (obligation 6). A row this
+ * engine did not write (an unreadable URL or host) throws: that is a defect,
+ * never a quiet pass.
+ */
+export function crawlAllowlistRefusal(
+  config: Pick<CrawlConfig, "siteUrl" | "legacyHosts" | "sitemapUrls">,
+  hostAllowed: (host: string) => boolean,
+): string | null {
+  const siteHost = new URL(config.siteUrl).hostname;
+  if (!hostAllowed(siteHost)) return `siteUrl is on '${siteHost}', which is not in this process's crawl allowlist`;
+  const own = new Set(hostProbeStarts(config.siteUrl).map((start) => new URL(start).hostname));
+  const added = (field: string, hosts: readonly string[]): string | null => {
+    for (const host of hosts) {
+      if (own.has(host)) continue;
+      if (!hostAllowed(host)) return `${field} names '${host}', which is not in this process's crawl allowlist`;
+    }
+    return null;
+  };
+  const legacy = (config.legacyHosts ?? []).length === 0 ? [] : hostProbeStarts(config.siteUrl, config.legacyHosts);
+  const refused = added("legacyHosts", legacy.map((start) => new URL(start).hostname));
+  if (refused !== null) return refused;
+  return added(
+    "sitemapUrls",
+    (config.sitemapUrls ?? []).map((entry) => new URL(entry).hostname),
+  );
+}
+
 /** The `execute` of a runner over `crawl` jobs. */
 export function crawlJobExecutor(deps: CrawlJobDeps): (job: ClaimedJob, signal: AbortSignal) => Promise<void> {
   return (job, signal) => runCrawlJob(deps, job, signal);
@@ -153,6 +202,12 @@ async function runCrawlJob(deps: CrawlJobDeps, job: ClaimedJob, signal: AbortSig
     if (row === undefined || read === null) throw new Error(`queue runner: no crawl ${crawlId}`);
     if (row.status !== "queued") throw new ClaimLostError(crawlId, row.status, "queued");
     const parsed = parseStoredConfig(row.config, crawlId);
+    // BEFORE the credentials are read and before anything is fetched.
+    const refusal = crawlAllowlistRefusal(parsed, deps.hostAllowed);
+    if (refusal !== null) {
+      await pauseBeforeStart(deps, job, "not_allowed", refusal);
+      return;
+    }
     const required = parsed.credentialShape ?? null;
     let credentials: CrawlCredentials | undefined;
     if (required === null) {
@@ -171,7 +226,7 @@ async function runCrawlJob(deps: CrawlJobDeps, job: ClaimedJob, signal: AbortSig
         // values are sent again (28b item 10). The loop would refuse the crawl
         // too (`requireCredentials`), but as `failed` — and a crawl whose site
         // never saw a request did not fail.
-        await pauseUnreadable(deps, job, stored.why);
+        await pauseBeforeStart(deps, job, "credentials_unreadable", stored.why);
         return;
       }
       credentials = stored.credentials;
@@ -274,14 +329,20 @@ async function runCrawlJob(deps: CrawlJobDeps, job: ClaimedJob, signal: AbortSig
 }
 
 /**
- * Close a queued crawl `paused` with `pause_reason = 'credentials_unreadable'`
- * (28b item 10), and settle its job, in one transaction: its row names
- * credentials and this process has none it can use. Nothing was fetched.
+ * Close a queued crawl `paused` with `pause_reason = reason`, and settle its
+ * job, in one transaction, before a single request: `credentials_unreadable`
+ * (28b item 10: its row names credentials and this process has none it can
+ * use) or `not_allowed` (28b T5: this process's allowlist refuses it).
  * Conditioned on `queued` and on the job still being this runner's, as every
  * runner close is: a row another writer moved (or adopted) is left as it is,
  * and the job is abandoned.
  */
-async function pauseUnreadable(deps: CrawlJobDeps, job: ClaimedJob, why: string): Promise<void> {
+async function pauseBeforeStart(
+  deps: CrawlJobDeps,
+  job: ClaimedJob,
+  reason: "credentials_unreadable" | "not_allowed",
+  why: string,
+): Promise<void> {
   const p = deps.logPrefix ?? "api";
   const crawlId = job.crawlId;
   const moved = await deps.db.transaction(async (tx) => {
@@ -297,7 +358,7 @@ async function pauseUnreadable(deps: CrawlJobDeps, job: ClaimedJob, why: string)
       .update(crawls)
       .set({
         status: "paused",
-        pauseReason: "credentials_unreadable",
+        pauseReason: reason,
         // As every pause writes it: when the crawl stopped.
         finishedAt: new Date(),
         controlRequest: null,
@@ -311,9 +372,11 @@ async function pauseUnreadable(deps: CrawlJobDeps, job: ClaimedJob, why: string)
   });
   deps.log(
     moved === 0
-      ? `${p}: crawl ${crawlId} left the queue state before it could be paused for its ` +
-          `credentials (${why}); not started`
-      : `${p}: crawl ${crawlId} paused (credentials_unreadable) before any request: it needs ` +
+      ? `${p}: crawl ${crawlId} left the queue state before it could be paused (${reason}: ${why}); not started`
+      : reason === "not_allowed"
+        ? `${p}: crawl ${crawlId} paused (not_allowed) before any request: ${why}. ` +
+          "crawl_resume re-checks it against the allowlist of the server that takes the call"
+        : `${p}: crawl ${crawlId} paused (credentials_unreadable) before any request: it needs ` +
           `credentials and ${why}. crawl_resume with them continues it`,
   );
 }

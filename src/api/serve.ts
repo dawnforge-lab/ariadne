@@ -12,9 +12,17 @@
  * hatch that admits loopback and RFC1918 targets. Wiring it to env is exactly
  * what its docblock forbids, so this file constructs the server without it and
  * the only way to set it is to import `createApiServer` from code that means to.
+ *
+ * CRAWLS RUN ON WORKERS (28b T5). This process accepts and answers; it runs
+ * none (`crawlRunner: "workers"`, role `api`): crawl jobs are left in the
+ * pool for `npm run worker:serve`. It does run a REAPER (R10), so it settles
+ * its own dead render and rules jobs and sweeps expired credentials whether or
+ * not a worker is up. Render and rules calls still run here, synchronously.
  */
 import { closeDb, createDb } from "../db/client.js";
-import { parseCredentialKeys, parseCredentialRetentionDays } from "../crawl/credential-vault.js";
+import { CredentialVault, parseCredentialKeys, parseCredentialRetentionDays } from "../crawl/credential-vault.js";
+import { ReaperLoop } from "../worker/reaper-loop.js";
+import { timingWith } from "../worker/timing.js";
 import { loadApiConfig } from "./config.js";
 import { createApiServer } from "./http.js";
 
@@ -31,6 +39,7 @@ const api = createApiServer({
     allowedDomains: config.allowedDomains,
     credentialKeys,
     credentialRetentionDays,
+    crawlRunner: "workers",
     // Undefined means each field's own default — `exports/` and `renders/`; see
     // `ServiceConfig`. Unlike `crawlDefaults` these ARE environment knobs, and
     // safely so: they name where the server keeps its own output, not what it
@@ -40,7 +49,17 @@ const api = createApiServer({
   },
 });
 
+const reaper = new ReaperLoop(db, {
+  vault: new CredentialVault(db, credentialKeys),
+  retentionDays: credentialRetentionDays,
+  timing: timingWith(),
+  label: "api",
+  log: (line) => console.error(line),
+});
+reaper.start();
+
 const bound = await api.listen(config.port, process.env["ARIADNE_API_HOST"] ?? "127.0.0.1");
+console.error("ariadne api: crawls run on workers (npm run worker:serve); this process runs a reaper, not crawls");
 console.error(
   `ariadne api listening on http://${bound.host}:${bound.port} — ` +
     `${config.allowedDomains.length} allowed domain(s)`,
@@ -70,8 +89,9 @@ for (const signal of ["SIGINT", "SIGTERM"] as const) {
     console.error(`ariadne api: ${signal} — closing (a running crawl is paused (shutdown), not killed)`);
     // The queue's close aborts the crawl in flight and waits for it to write
     // its `paused` (shutdown) row, so a restart resumes rather than re-crawls.
-    api
-      .close()
+    reaper
+      .stop()
+      .then(() => api.close())
       .then(() => closeDb(db))
       .then(() => process.exit(0))
       .catch((error: unknown) => {

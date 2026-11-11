@@ -29,7 +29,7 @@ import { hostKeyOf } from "../../src/crawl/host-key.js";
 import { EXTRACTION_VERSION } from "../../src/crawl/versions.js";
 import { RULESET_VERSION } from "../../src/rules/registry/registry.js";
 import { ApiService } from "../../src/api/service.js";
-import type { ServiceConfig } from "../../src/api/config.js";
+import { isHostAllowed, type ServiceConfig } from "../../src/api/config.js";
 import { LOCAL_TENANT } from "../../src/tenant.js";
 import { claimNextJob, enqueueJob, withPinnedJob, type ClaimedJob } from "../../src/worker/jobs.js";
 import { registerInstance } from "../../src/worker/instance.js";
@@ -537,6 +537,7 @@ describe("a runner that lost its job", () => {
       concurrency: 1,
       log: (line) => log.push(line),
       execute: crawlJobExecutor({
+        hostAllowed: (host) => isHostAllowed(host, ["127.0.0.1"]),
         db,
         vault,
         processTrust: { allowPrivate: true },
@@ -629,7 +630,7 @@ describe("a runner that lost its job", () => {
 
     // And the runner's path: logged, nothing written.
     const log: string[] = [];
-    await crawlJobExecutor({ db, vault, processTrust: { allowPrivate: true }, log: (l) => log.push(l) })(
+    await crawlJobExecutor({ hostAllowed: (host) => isHostAllowed(host, ["127.0.0.1"]), db, vault, processTrust: { allowPrivate: true }, log: (l) => log.push(l) })(
       claimed,
       new AbortController().signal,
     );
