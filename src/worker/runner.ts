@@ -19,6 +19,21 @@
  * stay queued. A claim that lands after `stop()` began is handed back to the
  * queue untouched rather than started only to be aborted.
  *
+ * A JOB TAKEN FROM THE RUNNER IS STOPPED (28b T4b). Every heartbeat
+ * (`beatOnce()`) answers which of the runner's jobs are still its own; one
+ * that is not — a reaper read this process as dead and abandoned it, or
+ * `crawl_resume` adopted its crawl — has its signal ABORTED, and the work ends
+ * as a stop. A heartbeat refused because the instance itself is stopped or
+ * gone (`InstanceGoneError`) aborts every job. Logging alone would leave two
+ * runners on one crawl. What the stopped work may still write is the loop's
+ * business: it writes the crawl only while it owns the job
+ * (`ResumeOpts.owner`, src/crawl/loop.ts).
+ *
+ * THE REAPER runs only in a runner built with `reaper` (Ruling R10): a worker,
+ * or the API in workers mode — never an in-process service. Every
+ * `timing.reapEvery` it calls `reapOnce` (src/worker/reaper.ts), one tick at a
+ * time, and logs what a tick did when it did anything.
+ *
  * Nothing here throws into the void: a claim that fails is logged and retried
  * at the next tick, and each job's promise is caught before anyone awaits it,
  * because an unhandled rejection ends a Node 22 process and one bad job must
@@ -28,8 +43,10 @@ import { and, eq } from "drizzle-orm";
 
 import type { Db } from "../db/client.js";
 import { jobs } from "../db/schema.js";
+import type { CredentialVault } from "../crawl/credential-vault.js";
 import { assertTenantCap, claimNextJob, finishJob, type ClaimedJob, type JobKind, type JobOutcome } from "./jobs.js";
-import { heartbeat } from "./instance.js";
+import { heartbeat, InstanceGoneError } from "./instance.js";
+import { reapOnce, type ReapSummary } from "./reaper.js";
 import { timingWith, type Timing } from "./timing.js";
 
 /** `ARIADNE_TENANT_MAX_RUNNING` when it is not set (R9). */
@@ -78,6 +95,14 @@ export interface JobRunnerOptions {
    * pinned render and rules jobs, beats it with this runner's job ids).
    */
   heartbeat?: boolean;
+  /**
+   * Run the reaper every `timing.reapEvery` (Ruling R10): a worker, or the API
+   * in workers mode. Absent in an in-process service, which never reaps.
+   * `retentionDays` is the credential retention the tick's sweep enforces.
+   * `onlyInstances` is TEST ONLY (`ReapOptions.onlyInstances`): production
+   * never passes it.
+   */
+  reaper?: { vault: CredentialVault; retentionDays: number; onlyInstances?: readonly string[] };
 }
 
 interface Running {
@@ -93,6 +118,9 @@ export class JobRunner {
   private chain: Promise<void> = Promise.resolve();
   private timer: NodeJS.Timeout | null = null;
   private beat: NodeJS.Timeout | null = null;
+  private reapTimer: NodeJS.Timeout | null = null;
+  /** The reaper tick in flight, if any: ticks never overlap. */
+  private reaping: Promise<void> | null = null;
   private started = false;
   private stopped = false;
   private stopping: Promise<void> | null = null;
@@ -120,13 +148,79 @@ export class JobRunner {
     if (this.opts.heartbeat !== false) {
       // Liveness: only a live instance's jobs count as held (Ruling R10).
       this.beat = setInterval(() => {
-        heartbeat(this.db, this.opts.instanceId, this.runningJobIds()).catch((error: unknown) => {
+        this.beatOnce().catch((error: unknown) => {
           this.log(`runner ${this.opts.instanceId}: heartbeat failed — ${messageOf(error)}`);
         });
       }, this.timing.heartbeat);
       this.beat.unref();
     }
+    if (this.opts.reaper !== undefined) {
+      this.reapTimer = setInterval(() => this.reapTick(), this.timing.reapEvery);
+      this.reapTimer.unref();
+    }
     void this.wake();
+  }
+
+  /**
+   * Heartbeat this runner's instance and running jobs (plus `extraJobIds`,
+   * jobs the same instance holds outside this runner — the API service's
+   * pinned render and rules jobs), then stop every job of THIS runner the beat
+   * did not answer as still its own (module header). Rejects with the beat's
+   * error, after aborting every job when the instance is gone. An owner that
+   * beats the instance itself (`heartbeat: false`) calls this.
+   */
+  async beatOnce(extraJobIds: readonly string[] = []): Promise<void> {
+    const mine = this.runningJobIds();
+    let held: Set<string>;
+    try {
+      held = new Set(await heartbeat(this.db, this.opts.instanceId, [...mine, ...extraJobIds]));
+    } catch (error) {
+      if (error instanceof InstanceGoneError) {
+        for (const id of this.runningJobIds()) {
+          this.lose(id, "its instance is stopped or gone, so no job is this runner's any longer");
+        }
+      }
+      throw error;
+    }
+    for (const id of mine) {
+      if (!held.has(id)) {
+        this.lose(
+          id,
+          "it is no longer running under this instance (a reaper abandoned it, or crawl_resume adopted its crawl)",
+        );
+      }
+    }
+  }
+
+  /** Abort a job the runner no longer holds, saying so. Once per job. */
+  private lose(jobId: string, why: string): void {
+    const job = this.running.get(jobId);
+    if (job === undefined || job.controller.signal.aborted) return;
+    this.log(`runner ${this.opts.instanceId}: job ${jobId} stopped: ${why}`);
+    job.controller.abort();
+  }
+
+  private reapTick(): void {
+    const reaper = this.opts.reaper;
+    if (reaper === undefined || this.stopped || this.reaping !== null) return;
+    this.reaping = reapOnce(this.db, {
+      now: new Date(),
+      timing: this.timing,
+      vault: reaper.vault,
+      retentionDays: reaper.retentionDays,
+      ...(reaper.onlyInstances === undefined ? {} : { onlyInstances: reaper.onlyInstances }),
+    })
+      .then((summary) => {
+        if (reapedSomething(summary)) this.log(`runner ${this.opts.instanceId}: reaper — ${describeReap(summary)}`);
+      })
+      .catch((error: unknown) => {
+        this.log(
+          `runner ${this.opts.instanceId}: the reaper's tick failed — ${messageOf(error)}; retrying at the next tick`,
+        );
+      })
+      .finally(() => {
+        this.reaping = null;
+      });
   }
 
   /**
@@ -150,8 +244,11 @@ export class JobRunner {
     this.stopped = true;
     if (this.timer !== null) clearInterval(this.timer);
     if (this.beat !== null) clearInterval(this.beat);
+    if (this.reapTimer !== null) clearInterval(this.reapTimer);
     this.stopping = (async () => {
       await this.chain;
+      // A tick in flight finishes first: its transactions settle what they took.
+      if (this.reaping !== null) await this.reaping;
       const current = [...this.running.values()];
       for (const job of current) job.controller.abort();
       await Promise.all(current.map((job) => job.done));
@@ -167,6 +264,7 @@ export class JobRunner {
           instanceId: this.opts.instanceId,
           kinds: this.opts.kinds,
           pinnedTo: this.opts.pinnedTo,
+          deadAfterMs: this.timing.deadAfter,
           ...(this.opts.maxRunningPerTenant === undefined ? {} : { maxRunningPerTenant: this.opts.maxRunningPerTenant }),
         });
       } catch (error) {
@@ -227,6 +325,19 @@ export class JobRunner {
       );
     }
   }
+}
+
+function reapedSomething(summary: ReapSummary): boolean {
+  return Object.values(summary).some((n) => n > 0);
+}
+
+function describeReap(summary: ReapSummary): string {
+  return (
+    `${summary.abandonedJobs} dead job(s) abandoned, ${summary.pausedCrawls} crawl(s) paused, ` +
+    `${summary.cancelledCrawls} cancelled, ${summary.requeuedCrawls} requeued, ` +
+    `${summary.credentialsSwept} expired credential row(s) swept, ` +
+    `${summary.instancesDeleted} dead instance(s) deleted`
+  );
 }
 
 function messageOf(error: unknown): string {

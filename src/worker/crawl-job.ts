@@ -22,6 +22,13 @@
  * left exactly as the other writer left it — closing it `failed` would
  * overwrite a decision somebody made.
  *
+ * THE JOB MAY BE TAKEN FROM THE RUNNER (28b T4b): a reaper that read its
+ * process as dead abandons it, `crawl_resume` adopts it. Every write here and
+ * in the loop is conditioned on the job still being this runner's
+ * (`ResumeOpts.owner`): a job taken before the crawl's claim never starts it,
+ * and one taken during the run — the runner's heartbeat aborts it then — does
+ * not close the crawl over whoever took it (`JobLostError`, logged).
+ *
  * EVERY END SETTLES THE JOB WITH THE CRAWL CHANGE THAT ENDS IT, in one
  * transaction where the crawl changes: the loop's close (`onClose`), the
  * `credentials_unreadable` pause. So no reader sees the crawl stopped while its
@@ -32,13 +39,14 @@
  * back to pending, which is right after a crash and wrong while another
  * process is working, and a runner cannot tell those apart from outside.
  */
-import { and, eq } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 
 import type { Db } from "../db/client.js";
 import { crawls } from "../db/schema.js";
 import {
   ClaimLostError,
   failureReasonOf,
+  JobLostError,
   parseStoredConfig,
   resumeCrawl,
   type CloseHook,
@@ -180,6 +188,10 @@ async function runCrawlJob(deps: CrawlJobDeps, job: ClaimedJob, signal: AbortSig
       signal,
       expectStatus: "queued",
       onClose: crawlJobCloseHook(job.id),
+      // The run writes the crawl only while this job is still its own (28b
+      // T4b): a job abandoned by a reaper or adopted by a resume never starts
+      // the crawl, and its close is not written over the crawl's new holder.
+      owner: { jobId: job.id, instanceId: job.claimedBy },
     });
     // A run that ended cancelled (an agent's cancel of a running crawl)
     // releases its credentials, as a cancel of a queued or paused one does
@@ -196,6 +208,20 @@ async function runCrawlJob(deps: CrawlJobDeps, job: ClaimedJob, signal: AbortSig
           `${summary.pageTemplates.pagesRetyped} retyped`;
     log(`${p}: crawl ${crawlId} ${summary.status} — ${summary.pagesCrawled} page(s), ${templates}`);
   } catch (error) {
+    if (error instanceof JobLostError) {
+      // The job was taken from this runner (a reaper, a resume's adoption):
+      // the crawl is whoever took it's, and nothing was written to it. The
+      // job is already settled; `finishJob` leaves it so.
+      log(
+        error.stage === "start"
+          ? `${p}: crawl ${crawlId}: its job ${job.id} was taken from this runner before the crawl ` +
+              "started; not started"
+          : `${p}: crawl ${crawlId}: its job ${job.id} was taken from this runner, and the crawl ` +
+              `('${error.status}') by another holder since; this run's close was not written`,
+      );
+      await finishJob(db, job.id, "abandoned");
+      return;
+    }
     if (error instanceof ClaimLostError) {
       // Not a failure, and nothing to write to the crawl: see the module
       // header. Matched on the type, never on the sentence.
@@ -227,7 +253,16 @@ async function runCrawlJob(deps: CrawlJobDeps, job: ClaimedJob, signal: AbortSig
           // The loop's own helper: one rule for what may go in this column.
           failureReason: failureReasonOf(error),
         })
-        .where(and(eq(crawls.id, crawlId), eq(crawls.status, "queued")));
+        // And only while the job is still this runner's (28b T4b): a crawl
+        // adopted meanwhile is queued under ANOTHER job, and is not ours to fail.
+        .where(
+          and(
+            eq(crawls.id, crawlId),
+            eq(crawls.status, "queued"),
+            sql`exists (select 1 from jobs j where j.id = ${job.id} and j.status = 'running'
+                         and j.claimed_by = ${job.claimedBy})`,
+          ),
+        );
       await finishJob(db, job.id, "failed", failureReasonOf(error));
     } catch (recordError) {
       log(
@@ -243,8 +278,9 @@ async function runCrawlJob(deps: CrawlJobDeps, job: ClaimedJob, signal: AbortSig
  * Close a queued crawl `paused` with `pause_reason = 'credentials_unreadable'`
  * (28b item 10), and settle its job, in one transaction: its row names
  * credentials and this process has none it can use. Nothing was fetched.
- * Conditioned on `queued`, as every runner close is: a row another writer
- * moved is left as it is, and the job is abandoned.
+ * Conditioned on `queued` and on the job still being this runner's, as every
+ * runner close is: a row another writer moved (or adopted) is left as it is,
+ * and the job is abandoned.
  */
 async function pauseUnreadable(deps: CrawlJobDeps, job: ClaimedJob, why: string): Promise<void> {
   const p = deps.logPrefix ?? "api";
@@ -259,7 +295,16 @@ async function pauseUnreadable(deps: CrawlJobDeps, job: ClaimedJob, why: string)
         finishedAt: new Date(),
         controlRequest: null,
       })
-      .where(and(eq(crawls.id, crawlId), eq(crawls.status, "queued")));
+      .where(
+        and(
+          eq(crawls.id, crawlId),
+          eq(crawls.status, "queued"),
+          // While the job is still this runner's (28b T4b), as the run's own
+          // claim requires (`ResumeOpts.owner`): an adopted crawl is not ours.
+          sql`exists (select 1 from jobs j where j.id = ${job.id} and j.status = 'running'
+                       and j.claimed_by = ${job.claimedBy})`,
+        ),
+      );
     if (result.rowCount === null) {
       throw new Error(`queue runner: the pause of crawl ${crawlId} reported no row count`);
     }

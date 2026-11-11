@@ -476,7 +476,10 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "paused is a stop that crawl_resume continues, with pauseReason 'request' " +
         "(crawl_pause), 'shutdown' (the server stopped mid-run) or " +
         "'credentials_unreadable' (its stored credentials could not be read when it was " +
-        "picked up, so nothing was fetched: crawl_resume with them continues it). cancelled is " +
+        "picked up, so nothing was fetched: crawl_resume with them continues it) or " +
+        "'worker_lost' (the process running it died). A worker-pool crawl paused 'shutdown' " +
+        "or 'worker_lost' is queued again by the engine itself, up to three times in a row; " +
+        "'request' and 'credentials_unreadable' wait for crawl_resume. cancelled is " +
         "final — crawl_resume refuses it; cancelledAt says when, and neverFetched " +
         "counts the URLs it never asked for (null on a crawl cancelled before it ran: " +
         "nothing was seen, which is not zero). controlRequested is a pause or cancel " +

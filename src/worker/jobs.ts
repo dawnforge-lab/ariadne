@@ -54,9 +54,14 @@
  *    as that process decides; its running jobs are not the pool's and do not
  *    count against the cap.
  *
- * "Running" is the row's status, whoever holds it: a job whose process died is
- * still running until the reaper (Task 4b) settles it, and its host stays held
- * till then — never a second fetcher on a site because a heartbeat was late.
+ * "Running" is a `running` row whose holder is LIVE (`liveHolderSql`, 28b
+ * T4b): a job whose process stopped or went silent for `deadAfter` holds
+ * neither its host nor its tenant's count, so a dead process cannot keep a site
+ * from being crawled until a reaper runs — and in-process mode runs none. The
+ * cost, stated: a process silent for longer than `deadAfter` but not dead (a
+ * stall) shares its host with the next claim until its next heartbeat tells it
+ * the job is gone (src/worker/runner.ts aborts it then). `deadAfter` is six
+ * heartbeats for that reason.
  *
  * **The claims take turns.** Under READ COMMITTED two claims racing over two
  * queued jobs of ONE host each see the other's job still queued (neither
@@ -253,29 +258,50 @@ function isLiveViolation(error: unknown): boolean {
  * process's job. A job whose process is gone is a row, not work: its queued
  * crawl is nobody's (`queuePosition` null), `crawl_mark_failed` may retire it
  * and `crawl_resume` adopts it (a fresh job, stamped with this code's
- * versions). (Task 4's reaper settles such rows; until it runs they are read
- * as what they are.) A SQL boolean over the job alias `j`.
+ * versions). (The reaper, src/worker/reaper.ts, settles such rows where one
+ * runs; until it does they are read as what they are.) A SQL boolean over the
+ * job alias `alias` (default `j`).
+ *
+ * Every "held" question reads this one predicate: the busy guards, the claim's
+ * host exclusivity and tenant cap, `HOST_BUSY`, `queuePosition`, and — negated
+ * — the reaper's "dead".
  */
-export function liveHolderSql(deadAfterMs: number): SQL {
+export function liveHolderSql(deadAfterMs: number, alias = "j"): SQL {
+  const j = sql.identifier(alias);
+  return sql`(
+    (${j}.status = 'queued' and ${j}.pinned_to is null
+       and ${j}.ruleset_version = ${RULESET_VERSION} and ${j}.extraction_version = ${EXTRACTION_VERSION})
+    or ${liveInstanceSql(
+      sql`(case when ${j}.status = 'running' then ${j}.claimed_by else ${j}.pinned_to end)`,
+      deadAfterMs,
+    )})`;
+}
+
+/**
+ * WHETHER AN INSTANCE IS LIVE: its row exists, it is not stopped, and its
+ * heartbeat is within `deadAfterMs` on the DATABASE's clock (heartbeats are
+ * stamped with it too, so app/database skew cannot make a live process read
+ * dead). A SQL boolean over the instance id `instanceId`. `liveHolderSql` is
+ * this over a job's holder; the reaper deletes instances that are NOT this.
+ */
+export function liveInstanceSql(instanceId: SQL, deadAfterMs: number): SQL {
   if (!Number.isInteger(deadAfterMs) || deadAfterMs <= 0) {
     throw new Error(`liveHolderSql: deadAfterMs must be a positive whole number, got ${String(deadAfterMs)}`);
   }
-  return sql`(
-    (j.status = 'queued' and j.pinned_to is null
-       and j.ruleset_version = ${RULESET_VERSION} and j.extraction_version = ${EXTRACTION_VERSION})
-    or exists (
-      select 1 from instances i
-       where i.id = (case when j.status = 'running' then j.claimed_by else j.pinned_to end)
-         and i.stopped_at is null
-         and i.heartbeat_at > now() - (${deadAfterMs}::int * interval '1 millisecond')))`;
+  return sql`exists (
+      select 1 from instances li
+       where li.id = ${instanceId}
+         and li.stopped_at is null
+         and li.heartbeat_at > now() - (${deadAfterMs}::int * interval '1 millisecond'))`;
 }
 
 /**
  * The crawl's live (`queued|running`) job, or null — at most one exists (the
- * index) — with whether its holder is live (`liveHolderSql`). The busy guards
- * read the row whatever its holder: the index refuses a second job either way.
- * The "held" questions (`queuePosition`, `crawl_mark_failed`, `crawl_resume`)
- * read `live`.
+ * index) — with whether its holder is live (`liveHolderSql`). Every "held"
+ * question reads `live` (28b T4b): `queuePosition`, `crawl_mark_failed`,
+ * `crawl_resume` and the busy guards alike. A row whose holder is dead still
+ * occupies the index, so whoever next needs it adopts it (`abandonOrphanJob`)
+ * or the reaper settles it.
  */
 export async function liveJobOf(
   reader: Reader,
@@ -413,29 +439,48 @@ export async function enqueueJob(
   return id;
 }
 
+/**
+ * Insert a live job, turning the one-live-job refusal into the operation's
+ * sentence. With `adoptDeadAfterMs` (a synchronous render or rules run, 28b
+ * T4b), a RENDER OR RULES holder whose process is not live is no holder: it is
+ * abandoned as it was read (`abandonOrphanJob`) and the insert tried once more
+ * — a dead process's pass must not refuse every pass after it until a reaper
+ * runs, and in-process mode runs none. A crawl job is never adopted here: a
+ * dead crawl job is `crawl_resume`'s to adopt (its crawl is queued or running,
+ * which a render or rules call refuses on its own terms first).
+ */
 async function insertLive(
   writer: Writer,
   crawlId: string,
   kind: JobKind,
   values: typeof jobs.$inferInsert,
+  adoptDeadAfterMs?: number,
 ): Promise<void> {
-  try {
-    await writer.transaction(async (savepoint) => {
-      await savepoint.insert(jobs).values(values);
-    });
-  } catch (error) {
-    if (!isLiveViolation(error)) throw error;
-    const holder = await liveJobOf(writer, crawlId);
-    if (holder === null) {
-      // The holder ended between the refusal and this read: the crawl is free
-      // now, but this call was refused and nothing was written.
-      throw new ServiceError(
-        "CONFLICT",
-        `crawl ${crawlId} was held by another job when this call asked for it, and that job ` +
-          "has just ended. Nothing was started: ask again",
-      );
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      await writer.transaction(async (savepoint) => {
+        await savepoint.insert(jobs).values(values);
+      });
+      return;
+    } catch (error) {
+      if (!isLiveViolation(error)) throw error;
+      const holder = await liveJobOf(writer, crawlId, adoptDeadAfterMs ?? DEFAULT_TIMING.deadAfter);
+      if (holder === null) {
+        // The holder ended between the refusal and this read: the crawl is free
+        // now, but this call was refused and nothing was written.
+        throw new ServiceError(
+          "CONFLICT",
+          `crawl ${crawlId} was held by another job when this call asked for it, and that job ` +
+            "has just ended. Nothing was started: ask again",
+        );
+      }
+      const adoptable =
+        adoptDeadAfterMs !== undefined && attempt === 0 && !holder.live && holder.kind !== "crawl" && kind !== "crawl";
+      // Only as read: one that moved since (a live process took it, or another
+      // call settled it) is the refusal below, never abandoned.
+      if (adoptable && (await abandonOrphanJob(writer, holder))) continue;
+      throw new JobBusyError(crawlId, kind, holder);
     }
-    throw new JobBusyError(crawlId, kind, holder);
   }
 }
 
@@ -461,6 +506,10 @@ async function insertLive(
  * number, `parseTenantMaxRunning` reads it from `ARIADNE_TENANT_MAX_RUNNING`),
  * refused for a pinned one, which the cap does not apply to (R9).
  *
+ * `deadAfterMs` (the runner's `timing.deadAfter`): a running job counts for its
+ * host and its tenant only while its holder is live (`liveHolderSql`, 28b
+ * T4b) — module header, "Fair claims".
+ *
  * A `crawl` job then does the loop's own compare-and-swap on `crawls.status`
  * (`queued → running`); a crawl paused or cancelled between this claim and
  * that one is a `ClaimLostError`, and the runner abandons the job having
@@ -468,10 +517,17 @@ async function insertLive(
  */
 export async function claimNextJob(
   db: Writer,
-  opts: { instanceId: string; kinds: readonly JobKind[]; pinnedTo: string | null; maxRunningPerTenant?: number },
+  opts: {
+    instanceId: string;
+    kinds: readonly JobKind[];
+    pinnedTo: string | null;
+    maxRunningPerTenant?: number;
+    deadAfterMs?: number;
+  },
 ): Promise<ClaimedJob | null> {
   if (opts.kinds.length === 0) throw new Error("claimNextJob: a runner must claim at least one kind");
   assertTenantCap(opts.pinnedTo, opts.maxRunningPerTenant, "claimNextJob");
+  const deadAfterMs = opts.deadAfterMs ?? DEFAULT_TIMING.deadAfter;
   const pinned: SQL =
     opts.pinnedTo === null ? sql`q.pinned_to is null` : sql`q.pinned_to = ${opts.pinnedTo}`;
   const kinds = sql.join(opts.kinds.map((k) => sql`${k}`), sql`, `);
@@ -483,6 +539,7 @@ export async function claimNextJob(
           select r.tenant_id, count(*)::int as n
             from jobs r
            where r.status = 'running' and r.kind = 'crawl' and r.pinned_to is null
+             and ${liveHolderSql(deadAfterMs, "r")}
            group by r.tenant_id)`
     : sql``;
   const underCap: SQL = unpinned
@@ -494,7 +551,8 @@ export async function claimNextJob(
     with busy_hosts as materialized (
       select distinct c.host_key
         from jobs r join crawls c on c.id = r.crawl_id
-       where r.status = 'running' and r.kind in ('crawl', 'render'))
+       where r.status = 'running' and r.kind in ('crawl', 'render')
+         and ${liveHolderSql(deadAfterMs, "r")})
       ${tenantRunning}
     update jobs
        set status = 'running', claimed_by = ${opts.instanceId},
@@ -644,12 +702,29 @@ export async function settleCrawlJob(
  * sentence), then the host — a running crawl or render job of ANOTHER crawl
  * with the same `host_key` refuses `HOST_BUSY` and the insert rolls back.
  * A `rules` job fetches nothing and is inserted as before.
+ *
+ * LIVENESS (28b T4b), on the caller's `deadAfterMs`: a render or rules job of
+ * this crawl whose process is not live does not refuse this one — it is
+ * abandoned as read and this one runs (`insertLive`) — and another crawl's job
+ * on the host refuses `HOST_BUSY` only while its holder is live.
+ *
+ * `held`, when given, carries this job's id while it runs, so the process's
+ * heartbeat stamps it (`heartbeat`): the row's `heartbeat_at` stays fresh as
+ * a running claimed job's does.
  */
 export async function withPinnedJob<T>(
   db: Db,
-  input: { tenant: TenantId; crawlId: string; kind: "render" | "rules"; instanceId: string },
+  input: {
+    tenant: TenantId;
+    crawlId: string;
+    kind: "render" | "rules";
+    instanceId: string;
+    deadAfterMs?: number;
+    held?: Set<string>;
+  },
   run: () => Promise<T>,
 ): Promise<T> {
+  const deadAfterMs = input.deadAfterMs ?? DEFAULT_TIMING.deadAfter;
   const id = `job_${randomUUID()}`;
   const now = new Date();
   const values: typeof jobs.$inferInsert = {
@@ -668,16 +743,18 @@ export async function withPinnedJob<T>(
   if (input.kind === "render") {
     await db.transaction(async (tx) => {
       await takeHostClaimLock(tx);
-      await insertLive(tx, input.crawlId, input.kind, values);
-      await refuseBusyHost(tx, input.crawlId);
+      await insertLive(tx, input.crawlId, input.kind, values, deadAfterMs);
+      await refuseBusyHost(tx, input.crawlId, deadAfterMs);
     });
   } else {
-    await insertLive(db, input.crawlId, input.kind, values);
+    await insertLive(db, input.crawlId, input.kind, values, deadAfterMs);
   }
+  input.held?.add(id);
   let result: T;
   try {
     result = await run();
   } catch (error) {
+    input.held?.delete(id);
     try {
       await finishJob(db, id, "failed", messageOf(error));
     } catch (finishError) {
@@ -689,21 +766,23 @@ export async function withPinnedJob<T>(
     }
     throw error;
   }
+  input.held?.delete(id);
   await finishJob(db, id, "done");
   return result;
 }
 
 /**
- * `HOST_BUSY` when a running crawl or render job of another crawl holds this
- * crawl's host. Called under `HOST_CLAIM_LOCK`, so no claim of that host can
- * land between this read and the caller's commit.
+ * `HOST_BUSY` when a running crawl or render job of another crawl, held by a
+ * live process, holds this crawl's host. Called under `HOST_CLAIM_LOCK`, so no
+ * claim of that host can land between this read and the caller's commit.
  */
-async function refuseBusyHost(tx: Writer, crawlId: string): Promise<void> {
+async function refuseBusyHost(tx: Writer, crawlId: string, deadAfterMs: number): Promise<void> {
   const result = await tx.execute<{ host_key: string; busy: boolean }>(sql`
     select c.host_key,
            exists (select 1 from jobs r join crawls rc on rc.id = r.crawl_id
                     where r.status = 'running' and r.kind in ('crawl', 'render')
-                      and rc.host_key = c.host_key and r.crawl_id <> c.id) as busy
+                      and rc.host_key = c.host_key and r.crawl_id <> c.id
+                      and ${liveHolderSql(deadAfterMs, "r")}) as busy
       from crawls c
      where c.id = ${crawlId}`);
   const row = result.rows[0];

@@ -184,9 +184,26 @@ async function riggedServer(
 ): Promise<Rig> {
   const log: string[] = [];
   const calls = new Map<string, number>();
+  // A BROKEN method is broken inside a transaction too: a database that
+  // refuses an update refuses it whichever handle asks (28b T4b — the crawl's
+  // claim moved into a transaction that checks its job, and a rig that broke
+  // only the pool's `update` would let that claim through).
+  const brokenIn = <T extends object>(handle: T): T =>
+    new Proxy(handle, {
+      get(target, prop) {
+        if (typeof prop === "string" && prop in broken) return broken[prop];
+        const value = Reflect.get(target, prop) as unknown;
+        if (prop === "transaction" && typeof value === "function") {
+          return (run: (tx: object) => unknown, ...rest: unknown[]) =>
+            (value as (...args: unknown[]) => unknown).call(target, (tx: object) => run(brokenIn(tx)), ...rest);
+        }
+        return typeof value === "function" ? (value as (...args: unknown[]) => unknown).bind(target) : value;
+      },
+    });
   const rigged = new Proxy(db, {
     get(target, prop) {
       if (typeof prop === "string" && prop in broken) return broken[prop];
+      if (prop === "transaction" && Object.keys(broken).length > 0) return brokenIn(target).transaction;
       const value = Reflect.get(target, prop) as unknown;
       const bound =
         typeof value === "function"

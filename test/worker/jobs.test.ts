@@ -15,6 +15,10 @@
  * So every seeded crawl has a HOST OF ITS OWN unless a test names one: two of
  * this file's crawls on one host would wait on each other — and on any other
  * file's crawl of that host.
+ *
+ * Task 4b: a running job holds its crawl and its host only while its holder
+ * is LIVE, so a test whose job must hold claims or runs it as a registered
+ * instance (`live()`); a made-up claimer id is a dead process's.
  */
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
@@ -86,6 +90,17 @@ async function seedCrawl(
 
 /** A pin no live process holds: the test's own runner. */
 const pin = (): string => `test-pin-${randomUUID()}`;
+
+/**
+ * A registered instance, live for the default `deadAfter` (a minute): the
+ * holder of a job that must HOLD — since 28b T4b a running job whose holder is
+ * not live holds neither its crawl nor its host.
+ */
+async function live(): Promise<string> {
+  const id = await registerInstance(db, "worker");
+  createdInstances.push(id);
+  return id;
+}
 
 async function jobRow(id: string): Promise<typeof jobs.$inferSelect> {
   const [row] = await db.select().from(jobs).where(eq(jobs.id, id));
@@ -274,7 +289,7 @@ describe("withPinnedJob", () => {
     const crawlId = await seedCrawl("finished");
     const hold = deferred();
     const entered = deferred();
-    const first = withPinnedJob(db, { tenant: LOCAL_TENANT, crawlId, kind: "rules", instanceId: pin() }, async () => {
+    const first = withPinnedJob(db, { tenant: LOCAL_TENANT, crawlId, kind: "rules", instanceId: await live() }, async () => {
       entered.resolve();
       await hold.promise;
     });
@@ -477,10 +492,10 @@ describe("fair claims (28b T4a)", () => {
     }
   }
 
-  /** A pinned runner over fake crawl work that ends when the test says. */
-  function heldRunner(pinnedTo: string, release: Map<string, () => void>): JobRunner {
+  /** A pinned runner of a live instance over fake crawl work that ends when the test says. */
+  function heldRunner(pinnedTo: string, release: Map<string, () => void>, instanceId: string): JobRunner {
     return new JobRunner(db, {
-      instanceId: `${pinnedTo}-runner-${randomUUID()}`,
+      instanceId,
       kinds: ["crawl"],
       pinnedTo,
       concurrency: 1,
@@ -505,7 +520,7 @@ describe("fair claims (28b T4a)", () => {
     const a2 = await enqueueJob(db, { tenant: LOCAL_TENANT, crawlId: await seedCrawl("queued", a), kind: "crawl", pinnedTo });
     const b1 = await enqueueJob(db, { tenant: LOCAL_TENANT, crawlId: await seedCrawl("queued", b), kind: "crawl", pinnedTo });
     const release = new Map<string, () => void>();
-    const runners = [heldRunner(pinnedTo, release), heldRunner(pinnedTo, release)];
+    const runners = [heldRunner(pinnedTo, release, await live()), heldRunner(pinnedTo, release, await live())];
     const running = (): string[] => sorted(runners.flatMap((r) => r.runningJobIds()));
     for (const runner of runners) runner.start();
     try {
@@ -530,8 +545,9 @@ describe("fair claims (28b T4a)", () => {
       for (let i = 0; i < 3; i += 1) {
         await enqueueJob(db, { tenant: LOCAL_TENANT, crawlId: await seedCrawl("queued", site), kind: "crawl", pinnedTo });
       }
+      const racers = await Promise.all(Array.from({ length: 6 }, () => live()));
       const claims = await Promise.all(
-        Array.from({ length: 6 }, (_, i) => claimNextJob(db, { instanceId: `racer-${i}`, kinds: ["crawl"], pinnedTo })),
+        racers.map((instanceId) => claimNextJob(db, { instanceId, kinds: ["crawl"], pinnedTo })),
       );
       expect(claims.filter((c) => c !== null), `round ${round}`).toHaveLength(1);
     }
@@ -557,8 +573,9 @@ describe("fair claims (28b T4a)", () => {
       const one1 = await enqueueJob(db, { tenant: LOCAL_TENANT, crawlId: await seedCrawl("queued", one), kind: "crawl", pinnedTo });
       const one2 = await enqueueJob(db, { tenant: LOCAL_TENANT, crawlId: await seedCrawl("queued", one), kind: "crawl", pinnedTo });
       const two1 = await enqueueJob(db, { tenant: LOCAL_TENANT, crawlId: await seedCrawl("queued", two), kind: "crawl", pinnedTo });
+      const claimer = await live();
       const claim = async (): Promise<ClaimedJob | null> => {
-        const job = await claimNextJob(db, { instanceId: "runner-ports", kinds: ["crawl"], pinnedTo });
+        const job = await claimNextJob(db, { instanceId: claimer, kinds: ["crawl"], pinnedTo });
         if (job !== null) claimed.push(job.id);
         return job;
       };
@@ -580,7 +597,7 @@ describe("fair claims (28b T4a)", () => {
     const entered = deferred();
     const rendering = withPinnedJob(
       db,
-      { tenant: LOCAL_TENANT, crawlId: await seedCrawl("finished", site), kind: "render", instanceId: pin() },
+      { tenant: LOCAL_TENANT, crawlId: await seedCrawl("finished", site), kind: "render", instanceId: await live() },
       async () => {
         entered.resolve();
         await hold.promise;
@@ -608,7 +625,7 @@ describe("fair claims (28b T4a)", () => {
     const pinnedTo = pin();
     const theirs = await seedCrawl("running", site, other);
     await enqueueJob(db, { tenant: other, crawlId: theirs, kind: "crawl", pinnedTo });
-    expect((await claimNextJob(db, { instanceId: "runner-h", kinds: ["crawl"], pinnedTo }))?.crawlId).toBe(theirs);
+    expect((await claimNextJob(db, { instanceId: await live(), kinds: ["crawl"], pinnedTo }))?.crawlId).toBe(theirs);
 
     const mine = await seedCrawl("finished", site);
     let ran = false;

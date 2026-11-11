@@ -3,8 +3,8 @@
  * its heartbeat.
  *
  * An instance is registered at boot with a fresh id. Its heartbeat stamps the
- * row and the jobs it is running; the reaper (Task 4) reads both to tell a
- * dead process's jobs from a live one's.
+ * row and the jobs it is running; the reaper (src/worker/reaper.ts) reads the
+ * instance's to tell a dead process's jobs from a live one's.
  */
 import { hostname } from "node:os";
 import { randomUUID } from "node:crypto";
@@ -32,28 +32,42 @@ export async function registerInstance(db: Db, role: InstanceRole): Promise<stri
 }
 
 /**
+ * The instance a heartbeat named is gone (the reaper deleted its row as dead)
+ * or stopped: the jobs it held are no longer its own, and its runner aborts
+ * them (src/worker/runner.ts). Matched on the type, never the sentence.
+ */
+export class InstanceGoneError extends Error {
+  constructor(readonly instanceId: string) {
+    super(
+      `heartbeat: no instance ${instanceId} that is still running — its row was removed as ` +
+        "dead or it was stopped, and the jobs it held are no longer its own",
+    );
+    this.name = "InstanceGoneError";
+  }
+}
+
+/**
  * Stamp the instance and the jobs it is running (only those it holds and that
- * are still running: a job the reaper took is not revived by a late beat).
+ * are still running: a job the reaper took is not revived by a late beat), and
+ * answer the ids it stamped — the ones of `runningJobIds` still this
+ * instance's. One named but not answered was taken from it (the reaper
+ * abandoned it, or `crawl_resume` adopted it), and its runner stops it.
+ *
  * Stamped with the DATABASE's clock, as the liveness test that reads it is
  * (`liveHolderSql`), so app/database clock skew cannot make a live process
  * look dead. An instance whose row is gone (the reaper deleted it as dead) or
- * that is stopped throws: its jobs are no longer its own, and carrying on as
- * if they were would be two runners on one crawl.
+ * that is stopped throws `InstanceGoneError`: its jobs are no longer its own,
+ * and carrying on as if they were would be two runners on one crawl.
  */
-export async function heartbeat(db: Db, instanceId: string, runningJobIds: readonly string[]): Promise<void> {
+export async function heartbeat(db: Db, instanceId: string, runningJobIds: readonly string[]): Promise<string[]> {
   const beat = await db
     .update(instances)
     .set({ heartbeatAt: sql`now()` })
     .where(and(eq(instances.id, instanceId), isNull(instances.stoppedAt)))
     .returning({ id: instances.id });
-  if (beat.length === 0) {
-    throw new Error(
-      `heartbeat: no instance ${instanceId} that is still running — its row was removed as ` +
-        "dead or it was stopped, and the jobs it held are no longer its own",
-    );
-  }
-  if (runningJobIds.length === 0) return;
-  await db
+  if (beat.length === 0) throw new InstanceGoneError(instanceId);
+  if (runningJobIds.length === 0) return [];
+  const stamped = await db
     .update(jobs)
     .set({ heartbeatAt: sql`now()` })
     .where(
@@ -62,7 +76,9 @@ export async function heartbeat(db: Db, instanceId: string, runningJobIds: reado
         eq(jobs.claimedBy, instanceId),
         eq(jobs.status, "running"),
       ),
-    );
+    )
+    .returning({ id: jobs.id });
+  return stamped.map((row) => row.id);
 }
 
 /**

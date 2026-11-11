@@ -509,9 +509,12 @@ export async function failUrl(
  *
  * `refundAttempt` gives back the attempt each released row spent when it was
  * leased: a URL put back because the crawl was paused was never really tried.
+ *
+ * `db` may be a transaction: the reaper releases a dead run's leases in the
+ * one that pauses its crawl (src/worker/reaper.ts).
  */
 export async function releaseLeases(
-  db: Db,
+  db: Pick<Db, "execute">,
   crawlId: string,
   leaseId: string | null,
   opts: { refundAttempt?: boolean } = {},

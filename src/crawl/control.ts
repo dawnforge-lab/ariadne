@@ -19,9 +19,12 @@ export type ControlRequest = (typeof CONTROL_REQUESTS)[number];
  * shut down (`shutdown`), or its stored credentials could not be read when a
  * runner picked it up (`credentials_unreadable`, Phase 28b: the key was rotated
  * past them, they failed authentication, or the retention sweep deleted them;
- * `crawl_resume` with the values continues it).
+ * `crawl_resume` with the values continues it), or the process running it died
+ * and the reaper settled its work (`worker_lost`, Phase 28b: src/worker/
+ * reaper.ts). `shutdown` and `worker_lost` are SYSTEM pauses: a worker-pool
+ * crawl paused by one is requeued by the reaper, at most three times in a row.
  */
-export const PAUSE_REASONS = ["request", "shutdown", "credentials_unreadable"] as const;
+export const PAUSE_REASONS = ["request", "shutdown", "credentials_unreadable", "worker_lost"] as const;
 export type PauseReason = (typeof PAUSE_REASONS)[number];
 
 function readOf<T extends string>(

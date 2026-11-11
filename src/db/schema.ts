@@ -56,7 +56,8 @@ export const crawls = pgTable("crawls", {
   // check constraints):
   //  - control_request: "pause" | "cancel", non-null only while status='running'
   //    (a request the loop has not yet acted on);
-  //  - pause_reason: "request" | "shutdown" | "credentials_unreadable" (28b),
+  //  - pause_reason: "request" | "shutdown" | "credentials_unreadable" |
+  //    "worker_lost" (both 28b; `PAUSE_REASONS`, src/crawl/control.ts),
   //    non-null exactly when status='paused';
   //  - cancelled_at: set only when status='cancelled'.
   controlRequest: text("control_request"),
@@ -414,6 +415,14 @@ export const crawls = pgTable("crawls", {
   index("crawls_tenant_started").on(t.tenantId, t.startedAt.desc(), t.id.desc()),
   // Claim eligibility joins running jobs to their crawls by host (28b Task 4).
   index("crawls_host_key").on(t.hostKey),
+  // The reaper's requeue scan (28b T4b, migration 0043): system-paused crawls
+  // still under the auto-resume cap (src/worker/reaper.ts) — a handful at any
+  // moment, out of every crawl ever run.
+  index("crawls_system_paused")
+    .on(t.finishedAt, t.id)
+    .where(
+      sql`${t.status} = 'paused' and ${t.pauseReason} in ('shutdown', 'worker_lost') and ${t.autoResumeCount} < 3`,
+    ),
 ]);
 
 export const pages = pgTable("pages", {

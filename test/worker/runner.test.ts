@@ -10,6 +10,10 @@
  *    is lost by the runner (`ClaimLostError`), which writes nothing.
  *  - Restart: a crawl accepted by server A and never claimed is run to the
  *    end by runner B after A is gone. Before 28b it was stranded.
+ *  - Reaping and auto-resume (28b T4b): a dead worker's crawl is requeued and
+ *    finished by another runner; the three-times cap; which pauses resume by
+ *    themselves. Here because a requeue enqueues an UNPINNED job, and the pool
+ *    is this file's (below). The rest of the reaper is test/worker/reaper.test.ts.
  *
  * THE UNPINNED POOL IS THIS FILE'S ALONE. The in-process services of every
  * other suite pin the crawl jobs they accept to themselves and claim only
@@ -45,6 +49,8 @@ import { claimNextJob, enqueueJob, queuePositionOf, type ClaimedJob } from "../.
 import { registerInstance } from "../../src/worker/instance.js";
 import { JobRunner, parseTenantMaxRunning } from "../../src/worker/runner.js";
 import { crawlJobExecutor } from "../../src/worker/crawl-job.js";
+import { reapOnce, type ReapSummary } from "../../src/worker/reaper.js";
+import { timingWith } from "../../src/worker/timing.js";
 import { TEST_CREDENTIAL_KEYS } from "../helpers/credential-keys.js";
 
 const PAGE_DELAY_MS = 100;
@@ -132,6 +138,26 @@ async function seedCrawl(
   });
   createdCrawls.push(id);
   return id;
+}
+
+/**
+ * The unpinned pool is this file's alone, but an interrupted earlier run can
+ * leave claimable jobs in it, and a claim takes the oldest first. Settled
+ * before a test that claims the pool reads it. (Jobs of another engine
+ * version are nobody's claim here, and are left.)
+ */
+async function clearPool(): Promise<void> {
+  await db
+    .update(jobs)
+    .set({ status: "abandoned", finishedAt: new Date() })
+    .where(
+      and(
+        eq(jobs.status, "queued"),
+        isNull(jobs.pinnedTo),
+        eq(jobs.rulesetVersion, RULESET_VERSION),
+        eq(jobs.extractionVersion, EXTRACTION_VERSION),
+      ),
+    );
 }
 
 beforeAll(async () => {
@@ -533,26 +559,6 @@ describe("liveness decides held (Ruling R10)", () => {
 describe("fair claims over the unpinned pool, and HOST_BUSY (28b T4a)", () => {
   const short = (): string => randomUUID().slice(0, 8);
 
-  /**
-   * The unpinned pool is this file's alone, but an interrupted earlier run can
-   * leave claimable jobs in it, and a claim takes the oldest first. Settled
-   * before a test that claims the pool reads it. (Jobs of another engine
-   * version are nobody's claim here, and are left.)
-   */
-  async function clearPool(): Promise<void> {
-    await db
-      .update(jobs)
-      .set({ status: "abandoned", finishedAt: new Date() })
-      .where(
-        and(
-          eq(jobs.status, "queued"),
-          isNull(jobs.pinnedTo),
-          eq(jobs.rulesetVersion, RULESET_VERSION),
-          eq(jobs.extractionVersion, EXTRACTION_VERSION),
-        ),
-      );
-  }
-
   async function queueUnpinned(tenant: TenantId): Promise<string> {
     return enqueueJob(db, { tenant, crawlId: await seedCrawl("queued", undefined, tenant), kind: "crawl" });
   }
@@ -610,8 +616,11 @@ describe("fair claims over the unpinned pool, and HOST_BUSY (28b T4a)", () => {
     const x = await queueUnpinned(t);
     const y = await queueUnpinned(t);
     const z = await queueUnpinned(t);
+    // A live claimer: a dead process's running jobs count against no cap (28b T4b).
+    const poolRunner = await registerInstance(db, "worker");
+    createdInstances.push(poolRunner);
     const claim = (max: number): Promise<ClaimedJob | null> =>
-      claimNextJob(db, { instanceId: "pool-runner", kinds: ["crawl"], pinnedTo: null, maxRunningPerTenant: max });
+      claimNextJob(db, { instanceId: poolRunner, kinds: ["crawl"], pinnedTo: null, maxRunningPerTenant: max });
     expect((await claim(1))?.id).toBe(x);
     expect(await claim(1)).toBeNull();
     expect((await claim(2))?.id).toBe(y);
@@ -739,4 +748,283 @@ describe("fair claims over the unpinned pool, and HOST_BUSY (28b T4a)", () => {
       await api.close();
     }
   }, 60_000);
+});
+
+describe("reaping and auto-resume over the pool (28b T4b)", () => {
+  /** The brief's clock: heartbeat 50 ms, dead after 300 ms, a reaper every 100 ms. */
+  const TIGHT = timingWith({ heartbeat: 50, deadAfter: 300, reapEvery: 100, claimPoll: 50 });
+
+  /** A reaper tick confined to `only` (TEST ONLY): another suite's rows are never its. */
+  function reap(only: readonly string[]): Promise<ReapSummary> {
+    return reapOnce(db, {
+      now: new Date(),
+      timing: TIGHT,
+      vault: new CredentialVault(db, TEST_CREDENTIAL_KEYS),
+      // A century: this tick sweeps no other suite's credentials.
+      retentionDays: 36_500,
+      onlyInstances: only,
+    });
+  }
+
+  async function deadInstance(): Promise<string> {
+    const id = await registerInstance(db, "worker");
+    createdInstances.push(id);
+    await db.execute(sql`update instances set heartbeat_at = now() - interval '1 hour' where id = ${id}`);
+    return id;
+  }
+
+  async function seedJob(crawlId: string, fields: Partial<typeof jobs.$inferInsert> & { status: string }): Promise<string> {
+    const id = `job_${randomUUID()}`;
+    await db.insert(jobs).values({
+      id,
+      tenantId: LOCAL_TENANT,
+      crawlId,
+      kind: "crawl",
+      rulesetVersion: RULESET_VERSION,
+      extractionVersion: EXTRACTION_VERSION,
+      ...fields,
+    });
+    return id;
+  }
+
+  function poolRunner(instanceId: string): JobRunner {
+    return new JobRunner(db, {
+      instanceId,
+      kinds: ["crawl"],
+      pinnedTo: null,
+      maxRunningPerTenant: 1,
+      concurrency: 1,
+      log: () => {},
+      execute: crawlJobExecutor({
+        db,
+        vault: new CredentialVault(db, TEST_CREDENTIAL_KEYS),
+        processTrust: { allowPrivate: true },
+        log: () => {},
+        logPrefix: "worker",
+      }),
+      timing: TIGHT,
+    });
+  }
+
+  it("a job whose instance stopped heartbeating is abandoned; its crawl goes paused (worker_lost) and is requeued in the same tick; another runner finishes it with no duplicate pages", async () => {
+    await clearPool();
+    const service = newService([], { crawlRunner: "workers" });
+    const maxPages = 12;
+    const { crawlId } = await start(service, maxPages);
+    const x = await registerInstance(db, "worker");
+    createdInstances.push(x);
+    const xRunner = poolRunner(x);
+    xRunner.start();
+    const pageCount = async (): Promise<number> => {
+      const [row] = await db.select({ n: sql<number>`count(*)::int` }).from(pages).where(eq(pages.crawlId, crawlId));
+      return row?.n ?? 0;
+    };
+    await until(
+      "X crawling, three pages in",
+      async () => [(await crawlRow(crawlId)).status, await pageCount()] as const,
+      ([s, n]) => s === "running" && n >= 3,
+    );
+    const [job] = await jobsOf(crawlId);
+
+    // X DIES. A process cannot be killed inside a test, so X's loop is stopped
+    // and its rows put back exactly as a kill leaves them: the crawl running,
+    // its job running under X, URLs leased to X's workers, X's heartbeat stale.
+    await xRunner.stop();
+    const pending = await db
+      .select({ url: frontier.url, attempts: frontier.attempts })
+      .from(frontier)
+      .where(and(eq(frontier.crawlId, crawlId), eq(frontier.state, "pending")))
+      .orderBy(frontier.url)
+      .limit(2);
+    expect(pending).toHaveLength(2);
+    await db.transaction(async (tx) => {
+      await tx.update(crawls).set({ status: "running", pauseReason: null, finishedAt: null }).where(eq(crawls.id, crawlId));
+      await tx.update(jobs).set({ status: "running", finishedAt: null }).where(eq(jobs.id, job!.id));
+      await tx
+        .update(frontier)
+        .set({
+          state: "leased",
+          leaseId: "x-killed-worker",
+          leasedUntil: new Date(Date.now() + 60 * 60 * 1000),
+          attempts: sql`${frontier.attempts} + 1`,
+        })
+        .where(and(eq(frontier.crawlId, crawlId), inArray(frontier.url, pending.map((p) => p.url))));
+      await tx.execute(sql`update instances set heartbeat_at = now() - interval '1 hour' where id = ${x}`);
+    });
+
+    const summary = await reap([x]);
+    expect(summary).toEqual({
+      abandonedJobs: 1,
+      pausedCrawls: 1,
+      cancelledCrawls: 0,
+      requeuedCrawls: 1,
+      credentialsSwept: 0,
+      instancesDeleted: 0,
+    });
+    expect(await crawlRow(crawlId)).toMatchObject({ status: "queued", pauseReason: null, autoResumeCount: 1, finishedAt: null });
+    const afterReap = await jobsOf(crawlId);
+    expect(afterReap.map((j) => [j.status, j.pinnedTo, j.claimedBy])).toEqual([
+      ["abandoned", null, x],
+      ["queued", null, null],
+    ]);
+    expect(afterReap[1]).toMatchObject({ rulesetVersion: RULESET_VERSION, extractionVersion: EXTRACTION_VERSION });
+    // X's leases are back, their attempts refunded: a killed fetch was never tried.
+    const released = await db
+      .select({ url: frontier.url, state: frontier.state, attempts: frontier.attempts, leaseId: frontier.leaseId })
+      .from(frontier)
+      .where(and(eq(frontier.crawlId, crawlId), inArray(frontier.url, pending.map((p) => p.url))))
+      .orderBy(frontier.url);
+    expect(released).toEqual(pending.map((p) => ({ url: p.url, state: "pending", attempts: p.attempts, leaseId: null })));
+
+    const y = await registerInstance(db, "worker");
+    createdInstances.push(y);
+    const yRunner = poolRunner(y);
+    yRunner.start();
+    try {
+      const done = await until(
+        "Y finished the crawl X lost",
+        () => crawlRow(crawlId),
+        (row) => row.status !== "queued" && row.status !== "running",
+        90_000,
+      );
+      expect(done).toMatchObject({ status: "finished", pagesCrawled: maxPages });
+      const duplicates = await db.execute(
+        sql`select url, count(*)::int as n from pages where crawl_id = ${crawlId} group by url having count(*) > 1`,
+      );
+      expect(duplicates.rows).toEqual([]);
+      expect(await pageCount()).toBe(maxPages);
+      expect((await jobsOf(crawlId)).map((j) => [j.status, j.claimedBy])).toEqual([
+        ["abandoned", x],
+        ["done", y],
+      ]);
+    } finally {
+      await yRunner.stop();
+    }
+  }, 120_000);
+
+  it("a crawl reaped worker_lost a fourth time stays paused, with auto_resume_count = 3", async () => {
+    await clearPool();
+    const d = await deadInstance();
+    const crawlId = await seedCrawl("running");
+    await seedJob(crawlId, { status: "running", claimedBy: d, claimedAt: new Date(), heartbeatAt: new Date() });
+    for (let round = 1; round <= 3; round += 1) {
+      expect(await reap([d]), `round ${round}`).toMatchObject({ abandonedJobs: 1, pausedCrawls: 1, requeuedCrawls: 1 });
+      expect(await crawlRow(crawlId), `round ${round}`).toMatchObject({ status: "queued", autoResumeCount: round });
+      // Claimed by the dead worker again, and started: the crawl that kills its worker every time.
+      const claimed = await db
+        .update(jobs)
+        .set({ status: "running", claimedBy: d, claimedAt: new Date(), heartbeatAt: new Date() })
+        .where(and(eq(jobs.crawlId, crawlId), eq(jobs.status, "queued"), isNull(jobs.pinnedTo)))
+        .returning({ id: jobs.id });
+      expect(claimed, `round ${round}`).toHaveLength(1);
+      await db.update(crawls).set({ status: "running" }).where(eq(crawls.id, crawlId));
+    }
+    expect(await reap([d])).toMatchObject({ abandonedJobs: 1, pausedCrawls: 1, requeuedCrawls: 0 });
+    expect(await crawlRow(crawlId)).toMatchObject({ status: "paused", pauseReason: "worker_lost", autoResumeCount: 3 });
+    expect((await jobsOf(crawlId)).map((j) => j.status)).toEqual(["abandoned", "abandoned", "abandoned", "abandoned"]);
+    // And a later tick leaves it there.
+    expect(await reap([d])).toMatchObject({ requeuedCrawls: 0 });
+    expect((await crawlRow(crawlId)).status).toBe("paused");
+  });
+
+  it("requeues a worker-pool crawl paused shutdown or worker_lost; never one paused request or credentials_unreadable, nor an in-process (pinned) crawl paused shutdown", async () => {
+    await clearPool();
+    const i = await deadInstance();
+    const cases = [
+      ["shutdown", null, true],
+      ["worker_lost", null, true],
+      ["request", null, false],
+      ["credentials_unreadable", null, false],
+      ["shutdown", i, false],
+    ] as const;
+    const seeded: string[] = [];
+    for (const [reason, pinnedTo] of cases) {
+      const crawlId = `crawl_runner_${randomUUID()}`;
+      const siteUrl = `https://runner-${randomUUID()}.example/`;
+      await db.insert(crawls).values({
+        tenantId: LOCAL_TENANT,
+        id: crawlId,
+        siteUrl,
+        hostKey: hostKeyOf(siteUrl),
+        config: { siteUrl },
+        rulesetVersion: RULESET_VERSION,
+        status: "paused",
+        pauseReason: reason,
+        finishedAt: new Date(),
+        rulesRunAt: new Date(),
+        rulesJudgedWith: { rulesetVersion: RULESET_VERSION },
+      });
+      createdCrawls.push(crawlId);
+      // Its last crawl job: claimed by `i`, settled when the crawl paused.
+      await seedJob(crawlId, { status: "abandoned", pinnedTo, claimedBy: i, finishedAt: new Date() });
+      seeded.push(crawlId);
+    }
+    try {
+      expect(await reap([i])).toMatchObject({ abandonedJobs: 0, pausedCrawls: 0, requeuedCrawls: 2 });
+      for (const [index, [reason, pinnedTo, requeued]] of cases.entries()) {
+        const crawlId = seeded[index]!;
+        const label = `${reason}${pinnedTo === null ? "" : " (pinned)"}`;
+        const row = await crawlRow(crawlId);
+        const live = (await jobsOf(crawlId)).filter((j) => j.status === "queued");
+        if (requeued) {
+          // The same state change as crawl_resume, done by the engine.
+          expect(row, label).toMatchObject({
+            status: "queued",
+            pauseReason: null,
+            finishedAt: null,
+            rulesRunAt: null,
+            rulesJudgedWith: null,
+            autoResumeCount: 1,
+          });
+          expect(live.map((j) => [j.kind, j.pinnedTo]), label).toEqual([["crawl", null]]);
+        } else {
+          expect(row, label).toMatchObject({ status: "paused", pauseReason: reason, autoResumeCount: 0 });
+          expect(live, label).toEqual([]);
+        }
+      }
+    } finally {
+      await db.update(jobs).set({ status: "abandoned" }).where(and(inArray(jobs.crawlId, seeded), eq(jobs.status, "queued")));
+    }
+  });
+
+  it("a runner built with a reaper reaps every reapEvery, and one without never does", async () => {
+    const d = await deadInstance();
+    const crawlId = await seedCrawl("running");
+    // Pinned: an in-process crawl, so the tick pauses it and requeues nothing.
+    const job = await seedJob(crawlId, { status: "running", pinnedTo: d, claimedBy: d, claimedAt: new Date(), heartbeatAt: new Date() });
+    const plainId = await registerInstance(db, "worker");
+    createdInstances.push(plainId);
+    const reaperId = await registerInstance(db, "worker");
+    createdInstances.push(reaperId);
+    const make = (instanceId: string, reaper: boolean): JobRunner =>
+      new JobRunner(db, {
+        instanceId,
+        kinds: ["rules"],
+        pinnedTo: instanceId,
+        concurrency: 1,
+        execute: async () => {},
+        log: () => {},
+        timing: TIGHT,
+        ...(reaper
+          ? { reaper: { vault: new CredentialVault(db, TEST_CREDENTIAL_KEYS), retentionDays: 36_500, onlyInstances: [d] } }
+          : {}),
+      });
+    const plain = make(plainId, false);
+    plain.start();
+    try {
+      await sleep(5 * TIGHT.reapEvery);
+      expect((await jobsOf(crawlId)).map((j) => j.status)).toEqual(["running"]);
+    } finally {
+      await plain.stop();
+    }
+    const reaping = make(reaperId, true);
+    reaping.start();
+    try {
+      await until("the reaper's tick", async () => (await jobsOf(crawlId))[0]?.status, (s) => s === "abandoned", 10_000);
+      expect(await crawlRow(crawlId)).toMatchObject({ status: "paused", pauseReason: "worker_lost" });
+      expect((await db.select().from(jobs).where(eq(jobs.id, job)))[0]?.status).toBe("abandoned");
+    } finally {
+      await reaping.stop();
+    }
+  });
 });

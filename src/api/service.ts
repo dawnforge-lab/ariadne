@@ -2511,6 +2511,11 @@ export class ApiService {
   private instance: Promise<string> | null = null;
   /** The instance's heartbeat (Ruling R10: only a live instance's jobs are held). */
   private beat: NodeJS.Timeout | null = null;
+  /**
+   * The render and rules jobs this process is running now (`withPinnedJob`'s
+   * `held`), so the heartbeat stamps their rows too (28b T4b).
+   */
+  private readonly pinnedJobs = new Set<string>();
   /** `ServiceConfig.timing` over the defaults: heartbeat period, liveness window. */
   private readonly timing: Timing;
   /** The in-process runner, built with the instance on first need. */
@@ -2595,17 +2600,23 @@ export class ApiService {
 
   /**
    * Beat this process's instance every `timing.heartbeat`, with the ids of the
-   * crawl jobs its runner is running. The instance holds that runner's work
-   * and the render and rules jobs pinned to it, so it is beaten here, once,
-   * in either mode (the runner is built with `heartbeat: false`). A beat that
-   * fails is logged, never thrown into the void.
+   * crawl jobs its runner is running and of the render and rules jobs it is
+   * running itself (`pinnedJobs`). The instance holds all of them, so it is
+   * beaten here, once, in either mode (the runner is built with `heartbeat:
+   * false`) — through the runner when there is one, which stops any crawl job
+   * the beat answers as no longer this instance's (28b T4b). A render or rules
+   * pass is not stopped that way: neither can be interrupted, and a dead
+   * process's pass is what liveness reads, not a live one's. A beat that fails
+   * is logged, never thrown into the void.
    */
   private startHeartbeat(instanceId: string): void {
     if (this.beat !== null || this.closed) return;
     this.beat = setInterval(() => {
       void (async () => {
         const runner = this.runner === null ? null : await this.runner.catch(() => null);
-        await heartbeat(this.db, instanceId, runner?.runningJobIds() ?? []);
+        const pinned = [...this.pinnedJobs];
+        if (runner === null) await heartbeat(this.db, instanceId, pinned);
+        else await runner.beatOnce(pinned);
       })().catch((error: unknown) => {
         this.log(`api: instance ${instanceId} heartbeat failed — ${messageOf(error)}`);
       });
@@ -4124,14 +4135,15 @@ export class ApiService {
     // checks keep their own order relative to each other (allowlist before URL
     // policy, per `startCrawl`) — this is inserted ahead of them.
     const holder = await liveJobOf(this.db, crawlId, this.timing.deadAfter);
-    if (holder !== null && holder.kind !== "crawl") {
+    if (holder !== null && holder.kind !== "crawl" && holder.live) {
       throw new ServiceError("CONFLICT", busySentences.busy(crawlId, "crawl_resume", holder.kind));
     }
-    // Held only while the process its crawl job belongs to is live (Ruling
-    // R10). A crawl job whose process stopped or died is nobody's work, and
-    // this resume ADOPTS it (below, in the claim's transaction): queued or
-    // running, it is abandoned and a fresh job enqueued for this server.
-    // Before 28b such a crawl was stranded.
+    // Held only while the process its job belongs to is live (Ruling R10; a
+    // render or rules job too since 28b T4b). A job whose process stopped or
+    // died is nobody's work, and this resume ADOPTS the crawl (below, in the
+    // claim's transaction): queued or running, the job is abandoned and a
+    // fresh crawl job enqueued for this server. Before 28b such a crawl was
+    // stranded.
     if (holder?.live === true) {
       throw new ServiceError("CONFLICT", busySentences.held(crawlId, row.status));
     }
@@ -4280,6 +4292,10 @@ export class ApiService {
           rulesRunAt: null,
           // The stamp of what that judgement used goes with it: non-null exactly when `rules_run_at` is (27a).
           rulesJudgedWith: null,
+          // An agent's resume starts the reaper's count of requeues-in-a-row
+          // again (28b T4b): the three-times cap is on crawls that kill their
+          // worker with nobody asking, not on crawls an agent keeps alive.
+          autoResumeCount: 0,
           // AND THE FAILURE SENTENCE, by `finishedAt`'s argument again: the
           // column's contract is `failure_reason IS NOT NULL` ⟹ `status =
           // 'failed'` (migration 0017), so a queued row still carrying why the
@@ -4352,7 +4368,7 @@ export class ApiService {
           throw new ServiceError("CONFLICT", busySentences.orphanClaimed(crawlId, "crawl_resume"));
         }
         this.log(
-          `api: crawl ${crawlId}: adopted — its ${orphanJob.status} crawl job of instance ` +
+          `api: crawl ${crawlId}: adopted — its ${orphanJob.status} ${orphanJob.kind} job of instance ` +
             `${(orphanJob.status === "running" ? orphanJob.claimedBy : orphanJob.pinnedTo) ?? "(none)"}, ` +
             "which is no longer live, is abandoned and a new one queued",
         );
@@ -4545,8 +4561,10 @@ export class ApiService {
     const instanceId = await this.instanceId();
     let summary: RenderPassSummary;
     try {
-      summary = await withPinnedJob(this.db, { tenant, crawlId, kind: "render", instanceId }, () =>
-        this.renderUnderJob(tenant, crawlId, input, sent),
+      summary = await withPinnedJob(
+        this.db,
+        { tenant, crawlId, kind: "render", instanceId, deadAfterMs: this.timing.deadAfter, held: this.pinnedJobs },
+        () => this.renderUnderJob(tenant, crawlId, input, sent),
       );
     } catch (error) {
       // The crawl's own crawl job holds it: it is queued or running, and the
@@ -4724,8 +4742,10 @@ export class ApiService {
     // under a run that had read it `paused`.
     const instanceId = await this.instanceId();
     try {
-      return await withPinnedJob(this.db, { tenant, crawlId, kind: "rules", instanceId }, () =>
-        this.judgeUnderJob(tenant, crawlId),
+      return await withPinnedJob(
+        this.db,
+        { tenant, crawlId, kind: "rules", instanceId, deadAfterMs: this.timing.deadAfter, held: this.pinnedJobs },
+        () => this.judgeUnderJob(tenant, crawlId),
       );
     } catch (error) {
       // The crawl's own crawl job holds it: the crawl is queued or running,
@@ -5352,11 +5372,14 @@ export class ApiService {
    * crawl it is working on, so a command that would change the crawl under it
    * is refused (409), naming the operation and the pass. Since 28b the hold is
    * the crawl's `running` render or rules job, read on `reader` — the pool, or
-   * a transaction that has locked the crawl row so no new job can start.
+   * a transaction that has locked the crawl row so no new job can start — and
+   * only while the process running it is LIVE (28b T4b): a dead process's pass
+   * is interrupted already, and must not refuse every command until a reaper
+   * settles its row (in-process mode runs no reaper).
    */
   private async refuseWhileBusy(reader: Writer, crawlId: string, operation: string): Promise<void> {
-    const holder = await liveJobOf(reader, crawlId);
-    if (holder === null || holder.kind === "crawl") return;
+    const holder = await liveJobOf(reader, crawlId, this.timing.deadAfter);
+    if (holder === null || holder.kind === "crawl" || !holder.live) return;
     throw new ServiceError("CONFLICT", busySentences.busy(crawlId, operation, holder.kind));
   }
 
@@ -5381,8 +5404,10 @@ export class ApiService {
     changes: boolean,
   ): Promise<void> {
     if (!changes || status !== "queued") return;
-    const holder = await liveJobOf(reader, crawlId);
-    if (holder?.kind === "crawl" && holder.status === "running") {
+    const holder = await liveJobOf(reader, crawlId, this.timing.deadAfter);
+    // A dead claimer is starting nothing (28b T4b): its job is the reaper's,
+    // and a `crawl_resume` adopts the crawl.
+    if (holder?.kind === "crawl" && holder.status === "running" && holder.live) {
       throw new ServiceError(
         "CONFLICT",
         `crawl ${crawlId} is starting now: this server has taken it off its queue and ` +
@@ -5392,10 +5417,10 @@ export class ApiService {
     }
   }
 
-  /** The refusal `setCrawlConfig` gives while a rules run holds the crawl. */
+  /** The refusal `setCrawlConfig` gives while a rules run of a live process holds the crawl. */
   private async refuseWhileJudging(reader: Writer, crawlId: string): Promise<void> {
-    const holder = await liveJobOf(reader, crawlId);
-    if (holder?.kind === "rules") {
+    const holder = await liveJobOf(reader, crawlId, this.timing.deadAfter);
+    if (holder?.kind === "rules" && holder.live) {
       throw new ServiceError("CONFLICT", busySentences.judgingConfig(crawlId));
     }
   }

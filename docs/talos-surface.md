@@ -946,11 +946,11 @@ Two properties make the double-transport claim below cheap to trust:
 
 - The token is `ARIADNE_API_TOKEN`, minimum 16 characters, compared in constant
   time over SHA-256 digests (`src/api/auth.ts`). The server refuses to boot
-  without one (`test/api/http.test.ts:2155` "refuses to produce a config without
+  without one (`test/api/http.test.ts:2172` "refuses to produce a config without
   a token").
 - **The token is checked before routing**, so an unauthenticated caller cannot
   map the surface: an unknown path answers 401, not 404
-  (`test/api/http.test.ts:478` "checks the token before routing"). Every refusal
+  (`test/api/http.test.ts:495` "checks the token before routing"). Every refusal
   names *which* thing was wrong — missing header, wrong scheme, wrong token.
 - **MCP asks for no credential** and that is a posture, not an omission: an
   stdio client either started this process or was handed its pipes
@@ -972,7 +972,7 @@ Two properties make the double-transport claim below cheap to trust:
   trigger and still answers every query — the read-only posture a Talos
   deployment can run for reporting-only tenants
   (`test/api/mcp.test.ts:949` "refuses every crawl when the allowlist is empty",
-  `test/api/http.test.ts:806` "refuses every crawl when the allowlist is empty,
+  `test/api/http.test.ts:823` "refuses every crawl when the allowlist is empty,
   but still answers queries").
 - **`ServiceConfig.allowAnyPublicHost` is a second code-only process-trust seam**
   (the first is `crawlDefaults`), and a Talos reader who finds the field in
@@ -1025,7 +1025,7 @@ CREDENTIALS_REQUIRED and writes nothing".
 
 `correlationId` is a UUID; the stack goes to the server log under that id and
 nowhere else (`test/api/mcp.test.ts:2889` "turns an unexpected throw into a tool
-error with a correlation id", `test/api/http.test.ts:2098` "turns an unexpected
+error with a correlation id", `test/api/http.test.ts:2115` "turns an unexpected
 throw into a 500 with a correlation id").
 
 ---
@@ -1365,7 +1365,7 @@ ran, `findingsCount` would sit beside a larger `pagesScanned`, and
 against §2's "empty is never a verdict", which rests entirely on that field.
 Findings rows are left in place and then read exactly as a run that died
 part-way, which §5 already covers. Re-run `crawl_rules` after the resumed crawl
-finishes (`test/api/http.test.ts:1266` "unjudges a crawl it queues, so no
+finishes (`test/api/http.test.ts:1283` "unjudges a crawl it queues, so no
 timestamp outlives the pages it described").
 
 Refusals, each naming which one fired: no such crawl (404); this server already
@@ -1418,11 +1418,11 @@ follows. A caller who wants a crawl dead and not continued uses `crawl_cancel`;
 **Pages waiting on the render pass are NOT resumable work.** `render_pending`
 rows are already-crawled pages the selection promoted and the crawl loop never
 leases them; the refusal names them and points at `crawl_render`
-(`test/api/http.test.ts:1380` "names render_pending rows as the render pass's
+(`test/api/http.test.ts:1397` "names render_pending rows as the render pass's
 work, not a resume's"). Neither are the null `fetch_class` rows of a crawl
 configured with `fetchResources: false` — those carry the operator's decision,
 and a resume would not ask about them
-(`test/api/http.test.ts:1357` "does not read an off switch as resumable work").
+(`test/api/http.test.ts:1374` "does not read an off switch as resumable work").
 
 **The honest race.** The two liveness checks are a snapshot: a lease can expire
 between the count and the enqueue, and a worker this server cannot see can take a
@@ -1433,7 +1433,7 @@ row says something else — the silent no-op hard rule 7 forbids. That narrows t
 double-accept race as far as it goes without a lock (of two callers past the
 guards, only the one whose UPDATE lands first is accepted), and it cannot close
 the window against a process that never touches the status
-(`test/api/http.test.ts:1299` "409s when the crawl's state changes under the
+(`test/api/http.test.ts:1316` "409s when the crawl's state changes under the
 call, rather than queueing anyway").
 
 For the remainder, the guard is not the safety mechanism — `leaseBatch` is.
@@ -1454,7 +1454,7 @@ Proven end to end, not argued: a real fixture crawl killed in the middle of its
 resource pass by stopping the server that ran it, resumed over the wire by a
 different server, reaches the totals of a control crawl that was never killed —
 3 pages, 24 resources seen and weighed, 0 unasked, 23 findings, on both
-(`test/api/http.test.ts:1181` "a killed crawl resumed over the wire reaches the
+(`test/api/http.test.ts:1198` "a killed crawl resumed over the wire reaches the
 totals of a control that was never killed"; the MCP half is
 `test/api/mcp.test.ts:1614` "finishes a crawl a server was killed in the middle
 of, and keeps its earned spacing").
@@ -2382,7 +2382,7 @@ when both counts are 0. `"failed"` is neither "rendered" nor "no render
 needed". `"failed"` takes precedence over `"ran"`; the closed vocabulary is
 `ran`, `none`, `failed`. Read it before quoting any JavaScript finding. Pinned:
 `test/api/mcp.test.ts:1472` "says over the wire whether a render pass ran, not
-just how many pages it left", `test/api/http.test.ts:1758` "serves
+just how many pages it left", `test/api/http.test.ts:1775` "serves
 renderPassEvidence none beside the selection a pass would make",
 `test/rules/render-metrics.test.ts:536` "answers none on a crawl nobody
 rendered, and still reports what a pass would choose".
@@ -4010,7 +4010,7 @@ referencing counts summing to the edge table), `test/api/query.test.ts:3273`
 "reads every view through a cursor that can be walked one row at a time",
 `test/api/query.test.ts:3308` "refuses a view, a format or a rule it cannot
 answer", `test/api/query.test.ts:3383` "refuses a crawl holding a retired rule's
-findings BEFORE the header", `test/api/http.test.ts:1974` "tears the response
+findings BEFORE the header", `test/api/http.test.ts:1991` "tears the response
 when a CSV export fails mid-stream, rather than truncating the file";
 `test/api/mcp.test.ts:802` "describes the shape of the CSV it writes, not just
 that it writes one" and `test/api/mcp.test.ts:2862` "streams the resources view
