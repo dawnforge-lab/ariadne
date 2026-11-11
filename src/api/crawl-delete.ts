@@ -37,6 +37,7 @@ import {
   structuredData,
   urlParams,
 } from "../db/schema.js";
+import { tenantExportDir, type TenantId } from "./tenant.js";
 
 type CrawlChildTable = PgTable & { crawlId: PgColumn };
 
@@ -112,8 +113,9 @@ function describe(error: unknown): string {
 
 /**
  * Remove the crawl's render artifacts (`<renderDir>/<crawlId>/`, recursively)
- * and every file in the export directory whose name starts with the crawl's
- * slug and a dash — exports and their stray `.tmp-` files alike. Answers how
+ * and every file in the owning tenant's export directory
+ * (`<exportDir>/<tenant>/`, `tenantExportDir`) whose name starts with the
+ * crawl's slug and a dash — exports and their stray `.tmp-` files alike. Answers how
  * many regular files went. Throws, naming every path left on disk, if any
  * could not be removed; the crawl's rows are gone by then and the message says
  * so.
@@ -122,8 +124,12 @@ export async function deleteCrawlFiles(
   crawlId: string,
   crawlSlug: string,
   renderDir: string,
-  exportDir: string,
+  exportRoot: string,
+  tenant: TenantId,
 ): Promise<{ renders: number; exports: number }> {
+  // The tenant's own directory, where `exportCrawl` writes: another tenant's
+  // directory is never listed, whatever its files are called.
+  const exportDir = tenantExportDir(exportRoot, tenant);
   // CONTAINMENT, as `exportCrawl` checks its file: the recursive remove below
   // must only ever reach a directory INSIDE the render directory. Crawl ids are
   // server-generated, but this is a recursive delete, and an id that resolved

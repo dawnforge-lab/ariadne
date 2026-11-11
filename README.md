@@ -47,7 +47,8 @@ tests.
 
 Two transports, one service layer: `npm run api:serve` (HTTP, bearer-token
 trust) and `npm run mcp:serve` (MCP over stdio, process trust). The crawl
-domain allowlist binds both.
+domain allowlist binds both. Every request names its tenant
+(`X-Ariadne-Tenant` over HTTP, `ARIADNE_TENANT` at boot over stdio).
 
 Hard memory contract: RAM is O(concurrency), not O(URLs). 50k pages under
 512MB is the Phase 1 gate; 1M under 512MB is the target.

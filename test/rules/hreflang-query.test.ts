@@ -9,6 +9,7 @@ import { URL_FINDING_CAP } from "../../src/rules/query/crawl-evidence.js";
 import { ALTERNATE_HOST_CAP, HREFLANG_PAGE_BATCH, hreflangRules } from "../../src/rules/query/hreflang.js";
 import type { Finding, QueryRule } from "../../src/rules/registry/types.js";
 import { writerIndexable, type IndexabilitySpec } from "./mk-page.js";
+import { LOCAL_TENANT } from "../../src/api/tenant.js";
 
 function databaseUrl(): string {
   const url = process.env.DATABASE_URL;
@@ -112,6 +113,7 @@ describe("hreflangRules against the database", () => {
   async function newCrawl(): Promise<string> {
     const id = `crawl_${randomUUID()}`;
     await db.insert(crawls).values({
+      tenantId: LOCAL_TENANT,
       id,
       siteUrl: SITE,
       config: {},

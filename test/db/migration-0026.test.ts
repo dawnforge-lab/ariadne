@@ -17,6 +17,7 @@ import { eq, sql } from "drizzle-orm";
 import { closeDb, createDb, type Db } from "../../src/db/client.js";
 import { runMigrations } from "../../src/db/migrate.js";
 import { crawls, pages } from "../../src/db/schema.js";
+import { LOCAL_TENANT } from "../../src/api/tenant.js";
 
 function databaseUrl(): string {
   const url = process.env.DATABASE_URL;
@@ -86,6 +87,7 @@ describe("0026 — the Phase 26b page facts", () => {
   it("reads null on a row that never named them", async () => {
     const crawlId = `crawl_0026_${randomUUID()}`;
     await db.insert(crawls).values({
+      tenantId: LOCAL_TENANT,
       id: crawlId, siteUrl: "https://m26.example", config: {}, rulesetVersion: "test",
     });
     created.push(crawlId);

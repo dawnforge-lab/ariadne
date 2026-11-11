@@ -147,6 +147,7 @@ import {
   type CredentialTarget,
 } from "./credentials.js";
 import { storableCap, storableDeep } from "./storable-text.js";
+import type { TenantId } from "../api/tenant.js";
 
 /**
  * `RenderSelectionConfig` is extended rather than restated: the render pass's
@@ -473,9 +474,9 @@ export interface DiscoveryEvidence {
   /**
    * The walk's own truncation, plus `interrupted` (Phase 27d): set to true on
    * the evidence an EARLIER run wrote by a run about to clear the staged
-   * sitemap alternates for its re-walk (`markEvidenceInterrupted`, written
-   * ahead), and left there when that run ends — stopped, failed, or crashed —
-   * before writing its own; that evidence then no longer describes what is
+   * sitemap memberships and alternates for its re-walk
+   * (`SitemapRowSink.prepare`, written ahead), and left there when that run
+   * ends — stopped, failed, or crashed — before writing its own; that evidence then no longer describes what is
    * staged. Never written by a walk that returned: the next complete walk
    * rewrites this object whole and the key is gone. Absent reads false
    * (`readSitemapHreflang`).
@@ -831,6 +832,7 @@ export class ClaimLostError extends Error {
  */
 export async function runCrawl(
   db: Db,
+  tenant: TenantId,
   config: CrawlConfig,
   signal?: AbortSignal,
   testHooks?: LoopTestHooks,
@@ -854,6 +856,7 @@ export async function runCrawl(
   const crawlId = `crawl_${randomUUID()}`;
   await db.insert(crawls).values({
     id: crawlId,
+    tenantId: tenant,
     siteUrl: config.siteUrl,
     config: storableConfig(config),
     rulesetVersion: RULESET_VERSION,
@@ -1732,29 +1735,37 @@ async function runToCompletion(
     await recordPlatform(activeProfile);
   }
 
-  // A resume walks the sitemaps again. `sitemap_urls` and `sitemap_memberships`
-  // are keyed, so a re-read lands on the rows the first read wrote; the staged
-  // alternates have no key (two documents may state one pair), so the earlier
-  // read's go first rather than being doubled.
+  // A resume walks the sitemaps again. `sitemap_urls` is keyed, so a re-read
+  // lands on the rows the first read wrote. The staging the walk writes —
+  // `sitemap_memberships` and `sitemap_hreflang` — stays the earlier walk's
+  // until this walk replaces it, and is cleared only then (27d ruling R17): by
+  // the sink before its first insert, or below once a walk that staged nothing
+  // has returned. A resume that finds robots.txt unreachable walks nothing, so
+  // it replaces nothing: the earlier walk's staging stands beside the evidence
+  // that counts it (`writeUnreachableRobotsEvidence`).
   //
   // A pause or cancel stops the walk mid-document (Phase 27d): `discover`
   // rejects with `DiscoveryAbortedError`, and the run closes stopped with no
   // discovery evidence and nothing enqueued. A resume walks again from the top.
   //
-  // THE INTERRUPTED MARK, WRITTEN AHEAD (rulings R8, R10; 27d final). From the
-  // delete below until this run's own evidence is on the row, an earlier run's
-  // evidence (on a resume) no longer describes what is staged. So it is marked
-  // `interrupted` BEFORE the delete, and the evidence write below replaces the
-  // object whole, which clears the key. Whatever ends the run in between — a
-  // stop, a failed poll, a failed sink insert, `persistSitemap`, the evidence
-  // write itself, or the process dying with no catch or close run at all —
-  // leaves the mark on the row, so a `failed` row, which can still be judged,
-  // never pairs complete-looking evidence with a partial staging. A fresh
-  // crawl has no evidence yet, and the mark matches no row.
-  await markEvidenceInterrupted(db, crawlId);
-  await db.delete(sitemapHreflang).where(eq(sitemapHreflang.crawlId, crawlId));
+  // THE INTERRUPTED MARK, WRITTEN AHEAD (rulings R8, R10; 27d final), by
+  // `SitemapRowSink.prepare`. From the clear until this run's own evidence is
+  // on the row, an earlier run's evidence (on a resume) no longer describes
+  // what is staged. So it is marked `interrupted` BEFORE the clear, and the
+  // evidence write below replaces the object whole, which drops the key.
+  // Whatever ends the run in between — a stop, a failed poll, a failed sink
+  // insert, `persistSitemap`, the evidence write itself, or the process dying
+  // with no catch or close run at all — leaves the mark on the row, so a
+  // `failed` row, which can still be judged, never pairs complete-looking
+  // evidence with a partial staging. A fresh crawl has no evidence yet, and
+  // the mark matches no row.
   let discovery: DiscoveryResult;
   const onSitemapFlush = testHooks?.onSitemapFlush;
+  const sitemapSink = new SitemapRowSink(
+    db,
+    crawlId,
+    onSitemapFlush === undefined ? undefined : () => onSitemapFlush(signal),
+  );
   try {
     discovery = await discover(config.siteUrl, {
       userAgent: config.userAgent,
@@ -1771,17 +1782,22 @@ async function runToCompletion(
       // the spider's (declared and supplied), and only the entries' enqueue is
       // skipped below.
       walkSitemaps: config.mode !== "list" || config.sitemapUrls !== undefined,
-      sink: new SitemapRowSink(
-        db,
-        crawlId,
-        onSitemapFlush === undefined ? undefined : () => onSitemapFlush(signal),
-      ),
+      sink: sitemapSink,
     });
   } catch (error) {
     if (error instanceof DiscoveryAbortedError && signal.aborted) {
       return closeStoppedBeforePages(db, crawlId, watcher);
     }
     throw error;
+  }
+  // The walk returned: what it staged replaces the earlier walk's, and a walk
+  // that staged nothing (no sitemap declared, every document failed) replaces
+  // it with nothing. A no-op when the sink already cleared before its first
+  // insert. Not when robots.txt was unreachable: `discover` then walked no
+  // sitemap (complete disallow, verified there), so there is nothing to
+  // replace the earlier walk's staging with — see the evidence write below.
+  if (discovery.robots.outcome !== "unreachable") {
+    await sitemapSink.prepare();
   }
   await testHooks?.afterDiscovery?.(signal);
   // A stop that landed as the walk finished — after its last request, before
@@ -1811,13 +1827,16 @@ async function runToCompletion(
   // INSERTION 2 — discovery's own findings, written before anything branches on
   // them. A crawl that refuses to run because robots.txt is unreachable is
   // exactly the crawl whose discovery evidence a reader most needs.
-  await db
-    .update(crawls)
-    // The site's robots.txt text rides in this evidence (`robots.raw`, and the
-    // note can quote it), so it passes the storability boundary (ruling R11):
-    // a NUL in robots.txt must not fail the crawl before any page is fetched.
-    .set({ discovery: storableDeep(discoveryEvidence(discovery, config)) })
-    .where(eq(crawls.id, crawlId));
+  //
+  // The site's robots.txt text rides in this evidence (`robots.raw`, and the
+  // note can quote it), so it passes the storability boundary (ruling R11): a
+  // NUL in robots.txt must not fail the crawl before any page is fetched.
+  const evidence = storableDeep(discoveryEvidence(discovery, config));
+  if (discovery.robots.outcome === "unreachable") {
+    await writeUnreachableRobotsEvidence(db, crawlId, evidence, sitemapSink);
+  } else {
+    await db.update(crawls).set({ discovery: evidence }).where(eq(crawls.id, crawlId));
+  }
 
   // Complete disallow: robots.txt could not be read, which is not permission
   // (RFC 9309 §2.3.1.4). The crawl fails loudly rather than reporting a clean
@@ -3048,9 +3067,51 @@ async function runToCompletion(
 }
 
 /**
+ * The discovery evidence of a run that found robots.txt unreachable (27d
+ * ruling R17). That run walked no sitemap (`discover`: complete disallow), so
+ * it staged nothing and replaces nothing.
+ *
+ *  - A crawl that already holds evidence — a resume of a walked crawl — keeps
+ *    the walk's keys (`suppliedSitemaps`, `truncation` with any `interrupted`
+ *    mark, `docsFetched`, `sitemapFacts`, `sitemapsRead`): they still describe
+ *    the staging the earlier walk left, which stands. The keys robots.txt
+ *    itself decides come from THIS read (controller ruling R5): `robots`, and
+ *    `sitemapSources` — the `Sitemap:` lines the file declared, which an
+ *    unreachable file declared none of. Keeping the earlier file's lines beside
+ *    an `unreachable` outcome would have `robots_get` say this read declared
+ *    them.
+ *  - A crawl with none gets this run's evidence whole, as a fresh crawl always
+ *    has. Its staging is cleared first (`prepare`; the mark matches no row):
+ *    rows on it can only be a walk stopped before it wrote evidence, and the
+ *    whole evidence counts none, so no reader pairs the two.
+ */
+async function writeUnreachableRobotsEvidence(
+  db: Db,
+  crawlId: string,
+  evidence: DiscoveryEvidence,
+  sink: SitemapRowSink,
+): Promise<void> {
+  const merged = await db
+    .update(crawls)
+    .set({
+      // The robots-derived keys only; the walk's keys stand (see above).
+      discovery: sql`${crawls.discovery} || jsonb_build_object(
+        'robots', ${JSON.stringify(evidence.robots)}::jsonb,
+        'sitemapSources', ${JSON.stringify(evidence.sitemapSources)}::jsonb
+      )`,
+    })
+    .where(and(eq(crawls.id, crawlId), isNotNull(crawls.discovery)))
+    .returning({ id: crawls.id });
+  if (merged.length === 1) return;
+  await sink.prepare();
+  await db.update(crawls).set({ discovery: evidence }).where(eq(crawls.id, crawlId));
+}
+
+/**
  * Mark the discovery evidence an EARLIER run of this crawl kept as
  * `truncation.interrupted` (rulings R8, R10). Written AHEAD, just before this
- * run clears the staged sitemap alternates for its re-walk: from then until
+ * run clears the staged sitemap memberships and alternates for its re-walk
+ * (`SitemapRowSink.prepare`, the one caller): from then until
  * its own evidence is written, the kept evidence no longer describes what is
  * staged, and a run that ends in between — however, a crash included — leaves
  * the mark. The hreflang absence rules refuse on it and the marker names it,
@@ -3058,11 +3119,11 @@ async function runToCompletion(
  * with no evidence yet — a fresh one — has nothing to mark: the update matches
  * no row. Idempotent.
  */
-async function markEvidenceInterrupted(db: Db, crawlId: string): Promise<void> {
+export async function markEvidenceInterrupted(db: Db, crawlId: string): Promise<void> {
   await db
     .update(crawls)
     .set({
-      discovery: sql`jsonb_set(${crawls.discovery}, '{truncation,interrupted}', 'true'::jsonb)`,
+      discovery: sql`jsonb_set(${crawls.discovery}, '{truncation}', coalesce(${crawls.discovery}->'truncation', '{}'::jsonb) || '{"interrupted": true}'::jsonb)`,
     })
     .where(and(eq(crawls.id, crawlId), isNotNull(crawls.discovery)));
 }
@@ -3084,9 +3145,11 @@ async function markEvidenceInterrupted(db: Db, crawlId: string): Promise<void> {
  * a "crawl stopped" sentence on a row that then closes `failed`; the page loop
  * gets the same guarantee from raising the poll failure ahead of its probe.
  *
- * A stop after the run cleared the staged sitemap alternates finds evidence an
- * EARLIER run kept already marked `interrupted`: `runToCompletion` writes the
- * mark ahead of the clear (rulings R8, R10), so this close has nothing to add.
+ * A stop after the run cleared the staged sitemap memberships and alternates
+ * finds evidence an EARLIER run kept already marked `interrupted`:
+ * `SitemapRowSink.prepare` writes the mark ahead of the clear (rulings R8,
+ * R10), so this close has nothing to add. A stop before the walk cleared
+ * anything finds the earlier evidence and staging still a matched pair.
  *
  * The page count is the frontier's, as the robots refusal's is: a resume
  * stopped here keeps what its earlier runs crawled.
@@ -3490,6 +3553,8 @@ async function persistSitemap(
 export class SitemapRowSink implements SitemapSink {
   private readonly memberships: (typeof sitemapMemberships.$inferInsert)[] = [];
   private readonly alternates: (typeof sitemapHreflang.$inferInsert)[] = [];
+  /** The one clear of this crawl's earlier staging; see `prepare`. */
+  private prepared: Promise<void> | null = null;
 
   constructor(
     private readonly db: Db,
@@ -3526,7 +3591,38 @@ export class SitemapRowSink implements SitemapSink {
     });
   }
 
+  /**
+   * Clear the staging an earlier walk of this crawl left, so that what this
+   * walk stages replaces it (27d ruling R17). Idempotent: the first call does
+   * the work, and every later call awaits that same work.
+   *
+   * WRITE-AHEAD ORDER (rulings R8, R10; 27d final F4): the earlier run's
+   * evidence is marked `interrupted` FIRST, and only then are this crawl's
+   * `sitemap_hreflang` and `sitemap_memberships` rows deleted. A run that ends
+   * anywhere after the mark — a crash included — leaves it, until the run's
+   * own evidence replaces the object. A fresh crawl has no evidence, and the
+   * mark matches no row.
+   *
+   * Called by `flush` (so before its first insert), and by the crawl once a walk
+   * has returned (a walk may stage nothing). A robots.txt that was unreachable
+   * walks nothing and so replaces nothing: then it is called only on a row with
+   * no evidence (`writeUnreachableRobotsEvidence`).
+   */
+  prepare(): Promise<void> {
+    this.prepared ??= (async () => {
+      await markEvidenceInterrupted(this.db, this.crawlId);
+      await this.db.delete(sitemapHreflang).where(eq(sitemapHreflang.crawlId, this.crawlId));
+      await this.db.delete(sitemapMemberships).where(eq(sitemapMemberships.crawlId, this.crawlId));
+    })();
+    return this.prepared;
+  }
+
   async flush(): Promise<void> {
+    // On every flush, buffered rows or not: the first flush is where the walk
+    // starts writing its staging (a document's first chunk may carry no row),
+    // and the `onFlush` observer sees the clear done. Only a walk that reaches
+    // a sitemap document flushes — never one refused by robots.txt.
+    await this.prepare();
     while (this.memberships.length > 0) {
       const batch = this.memberships.splice(0, SITEMAP_BATCH);
       await this.db.insert(sitemapMemberships).values(storableDeep(batch)).onConflictDoNothing();

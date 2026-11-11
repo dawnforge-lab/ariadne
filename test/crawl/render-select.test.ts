@@ -40,6 +40,7 @@ import {
   SUSPICION,
   type RenderSelection,
 } from "../../src/crawl/render/select.js";
+import { LOCAL_TENANT } from "../../src/api/tenant.js";
 
 function databaseUrl(): string {
   const url = process.env.DATABASE_URL;
@@ -85,6 +86,7 @@ describe("selectRenderSet", () => {
   async function newCrawl(): Promise<string> {
     const id = `crawl_${randomUUID()}`;
     await db.insert(crawls).values({
+      tenantId: LOCAL_TENANT,
       id,
       siteUrl: SITE,
       config: {},
@@ -858,6 +860,7 @@ describe("the render pass's frontier state", () => {
   async function newCrawl(): Promise<string> {
     const id = `crawl_${randomUUID()}`;
     await db.insert(crawls).values({
+      tenantId: LOCAL_TENANT,
       id,
       siteUrl: SITE,
       config: {},

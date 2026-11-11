@@ -32,6 +32,7 @@ import { crawls } from "../src/db/schema.js";
 import { frontierCounts } from "../src/crawl/frontier.js";
 import { CRAWL_DEFAULTS, resumeCrawl, runCrawl, type CrawlConfig } from "../src/crawl/loop.js";
 import { startSiteServer } from "../test/gate/site-server.js";
+import { LOCAL_TENANT } from "../src/api/tenant.js";
 
 const GATE_PAGES = 50_000;
 
@@ -169,7 +170,7 @@ async function main(): Promise<number> {
     // unique; this only stops a skewed clock hiding the row we are looking for.
     const since = new Date(Date.now() - 1_000);
     const startedAt = Date.now();
-    const first = runCrawl(db, config, controller.signal);
+    const first = runCrawl(db, LOCAL_TENANT, config, controller.signal);
 
     const crawlId = await waitForCrawlId(db, config.siteUrl, since);
     console.log(`crawl id        ${crawlId}`);

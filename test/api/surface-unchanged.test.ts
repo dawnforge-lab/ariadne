@@ -12,6 +12,7 @@ import { runMigrations } from "../../src/db/migrate.js";
 import { crawls } from "../../src/db/schema.js";
 import { createApiServer, type ApiServer } from "../../src/api/http.js";
 import { PAGE_FIELDS } from "../../src/api/service.js";
+import { LOCAL_TENANT } from "../../src/api/tenant.js";
 
 const TOKEN = "test-token-0123456789abcdef";
 const SITE = "https://surface-unchanged.test";
@@ -30,6 +31,7 @@ beforeAll(async () => {
   db = createDb(process.env["DATABASE_URL"]!);
   await runMigrations(db);
   await db.insert(crawls).values({
+    tenantId: LOCAL_TENANT,
     id,
     siteUrl: `${SITE}/`,
     config: { siteUrl: `${SITE}/` },
@@ -54,7 +56,7 @@ afterAll(async () => {
 });
 
 async function get(path: string): Promise<unknown> {
-  const res = await fetch(`${base}${path}`, { headers: { authorization: `Bearer ${TOKEN}` } });
+  const res = await fetch(`${base}${path}`, { headers: { authorization: `Bearer ${TOKEN}`, "x-ariadne-tenant": "local" } });
   expect(res.status).toBe(200);
   return res.json();
 }

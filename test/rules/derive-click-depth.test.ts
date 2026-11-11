@@ -25,6 +25,7 @@ import {
   ROOT_REDIRECT_HOPS,
 } from "../../src/rules/derive/click-depth.js";
 import { mkDiscovery } from "./mk-discovery.js";
+import { LOCAL_TENANT } from "../../src/api/tenant.js";
 
 function databaseUrl(): string {
   const url = process.env.DATABASE_URL;
@@ -49,6 +50,7 @@ describe("deriveClickDepth against the database", () => {
   async function newCrawl(siteUrl = SITE): Promise<string> {
     const id = `crawl_${randomUUID()}`;
     await db.insert(crawls).values({
+      tenantId: LOCAL_TENANT,
       id,
       siteUrl,
       config: { userAgent: "AriadneBot-test", maxPages: 500 },

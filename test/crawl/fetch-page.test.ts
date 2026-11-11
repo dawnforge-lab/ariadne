@@ -913,4 +913,26 @@ describe("fetchPage signal (27b)", () => {
     const result = await fetchPage(`${stallBase}/stall`, { ...OPTS, timeoutMs: 200 });
     expect(result.fetchClass).toBe("timeout");
   });
+
+  it("throws a programmer error even when the caller's signal aborted in the same tick (28a T5)", async () => {
+    // The resolver aborts the caller's signal and then fails with a TypeError:
+    // our bug and the abort land together. The bug must surface, not be
+    // reclassified as an abort (hard rule 7; the resources path, 27d F3).
+    const controller = new AbortController();
+    const bug = new TypeError("programmer error in the resolver");
+    const err = await fetchPage("http://example.invalid/", {
+      userAgent: "x",
+      allowPrivate: true,
+      signal: controller.signal,
+      lookup: (_h, _o, cb) => {
+        controller.abort();
+        cb(bug, "");
+      },
+    }).then(
+      () => null,
+      (e: unknown) => e,
+    );
+    expect(err).not.toBeInstanceOf(FetchAbortedError);
+    expect(err).toBeInstanceOf(TypeError);
+  });
 });

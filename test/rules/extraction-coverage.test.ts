@@ -6,6 +6,7 @@ import { closeDb, createDb, type Db } from "../../src/db/client.js";
 import { runMigrations } from "../../src/db/migrate.js";
 import { crawls, pages } from "../../src/db/schema.js";
 import { extractionCoverage } from "../../src/rules/helpers.js";
+import { LOCAL_TENANT } from "../../src/api/tenant.js";
 
 function databaseUrl(): string {
   const url = process.env.DATABASE_URL;
@@ -29,6 +30,7 @@ afterAll(async () => {
 async function seed(versions: Array<number | null>): Promise<string> {
   const id = `crawl_cov_${randomUUID()}`;
   await db.insert(crawls).values({
+    tenantId: LOCAL_TENANT,
     id,
     siteUrl: "https://cov.example",
     config: {},

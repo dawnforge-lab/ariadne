@@ -22,7 +22,9 @@ export type ServiceErrorCode =
   | "FORBIDDEN"
   | "NOT_FOUND"
   | "CONFLICT"
-  | "CREDENTIALS_REQUIRED";
+  | "CREDENTIALS_REQUIRED"
+  | "TENANT_REQUIRED"
+  | "INVALID_TENANT";
 
 /**
  * A refusal with a reason the caller may be shown.

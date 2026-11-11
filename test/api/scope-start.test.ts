@@ -29,6 +29,7 @@ import { createApiServer, type ApiServer } from "../../src/api/http.js";
 import { createMcpServer, type AriadneMcpServer } from "../../src/api/mcp.js";
 import { LIST_MAX_URLS } from "../../src/api/config-schema.js";
 import type { ServiceConfig } from "../../src/api/config.js";
+import { LOCAL_TENANT } from "../../src/api/tenant.js";
 
 const TOKEN = "test-token-scope-start-0123456789";
 const PAGE_DELAY_MS = 100;
@@ -85,7 +86,7 @@ interface Res {
 }
 
 async function call(base: string, method: string, path: string, body?: unknown, raw?: string): Promise<Res> {
-  const headers: Record<string, string> = { authorization: `Bearer ${TOKEN}` };
+  const headers: Record<string, string> = { authorization: `Bearer ${TOKEN}`, "x-ariadne-tenant": "local" };
   const payload = raw ?? (body === undefined ? undefined : JSON.stringify(body));
   if (payload !== undefined) headers["content-type"] = "application/json";
   const res = await fetch(`${base}${path}`, {
@@ -196,7 +197,7 @@ beforeAll(async () => {
   baseA = `http://127.0.0.1:${(await apiA.listen(0)).port}`;
   apiB = createApiServer({ db, config: { ...config, token: TOKEN } });
   baseB = `http://127.0.0.1:${(await apiB.listen(0)).port}`;
-  mcp = createMcpServer({ db, config });
+  mcp = createMcpServer({ db, config: { ...config, tenant: LOCAL_TENANT } });
   const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
   client = new Client({ name: "ariadne-test-scope-start", version: "0.0.1" });
   await mcp.connect(serverSide);

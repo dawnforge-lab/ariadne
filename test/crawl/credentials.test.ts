@@ -45,6 +45,7 @@ import {
   storableConfig,
   type CrawlConfig,
 } from "../../src/crawl/loop.js";
+import { LOCAL_TENANT } from "../../src/api/tenant.js";
 
 function databaseUrl(): string {
   const url = process.env.DATABASE_URL;
@@ -382,6 +383,7 @@ describe("credentials on the wire", () => {
     recorded = [];
     const summary = await runCrawl(
       db,
+      LOCAL_TENANT,
       cfg({
         probeHosts: true,
         legacyHosts: [other],
@@ -492,7 +494,7 @@ describe("a crawl that needs credentials and has none", () => {
   it("throws CredentialsMissingError naming the fields, makes no request and writes no row", async () => {
     recorded = [];
     const siteUrl = `${base}/needs-auth/`;
-    const error = await runCrawl(db, cfg({ siteUrl, credentialShape: shapeOf(CREDS)! })).catch(
+    const error = await runCrawl(db, LOCAL_TENANT, cfg({ siteUrl, credentialShape: shapeOf(CREDS)! })).catch(
       (e: unknown) => e,
     );
     expect(error).toBeInstanceOf(CredentialsMissingError);
@@ -507,7 +509,7 @@ describe("a crawl that needs credentials and has none", () => {
 
   it("refuses credentials supplied without a shape to store", async () => {
     recorded = [];
-    await expect(runCrawl(db, cfg({ credentials: CREDS }))).rejects.toThrow(/credentialShape/);
+    await expect(runCrawl(db, LOCAL_TENANT, cfg({ credentials: CREDS }))).rejects.toThrow(/credentialShape/);
     expect(recorded).toEqual([]);
   });
 });
@@ -541,6 +543,7 @@ describe("resumeCrawl: the row's stored shape decides", () => {
     const crawlId = `crawl_credentials_shape_${Date.now()}`;
     const stored = storableConfig(cfg({ credentialShape: shapeOf(CREDS)! }));
     await db.insert(crawls).values({
+      tenantId: LOCAL_TENANT,
       id: crawlId,
       siteUrl: stored.siteUrl,
       config: stored,

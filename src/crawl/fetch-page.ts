@@ -721,12 +721,14 @@ export async function fetchPage(url: string, opts: FetchOpts): Promise<FetchResu
           : retryAfter.note,
     };
   } catch (error) {
-    // The caller's abort wins over every classification, including a deadline
-    // that fired in the same tick: nothing aborted is ever written as a row.
-    if (callerSignal?.aborted) throw new FetchAbortedError(url);
     // Our bug, not theirs — surface it loudly instead of burying it in a
-    // classified row. This is the only path out of fetchPage that throws.
+    // classified row. Checked FIRST: a programmer error that lands in the same
+    // tick as the caller's abort must not be reclassified as the abort.
     if (isProgrammerError(error)) throw error;
+    // The caller's abort wins over every other classification, including a
+    // deadline that fired in the same tick: nothing aborted is ever written as
+    // a row.
+    if (callerSignal?.aborted) throw new FetchAbortedError(url);
 
     const responseTimeMs = Date.now() - started;
     const refusal = blockedAddressMessage(error);

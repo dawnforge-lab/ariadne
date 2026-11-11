@@ -22,6 +22,7 @@ import {
   type CrawlSummary,
 } from "../../src/crawl/loop.js";
 import { RULESET_VERSION } from "../../src/rules/registry/registry.js";
+import { LOCAL_TENANT } from "../../src/api/tenant.js";
 
 function databaseUrl(): string {
   const url = process.env.DATABASE_URL;
@@ -132,6 +133,7 @@ function cfg(urls: string[], overrides: Partial<CrawlConfig> = {}): CrawlConfig 
 async function createListCrawl(urls: string[], config: CrawlConfig): Promise<string> {
   const id = `crawl_list_${Math.random().toString(36).slice(2)}`;
   await db.insert(crawls).values({
+    tenantId: LOCAL_TENANT,
     id,
     siteUrl: config.siteUrl,
     config: storableConfig(config),
@@ -283,7 +285,7 @@ describe("list mode, the final wave (27c M8)", () => {
   it("runCrawl refuses mode list before a row exists: only the API creates a list crawl", async () => {
     const before = await db.select({ id: crawls.id }).from(crawls).where(eq(crawls.siteUrl, `${base}/`));
     requested = [];
-    await expect(runCrawl(db, cfg(["/p/1"]))).rejects.toThrow(/mode "list"/);
+    await expect(runCrawl(db, LOCAL_TENANT, cfg(["/p/1"]))).rejects.toThrow(/mode "list"/);
     const after = await db.select({ id: crawls.id }).from(crawls).where(eq(crawls.siteUrl, `${base}/`));
     expect(after.length).toBe(before.length);
     expect(requested).toEqual([]);

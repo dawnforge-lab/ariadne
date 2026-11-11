@@ -60,6 +60,7 @@ import { runRules } from "../../src/rules/run.js";
 import { serpWidth } from "../../src/rules/serp-width.js";
 import { mkDiscovery } from "./mk-discovery.js";
 import { CLEAN_META, CLEAN_TITLE, mkPage } from "./mk-page.js";
+import { LOCAL_TENANT } from "../../src/api/tenant.js";
 
 const syntheticTriage =
   (id: string): TriageLookup =>
@@ -209,6 +210,7 @@ describe("query rules, the runner and site.health against the database", () => {
   ): Promise<string> {
     const id = `crawl_${randomUUID()}`;
     await db.insert(crawls).values({
+      tenantId: LOCAL_TENANT,
       id,
       siteUrl: SITE,
       config: { maxPages: 10_000, userAgent: "AriadneBot-test" },

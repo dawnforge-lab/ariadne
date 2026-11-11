@@ -45,6 +45,7 @@ import {
 import { closeDb, createDb, type Db } from "../../src/db/client.js";
 import { runMigrations } from "../../src/db/migrate.js";
 import { crawls, pages } from "../../src/db/schema.js";
+import { LOCAL_TENANT } from "../../src/api/tenant.js";
 
 function databaseUrl(): string {
   const url = process.env.DATABASE_URL;
@@ -162,6 +163,7 @@ function allowAllRobots(): RobotsInfo {
 async function seedCrawl(): Promise<string> {
   const crawlId = `crawl_recheck_${randomUUID()}`;
   await db.insert(crawls).values({
+    tenantId: LOCAL_TENANT,
     id: crawlId,
     siteUrl: base,
     config: { siteUrl: base },

@@ -9,8 +9,8 @@
  * — go to stderr, which is where the service's default log already writes.
  *
  * The token this file does NOT read is the point of the file. `loadMcpConfig`
- * requires a database URL and reads the crawl allowlist, and asks for no bearer
- * token, because an stdio client is the process that started this one: process
+ * requires a database URL and a tenant (`ARIADNE_TENANT`, no default), reads the
+ * crawl allowlist, and asks for no bearer token, because an stdio client is the process that started this one: process
  * trust, not token trust (see `src/api/mcp.ts`'s header). The allowlist is read
  * all the same — process trust says who may ask, never which hosts may be
  * crawled.
@@ -30,6 +30,7 @@ const db = createDb(config.databaseUrl);
 const mcp = createMcpServer({
   db,
   config: {
+    tenant: config.tenant,
     allowedDomains: config.allowedDomains,
     // Undefined means each field's own default — `exports/` and `renders/`; see
     // `ServiceConfig`.
@@ -40,7 +41,8 @@ const mcp = createMcpServer({
 
 await mcp.connect(new StdioServerTransport());
 console.error(
-  `ariadne mcp: serving on stdio — ${config.allowedDomains.length} allowed domain(s)`,
+  `ariadne mcp: serving on stdio for tenant ${config.tenant} — ` +
+    `${config.allowedDomains.length} allowed domain(s)`,
 );
 // Stderr, like everything else here: stdout belongs to the protocol. An
 // operator needs to know where `crawl_render` leaves its documents.

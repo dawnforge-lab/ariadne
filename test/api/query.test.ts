@@ -16,7 +16,7 @@
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { gunzipSync } from "node:zlib";
-import { chmodSync, readFileSync, readdirSync, rmSync } from "node:fs";
+import { chmodSync, mkdirSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -60,6 +60,7 @@ function titleOf(ruleId: string): string {
   return rule.title;
 }
 import { RULESET_VERSION } from "../../src/rules/registry/registry.js";
+import { LOCAL_TENANT } from "../../src/api/tenant.js";
 
 const TOKEN = "test-token-0123456789abcdef";
 const SITE = "http://query.example";
@@ -196,7 +197,7 @@ const HOSTILE_CACHE_CONTROL = "@SUM(1+1)";
 const FILLER_LINKS = 1200;
 
 async function call(path: string, opts: { token?: string | null } = {}): Promise<Res> {
-  const headers: Record<string, string> = {};
+  const headers: Record<string, string> = { "x-ariadne-tenant": "local" };
   const token = opts.token === undefined ? `Bearer ${TOKEN}` : opts.token;
   if (token !== null) headers["authorization"] = token;
   const res = await fetch(`${base}${path}`, { headers });
@@ -229,7 +230,7 @@ interface CsvRes {
  * as one chunk however long it is.
  */
 async function callCsv(path: string): Promise<CsvRes> {
-  const res = await fetch(`${base}${path}`, { headers: { authorization: `Bearer ${TOKEN}` } });
+  const res = await fetch(`${base}${path}`, { headers: { authorization: `Bearer ${TOKEN}`, "x-ariadne-tenant": "local" } });
   const reader = res.body?.getReader();
   const decoder = new TextDecoder();
   let text = "";
@@ -332,6 +333,7 @@ async function seedCrawl(
   } = {},
 ): Promise<void> {
   await db.insert(crawls).values({
+    tenantId: LOCAL_TENANT,
     id,
     siteUrl: opts.siteUrl ?? `${SITE}/`,
     config: opts.config ?? { siteUrl: `${SITE}/` },
@@ -2750,7 +2752,7 @@ describe("GET /crawls/:id/export", () => {
     // moment: a caller can find yesterday's export without a listing, and an
     // agent looping over /export does not fill a disk.
     const path = String(res.body["path"]);
-    expect(path).toBe(join(exportDir, `${crawlA}-issues.jsonl.gz`));
+    expect(path).toBe(join(exportDir, "local", `${crawlA}-issues.jsonl.gz`));
 
     const rows = lines(path);
     expect(rows).toHaveLength(12);
@@ -2801,7 +2803,7 @@ describe("GET /crawls/:id/export", () => {
 
     // One file for this crawl, and it holds the SECOND export's rows — not the
     // first's, and not a concatenation of both.
-    const mine = readdirSync(exportDir).filter((name) => name.startsWith(crawlD));
+    const mine = readdirSync(join(exportDir, "local")).filter((name) => name.startsWith(crawlD));
     expect(mine).toEqual([`${crawlD}-issues.jsonl.gz`]);
     expect(lines(String(second.body["path"])).map((r) => r["url"])).toEqual([
       `${SITE}/d1`, `${SITE}/d2`,
@@ -2825,7 +2827,7 @@ describe("GET /crawls/:id/export", () => {
       unhandled.push(reason);
     };
     process.on("unhandledRejection", onUnhandled);
-    chmodSync(exportDir, 0o500); // read and traverse, but nothing may be created
+    mkdirSync(join(exportDir, "local"), { recursive: true }); chmodSync(join(exportDir, "local"), 0o500); // the tenant's directory: read and traverse, but nothing may be created
     try {
       const res = await call(`/crawls/${crawlA}/export?dataset=pages`);
       expect(res.status).toBe(500);
@@ -2834,7 +2836,7 @@ describe("GET /crawls/:id/export", () => {
       await new Promise((r) => setTimeout(r, 100));
       expect(unhandled, "the export left a rejection for nobody to handle").toEqual([]);
     } finally {
-      chmodSync(exportDir, 0o700);
+      chmodSync(join(exportDir, "local"), 0o700);
       process.off("unhandledRejection", onUnhandled);
     }
 
@@ -2843,7 +2845,7 @@ describe("GET /crawls/:id/export", () => {
     const after = await call(`/crawls/${crawlA}/export?dataset=pages`);
     expect(after.status).toBe(200);
     expect(after.body["rows"]).toBe(4);
-    expect(readdirSync(exportDir).filter((name) => name.includes(".tmp-"))).toEqual([]);
+    expect(readdirSync(join(exportDir, "local")).filter((name) => name.includes(".tmp-"))).toEqual([]);
   });
 });
 
@@ -3353,7 +3355,7 @@ describe("GET /crawls/:id/export?format=csv", () => {
     expect(implicit.status).toBe(200);
     expect(implicit.body).toEqual({
       dataset: "issues",
-      path: join(exportDir, `${crawlF}-issues.jsonl.gz`),
+      path: join(exportDir, "local", `${crawlF}-issues.jsonl.gz`),
       rows: 3,
       bytes: implicit.body["bytes"],
       // Additive since 27a / 27c M16: the rules the judgement leaves out and
@@ -3398,7 +3400,7 @@ describe("GET /crawls/:id/export?format=csv", () => {
   // a file is told, rather than being handed the CSV it did not ask for.
   it("refuses to stream a format that writes a file", async () => {
     await expect(
-      api.service.prepareCsvExport(crawlF, { format: "jsonl.gz" }),
+      api.service.prepareCsvExport(LOCAL_TENANT, crawlF, { format: "jsonl.gz" }),
     ).rejects.toThrow(/writes a file/);
   });
 
@@ -3799,8 +3801,8 @@ describe("GET /compare", () => {
   it("409s a crawl whose site URL is not a URL, rather than calling it another site", async () => {
     const broken = `crawl_cmp_broken_${Date.now()}`;
     await db.execute(sql`
-      insert into crawls (id, site_url, config_jsonb, ruleset_version, status, rules_run_at)
-      values (${broken}, 'not a url at all', '{}'::jsonb, '0.0.0-test', 'finished', now())`);
+      insert into crawls (id, tenant_id, site_url, config_jsonb, ruleset_version, status, rules_run_at)
+      values (${broken}, ${LOCAL_TENANT}, 'not a url at all', '{}'::jsonb, '0.0.0-test', 'finished', now())`);
     try {
       const res = await compare(cmpBase, broken);
       expect(res.status).toBe(409);
@@ -4044,7 +4046,7 @@ describe("crawl-start refuses the test-only fields by name", () => {
     for (const value of [0, 1, 1000, 60_000]) {
       const res = await fetch(`${base}/crawls`, {
         method: "POST",
-        headers: { authorization: `Bearer ${TOKEN}`, "content-type": "application/json" },
+        headers: { authorization: `Bearer ${TOKEN}`, "x-ariadne-tenant": "local", "content-type": "application/json" },
         body: JSON.stringify({ siteUrl: `${SITE}/`, recheckMinGapMs: value }),
       });
       const body = (await res.json()) as Record<string, unknown>;
@@ -4148,6 +4150,7 @@ describe("GET /crawls/:id — why a failed crawl failed", () => {
   beforeAll(async () => {
     failedId = `crawl_q_failed_${Date.now()}`;
     await db.insert(crawls).values({
+      tenantId: LOCAL_TENANT,
       id: failedId,
       siteUrl: `${SITE}/`,
       config: { siteUrl: `${SITE}/` },
@@ -4161,6 +4164,7 @@ describe("GET /crawls/:id — why a failed crawl failed", () => {
     // does not cover, and every reader of this field has to handle it.
     pre0017Id = `crawl_q_pre0017_${Date.now()}`;
     await db.insert(crawls).values({
+      tenantId: LOCAL_TENANT,
       id: pre0017Id,
       siteUrl: `${SITE}/`,
       config: { siteUrl: `${SITE}/` },
@@ -4172,6 +4176,7 @@ describe("GET /crawls/:id — why a failed crawl failed", () => {
     // gone, held by nobody here, no lease on it.
     orphanId = `crawl_q_orphan_${Date.now()}`;
     await db.insert(crawls).values({
+      tenantId: LOCAL_TENANT,
       id: orphanId,
       siteUrl: `${SITE}/`,
       config: { siteUrl: `${SITE}/` },
@@ -4224,7 +4229,7 @@ describe("GET /crawls/:id — why a failed crawl failed", () => {
   it("says an operator retired it, in the constant's own words", async () => {
     const res = await fetch(`${base}/crawls/${orphanId}/fail`, {
       method: "POST",
-      headers: { authorization: `Bearer ${TOKEN}` },
+      headers: { authorization: `Bearer ${TOKEN}`, "x-ariadne-tenant": "local" },
     });
     expect(res.status).toBe(200);
     const body = (await res.json()) as Record<string, unknown>;

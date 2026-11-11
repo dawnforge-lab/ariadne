@@ -51,6 +51,7 @@ import { closeDb, createDb, type Db } from "../../src/db/client.js";
 import { runMigrations } from "../../src/db/migrate.js";
 import { MAX_RESOURCE_REFS } from "../../src/crawl/parse/page-analyzer.js";
 import { crawls, pages } from "../../src/db/schema.js";
+import { LOCAL_TENANT } from "../../src/api/tenant.js";
 
 function databaseUrl(): string {
   const url = process.env.DATABASE_URL;
@@ -162,7 +163,7 @@ async function withServer<T>(
  */
 async function crawlOf(bodies: Record<string, string>): Promise<string> {
   return withServer(bodies, async (config) => {
-    const summary = await runCrawl(db, config);
+    const summary = await runCrawl(db, LOCAL_TENANT, config);
     created.push(summary.crawlId);
     return summary.crawlId;
   });
@@ -233,6 +234,7 @@ describe("0014 — resource_refs_capped_pages", () => {
     const id = `crawl_${randomUUID()}`;
     created.push(id);
     await db.insert(crawls).values({
+      tenantId: LOCAL_TENANT,
       id,
       siteUrl: "https://pre-0014.example/",
       config: {},
@@ -267,7 +269,7 @@ describe("0014 — resource_refs_capped_pages", () => {
     };
 
     await withServer(bodies, async (config) => {
-      const first = await runCrawl(db, config);
+      const first = await runCrawl(db, LOCAL_TENANT, config);
       created.push(first.crawlId);
       const crawlId = first.crawlId;
       expect(await stamped(crawlId)).toBe(2);

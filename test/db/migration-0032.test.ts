@@ -18,6 +18,7 @@ import { eq, inArray, sql } from "drizzle-orm";
 import { closeDb, createDb, type Db } from "../../src/db/client.js";
 import { runMigrations } from "../../src/db/migrate.js";
 import { crawls } from "../../src/db/schema.js";
+import { LOCAL_TENANT } from "../../src/api/tenant.js";
 import { DEFAULT_THRESHOLDS, readStamp } from "../../src/rules/judgement.js";
 
 function databaseUrl(): string {
@@ -60,6 +61,7 @@ describe("0032 — crawls judged before 27a carry a stamp", () => {
       .transaction(async (tx) => {
         const row = (id: string, config: Record<string, unknown>, rulesRunAt: Date | null) => ({
           id,
+          tenantId: LOCAL_TENANT,
           siteUrl: "https://m32.example",
           config,
           rulesetVersion: "test",

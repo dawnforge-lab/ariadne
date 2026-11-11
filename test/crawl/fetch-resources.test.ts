@@ -31,6 +31,7 @@ import {
   RESOURCE_ROBOTS_UNREACHABLE_CLASS,
   type ResourcePassSummary,
 } from "../../src/crawl/resources/fetch-resources.js";
+import { LOCAL_TENANT } from "../../src/api/tenant.js";
 
 function databaseUrl(): string {
   const url = process.env.DATABASE_URL;
@@ -392,6 +393,7 @@ const createdCrawls: string[] = [];
 async function seedCrawl(siteUrl: string): Promise<string> {
   const crawlId = `crawl_res_${randomUUID()}`;
   await db.insert(crawls).values({
+    tenantId: LOCAL_TENANT,
     id: crawlId,
     siteUrl,
     config: { siteUrl },
@@ -408,10 +410,10 @@ async function seedCrawl(siteUrl: string): Promise<string> {
  * `test/crawl/loop.test.ts` uses, for the same reason).
  */
 async function crawl(
-  config: Parameters<typeof runCrawl>[1],
+  config: Parameters<typeof runCrawl>[2],
   signal?: AbortSignal,
 ): Promise<Awaited<ReturnType<typeof runCrawl>>> {
-  const summary = await runCrawl(db, config, signal);
+  const summary = await runCrawl(db, LOCAL_TENANT, config, signal);
   createdCrawls.push(summary.crawlId);
   return summary;
 }
@@ -931,7 +933,7 @@ describe("robots.txt, per host, fetched once", () => {
 
     const service = new ApiService(db, { allowedDomains: ["127.0.0.1"], log: () => {} });
     try {
-      const detail = await service.getCrawl(crawlId);
+      const detail = await service.getCrawl(LOCAL_TENANT, crawlId);
       const census = detail.resources;
 
       // The two facts, side by side, on a crawl nothing seeded a `fetch_class`

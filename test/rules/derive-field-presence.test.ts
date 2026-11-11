@@ -28,6 +28,7 @@ import {
   type FieldPresence,
 } from "../../src/rules/derive/field-presence.js";
 import { mkDiscovery } from "./mk-discovery.js";
+import { LOCAL_TENANT } from "../../src/api/tenant.js";
 
 function databaseUrl(): string {
   const url = process.env.DATABASE_URL;
@@ -124,6 +125,7 @@ describe("deriveFieldPresence against the database", () => {
   async function newCrawl(): Promise<string> {
     const id = `crawl_${randomUUID()}`;
     await db.insert(crawls).values({
+      tenantId: LOCAL_TENANT,
       id,
       siteUrl: SITE,
       config: { userAgent: "AriadneBot-test", maxPages: 500 },

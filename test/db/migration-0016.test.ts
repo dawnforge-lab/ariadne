@@ -46,6 +46,7 @@ import { runCrawl, type CrawlConfig, type CrawlSummary } from "../../src/crawl/l
 import { closeDb, createDb, type Db } from "../../src/db/client.js";
 import { runMigrations } from "../../src/db/migrate.js";
 import { crawls, pages } from "../../src/db/schema.js";
+import { LOCAL_TENANT } from "../../src/api/tenant.js";
 
 function databaseUrl(): string {
   const url = process.env.DATABASE_URL;
@@ -154,7 +155,7 @@ beforeAll(async () => {
     // `storableConfig`, so no resume inherits it (test/crawl/loop.test.ts).
     recheckMinGapMs: RECHECK_MIN_GAP_MS,
   };
-  const summary = await runCrawl(db, config);
+  const summary = await runCrawl(db, LOCAL_TENANT, config);
   crawlId = summary.crawlId;
   created.push(crawlId);
 

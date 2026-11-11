@@ -22,6 +22,7 @@ import { DEFAULT_RULE_CAPS } from "../../src/rules/query/crawl-evidence.js";
 import { BROKEN_SAMPLE_RESOURCES } from "../../src/rules/query/resources.js";
 import { missingSecurityHeaders, securityRules } from "../../src/rules/query/security.js";
 import type { Finding, QueryRule } from "../../src/rules/registry/types.js";
+import { LOCAL_TENANT } from "../../src/api/tenant.js";
 
 function databaseUrl(): string {
   const url = process.env.DATABASE_URL;
@@ -248,7 +249,7 @@ describe("securityRules against the database", () => {
 
   async function newCrawl(siteUrl: string): Promise<string> {
     const id = `crawl_${randomUUID()}`;
-    await db.insert(crawls).values({ id, siteUrl, config: {}, rulesetVersion: "test" });
+    await db.insert(crawls).values({ tenantId: LOCAL_TENANT, id, siteUrl, config: {}, rulesetVersion: "test" });
     createdCrawls.push(id);
     return id;
   }

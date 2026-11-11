@@ -39,6 +39,7 @@ import type { Finding, QueryRule, RuleCaps } from "../../src/rules/registry/type
 import { runRules } from "../../src/rules/run.js";
 import { mkDiscovery } from "./mk-discovery.js";
 import { CLEAN_META, mkPage } from "./mk-page.js";
+import { LOCAL_TENANT } from "../../src/api/tenant.js";
 
 /**
  * The triage a synthetic rule is registered with. The real table
@@ -152,6 +153,7 @@ describe("the finding cap against the database", () => {
   async function newCrawl(config: Record<string, unknown> = {}): Promise<string> {
     const id = `crawl_${randomUUID()}`;
     await db.insert(crawls).values({
+      tenantId: LOCAL_TENANT,
       id,
       siteUrl: SITE,
       config: { maxPages: 10_000, userAgent: "AriadneBot-test", ...config },

@@ -58,6 +58,7 @@ import {
 import { closeDb, createDb, type Db } from "../../src/db/client.js";
 import { runMigrations } from "../../src/db/migrate.js";
 import { crawls, pages } from "../../src/db/schema.js";
+import { LOCAL_TENANT } from "../../src/api/tenant.js";
 
 function databaseUrl(): string {
   const url = process.env.DATABASE_URL;
@@ -175,11 +176,11 @@ beforeAll(async () => {
   if (healthyAddr === null || typeof healthyAddr === "string") throw new Error("no fixture port");
   healthyBase = `http://127.0.0.1:${healthyAddr.port}`;
 
-  failedSummary = await runCrawl(db, config(`${brokenBase}/`));
+  failedSummary = await runCrawl(db, LOCAL_TENANT, config(`${brokenBase}/`));
   failedCrawlId = failedSummary.crawlId;
   created.push(failedCrawlId);
 
-  const okSummary = await runCrawl(db, config(`${healthyBase}/`));
+  const okSummary = await runCrawl(db, LOCAL_TENANT, config(`${healthyBase}/`));
   okCrawlId = okSummary.crawlId;
   created.push(okCrawlId);
 }, 60_000);

@@ -98,7 +98,7 @@ let seam: (phase: "written" | "committed") => Promise<void> = async () => {};
 const createdCrawls: string[] = [];
 
 async function call(method: string, path: string, body?: unknown): Promise<{ status: number; text: string; body: Record<string, unknown> }> {
-  const headers: Record<string, string> = { authorization: `Bearer ${TOKEN}` };
+  const headers: Record<string, string> = { authorization: `Bearer ${TOKEN}`, "x-ariadne-tenant": "local" };
   if (body !== undefined) headers["content-type"] = "application/json";
   const res = await fetch(`${base}${path}`, { method, headers, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
   const text = await res.text();

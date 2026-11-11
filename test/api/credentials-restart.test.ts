@@ -28,6 +28,7 @@ import { createApiServer, type ApiServer } from "../../src/api/http.js";
 import { createMcpServer, type AriadneMcpServer } from "../../src/api/mcp.js";
 import type { ServiceConfig } from "../../src/api/config.js";
 import { mkDiscovery } from "../rules/mk-discovery.js";
+import { LOCAL_TENANT } from "../../src/api/tenant.js";
 
 const TOKEN = "test-token-credentials-restart-0123456789";
 const PAGE_DELAY_MS = 60;
@@ -74,7 +75,7 @@ interface Res {
 }
 
 async function call(method: string, path: string, body?: unknown): Promise<Res> {
-  const headers: Record<string, string> = { authorization: `Bearer ${TOKEN}` };
+  const headers: Record<string, string> = { authorization: `Bearer ${TOKEN}`, "x-ariadne-tenant": "local" };
   if (body !== undefined) headers["content-type"] = "application/json";
   const res = await fetch(`${base}${path}`, {
     method,
@@ -175,6 +176,7 @@ async function seedPaused(
 ): Promise<string> {
   const id = `crawl_credentials_${randomUUID()}`;
   await db.insert(crawls).values({
+    tenantId: LOCAL_TENANT,
     id,
     siteUrl: `${site}/auth/`,
     config: {
@@ -262,7 +264,7 @@ beforeAll(async () => {
   site = `http://127.0.0.1:${address.port}`;
 
   api = await newApi();
-  mcp = createMcpServer({ db, config: serviceConfig() });
+  mcp = createMcpServer({ db, config: { ...serviceConfig(), tenant: LOCAL_TENANT } });
   const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
   client = new Client({ name: "ariadne-test-credentials-restart", version: "0.0.1" });
   await mcp.connect(serverSide);

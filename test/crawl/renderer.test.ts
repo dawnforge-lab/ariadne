@@ -67,6 +67,7 @@ import {
   renderLeaseSeconds,
   runRenderPass,
 } from "../../src/crawl/render/run-render.js";
+import { LOCAL_TENANT } from "../../src/api/tenant.js";
 
 function databaseUrl(): string {
   const url = process.env.DATABASE_URL;
@@ -1803,6 +1804,7 @@ describe("runRenderPass", () => {
     const base = where.base ?? site.base;
     const id = `crawl_${randomUUID()}`;
     await db.insert(crawls).values({
+      tenantId: LOCAL_TENANT,
       id,
       siteUrl: where.siteUrl ?? site.base,
       config: {},

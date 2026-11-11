@@ -57,6 +57,7 @@ import { RENDER_PASS_EVIDENCE } from "../../src/rules/metric/render-metrics.js";
 import { buildRegistry } from "../../src/rules/index.js";
 import { DEFAULT_THRESHOLDS } from "../../src/rules/judgement.js";
 import { RULESET_VERSION } from "../../src/rules/registry/registry.js";
+import { LOCAL_TENANT } from "../../src/api/tenant.js";
 
 /** `crawl_status.recheck.noResponse` on a crawl with no no-response pages. */
 const NO_RESPONSE_ZERO = { pages: 0, confirmed: 0, answered: 0, inconclusive: 0, pending: 0 };
@@ -234,6 +235,7 @@ async function seedCrawl(row: {
   siteUrl?: string;
 }): Promise<string> {
   await db.insert(crawls).values({
+    tenantId: LOCAL_TENANT,
     id: row.id,
     siteUrl: row.siteUrl ?? `${SEEDED_SITE}/`,
     config: row.config ?? { siteUrl: `${SEEDED_SITE}/` },
@@ -345,7 +347,7 @@ async function riggedServer(broken: Record<string, () => never>): Promise<{
 
   const server = createMcpServer({
     db: rigged,
-    config: { allowedDomains: ["127.0.0.1"], renderDir, log: (line) => log.push(line) },
+    config: { tenant: LOCAL_TENANT, allowedDomains: ["127.0.0.1"], renderDir, log: (line) => log.push(line) },
   });
   const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
   const riggedClient = new Client({ name: "ariadne-test-rigged", version: "0.0.1" });
@@ -438,7 +440,7 @@ beforeAll(async () => {
   mcp = createMcpServer({
     db,
     config: {
-      allowedDomains: ["127.0.0.1"],
+      tenant: LOCAL_TENANT, allowedDomains: ["127.0.0.1"],
       // PROCESS TRUST, NOT WIRE TRUST. See the module header.
       crawlDefaults: { allowPrivate: true, probeHosts: false, perHostDelayMs: 0 },
       resolveAddress: TEST_RESOLVER,
@@ -454,7 +456,7 @@ beforeAll(async () => {
 
   closedMcp = createMcpServer({
     db,
-    config: { allowedDomains: [], exportDir, renderDir, log: (line) => serverLog.push(line) },
+    config: { tenant: LOCAL_TENANT, allowedDomains: [], exportDir, renderDir, log: (line) => serverLog.push(line) },
   });
   const [closedClientSide, closedServerSide] = InMemoryTransport.createLinkedPair();
   closedClient = new Client({ name: "ariadne-test-closed", version: "0.0.1" });
@@ -1537,7 +1539,7 @@ describe("crawl_resume", () => {
     const server = createMcpServer({
       db,
       config: {
-        allowedDomains: ["127.0.0.1"],
+        tenant: LOCAL_TENANT, allowedDomains: ["127.0.0.1"],
         crawlDefaults: { allowPrivate: true, probeHosts: false, perHostDelayMs: 0 },
         exportDir,
         renderDir,
@@ -1564,6 +1566,7 @@ describe("crawl_resume", () => {
   async function seedResumable(suffix: string, status: string): Promise<string> {
     const id = `crawl_mcp_resume_${suffix}_${Date.now()}`;
     await db.insert(crawls).values({
+      tenantId: LOCAL_TENANT,
       id,
       siteUrl: `${resumeSite}/`,
       config: {
@@ -2612,7 +2615,7 @@ describe("the two transports answer with one shape", () => {
 
   async function get(path: string): Promise<{ status: number; text: string; body: unknown }> {
     const res = await fetch(`${httpBase}${path}`, {
-      headers: { authorization: `Bearer ${TOKEN}` },
+      headers: { authorization: `Bearer ${TOKEN}`, "x-ariadne-tenant": "local" },
     });
     const text = await res.text();
     let body: unknown = null;
@@ -2919,7 +2922,7 @@ describe("the stdio entrypoint", () => {
     // real, the crawl is not.
     const child = spawn(process.execPath, ["node_modules/.bin/tsx", "src/api/mcp-serve.ts"], {
       cwd: new URL("../../", import.meta.url).pathname,
-      env: { ...process.env, DATABASE_URL: databaseUrl(), ARIADNE_ALLOWED_DOMAINS: "127.0.0.1" },
+      env: { ...process.env, DATABASE_URL: databaseUrl(), ARIADNE_TENANT: "local", ARIADNE_ALLOWED_DOMAINS: "127.0.0.1" },
       stdio: ["pipe", "pipe", "pipe"],
     });
     try {
@@ -2957,7 +2960,7 @@ describe("boot configuration", () => {
 
   it("asks for no bearer token: an stdio client is the process that started this one", () => {
     const config = loadMcpConfig({
-      DATABASE_URL: "postgres://x",
+      DATABASE_URL: "postgres://x", ARIADNE_TENANT: "local",
       ARIADNE_ALLOWED_DOMAINS: "example.com,*.example.org",
     });
     expect(config.allowedDomains).toEqual(["example.com", "*.example.org"]);
@@ -2966,12 +2969,12 @@ describe("boot configuration", () => {
     // trust model changing without anybody saying so. `renderDir` joined the
     // set in P8-T1 and `exportDir` in P8-T6 — both name where this server keeps
     // its own output, which is an operator's filesystem choice and not a
-    // credential.
+    // credential; `tenant` in 28a, which says whose crawls, not who may ask.
     expect(Object.keys(config).sort()).toEqual([
       "allowedDomains",
       "databaseUrl",
       "exportDir",
-      "renderDir",
+      "renderDir", "tenant",
     ]);
     // Unset means "use the default", which the service names — not a path this
     // function invents. See `parseOutputDir`.
@@ -2980,7 +2983,7 @@ describe("boot configuration", () => {
   });
 
   it("still reads the allowlist, and an empty one is a posture rather than an error", () => {
-    expect(loadMcpConfig({ DATABASE_URL: "postgres://x" }).allowedDomains).toEqual([]);
+    expect(loadMcpConfig({ DATABASE_URL: "postgres://x", ARIADNE_TENANT: "local" }).allowedDomains).toEqual([]);
   });
 
   // ARIADNE_RENDER_DIR, both readings. An empty string is the same answer as an
@@ -2989,11 +2992,11 @@ describe("boot configuration", () => {
   // evidence at the filesystem root.
   it("reads ARIADNE_RENDER_DIR, and treats empty and unset alike", () => {
     expect(
-      loadMcpConfig({ DATABASE_URL: "postgres://x", ARIADNE_RENDER_DIR: "/srv/ariadne/renders" })
+      loadMcpConfig({ DATABASE_URL: "postgres://x", ARIADNE_TENANT: "local", ARIADNE_RENDER_DIR: "/srv/ariadne/renders" })
         .renderDir,
     ).toBe("/srv/ariadne/renders");
     expect(
-      loadMcpConfig({ DATABASE_URL: "postgres://x", ARIADNE_RENDER_DIR: "   " }).renderDir,
+      loadMcpConfig({ DATABASE_URL: "postgres://x", ARIADNE_TENANT: "local", ARIADNE_RENDER_DIR: "   " }).renderDir,
     ).toBeUndefined();
   });
 
@@ -3002,11 +3005,11 @@ describe("boot configuration", () => {
   // drift apart on what an empty value means.
   it("reads ARIADNE_EXPORT_DIR, and treats empty and unset alike", () => {
     expect(
-      loadMcpConfig({ DATABASE_URL: "postgres://x", ARIADNE_EXPORT_DIR: "/srv/ariadne/exports" })
+      loadMcpConfig({ DATABASE_URL: "postgres://x", ARIADNE_TENANT: "local", ARIADNE_EXPORT_DIR: "/srv/ariadne/exports" })
         .exportDir,
     ).toBe("/srv/ariadne/exports");
     expect(
-      loadMcpConfig({ DATABASE_URL: "postgres://x", ARIADNE_EXPORT_DIR: "   " }).exportDir,
+      loadMcpConfig({ DATABASE_URL: "postgres://x", ARIADNE_TENANT: "local", ARIADNE_EXPORT_DIR: "   " }).exportDir,
     ).toBeUndefined();
   });
 
@@ -3015,13 +3018,13 @@ describe("boot configuration", () => {
   // test above.
   it("keeps the two output directories independent", () => {
     const onlyExport = loadMcpConfig({
-      DATABASE_URL: "postgres://x",
+      DATABASE_URL: "postgres://x", ARIADNE_TENANT: "local",
       ARIADNE_EXPORT_DIR: "/srv/ariadne/exports",
     });
     expect(onlyExport.exportDir).toBe("/srv/ariadne/exports");
     expect(onlyExport.renderDir).toBeUndefined();
     const onlyRender = loadMcpConfig({
-      DATABASE_URL: "postgres://x",
+      DATABASE_URL: "postgres://x", ARIADNE_TENANT: "local",
       ARIADNE_RENDER_DIR: "/srv/ariadne/renders",
     });
     expect(onlyRender.renderDir).toBe("/srv/ariadne/renders");
@@ -3111,6 +3114,7 @@ describe("crawl_status — why a failed crawl failed", () => {
     // pending frontier row is what gets it past the "nothing to resume" guard.
     const id = `crawl_mcp_resume_failed_${Date.now()}`;
     await db.insert(crawls).values({
+      tenantId: LOCAL_TENANT,
       id,
       siteUrl: `${resumeSite}/`,
       config: {

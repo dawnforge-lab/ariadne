@@ -44,6 +44,7 @@ import { runRules } from "../../src/rules/run.js";
 import { DEEP_DEPTH, SLOW_MS, THIN_WORDS, TITLE_MAX } from "../../src/rules/thresholds.js";
 import { mkDiscovery } from "./mk-discovery.js";
 import { CLEAN_META, mkPage } from "./mk-page.js";
+import { LOCAL_TENANT } from "../../src/api/tenant.js";
 
 const reg = buildRegistry();
 
@@ -351,6 +352,7 @@ describe("runRules stamps what it judged with", () => {
   async function newCrawl(config: Record<string, unknown>, judgement: unknown): Promise<string> {
     const id = `crawl_${randomUUID()}`;
     await db.insert(crawls).values({
+      tenantId: LOCAL_TENANT,
       id,
       siteUrl: SITE,
       config: { maxPages: 100, userAgent: "AriadneBot-test", ...config },

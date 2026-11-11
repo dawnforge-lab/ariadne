@@ -34,6 +34,7 @@ import {
   metricLookup,
   newMetricCrawl,
 } from "./metric-db.js";
+import { LOCAL_TENANT } from "../../src/api/tenant.js";
 
 const SITE = "https://health-metrics.example";
 const url = (path: string): string => `${SITE}${path}`;
@@ -503,6 +504,7 @@ describe("site.health over a capped run", () => {
   async function newCrawl(config: Record<string, unknown>): Promise<string> {
     const id = `crawl_${randomUUID()}`;
     await db.insert(crawls).values({
+      tenantId: LOCAL_TENANT,
       id,
       siteUrl: SITE,
       config,

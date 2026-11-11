@@ -81,6 +81,7 @@ import {
   calibrationFixtures,
 } from "../test/fixtures/pages/calibration-p26.js";
 import { startOffsiteHost } from "../test/fixtures/pages/render-p5.js";
+import { LOCAL_TENANT } from "../src/api/tenant.js";
 
 const REPO = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const DEFAULT_OUT = join(
@@ -930,7 +931,7 @@ async function runAriadne(base: string, legacyBase: string): Promise<AriadneResu
       recheckMinGapMs: 200,
       findingCap: null,
     };
-    const summary = await runCrawl(db, config);
+    const summary = await runCrawl(db, LOCAL_TENANT, config);
     // From here the crawl row exists: whatever throws below, it is deleted
     // (with its pages and issues, by cascade) rather than left orphaned in a
     // database the test suite shares.

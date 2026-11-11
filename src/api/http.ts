@@ -173,6 +173,7 @@ import { randomUUID } from "node:crypto";
 import type { Db } from "../db/client.js";
 import type { ApiServerConfig } from "./config.js";
 import { checkBearer } from "./auth.js";
+import { parseTenant, type TenantId } from "./tenant.js";
 import { unknownQueryParameterMessage } from "./errors.js";
 import {
   ApiService,
@@ -228,6 +229,9 @@ const STATUS_FOR: Record<ServiceErrorCode, number> = {
   // A conflict with the crawl's state like any other 409; the body's `code`
   // is what tells the two apart (27c Deviation 10).
   CREDENTIALS_REQUIRED: 409,
+  // 28a: no tenant named, or a tenant that is not a valid key — both 400.
+  TENANT_REQUIRED: 400,
+  INVALID_TENANT: 400,
 };
 
 export interface CreateApiServerOpts {
@@ -248,6 +252,11 @@ export interface ApiServer {
 type Segment = string | { param: string };
 
 interface RequestCtx {
+  /**
+   * The caller's tenant, from `X-Ariadne-Tenant`, parsed before routing. Every
+   * crawl-facing service call is made with it; nothing here defaults it.
+   */
+  tenant: TenantId;
   params: Record<string, string>;
   query: URLSearchParams;
   /** The parsed JSON body, or `undefined` when the request carried none. */
@@ -342,6 +351,18 @@ export function createApiServer({ db, config }: CreateApiServerOpts): ApiServer 
   };
 }
 
+/**
+ * Every route as `{method, path}` with params rendered `:name` — the sentinel's
+ * enumeration (test/api/tenant-isolation.test.ts), so a route added to
+ * `buildRoutes` without a tenancy case there fails CI.
+ */
+export function routeSignatures(): ReadonlyArray<{ method: string; path: string }> {
+  return buildRoutes().map((route) => ({
+    method: route.method,
+    path: `/${route.pattern.map((seg) => (typeof seg === "string" ? seg : `:${seg.param}`)).join("/")}`,
+  }));
+}
+
 function buildRoutes(): Route[] {
   const id: Segment = { param: "id" };
   return [
@@ -355,7 +376,7 @@ function buildRoutes(): Route[] {
       // both transports share (src/api/config-schema.ts).
       handler: async (service, ctx) => ({
         status: 202,
-        body: await service.startCrawl(ctx.body),
+        body: await service.startCrawl(ctx.tenant, ctx.body),
       }),
     },
     {
@@ -387,7 +408,7 @@ function buildRoutes(): Route[] {
       query: ["siteUrl", ...PAGINATION_PARAMS],
       handler: async (service, ctx) => ({
         status: 200,
-        body: await service.listCrawls({
+        body: await service.listCrawls(ctx.tenant, {
           ...optionalString(ctx.query, "siteUrl"),
           ...optionalNumber(ctx.query, "limit"),
           ...optionalString(ctx.query, "cursor"),
@@ -400,7 +421,7 @@ function buildRoutes(): Route[] {
       query: [],
       handler: async (service, ctx) => ({
         status: 200,
-        body: await service.getCrawl(param(ctx, "id")),
+        body: await service.getCrawl(ctx.tenant, param(ctx, "id")),
       }),
     },
     {
@@ -409,7 +430,7 @@ function buildRoutes(): Route[] {
       query: [],
       handler: async (service, ctx) => {
         noBody(ctx);
-        return { status: 200, body: await service.markCrawlFailed(param(ctx, "id")) };
+        return { status: 200, body: await service.markCrawlFailed(ctx.tenant, param(ctx, "id")) };
       },
     },
     {
@@ -424,7 +445,7 @@ function buildRoutes(): Route[] {
       // `parseResumeCrawlInput` refuses any other field rather than ignoring it.
       handler: async (service, ctx) => ({
         status: 202,
-        body: await service.resumeCrawl(param(ctx, "id"), parseResumeCrawlInput(ctx.body)),
+        body: await service.resumeCrawl(ctx.tenant, param(ctx, "id"), parseResumeCrawlInput(ctx.body)),
       }),
     },
     {
@@ -436,7 +457,7 @@ function buildRoutes(): Route[] {
       // between "done" and "accepted" the routes above draw.
       handler: async (service, ctx) => {
         noBody(ctx);
-        const out = await service.pauseCrawl(param(ctx, "id"));
+        const out = await service.pauseCrawl(ctx.tenant, param(ctx, "id"));
         return { status: out.immediate ? 200 : 202, body: out };
       },
     },
@@ -446,7 +467,7 @@ function buildRoutes(): Route[] {
       query: [],
       handler: async (service, ctx) => {
         noBody(ctx);
-        const out = await service.cancelCrawl(param(ctx, "id"));
+        const out = await service.cancelCrawl(ctx.tenant, param(ctx, "id"));
         return { status: out.immediate ? 200 : 202, body: out };
       },
     },
@@ -458,7 +479,7 @@ function buildRoutes(): Route[] {
         noBody(ctx);
         return {
           status: 200,
-          body: await service.deleteCrawl(param(ctx, "id"), ctx.query.get("confirm") ?? undefined),
+          body: await service.deleteCrawl(ctx.tenant, param(ctx, "id"), ctx.query.get("confirm") ?? undefined),
         };
       },
     },
@@ -475,7 +496,7 @@ function buildRoutes(): Route[] {
       // would otherwise get a 200 describing a selection they did not ask for.
       handler: async (service, ctx) => ({
         status: 200,
-        body: await service.renderCrawl(param(ctx, "id"), parseRenderCrawlInput(ctx.body)),
+        body: await service.renderCrawl(ctx.tenant, param(ctx, "id"), parseRenderCrawlInput(ctx.body)),
       }),
     },
     {
@@ -484,7 +505,7 @@ function buildRoutes(): Route[] {
       query: [],
       handler: async (service, ctx) => {
         noBody(ctx);
-        return { status: 200, body: await service.runRulesForCrawl(param(ctx, "id")) };
+        return { status: 200, body: await service.runRulesForCrawl(ctx.tenant, param(ctx, "id")) };
       },
     },
     {
@@ -493,7 +514,7 @@ function buildRoutes(): Route[] {
       query: [],
       handler: async (service, ctx) => ({
         status: 200,
-        body: await service.getCrawlConfig(param(ctx, "id")),
+        body: await service.getCrawlConfig(ctx.tenant, param(ctx, "id")),
       }),
     },
     {
@@ -507,7 +528,7 @@ function buildRoutes(): Route[] {
       // 400 naming what was wrong, and nothing is written.
       handler: async (service, ctx) => ({
         status: 200,
-        body: await service.setCrawlConfig(param(ctx, "id"), ctx.body),
+        body: await service.setCrawlConfig(ctx.tenant, param(ctx, "id"), ctx.body),
       }),
     },
     // THE QUERY SURFACE. Every one of these is a GET whose whole body is
@@ -522,7 +543,7 @@ function buildRoutes(): Route[] {
       query: ["severity", "checkId", "ruleId", "category", "pageType", ...PAGINATION_PARAMS],
       handler: async (service, ctx) => ({
         status: 200,
-        body: await service.listIssues(param(ctx, "id"), {
+        body: await service.listIssues(ctx.tenant, param(ctx, "id"), {
           ...optionalString(ctx.query, "severity"),
           ...optionalString(ctx.query, "checkId"),
           ...optionalString(ctx.query, "ruleId"),
@@ -539,7 +560,7 @@ function buildRoutes(): Route[] {
       query: PAGINATION_PARAMS,
       handler: async (service, ctx) => ({
         status: 200,
-        body: await service.listIssueUrls(param(ctx, "id"), param(ctx, "ruleId"), {
+        body: await service.listIssueUrls(ctx.tenant, param(ctx, "id"), param(ctx, "ruleId"), {
           ...optionalNumber(ctx.query, "limit"),
           ...optionalString(ctx.query, "cursor"),
         }),
@@ -555,7 +576,7 @@ function buildRoutes(): Route[] {
       query: PAGINATION_PARAMS,
       handler: async (service, ctx) => ({
         status: 200,
-        body: await service.listIssueInlinks(param(ctx, "id"), param(ctx, "ruleId"), {
+        body: await service.listIssueInlinks(ctx.tenant, param(ctx, "id"), param(ctx, "ruleId"), {
           ...optionalNumber(ctx.query, "limit"),
           ...optionalString(ctx.query, "cursor"),
         }),
@@ -567,7 +588,7 @@ function buildRoutes(): Route[] {
       query: ["metricId", "scope", "scopeValue", ...PAGINATION_PARAMS],
       handler: async (service, ctx) => ({
         status: 200,
-        body: await service.listMetrics(param(ctx, "id"), {
+        body: await service.listMetrics(ctx.tenant, param(ctx, "id"), {
           ...optionalString(ctx.query, "metricId"),
           ...optionalString(ctx.query, "scope"),
           ...optionalString(ctx.query, "scopeValue"),
@@ -582,7 +603,7 @@ function buildRoutes(): Route[] {
       query: ["includeZero"],
       handler: async (service, ctx) => ({
         status: 200,
-        body: await service.issuesOverview(param(ctx, "id"), {
+        body: await service.issuesOverview(ctx.tenant, param(ctx, "id"), {
           ...optionalBoolean(ctx.query, "includeZero"),
         }),
       }),
@@ -593,7 +614,7 @@ function buildRoutes(): Route[] {
       query: [],
       handler: async (service, ctx) => ({
         status: 200,
-        body: await service.crawlOverview(param(ctx, "id")),
+        body: await service.crawlOverview(ctx.tenant, param(ctx, "id")),
       }),
     },
     // ONE METRIC AS A TABLE. `/metrics` is the raw rows an agent quotes;
@@ -608,7 +629,7 @@ function buildRoutes(): Route[] {
       query: [],
       handler: async (service, ctx) => ({
         status: 200,
-        body: await service.metricTable(param(ctx, "id"), param(ctx, "metricId")),
+        body: await service.metricTable(ctx.tenant, param(ctx, "id"), param(ctx, "metricId")),
       }),
     },
     {
@@ -625,7 +646,7 @@ function buildRoutes(): Route[] {
       ],
       handler: async (service, ctx) => ({
         status: 200,
-        body: await service.listPages(param(ctx, "id"), {
+        body: await service.listPages(ctx.tenant, param(ctx, "id"), {
           ...optionalString(ctx.query, "pageType"),
           ...optionalNumber(ctx.query, "statusCode"),
           ...optionalBoolean(ctx.query, "indexable"),
@@ -648,7 +669,7 @@ function buildRoutes(): Route[] {
       query: ["crawlId"],
       handler: async (service, ctx) => ({
         status: 200,
-        body: await service.rulesCatalog({ ...optionalString(ctx.query, "crawlId") }),
+        body: await service.rulesCatalog(ctx.tenant, { ...optionalString(ctx.query, "crawlId") }),
       }),
     },
     // THE OTHER TWO ROUTES THAT ARE NOT UNDER A CRAWL, and for a stronger
@@ -665,6 +686,7 @@ function buildRoutes(): Route[] {
       handler: async (service, ctx) => ({
         status: 200,
         body: await service.compareCrawls(
+          ctx.tenant,
           requiredString(ctx.query, "baseCrawlId"),
           requiredString(ctx.query, "headCrawlId"),
         ),
@@ -677,6 +699,7 @@ function buildRoutes(): Route[] {
       handler: async (service, ctx) => ({
         status: 200,
         body: await service.listCompareUrls(
+          ctx.tenant,
           requiredString(ctx.query, "baseCrawlId"),
           requiredString(ctx.query, "headCrawlId"),
           requiredString(ctx.query, "ruleId"),
@@ -694,7 +717,7 @@ function buildRoutes(): Route[] {
       query: [],
       handler: async (service, ctx) => ({
         status: 200,
-        body: await service.getRobots(param(ctx, "id")),
+        body: await service.getRobots(ctx.tenant, param(ctx, "id")),
       }),
     },
     {
@@ -715,9 +738,9 @@ function buildRoutes(): Route[] {
         // shapes — and a format this server does not know still reaches the
         // service, which is what refuses it by name.
         if (ctx.query.get("format") === "csv") {
-          return { csv: await service.prepareCsvExport(param(ctx, "id"), opts) };
+          return { csv: await service.prepareCsvExport(ctx.tenant, param(ctx, "id"), opts) };
         }
-        return { status: 200, body: await service.exportCrawl(param(ctx, "id"), opts) };
+        return { status: 200, body: await service.exportCrawl(ctx.tenant, param(ctx, "id"), opts) };
       },
     },
   ];
@@ -742,6 +765,20 @@ async function handle(
     // buffers — so a refused request costs no memory, and the connection stays
     // usable rather than being reset under a client that is still writing.
     // This is the same reasoning as the 413 drain; see `DRAIN_FACTOR`.
+    req.resume();
+    return;
+  }
+
+  // THE TENANT SECOND: after the token (an unauthenticated caller learns
+  // nothing, this included) and before routing, so every route — an unknown
+  // one too — is refused the same way without one. No default: a request that
+  // names no tenant owns no crawl. Refused like the 401, body drained unread.
+  let tenant: TenantId;
+  try {
+    tenant = tenantOf(req.headers["x-ariadne-tenant"]);
+  } catch (error) {
+    if (!(error instanceof ServiceError)) throw error;
+    sendJson(res, STATUS_FOR[error.code], { error: error.message, code: error.code });
     req.resume();
     return;
   }
@@ -812,6 +849,7 @@ async function handle(
   try {
     checkQuery(url.searchParams, chosen.route.query);
     const reply = await chosen.route.handler(service, {
+      tenant,
       params: chosen.params,
       query: url.searchParams,
       body,
@@ -831,6 +869,19 @@ async function handle(
     );
     sendJson(res, 500, { error: "internal error", correlationId });
   }
+}
+
+/**
+ * The `X-Ariadne-Tenant` header as a tenant. Node folds a header sent twice
+ * into one comma-joined value, which the pattern refuses (`INVALID_TENANT`): two
+ * tenants is not one of them. An array never arrives for this header, and is
+ * refused the same way rather than picked from.
+ */
+function tenantOf(header: string | string[] | undefined): TenantId {
+  if (Array.isArray(header)) {
+    throw new ServiceError("INVALID_TENANT", "exactly one X-Ariadne-Tenant header is allowed");
+  }
+  return parseTenant(header);
 }
 
 function matchPattern(pattern: Segment[], segments: string[]): Record<string, string> | null {

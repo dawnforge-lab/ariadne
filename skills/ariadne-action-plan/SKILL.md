@@ -497,7 +497,7 @@ ship the tab: say which number is which and find out why.
   evidence, plus the rule's identity on every line.
 - **But check where the file landed.** `export_crawl` writes on the SERVER's
   filesystem and hands back a server path — `exports/` under the server's working
-  directory unless the operator set `ARIADNE_EXPORT_DIR`. Read the `path` the
+  directory unless the operator set `ARIADNE_EXPORT_DIR`, in a subdirectory named for the tenant. Read the `path` the
   answer gives you; never assemble one. If the server is not on your machine, that
   path is not yours to read, and the answer is to paginate anyway and say in the
   tab how many rows you fetched.

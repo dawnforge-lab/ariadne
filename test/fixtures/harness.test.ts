@@ -92,6 +92,7 @@ import {
   startOffsiteHost,
   type OffsiteHost,
 } from "./pages/render-p5.js";
+import { LOCAL_TENANT } from "../../src/api/tenant.js";
 
 function databaseUrl(): string {
   const url = process.env.DATABASE_URL;
@@ -701,7 +702,7 @@ beforeAll(async () => {
     // read the same object.
     renderBudgetPct: RENDER_BUDGET_PCT,
   };
-  summary = await runCrawl(db, config);
+  summary = await runCrawl(db, LOCAL_TENANT, config);
 
   // The crawl is `finished` by the time `runCrawl` returns (`closeCrawl` writes
   // the status before the summary is built), which is what lets the render pass

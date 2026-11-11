@@ -20,6 +20,7 @@ import { closeFetchAgents } from "../../src/crawl/http.js";
 import { robotsRules } from "../../src/rules/query/robots.js";
 import { linkGraphRules } from "../../src/rules/query/link-graph.js";
 import type { HostSpacingEntry, StoredHostSpacing } from "../../src/crawl/politeness.js";
+import { LOCAL_TENANT } from "../../src/api/tenant.js";
 
 /**
  * One host's 24a entry in `crawls.host_spacing_jsonb`. Every write a run makes
@@ -210,7 +211,7 @@ let db: Db;
 const createdCrawls: string[] = [];
 
 async function crawl(config: CrawlConfig, signal?: AbortSignal, testHooks?: LoopTestHooks) {
-  const summary = await runCrawl(db, config, signal, testHooks);
+  const summary = await runCrawl(db, LOCAL_TENANT, config, signal, testHooks);
   createdCrawls.push(summary.crawlId);
   return summary;
 }
@@ -961,7 +962,7 @@ describe("runCrawl", () => {
     const before = await db.select().from(crawls).where(eq(crawls.siteUrl, base));
     const known = new Set(before.map((r) => r.id));
 
-    await expect(runCrawl(db, config({ userAgent: "bad\nagent" }))).rejects.toThrow(
+    await expect(runCrawl(db, LOCAL_TENANT, config({ userAgent: "bad\nagent" }))).rejects.toThrow(
       /invalid user-agent header/i,
     );
 
@@ -983,7 +984,7 @@ describe("runCrawl", () => {
     try {
       // The host probe is off for this one: it fetches `/` before the crawl
       // does, so it would spring the trap before there is a loop to break.
-      await runCrawl(db, config({ probeHosts: false }));
+      await runCrawl(db, LOCAL_TENANT, config({ probeHosts: false }));
     } catch (error) {
       thrown = error;
     }
@@ -1467,7 +1468,7 @@ describe("crawl-level evidence", () => {
   it("refuses a supplied sitemap it cannot read, before the crawl row exists", async () => {
     const before = await db.select().from(crawls).where(eq(crawls.siteUrl, base));
     await expect(
-      runCrawl(db, config({ sitemapUrls: ["/sitemap.xml"] })),
+      runCrawl(db, LOCAL_TENANT, config({ sitemapUrls: ["/sitemap.xml"] })),
     ).rejects.toThrow(/sitemapUrls/);
     const after = await db.select().from(crawls).where(eq(crawls.siteUrl, base));
     expect(after).toHaveLength(before.length);
@@ -1543,7 +1544,7 @@ describe("crawl-level evidence", () => {
   it("refuses a legacy host it cannot read, before the crawl row exists", async () => {
     const before = await db.select().from(crawls).where(eq(crawls.siteUrl, base));
     await expect(
-      runCrawl(db, config({ legacyHosts: ["not a host"] })),
+      runCrawl(db, LOCAL_TENANT, config({ legacyHosts: ["not a host"] })),
     ).rejects.toThrow(/legacyHosts/);
     const after = await db.select().from(crawls).where(eq(crawls.siteUrl, base));
     // Nothing was created: a config we cannot read is not a crawl that ran.

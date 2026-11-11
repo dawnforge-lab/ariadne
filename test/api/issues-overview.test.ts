@@ -16,6 +16,7 @@ import { runMigrations } from "../../src/db/migrate.js";
 import { crawls, issues, metrics, pages } from "../../src/db/schema.js";
 import { mkDiscovery } from "../rules/mk-discovery.js";
 import { mkPage } from "../rules/mk-page.js";
+import { LOCAL_TENANT } from "../../src/api/tenant.js";
 
 function databaseUrl(): string {
   const url = process.env.DATABASE_URL;
@@ -42,6 +43,7 @@ const extraCrawls = [unjudgedId, staleRuleId, malformedId];
 
 async function seedCrawl(id: string, paths: string[]): Promise<void> {
   await db.insert(crawls).values({
+    tenantId: LOCAL_TENANT,
     id,
     siteUrl: `${SITE}/`,
     config: { siteUrl: `${SITE}/`, maxPages: 100, userAgent: "AriadneBot-test" },
@@ -77,7 +79,7 @@ async function issueUrlsDistinct(ruleId: string): Promise<number> {
   const urls = new Set<string>();
   let cursor: string | undefined;
   for (;;) {
-    const page = await service.listIssueUrls(crawlId, ruleId, {
+    const page = await service.listIssueUrls(LOCAL_TENANT, crawlId, ruleId, {
       limit: 2,
       ...(cursor === undefined ? {} : { cursor }),
     });
@@ -88,7 +90,7 @@ async function issueUrlsDistinct(ruleId: string): Promise<number> {
 }
 
 async function csvLines(): Promise<string[]> {
-  const stream = await service.prepareCsvExport(crawlId, { view: "issues_overview" });
+  const stream = await service.prepareCsvExport(LOCAL_TENANT, crawlId, { view: "issues_overview" });
   const out: string[] = [];
   for await (const record of stream.records()) out.push(record);
   return out;
@@ -101,7 +103,7 @@ beforeAll(async () => {
   service = new ApiService(db, { allowedDomains: [], exportDir, log: () => {} });
 
   await seedCrawl(crawlId, ["/", "/long", "/no-meta"]);
-  await service.runRulesForCrawl(crawlId);
+  await service.runRulesForCrawl(LOCAL_TENANT, crawlId);
 
   // Site-wide findings shaped as the real ones are: `page_id` null, the URL in
   // `details.pageUrl`. Three distinct URLs over four findings (one URL twice),
@@ -131,7 +133,7 @@ beforeAll(async () => {
   await seedCrawl(unjudgedId, ["/"]);
 
   await seedCrawl(staleRuleId, ["/"]);
-  await service.runRulesForCrawl(staleRuleId);
+  await service.runRulesForCrawl(LOCAL_TENANT, staleRuleId);
   await db.insert(issues).values({
     crawlId: staleRuleId,
     ruleId: "no.such-rule",
@@ -142,7 +144,7 @@ beforeAll(async () => {
   });
 
   await seedCrawl(malformedId, ["/"]);
-  await service.runRulesForCrawl(malformedId);
+  await service.runRulesForCrawl(LOCAL_TENANT, malformedId);
 }, 60_000);
 
 afterAll(async () => {
@@ -155,7 +157,7 @@ afterAll(async () => {
 describe("issues_overview rows", () => {
   it("counts each rule's distinct URLs as issue_urls lists them, for every rule", async () => {
     await setJudgement({});
-    const overview = await service.issuesOverview(crawlId, {});
+    const overview = await service.issuesOverview(LOCAL_TENANT, crawlId, {});
     expect(overview.rows.length).toBeGreaterThan(2);
     for (const row of overview.rows) {
       expect(row.urls, row.ruleId).toBe(await issueUrlsDistinct(row.ruleId));
@@ -163,31 +165,31 @@ describe("issues_overview rows", () => {
   });
 
   it("counts a page rule's URLs and agrees with issues_list on it", async () => {
-    const overview = await service.issuesOverview(crawlId, {});
-    const list = await service.listIssues(crawlId, { limit: 200 });
+    const overview = await service.issuesOverview(LOCAL_TENANT, crawlId, {});
+    const list = await service.listIssues(LOCAL_TENANT, crawlId, { limit: 200 });
     const row = overview.rows.find((r) => r.ruleId === "title.too-long");
     expect(row?.urls).toBe(1);
     expect(row?.urls).toBe(list.items.find((g) => g.ruleId === "title.too-long")?.count);
   });
 
   it("counts every distinct URL of a site-wide rule, not one", async () => {
-    const overview = await service.issuesOverview(crawlId, {});
+    const overview = await service.issuesOverview(LOCAL_TENANT, crawlId, {});
     const row = overview.rows.find((r) => r.ruleId === MANY_URLS);
     expect(row?.urls).toBe(3);
     expect(await issueUrlsDistinct(MANY_URLS)).toBe(3);
     // issues_list counts FINDINGS: four, over three URLs.
-    const list = await service.listIssues(crawlId, { limit: 200 });
+    const list = await service.listIssues(LOCAL_TENANT, crawlId, { limit: 200 });
     expect(list.items.find((g) => g.ruleId === MANY_URLS)?.count).toBe(4);
   });
 
   it("counts a site-wide finding that names no URL as one", async () => {
-    const overview = await service.issuesOverview(crawlId, {});
+    const overview = await service.issuesOverview(LOCAL_TENANT, crawlId, {});
     expect(overview.rows.find((r) => r.ruleId === NO_URL)?.urls).toBe(1);
     expect(await issueUrlsDistinct(NO_URL)).toBe(1);
   });
 
   it("takes pagesJudged from the stored site.health metric and computes the percentage", async () => {
-    const overview = await service.issuesOverview(crawlId, {});
+    const overview = await service.issuesOverview(LOCAL_TENANT, crawlId, {});
     const total = (
       await db.execute<{ t: number }>(sql`
         select (value_jsonb->>'urlsTotal')::int as t from metrics
@@ -208,7 +210,7 @@ describe("issues_overview rows", () => {
         "title.missing": { type: "warning", priority: "high" },
       },
     });
-    const { rows } = await service.issuesOverview(crawlId, { includeZero: true });
+    const { rows } = await service.issuesOverview(LOCAL_TENANT, crawlId, { includeZero: true });
     const rank = { issue: 0, warning: 1, opportunity: 2 } as const;
     const prio = { high: 0, medium: 1, low: 2 } as const;
     for (let i = 1; i < rows.length; i++) {
@@ -234,15 +236,15 @@ describe("issues_overview rows", () => {
 
   it("leaves a disabled rule out and names it", async () => {
     await setJudgement({ rules: { "title.too-long": { disabled: true } } });
-    const overview = await service.issuesOverview(crawlId, { includeZero: true });
+    const overview = await service.issuesOverview(LOCAL_TENANT, crawlId, { includeZero: true });
     expect(overview.rows.find((r) => r.ruleId === "title.too-long")).toBeUndefined();
     expect(overview.disabledRules).toEqual(["title.too-long"]);
     await setJudgement({});
   });
 
   it("includeZero adds zero rows for rules that did not fire, never a metric", async () => {
-    const fired = new Set((await service.issuesOverview(crawlId, {})).rows.map((r) => r.ruleId));
-    const full = await service.issuesOverview(crawlId, { includeZero: true });
+    const fired = new Set((await service.issuesOverview(LOCAL_TENANT, crawlId, {})).rows.map((r) => r.ruleId));
+    const full = await service.issuesOverview(LOCAL_TENANT, crawlId, { includeZero: true });
     const zero = full.rows.filter((r) => r.urls === 0);
     expect(zero.length).toBeGreaterThan(0);
     for (const row of zero) {
@@ -256,15 +258,15 @@ describe("issues_overview rows", () => {
 
 describe("issues_overview refusals", () => {
   it("refuses an unjudged crawl with CONFLICT", async () => {
-    await expect(service.issuesOverview(unjudgedId, {})).rejects.toMatchObject({
+    await expect(service.issuesOverview(LOCAL_TENANT, unjudgedId, {})).rejects.toMatchObject({
       code: "CONFLICT",
     });
   });
 
   it("refuses a stored finding of a rule the registry lacks, as issues_list does", async () => {
-    const asList = await service.listIssues(staleRuleId, {}).catch((e: unknown) => e);
+    const asList = await service.listIssues(LOCAL_TENANT, staleRuleId, {}).catch((e: unknown) => e);
     expect(asList).toBeInstanceOf(ServiceError);
-    const error = await service.issuesOverview(staleRuleId, {}).catch((e: unknown) => e);
+    const error = await service.issuesOverview(LOCAL_TENANT, staleRuleId, {}).catch((e: unknown) => e);
     expect(error).toBeInstanceOf(ServiceError);
     expect((error as ServiceError).code).toBe("CONFLICT");
     expect((error as ServiceError).message).toContain("no.such-rule");
@@ -272,7 +274,7 @@ describe("issues_overview refusals", () => {
 
   it("answers pagesJudged null (and percentOfJudged null) with no site.health row", async () => {
     await db.delete(metrics).where(eq(metrics.crawlId, malformedId));
-    const overview = await service.issuesOverview(malformedId, {});
+    const overview = await service.issuesOverview(LOCAL_TENANT, malformedId, {});
     expect(overview.pagesJudged).toBeNull();
     expect(overview.rows.length).toBeGreaterThan(0);
     for (const row of overview.rows) expect(row.percentOfJudged).toBeNull();
@@ -286,14 +288,14 @@ describe("issues_overview refusals", () => {
       scopeValue: "",
       value: { urlsTotal: "lots" },
     });
-    await expect(service.issuesOverview(malformedId, {})).rejects.toThrow(/urlsTotal/);
+    await expect(service.issuesOverview(LOCAL_TENANT, malformedId, {})).rejects.toThrow(/urlsTotal/);
   });
 });
 
 describe("issues_overview CSV", () => {
   it("has the exact header and the JSON's rows in the JSON's order", async () => {
     await setJudgement({});
-    const overview = await service.issuesOverview(crawlId, {});
+    const overview = await service.issuesOverview(LOCAL_TENANT, crawlId, {});
     const lines = await csvLines();
     expect(lines[0]).toBe(`${CSV_HEADER}\r\n`);
     expect(lines.length - 1).toBe(overview.rows.length);
@@ -318,6 +320,7 @@ describe("a list crawl names what it did not measure as {id, reason} (27d)", () 
   it("reads one shape on issues_list, issues_overview, metrics and the issues export", async () => {
     extraCrawls.push(listId);
     await db.insert(crawls).values({
+      tenantId: LOCAL_TENANT,
       id: listId,
       siteUrl: `${SITE}/`,
       config: { siteUrl: `${SITE}/`, maxPages: 100, userAgent: "AriadneBot-test", mode: "list" },
@@ -337,18 +340,18 @@ describe("a list crawl names what it did not measure as {id, reason} (27d)", () 
         discoveredVia: "seed",
       }),
     );
-    await service.runRulesForCrawl(listId);
+    await service.runRulesForCrawl(LOCAL_TENANT, listId);
 
-    const overview = await service.issuesOverview(listId, { includeZero: true });
+    const overview = await service.issuesOverview(LOCAL_TENANT, listId, { includeZero: true });
     const nm = overview.notMeasured;
     expect(nm.find((n) => n.id === "links.orphan")).toEqual({ id: "links.orphan", reason: SPIDER_REASON });
     expect(nm.find((n) => n.id === "sitemap.invalid")).toEqual({ id: "sitemap.invalid", reason: SITEMAP_REASON });
     expect(nm.map((n) => n.id)).toEqual(nm.map((n) => n.id).sort());
     for (const n of nm) expect(Object.keys(n).sort()).toEqual(["id", "reason"]);
 
-    expect((await service.listIssues(listId, {})).notMeasured).toEqual(nm);
-    expect((await service.listMetrics(listId, {})).notMeasured).toEqual(nm);
-    const exported = await service.exportCrawl(listId, { dataset: "issues" });
+    expect((await service.listIssues(LOCAL_TENANT, listId, {})).notMeasured).toEqual(nm);
+    expect((await service.listMetrics(LOCAL_TENANT, listId, {})).notMeasured).toEqual(nm);
+    const exported = await service.exportCrawl(LOCAL_TENANT, listId, { dataset: "issues" });
     expect(exported.notMeasured).toEqual(nm);
   });
 });

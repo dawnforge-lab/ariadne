@@ -35,6 +35,7 @@ import { mergePatch } from "../../src/api/judgement-view.js";
 import { DEFAULT_THRESHOLDS, OVERRIDABLE_THRESHOLDS } from "../../src/rules/judgement.js";
 import { mkDiscovery } from "../rules/mk-discovery.js";
 import { mkPage } from "../rules/mk-page.js";
+import { LOCAL_TENANT } from "../../src/api/tenant.js";
 
 /** The test-controlled hold on a rules run (see the module header). */
 const gate = vi.hoisted(() => ({
@@ -91,7 +92,7 @@ interface Res {
 }
 
 async function call(method: string, path: string, body?: unknown): Promise<Res> {
-  const headers: Record<string, string> = { authorization: `Bearer ${TOKEN}` };
+  const headers: Record<string, string> = { authorization: `Bearer ${TOKEN}`, "x-ariadne-tenant": "local" };
   if (body !== undefined) headers["content-type"] = "application/json";
   const res = await fetch(`${base}${path}`, {
     method,
@@ -132,6 +133,7 @@ async function storedRow(crawlId: string): Promise<{ judgement: unknown; config:
 
 async function seedJudgeable(crawlId: string): Promise<void> {
   await db.insert(crawls).values({
+    tenantId: LOCAL_TENANT,
     id: crawlId,
     siteUrl: `${SITE}/`,
     config: { siteUrl: `${SITE}/`, maxPages: 100, userAgent: "AriadneBot-test" },
@@ -198,7 +200,7 @@ beforeAll(async () => {
   });
   base = `http://127.0.0.1:${(await api.listen(0)).port}`;
 
-  mcp = createMcpServer({ db, config: { allowedDomains: [], exportDir, log: () => {} } });
+  mcp = createMcpServer({ db, config: { tenant: LOCAL_TENANT, allowedDomains: [], exportDir, log: () => {} } });
   const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
   client = new Client({ name: "ariadne-test-judgement-config", version: "0.0.1" });
   await mcp.connect(serverSide);
@@ -771,6 +773,7 @@ describe("the crawl part of crawl_config_get / crawl_config_set (27b T7)", () =>
   ): Promise<string> => {
     const id = `crawl_config_part_${randomUUID()}`;
     await db.insert(crawls).values({
+      tenantId: LOCAL_TENANT,
       id,
       siteUrl: `${SITE}/`,
       config: {
@@ -971,6 +974,7 @@ describe("judgement refusal wording: the start body and crawl_config_set say the
     expect(started.status).toBe(400);
     const id = `crawl_wording_${randomUUID()}`;
     await db.insert(crawls).values({
+      tenantId: LOCAL_TENANT,
       id,
       siteUrl: `${SITE}/`,
       config: { siteUrl: `${SITE}/`, maxPages: 10, maxDepth: 3, userAgent: "AriadneBot-test", perHostDelayMs: 1000, maxConcurrency: 1 },
@@ -994,6 +998,7 @@ describe("judgement refusal wording: the start body and crawl_config_set say the
     expect(started.status).toBe(400);
     const id = `crawl_wording_${randomUUID()}`;
     await db.insert(crawls).values({
+      tenantId: LOCAL_TENANT,
       id,
       siteUrl: `${SITE}/`,
       config: { siteUrl: `${SITE}/`, maxPages: 10, maxDepth: 3, userAgent: "AriadneBot-test", perHostDelayMs: 1000, maxConcurrency: 1 },
@@ -1014,6 +1019,7 @@ describe("the whole crawl object from crawl_config_get, redacted, sent back (27c
   const seed = async (status: string): Promise<string> => {
     const id = `crawl_config_echo_${randomUUID()}`;
     await db.insert(crawls).values({
+      tenantId: LOCAL_TENANT,
       id,
       siteUrl: `${SITE}/`,
       config: {
