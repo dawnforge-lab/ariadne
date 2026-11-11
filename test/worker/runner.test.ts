@@ -974,7 +974,8 @@ describe("reaping and auto-resume over the pool (28b T4b)", () => {
             finishedAt: null,
             rulesRunAt: null,
             rulesJudgedWith: null,
-            autoResumeCount: 1,
+            // Only a crash spends the cap (Ruling R17).
+            autoResumeCount: reason === "worker_lost" ? 1 : 0,
           });
           expect(live.map((j) => [j.kind, j.pinnedTo]), label).toEqual([["crawl", null]]);
         } else {
@@ -985,6 +986,32 @@ describe("reaping and auto-resume over the pool (28b T4b)", () => {
     } finally {
       await db.update(jobs).set({ status: "abandoned" }).where(and(inArray(jobs.crawlId, seeded), eq(jobs.status, "queued")));
     }
+  });
+
+  it("a crawl paused shutdown five times is requeued every time, its count unchanged — even at the worker_lost cap (Ruling R17)", async () => {
+    await clearPool();
+    const i = await deadInstance();
+    const crawlId = await seedCrawl("running");
+    // Three crashes already spent: a fourth `worker_lost` would stay paused.
+    await db.update(crawls).set({ status: "paused", pauseReason: "shutdown", finishedAt: new Date(), autoResumeCount: 3 }).where(eq(crawls.id, crawlId));
+    await seedJob(crawlId, { status: "abandoned", claimedBy: i, finishedAt: new Date() });
+    for (let round = 1; round <= 5; round += 1) {
+      expect(await reap([i]), `round ${round}`).toMatchObject({ requeuedCrawls: 1 });
+      expect(await crawlRow(crawlId), `round ${round}`).toMatchObject({ status: "queued", autoResumeCount: 3 });
+      // Claimed, started, and stopped by a deploy: what a worker's graceful
+      // shutdown leaves (src/worker/runner.ts stop(), the loop's shutdown close).
+      const claimed = await db
+        .update(jobs)
+        .set({ status: "abandoned", claimedBy: i, claimedAt: new Date(), finishedAt: new Date() })
+        .where(and(eq(jobs.crawlId, crawlId), eq(jobs.status, "queued"), isNull(jobs.pinnedTo)))
+        .returning({ id: jobs.id });
+      expect(claimed, `round ${round}`).toHaveLength(1);
+      await db.update(crawls).set({ status: "paused", pauseReason: "shutdown", finishedAt: new Date() }).where(eq(crawls.id, crawlId));
+    }
+    // And a crash then is the fourth: capped, as ever.
+    await db.update(crawls).set({ pauseReason: "worker_lost" }).where(eq(crawls.id, crawlId));
+    expect(await reap([i])).toMatchObject({ requeuedCrawls: 0 });
+    expect(await crawlRow(crawlId)).toMatchObject({ status: "paused", pauseReason: "worker_lost", autoResumeCount: 3 });
   });
 
   it("a runner built with a reaper reaps every reapEvery, and one without never does", async () => {

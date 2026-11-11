@@ -478,7 +478,8 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "'credentials_unreadable' (its stored credentials could not be read when it was " +
         "picked up, so nothing was fetched: crawl_resume with them continues it) or " +
         "'worker_lost' (the process running it died). A worker-pool crawl paused 'shutdown' " +
-        "or 'worker_lost' is queued again by the engine itself, up to three times in a row; " +
+        "is queued again by the engine itself, and one paused 'worker_lost' up to three times " +
+        "in a row; " +
         "'request' and 'credentials_unreadable' wait for crawl_resume. cancelled is " +
         "final — crawl_resume refuses it; cancelledAt says when, and neverFetched " +
         "counts the URLs it never asked for (null on a crawl cancelled before it ran: " +

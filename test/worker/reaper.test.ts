@@ -35,7 +35,7 @@ import { claimNextJob, enqueueJob, withPinnedJob, type ClaimedJob } from "../../
 import { registerInstance } from "../../src/worker/instance.js";
 import { JobRunner } from "../../src/worker/runner.js";
 import { crawlJobExecutor } from "../../src/worker/crawl-job.js";
-import { reapOnce, type ReapSummary } from "../../src/worker/reaper.js";
+import { ReapError, reapOnce, type ReapSummary } from "../../src/worker/reaper.js";
 import { timingWith } from "../../src/worker/timing.js";
 import { TEST_CREDENTIAL_KEYS } from "../helpers/credential-keys.js";
 
@@ -416,9 +416,15 @@ describe("reapOnce: a dead instance's jobs", () => {
 });
 
 describe("reapOnce: housekeeping", () => {
-  it("runs the credential retention sweep: a crawl finished 31 days ago loses its stored credentials, one finished 29 days ago keeps them", async () => {
+  it("runs the credential retention sweep: a crawl finished past the retention loses its stored credentials, one inside it keeps them", async () => {
+    // ON A SHARED DATABASE (fix round 1): a 30-day sweep here would delete
+    // test/api/credential-vault.test.ts's own backdated rows under it. So the
+    // retention is a century, which nothing but this test's `old` row is past;
+    // `recent` is inside both this retention and that suite's 30 days, so no
+    // sweep anywhere touches it. (The 30-day boundary itself is that suite's.)
+    const retentionDays = 36_500;
     const now = new Date();
-    const old = await seedCrawl({ status: "finished", finishedAt: new Date(now.getTime() - 31 * DAY) });
+    const old = await seedCrawl({ status: "finished", finishedAt: new Date(now.getTime() - (retentionDays + 100) * DAY) });
     const recent = await seedCrawl({ status: "finished", finishedAt: new Date(now.getTime() - 29 * DAY) });
     for (const crawlId of [old, recent]) {
       await db.transaction(async (tx) => {
@@ -436,8 +442,8 @@ describe("reapOnce: housekeeping", () => {
       return swept;
     };
     const i = await instanceAt(0);
-    const summary = await reapOnce(db, { now, timing: TIGHT, vault: spy, retentionDays: 30, onlyInstances: [i] });
-    expect(calls).toEqual([[now, 30]]);
+    const summary = await reapOnce(db, { now, timing: TIGHT, vault: spy, retentionDays, onlyInstances: [i] });
+    expect(calls).toEqual([[now, retentionDays]]);
     expect(summary.credentialsSwept).toBe(swept);
     const left = await db
       .select({ crawlId: crawlCredentials.crawlId })
@@ -634,6 +640,161 @@ describe("a runner that lost its job", () => {
     expect((await jobRow(claimed.id)).status).toBe("abandoned");
     const [{ n } = { n: -1 }] = await db.select({ n: sql<number>`count(*)::int` }).from(frontier).where(eq(frontier.crawlId, crawlId));
     expect(n).toBe(0);
+  });
+});
+
+describe("the reaper and a render adopting the same dead job (fix round 1: lock order)", () => {
+  /** A finished crawl on a host of its own, with a render job a dead instance left running. */
+  async function deadRender(): Promise<{ crawlId: string; deadJob: string; d: string }> {
+    const d = await dead();
+    const crawlId = await seedCrawl({ status: "finished" });
+    const deadJob = await seedJob(crawlId, { kind: "render", status: "running", pinnedTo: d, claimedBy: d });
+    return { crawlId, deadJob, d };
+  }
+
+  function render(crawlId: string, instanceId: string): Promise<string> {
+    return withPinnedJob(
+      db,
+      { tenant: LOCAL_TENANT, crawlId, kind: "render", instanceId, deadAfterMs: TIGHT.deadAfter },
+      async () => "rendered",
+    );
+  }
+
+  it("a reaper holding the crawl row while it reaps the job, and a render adopting that job, never deadlock", async () => {
+    // THE INTERLEAVING THAT DEADLOCKED, staged: the reaper's transaction locks
+    // the crawl row as `reapJob` does; the render begins adopting meanwhile;
+    // only then does the reaper reach for the job row. Before the fix the
+    // render held the job row and waited for its insert's key share on the
+    // crawl row, while the reaper (FOR UPDATE on that row) waited for the job
+    // row: 40P01.
+    const live = await instanceAt(0);
+    for (let round = 0; round < 3; round += 1) {
+      const { crawlId, deadJob } = await deadRender();
+      let rendering: Promise<string> | null = null;
+      await db.transaction(async (tx) => {
+        await tx.execute(sql`select id from crawls where id = ${crawlId} for no key update skip locked`);
+        rendering = render(crawlId, live);
+        rendering.catch(() => undefined); // awaited below
+        await sleep(200);
+        await tx.execute(sql`select id from jobs where id = ${deadJob} and status = 'running' for update`);
+        await tx.update(jobs).set({ status: "abandoned", finishedAt: new Date() }).where(eq(jobs.id, deadJob));
+      });
+      await expect(rendering!, `round ${round}`).resolves.toBe("rendered");
+      expect((await jobsOf(crawlId)).map((j) => [j.kind, j.status]), `round ${round}`).toEqual([
+        ["render", "abandoned"],
+        ["render", "done"],
+      ]);
+    }
+  });
+
+  it("a reaper tick and a render racing over one dead render job both succeed, round after round", async () => {
+    const live = await instanceAt(0);
+    for (let round = 0; round < 8; round += 1) {
+      const { crawlId, deadJob, d } = await deadRender();
+      const [reaped, rendered] = await Promise.allSettled([reap([d]), render(crawlId, live)]);
+      expect(reaped.status, `round ${round}: ${String((reaped as PromiseRejectedResult).reason)}`).toBe("fulfilled");
+      expect(rendered.status, `round ${round}: ${String((rendered as PromiseRejectedResult).reason)}`).toBe("fulfilled");
+      expect((await jobRow(deadJob)).status, `round ${round}`).toBe("abandoned");
+      const all = await jobsOf(crawlId);
+      expect(all.filter((j) => j.status === "done"), `round ${round}`).toHaveLength(1);
+      expect(all.filter((j) => j.status === "running" || j.status === "queued"), `round ${round}`).toEqual([]);
+    }
+  });
+});
+
+describe("a tick that partly fails (fix round 1)", () => {
+  it("a failing credential sweep does not stop the rest of the tick, and the tick still throws, with what it did", async () => {
+    const d = await dead();
+    const crawlId = await seedCrawl({ status: "running" });
+    await seedJob(crawlId, { kind: "crawl", status: "running", pinnedTo: d, claimedBy: d });
+    const broken = Object.create(vault) as CredentialVault;
+    broken.sweepExpired = async () => {
+      throw new Error("sweep refused (test)");
+    };
+    const outcome = await reapOnce(db, { now: new Date(), timing: TIGHT, vault: broken, retentionDays: 36_500, onlyInstances: [d] }).then(
+      () => null,
+      (error: unknown) => error,
+    );
+    expect(outcome).toBeInstanceOf(ReapError);
+    const error = outcome as ReapError;
+    expect(error.errors).toHaveLength(1);
+    expect(error.message).toContain("sweep refused (test)");
+    expect(error.summary).toEqual({ ...NOTHING, abandonedJobs: 1, pausedCrawls: 1 });
+    expect((await crawlRow(crawlId)).pauseReason).toBe("worker_lost");
+  });
+
+  it("a failing first step does not starve the credential sweep", async () => {
+    const i = await instanceAt(0);
+    let calls = 0;
+    // The tick's first statement (the dead-job read) fails; nothing else does.
+    const flaky = new Proxy(db, {
+      get(target, prop) {
+        const value = Reflect.get(target, prop) as unknown;
+        if (prop === "execute" && typeof value === "function") {
+          return (...args: unknown[]) => {
+            calls += 1;
+            if (calls === 1) return Promise.reject(new Error("database blinked (test)"));
+            return (value as (...a: unknown[]) => unknown).apply(target, args);
+          };
+        }
+        return typeof value === "function" ? (value as (...a: unknown[]) => unknown).bind(target) : value;
+      },
+    }) as Db;
+    let swept = false;
+    const spy = Object.create(vault) as CredentialVault;
+    spy.sweepExpired = async (at: Date, days: number) => {
+      swept = true;
+      return vault.sweepExpired(at, days);
+    };
+    const outcome = await reapOnce(flaky, { now: new Date(), timing: TIGHT, vault: spy, retentionDays: 36_500, onlyInstances: [i] }).then(
+      () => null,
+      (error: unknown) => error,
+    );
+    expect(swept).toBe(true);
+    expect(outcome).toBeInstanceOf(ReapError);
+    expect((outcome as ReapError).message).toContain("reading the dead running jobs failed");
+    expect((outcome as ReapError).message).toContain("database blinked (test)");
+  });
+});
+
+describe("a runner whose instance is gone (fix round 1)", () => {
+  it("aborts its jobs and claims nothing more under the gone id; its owner's stop() still settles it", async () => {
+    const i = await instanceAt(0);
+    const log: string[] = [];
+    const aborted: string[] = [];
+    const runner = new JobRunner(db, {
+      instanceId: i,
+      kinds: ["rules"],
+      pinnedTo: i,
+      concurrency: 2,
+      log: (line) => log.push(line),
+      timing: TIGHT,
+      execute: (job: ClaimedJob, signal: AbortSignal) =>
+        new Promise<void>((resolve) => {
+          signal.addEventListener("abort", () => {
+            aborted.push(job.id);
+            resolve();
+          });
+        }),
+    });
+    const first = await enqueueJob(db, { tenant: LOCAL_TENANT, crawlId: await seedCrawl({ status: "finished" }), kind: "rules", pinnedTo: i });
+    runner.start();
+    try {
+      await until("the first job running", () => runner.runningJobIds(), (ids) => ids.includes(first));
+      // Stopped under it: the next beat finds no instance that is still running.
+      await db.update(instances).set({ stoppedAt: new Date() }).where(eq(instances.id, i));
+      await until("the job aborted", () => aborted, (ids) => ids.includes(first), 10_000);
+      expect(log.some((l) => l.includes("claims, heartbeats and reaps nothing more"))).toBe(true);
+      // A job pinned to it now waits: many claim polls pass, and none claims it.
+      const second = await enqueueJob(db, { tenant: LOCAL_TENANT, crawlId: await seedCrawl({ status: "finished" }), kind: "rules", pinnedTo: i });
+      await runner.wake();
+      await sleep(10 * TIGHT.claimPoll);
+      expect((await jobRow(second)).status).toBe("queued");
+      expect(runner.runningJobIds()).toEqual([]);
+    } finally {
+      await runner.stop();
+    }
+    expect((await jobRow(first)).status).toBe("abandoned");
   });
 });
 

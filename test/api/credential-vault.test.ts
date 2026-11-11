@@ -314,8 +314,10 @@ describe("CredentialVault.sweepExpired", () => {
     for (const id of [old, recent, failed, paused]) await writeVia(vault, id);
 
     const swept = await vault.sweepExpired(now, 30);
-    // Other suites' rows may be swept too; these two must be among them.
-    expect(swept).toBeGreaterThanOrEqual(2);
+    // The ROWS are the assertion, not the count: on the shared database another
+    // suite's sweep (a reaper tick, 28b T4b) may delete these two first, and
+    // this call then counts neither — the rows are gone all the same.
+    expect(Number.isInteger(swept) && swept >= 0).toBe(true);
     expect(await rowOf(old)).toBeUndefined();
     expect(await rowOf(failed)).toBeUndefined();
     expect(await rowOf(recent)).toBeDefined();

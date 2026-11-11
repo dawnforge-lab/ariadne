@@ -443,9 +443,13 @@ export async function enqueueJob(
  * Insert a live job, turning the one-live-job refusal into the operation's
  * sentence. With `adoptDeadAfterMs` (a synchronous render or rules run, 28b
  * T4b), a RENDER OR RULES holder whose process is not live is no holder: it is
- * abandoned as it was read (`abandonOrphanJob`) and the insert tried once more
- * — a dead process's pass must not refuse every pass after it until a reaper
- * runs, and in-process mode runs none. A crawl job is never adopted here: a
+ * abandoned as it was read (`abandonOrphanJob`) and the insert tried again (at
+ * most twice more: a reaper settling the same dead job at that instant is the
+ * one race, and the retry then finds the crawl free) — a dead process's pass
+ * must not refuse every pass after it until a reaper runs, and in-process mode
+ * runs none. The adopted job row is locked before this insert takes its
+ * crawl's key-share lock, so every crawl-row lock elsewhere is `FOR NO KEY
+ * UPDATE` (src/worker/reaper.ts, "the locks"). A crawl job is never adopted here: a
  * dead crawl job is `crawl_resume`'s to adopt (its crawl is queued or running,
  * which a render or rules call refuses on its own terms first).
  */
@@ -456,6 +460,7 @@ async function insertLive(
   values: typeof jobs.$inferInsert,
   adoptDeadAfterMs?: number,
 ): Promise<void> {
+  const adopting = adoptDeadAfterMs !== undefined && kind !== "crawl";
   for (let attempt = 0; ; attempt += 1) {
     try {
       await writer.transaction(async (savepoint) => {
@@ -465,6 +470,9 @@ async function insertLive(
     } catch (error) {
       if (!isLiveViolation(error)) throw error;
       const holder = await liveJobOf(writer, crawlId, adoptDeadAfterMs ?? DEFAULT_TIMING.deadAfter);
+      // Adopting, a holder settled between the refusal and this read — the
+      // reaper took the dead job first, typically — is no holder: try again.
+      if (holder === null && adopting && attempt < 2) continue;
       if (holder === null) {
         // The holder ended between the refusal and this read: the crawl is free
         // now, but this call was refused and nothing was written.
@@ -474,11 +482,19 @@ async function insertLive(
             "has just ended. Nothing was started: ask again",
         );
       }
-      const adoptable =
-        adoptDeadAfterMs !== undefined && attempt === 0 && !holder.live && holder.kind !== "crawl" && kind !== "crawl";
-      // Only as read: one that moved since (a live process took it, or another
-      // call settled it) is the refusal below, never abandoned.
-      if (adoptable && (await abandonOrphanJob(writer, holder))) continue;
+      // Only as read: one that moved since is never abandoned here. Settled by
+      // somebody else (the reaper), the next attempt's insert or read says so;
+      // claimed by a live process, that read refuses.
+      if (adopting && attempt < 2 && !holder.live && holder.kind !== "crawl") {
+        // Crawl row first, then the job — the order every writer of the pair
+        // takes (src/worker/reaper.ts, "the locks"). `NO KEY UPDATE`, so a
+        // reaper holding it waits here rather than at our insert's key share.
+        // (On the pool — a rules run — each statement commits alone and holds
+        // nothing across the next, so there is no order to keep.)
+        await writer.execute(sql`select id from crawls where id = ${crawlId} for no key update`);
+        await abandonOrphanJob(writer, holder);
+        continue;
+      }
       throw new JobBusyError(crawlId, kind, holder);
     }
   }

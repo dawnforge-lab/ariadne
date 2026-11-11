@@ -22,7 +22,8 @@ export type ControlRequest = (typeof CONTROL_REQUESTS)[number];
  * `crawl_resume` with the values continues it), or the process running it died
  * and the reaper settled its work (`worker_lost`, Phase 28b: src/worker/
  * reaper.ts). `shutdown` and `worker_lost` are SYSTEM pauses: a worker-pool
- * crawl paused by one is requeued by the reaper, at most three times in a row.
+ * crawl paused by one is requeued by the reaper — after `shutdown` always (a
+ * deploy), after `worker_lost` at most three times in a row (Ruling R17).
  */
 export const PAUSE_REASONS = ["request", "shutdown", "credentials_unreadable", "worker_lost"] as const;
 export type PauseReason = (typeof PAUSE_REASONS)[number];

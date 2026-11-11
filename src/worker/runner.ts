@@ -24,7 +24,8 @@
  * that is not — a reaper read this process as dead and abandoned it, or
  * `crawl_resume` adopted its crawl — has its signal ABORTED, and the work ends
  * as a stop. A heartbeat refused because the instance itself is stopped or
- * gone (`InstanceGoneError`) aborts every job. Logging alone would leave two
+ * gone (`InstanceGoneError`) aborts every job, and the runner then claims,
+ * beats and reaps nothing more until its owner stops it. Logging alone would leave two
  * runners on one crawl. What the stopped work may still write is the loop's
  * business: it writes the crawl only while it owns the job
  * (`ResumeOpts.owner`, src/crawl/loop.ts).
@@ -123,6 +124,8 @@ export class JobRunner {
   private reaping: Promise<void> | null = null;
   private started = false;
   private stopped = false;
+  /** The instance is stopped or gone (`instanceGone`): nothing more is claimed. */
+  private gone = false;
   private stopping: Promise<void> | null = null;
 
   constructor(
@@ -175,11 +178,7 @@ export class JobRunner {
     try {
       held = new Set(await heartbeat(this.db, this.opts.instanceId, [...mine, ...extraJobIds]));
     } catch (error) {
-      if (error instanceof InstanceGoneError) {
-        for (const id of this.runningJobIds()) {
-          this.lose(id, "its instance is stopped or gone, so no job is this runner's any longer");
-        }
-      }
+      if (error instanceof InstanceGoneError) this.instanceGone();
       throw error;
     }
     for (const id of mine) {
@@ -189,6 +188,30 @@ export class JobRunner {
           "it is no longer running under this instance (a reaper abandoned it, or crawl_resume adopted its crawl)",
         );
       }
+    }
+  }
+
+  /**
+   * The instance this runner claims as is stopped or gone (fix round 1): every
+   * job is aborted, and the runner CLAIMS, BEATS AND REAPS NOTHING MORE — a
+   * claim under a gone id would start work the next beat aborts, and spend a
+   * crawl's auto-resumes doing it. It does not stop itself: it idles, its
+   * aborted jobs settle as they end, and its owner's `stop()` (a worker's
+   * shutdown, the service's `close()`) still waits for them. A new instance is
+   * a new runner. Once.
+   */
+  private instanceGone(): void {
+    if (this.gone) return;
+    this.gone = true;
+    if (this.timer !== null) clearInterval(this.timer);
+    if (this.beat !== null) clearInterval(this.beat);
+    if (this.reapTimer !== null) clearInterval(this.reapTimer);
+    this.log(
+      `runner ${this.opts.instanceId}: its instance is stopped or gone — every job it ran is ` +
+        "stopped, and it claims, heartbeats and reaps nothing more until its owner stops it",
+    );
+    for (const id of this.runningJobIds()) {
+      this.lose(id, "its instance is stopped or gone, so no job is this runner's any longer");
     }
   }
 
@@ -202,7 +225,7 @@ export class JobRunner {
 
   private reapTick(): void {
     const reaper = this.opts.reaper;
-    if (reaper === undefined || this.stopped || this.reaping !== null) return;
+    if (reaper === undefined || this.stopped || this.gone || this.reaping !== null) return;
     this.reaping = reapOnce(this.db, {
       now: new Date(),
       timing: this.timing,
@@ -228,7 +251,7 @@ export class JobRunner {
    * made and its jobs started (not finished). Never rejects.
    */
   wake(): Promise<void> {
-    if (!this.started || this.stopped) return Promise.resolve();
+    if (!this.started || this.stopped || this.gone) return Promise.resolve();
     this.chain = this.chain.then(() => this.fill());
     return this.chain;
   }
@@ -257,7 +280,7 @@ export class JobRunner {
   }
 
   private async fill(): Promise<void> {
-    while (!this.stopped && this.running.size < this.opts.concurrency) {
+    while (!this.stopped && !this.gone && this.running.size < this.opts.concurrency) {
       let job: ClaimedJob | null;
       try {
         job = await claimNextJob(this.db, {
@@ -272,7 +295,7 @@ export class JobRunner {
         return;
       }
       if (job === null) return;
-      if (this.stopped) {
+      if (this.stopped || this.gone) {
         await this.handBack(job);
         return;
       }

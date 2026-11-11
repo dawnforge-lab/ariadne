@@ -28,9 +28,10 @@ export const crawls = pgTable("crawls", {
   // appended their ports. Not surface: no reader answers it, though a HOST_BUSY
   // refusal names the caller's own crawl's.
   hostKey: text("host_key").notNull(),
-  // How many times the reaper has re-queued this crawl after a system pause
-  // (`shutdown`, `worker_lost`) without an agent asking (migration 0040,
-  // Phase 28b). Capped at 3 so a crawl that kills its worker every time stops;
+  // How many times in a row the reaper has re-queued this crawl after a
+  // `worker_lost` pause without an agent asking (migration 0040, Phase 28b).
+  // Capped at 3 so a crawl that kills its worker every time stops; a
+  // `shutdown` pause (a deploy) is requeued without counting (Ruling R17).
   // `crawl_resume` resets it. Not surface.
   autoResumeCount: integer("auto_resume_count").notNull().default(0),
   config: jsonb("config_jsonb").notNull(),
@@ -415,13 +416,14 @@ export const crawls = pgTable("crawls", {
   index("crawls_tenant_started").on(t.tenantId, t.startedAt.desc(), t.id.desc()),
   // Claim eligibility joins running jobs to their crawls by host (28b Task 4).
   index("crawls_host_key").on(t.hostKey),
-  // The reaper's requeue scan (28b T4b, migration 0043): system-paused crawls
-  // still under the auto-resume cap (src/worker/reaper.ts) — a handful at any
-  // moment, out of every crawl ever run.
-  index("crawls_system_paused")
+  // The reaper's requeue scan (28b T4b; migration 0043, re-cut by 0044 for
+  // Ruling R17): crawls paused `shutdown` (always requeued) or `worker_lost`
+  // still under the auto-resume cap (src/worker/reaper.ts,
+  // `SYSTEM_PAUSED_SQL`) — a handful at any moment, out of every crawl ever run.
+  index("crawls_requeuable")
     .on(t.finishedAt, t.id)
     .where(
-      sql`${t.status} = 'paused' and ${t.pauseReason} in ('shutdown', 'worker_lost') and ${t.autoResumeCount} < 3`,
+      sql`${t.status} = 'paused' and (${t.pauseReason} = 'shutdown' or (${t.pauseReason} = 'worker_lost' and ${t.autoResumeCount} < 3))`,
     ),
 ]);
 

@@ -39,7 +39,7 @@
  * back to pending, which is right after a crash and wrong while another
  * process is working, and a runner cannot tell those apart from outside.
  */
-import { and, eq, sql } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 
 import type { Db } from "../db/client.js";
 import { crawls } from "../db/schema.js";
@@ -47,6 +47,7 @@ import {
   ClaimLostError,
   failureReasonOf,
   JobLostError,
+  lockRunOwnership,
   parseStoredConfig,
   resumeCrawl,
   type CloseHook,
@@ -237,33 +238,31 @@ async function runCrawlJob(deps: CrawlJobDeps, job: ClaimedJob, signal: AbortSig
     // (migration 0017). The `where` keeps the two writers from arguing: a row
     // the loop already closed is no longer `queued` and keeps its own reason.
     //
-    // NOT ONE TRANSACTION with the job's settle, unlike every other end: this
-    // close must go through the same handle as the run it records, so a
-    // database that refused the run refuses the record too and says so
-    // (http.test's "cannot even record its own failure"). The window — the row
-    // `failed`, its job still `running` for one statement — can only make a
-    // resume answer "already held" once; it never runs a crawl twice.
+    // ONE TRANSACTION with the job's settle (28b T4b fix round 1), through the
+    // same handle as the run it records, so a database that refused the run
+    // refuses the record too and says so (http.test's "cannot even record its
+    // own failure"). And only while the job is still this runner's, read as
+    // the start claim reads it — the crawl row locked, then the job row
+    // (`lockRunOwnership`): a crawl adopted meanwhile is queued under ANOTHER
+    // job, and is not ours to fail. A job no longer ours is settled already,
+    // and `finishJob` leaves it so.
     log(`${p}: crawl ${crawlId} threw — ${messageOf(error)}`);
     try {
-      await db
-        .update(crawls)
-        .set({
-          status: "failed",
-          finishedAt: new Date(),
-          // The loop's own helper: one rule for what may go in this column.
-          failureReason: failureReasonOf(error),
-        })
-        // And only while the job is still this runner's (28b T4b): a crawl
-        // adopted meanwhile is queued under ANOTHER job, and is not ours to fail.
-        .where(
-          and(
-            eq(crawls.id, crawlId),
-            eq(crawls.status, "queued"),
-            sql`exists (select 1 from jobs j where j.id = ${job.id} and j.status = 'running'
-                         and j.claimed_by = ${job.claimedBy})`,
-          ),
-        );
-      await finishJob(db, job.id, "failed", failureReasonOf(error));
+      await db.transaction(async (tx) => {
+        const run = await lockRunOwnership(tx, crawlId, { jobId: job.id, instanceId: job.claimedBy });
+        if (run.owned && run.status === "queued") {
+          await tx
+            .update(crawls)
+            .set({
+              status: "failed",
+              finishedAt: new Date(),
+              // The loop's own helper: one rule for what may go in this column.
+              failureReason: failureReasonOf(error),
+            })
+            .where(and(eq(crawls.id, crawlId), eq(crawls.status, "queued")));
+        }
+        await finishJob(tx, job.id, "failed", failureReasonOf(error));
+      });
     } catch (recordError) {
       log(
         `${p}: crawl ${crawlId} — the queue runner itself failed and could not record it: ` +
@@ -286,6 +285,14 @@ async function pauseUnreadable(deps: CrawlJobDeps, job: ClaimedJob, why: string)
   const p = deps.logPrefix ?? "api";
   const crawlId = job.crawlId;
   const moved = await deps.db.transaction(async (tx) => {
+    // While the job is still this runner's (28b T4b), read as the run's own
+    // claim reads it (`ResumeOpts.owner`): the crawl row locked, then the job
+    // row. An adopted crawl is not ours.
+    const run = await lockRunOwnership(tx, crawlId, { jobId: job.id, instanceId: job.claimedBy });
+    if (!run.owned) {
+      await finishJob(tx, job.id, "abandoned");
+      return 0;
+    }
     const result = await tx
       .update(crawls)
       .set({
@@ -295,16 +302,7 @@ async function pauseUnreadable(deps: CrawlJobDeps, job: ClaimedJob, why: string)
         finishedAt: new Date(),
         controlRequest: null,
       })
-      .where(
-        and(
-          eq(crawls.id, crawlId),
-          eq(crawls.status, "queued"),
-          // While the job is still this runner's (28b T4b), as the run's own
-          // claim requires (`ResumeOpts.owner`): an adopted crawl is not ours.
-          sql`exists (select 1 from jobs j where j.id = ${job.id} and j.status = 'running'
-                       and j.claimed_by = ${job.claimedBy})`,
-        ),
-      );
+      .where(and(eq(crawls.id, crawlId), eq(crawls.status, "queued")));
     if (result.rowCount === null) {
       throw new Error(`queue runner: the pause of crawl ${crawlId} reported no row count`);
     }

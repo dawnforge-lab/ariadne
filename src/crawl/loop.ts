@@ -4204,11 +4204,49 @@ interface RunCloser {
   owner?: RunOwner;
 }
 
-/** The crawl row's status, locked `FOR UPDATE` (the first lock of the crawl → job order). */
+/**
+ * The crawl row's status, locked `FOR NO KEY UPDATE` — the first lock of the
+ * crawl → job order (`ResumeOpts.owner`).
+ *
+ * NOT `FOR UPDATE` (28b T4b fix round 1): inserting a job takes `FOR KEY
+ * SHARE` on its crawl row (the foreign key), and `FOR UPDATE` conflicts with
+ * it while `FOR NO KEY UPDATE` does not. A synchronous render that adopts a
+ * dead render job locks that job row, then inserts its own (key share on the
+ * crawl); a writer holding the crawl `FOR UPDATE` and waiting for the job row
+ * would close a cycle (40P01). `FOR NO KEY UPDATE` still excludes every other
+ * writer of the crawl row — each `UPDATE crawls` takes it, and the reaper, the
+ * claim and the closes all lock with it.
+ */
 async function lockCrawlStatus(tx: CloseTx, crawlId: string): Promise<string> {
-  const [row] = await tx.select({ status: crawls.status }).from(crawls).where(eq(crawls.id, crawlId)).for("update");
+  const [row] = await tx
+    .select({ status: crawls.status })
+    .from(crawls)
+    .where(eq(crawls.id, crawlId))
+    .for("no key update");
   if (row === undefined) throw new Error(`resumeCrawl: no crawl ${crawlId}`);
   return row.status;
+}
+
+/**
+ * Whether a run still owns its crawl, read as the start claim reads it: the
+ * crawl row locked (`lockCrawlStatus`), then the job row (`ownsJob`). For a
+ * runner's own writes outside the loop (src/worker/crawl-job.ts: the
+ * `credentials_unreadable` pause, a close of a run that threw before the
+ * loop), in the transaction that makes them. `status` is null for a crawl
+ * that no longer exists.
+ */
+export async function lockRunOwnership(
+  tx: CloseTx,
+  crawlId: string,
+  owner: RunOwner,
+): Promise<{ status: string | null; owned: boolean }> {
+  const [row] = await tx
+    .select({ status: crawls.status })
+    .from(crawls)
+    .where(eq(crawls.id, crawlId))
+    .for("no key update");
+  if (row === undefined) return { status: null, owned: false };
+  return { status: row.status, owned: await ownsJob(tx, owner) };
 }
 
 /** Whether the run's job is still `running` under its instance, the job row locked. */
