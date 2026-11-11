@@ -64,7 +64,7 @@ async function setJudgement(block: unknown): Promise<void> {
 async function allGroups(): Promise<
   Awaited<ReturnType<ApiService["listIssues"]>> & { items: IssueGroup[] }
 > {
-  return await service.listIssues(crawlId, { limit: 200 });
+  return await service.listIssues(LOCAL_TENANT, crawlId, { limit: 200 });
 }
 
 function group(groups: IssueGroup[], ruleId: string): IssueGroup | undefined {
@@ -72,7 +72,7 @@ function group(groups: IssueGroup[], ruleId: string): IssueGroup | undefined {
 }
 
 async function csvLines(view: string): Promise<string[]> {
-  const stream = await service.prepareCsvExport(crawlId, { view });
+  const stream = await service.prepareCsvExport(LOCAL_TENANT, crawlId, { view });
   const out: string[] = [];
   for await (const record of stream.records()) out.push(record.replace(/\r\n$/, ""));
   return out;
@@ -111,7 +111,7 @@ beforeAll(async () => {
   ]);
 
   // Judged with no overrides: the stamp's disabled set is empty.
-  await service.runRulesForCrawl(crawlId);
+  await service.runRulesForCrawl(LOCAL_TENANT, crawlId);
 });
 
 afterAll(async () => {
@@ -166,7 +166,7 @@ describe("rule overrides apply at read time", () => {
 
   it("issue_urls and issue_inlinks refuse a disabled rule with CONFLICT naming it", async () => {
     await setJudgement(OVERRIDES);
-    await expect(service.listIssueUrls(crawlId, "title.too-long")).rejects.toMatchObject({
+    await expect(service.listIssueUrls(LOCAL_TENANT, crawlId, "title.too-long")).rejects.toMatchObject({
       code: "CONFLICT",
       message:
         `rule 'title.too-long' is disabled on crawl '${crawlId}'; re-enable it with ` +
@@ -174,16 +174,16 @@ describe("rule overrides apply at read time", () => {
     });
     await setJudgement({ rules: { "links.broken-internal": { disabled: true } } });
     await expect(
-      service.listIssueInlinks(crawlId, "links.broken-internal"),
+      service.listIssueInlinks(LOCAL_TENANT, crawlId, "links.broken-internal"),
     ).rejects.toMatchObject({ code: "CONFLICT" });
     await expect(
-      service.listIssueInlinks(crawlId, "links.broken-internal"),
+      service.listIssueInlinks(LOCAL_TENANT, crawlId, "links.broken-internal"),
     ).rejects.toThrow(/links\.broken-internal/);
   });
 
   it("rules_catalog keeps the disabled rule, flags it, and still counts its stored findings", async () => {
     await setJudgement(OVERRIDES);
-    const catalog = await service.rulesCatalog({ crawlId });
+    const catalog = await service.rulesCatalog(LOCAL_TENANT, { crawlId });
     const rules = new Map(catalog.rules.map((r) => [r.id, r]));
 
     const disabled = rules.get("title.too-long");
@@ -222,7 +222,7 @@ describe("rule overrides apply at read time", () => {
   it("the issue_urls CSV of a disabled rule is refused before a byte", async () => {
     await setJudgement(OVERRIDES);
     await expect(
-      service.prepareCsvExport(crawlId, { view: "issue_urls", ruleId: "title.too-long" }),
+      service.prepareCsvExport(LOCAL_TENANT, crawlId, { view: "issue_urls", ruleId: "title.too-long" }),
     ).rejects.toMatchObject({ code: "CONFLICT" });
   });
 
@@ -236,7 +236,7 @@ describe("rule overrides apply at read time", () => {
           : view === "metric_table"
             ? { view, metricId: "site.health" }
             : { view };
-      const result = (await service.exportCrawl(crawlId, {
+      const result = (await service.exportCrawl(LOCAL_TENANT, crawlId, {
         format: "csv",
         ...opts,
       })) as CsvExportResult;
@@ -248,7 +248,7 @@ describe("rule overrides apply at read time", () => {
     }
     // An empty disabled set is stated, not omitted.
     await setJudgement({});
-    const clean = (await service.exportCrawl(crawlId, {
+    const clean = (await service.exportCrawl(LOCAL_TENANT, crawlId, {
       format: "csv",
       view: "issues_overview",
     })) as CsvExportResult;
@@ -257,7 +257,7 @@ describe("rule overrides apply at read time", () => {
 
   it("the JSONL issues export leaves out the disabled rule and names it in its manifest", async () => {
     await setJudgement(OVERRIDES);
-    const result = (await service.exportCrawl(crawlId, { dataset: "issues" })) as ExportResult;
+    const result = (await service.exportCrawl(LOCAL_TENANT, crawlId, { dataset: "issues" })) as ExportResult;
     expect(result.disabledRules).toEqual(["title.too-long"]);
     const rows = gunzipSync(readFileSync(result.path))
       .toString("utf8")
@@ -284,16 +284,16 @@ describe("rule overrides apply at read time", () => {
     expect(marker).toMatchObject({ type: "warning", priority: "low" });
 
     // The other datasets are not about findings and carry no such field.
-    const pagesExport = (await service.exportCrawl(crawlId, { dataset: "pages" })) as ExportResult;
+    const pagesExport = (await service.exportCrawl(LOCAL_TENANT, crawlId, { dataset: "pages" })) as ExportResult;
     expect(pagesExport).not.toHaveProperty("disabledRules");
   });
 
   it("a stored override of a rule the ruleset lacks is a CONFLICT naming the rule", async () => {
     await setJudgement({ rules: { "gone.rule": { disabled: true } } });
     try {
-      await expect(service.listIssues(crawlId)).rejects.toMatchObject({ code: "CONFLICT" });
-      await expect(service.listIssues(crawlId)).rejects.toThrow(/gone\.rule/);
-      await expect(service.listIssues(crawlId)).rejects.toThrow(new RegExp(crawlId));
+      await expect(service.listIssues(LOCAL_TENANT, crawlId)).rejects.toMatchObject({ code: "CONFLICT" });
+      await expect(service.listIssues(LOCAL_TENANT, crawlId)).rejects.toThrow(/gone\.rule/);
+      await expect(service.listIssues(LOCAL_TENANT, crawlId)).rejects.toThrow(new RegExp(crawlId));
     } finally {
       await setJudgement(null);
     }
@@ -302,7 +302,7 @@ describe("rule overrides apply at read time", () => {
   it("a malformed stored block is the loud error, never 'no overrides'", async () => {
     await setJudgement({ rules: { "title.too-long": { severity: "info" } } });
     try {
-      const failure = await service.listIssues(crawlId).then(
+      const failure = await service.listIssues(LOCAL_TENANT, crawlId).then(
         () => null,
         (error: unknown) => error,
       );
@@ -330,15 +330,15 @@ describe("threshold overrides apply at the next run, and the copy follows the st
   it("quotes the stamped value until the rules re-run, and reports the staleness", async () => {
     await setJudgement({ thresholds: { TITLE_MAX: 50 } });
 
-    const before = await service.rulesCatalog({ crawlId });
+    const before = await service.rulesCatalog(LOCAL_TENANT, { crawlId });
     const tooLong = before.rules.find((r) => r.id === "title.too-long");
     expect(tooLong?.explanation).toContain("60 characters");
     expect(before.judgementStale).toEqual({ stale: true, reasons: ["thresholds"] });
     expect(before.thresholds?.TITLE_MAX).toBe(60);
 
-    await service.runRulesForCrawl(crawlId);
+    await service.runRulesForCrawl(LOCAL_TENANT, crawlId);
 
-    const after = await service.rulesCatalog({ crawlId });
+    const after = await service.rulesCatalog(LOCAL_TENANT, { crawlId });
     const rerun = after.rules.find((r) => r.id === "title.too-long");
     expect(rerun?.explanation).toContain("50 characters");
     expect(rerun?.explanation).not.toContain("60 characters");
@@ -351,7 +351,7 @@ describe("threshold overrides apply at the next run, and the copy follows the st
   });
 
   it("without a crawl the catalog is the default rendering, with type and priority and no judgement fields", async () => {
-    const catalog = await service.rulesCatalog();
+    const catalog = await service.rulesCatalog(LOCAL_TENANT);
     expect(catalog).not.toHaveProperty("judgementStale");
     expect(catalog).not.toHaveProperty("thresholds");
     const tooLong = catalog.rules.find((r) => r.id === "title.too-long");
@@ -378,12 +378,12 @@ describe("an unjudged crawl", () => {
       status: "finished",
     });
     try {
-      const page = await service.listIssues(id);
+      const page = await service.listIssues(LOCAL_TENANT, id);
       expect(page.items).toEqual([]);
       expect(page.disabledRules).toEqual(["title.too-long"]);
       expect(page.judgementStale).toEqual({ stale: false, reasons: [] });
 
-      const catalog = await service.rulesCatalog({ crawlId: id });
+      const catalog = await service.rulesCatalog(LOCAL_TENANT, { crawlId: id });
       expect(catalog.judgementStale).toEqual({ stale: false, reasons: [] });
       expect(catalog.thresholds?.TITLE_MAX).toBe(55);
       expect(catalog.rules.find((r) => r.id === "title.too-long")?.explanation).toContain(
@@ -406,7 +406,7 @@ describe("an unjudged crawl", () => {
       rulesRunAt: new Date(),
     });
     try {
-      await expect(service.listIssues(id)).rejects.toThrow(
+      await expect(service.listIssues(LOCAL_TENANT, id)).rejects.toThrow(
         new RegExp(`crawl ${id}: judged .* rules_judged_with_jsonb is missing`),
       );
     } finally {

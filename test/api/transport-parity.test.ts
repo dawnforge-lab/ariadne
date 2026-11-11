@@ -73,7 +73,7 @@ interface Res {
 }
 
 async function call(method: string, path: string, body?: unknown): Promise<Res> {
-  const headers: Record<string, string> = { authorization: `Bearer ${TOKEN}` };
+  const headers: Record<string, string> = { authorization: `Bearer ${TOKEN}`, "x-ariadne-tenant": "local" };
   if (body !== undefined) headers["content-type"] = "application/json";
   const res = await fetch(`${base}${path}`, {
     method,
@@ -315,7 +315,7 @@ beforeAll(async () => {
   };
   api = createApiServer({ db, config: { ...config, token: TOKEN } });
   base = `http://127.0.0.1:${(await api.listen(0)).port}`;
-  mcp = createMcpServer({ db, config });
+  mcp = createMcpServer({ db, config: { ...config, tenant: LOCAL_TENANT } });
   const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
   client = new Client({ name: "ariadne-test-transport-parity", version: "0.0.1" });
   await mcp.connect(serverSide);
@@ -454,7 +454,7 @@ describe("contract clause 2: config_validate and crawl_start agree on every refu
 
     const res = await fetch(`${base}/config/validate`, {
       method: "POST",
-      headers: { authorization: `Bearer ${TOKEN}`, "content-type": "application/json" },
+      headers: { authorization: `Bearer ${TOKEN}`, "x-ariadne-tenant": "local", "content-type": "application/json" },
       body: "{not json",
     });
     expect(res.status).toBe(400);

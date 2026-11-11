@@ -19,6 +19,8 @@ import { domainToASCII } from "node:url";
 
 import type { CrawlConfig } from "../crawl/loop.js";
 import type { AddressResolver } from "../crawl/url-policy.js";
+import { ServiceError } from "./errors.js";
+import { parseTenant, type TenantId } from "./tenant.js";
 
 /**
  * What one engine instance may do, whoever is asking: POLICY, not identity.
@@ -150,6 +152,18 @@ export interface ApiServerConfig extends ServiceConfig {
   token: string;
 }
 
+/**
+ * The stdio MCP transport's configuration: one tenant per process (Phase 28a).
+ *
+ * Over HTTP the tenant is a request header, read per request; an stdio server
+ * has one client — the process that started it — so the tenant is fixed at boot
+ * (`ARIADNE_TENANT`) and every tool call is made with it. Required, with no
+ * default: a server that named no tenant would own no crawl.
+ */
+export interface McpServerConfig extends ServiceConfig {
+  tenant: TenantId;
+}
+
 /** Config read from the environment by the `api:serve` entrypoint. */
 export interface LoadedApiConfig {
   token: string;
@@ -164,6 +178,8 @@ export interface LoadedApiConfig {
 
 /** Config read from the environment by the `mcp:serve` entrypoint. */
 export interface LoadedMcpConfig {
+  /** `ARIADNE_TENANT`: required, through `parseTenant`. */
+  tenant: TenantId;
   allowedDomains: string[];
   databaseUrl: string;
   /** `ARIADNE_EXPORT_DIR`, or undefined for the `exports/` default. */
@@ -292,11 +308,31 @@ export function loadMcpConfig(env: NodeJS.ProcessEnv = process.env): LoadedMcpCo
     throw new Error("DATABASE_URL must be set: the MCP server holds the database handle");
   }
   return {
+    tenant: parseTenantEnv(env["ARIADNE_TENANT"]),
     allowedDomains: parseAllowedDomains(env["ARIADNE_ALLOWED_DOMAINS"]),
     databaseUrl,
     exportDir: parseOutputDir(env["ARIADNE_EXPORT_DIR"]),
     renderDir: parseOutputDir(env["ARIADNE_RENDER_DIR"]),
   };
+}
+
+/**
+ * `ARIADNE_TENANT` as a tenant, or a boot error. No default and no trim — the
+ * same `parseTenant` the HTTP header goes through — and the error names the
+ * variable and the rule, never the value set (it may be a key pasted into the
+ * wrong variable).
+ */
+function parseTenantEnv(raw: string | undefined): TenantId {
+  try {
+    return parseTenant(raw);
+  } catch (error) {
+    if (!(error instanceof ServiceError)) throw error;
+    throw new Error(
+      error.code === "TENANT_REQUIRED"
+        ? "ARIADNE_TENANT must be set: the MCP server acts for one tenant, and there is no default"
+        : `ARIADNE_TENANT is not a valid tenant: ${error.message}`,
+    );
+  }
 }
 
 /**

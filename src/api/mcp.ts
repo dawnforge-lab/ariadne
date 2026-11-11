@@ -20,6 +20,11 @@
  * theatre. See `loadMcpConfig` for the boot-time half of the same argument, and
  * for what changes if this server is ever mounted on a network transport.
  *
+ * **One tenant per process.** Process trust says who may ask; the tenant says
+ * whose crawls they may ask about. It is fixed at boot (`config.tenant`, from
+ * `ARIADNE_TENANT`) and every crawl-facing tool calls the service with it, so a
+ * crawl of another tenant answers exactly like a crawl that does not exist.
+ *
  * **The allowlist binds BOTH transports, and it binds them in one place.**
  * `ApiService.startCrawl` checks `allowedDomains` before it spends a URL-policy
  * verdict on the seed, and `checkLegacyHosts` checks every extra host the probe
@@ -69,7 +74,7 @@ import { FETCH_CLASSES } from "../crawl/fetch-page.js";
 import { DISCOVERED_VIA } from "../crawl/frontier.js";
 import { RENDER_PASS_EVIDENCE } from "../rules/metric/render-metrics.js";
 import { METRIC_SCOPES } from "../rules/registry/types.js";
-import type { ServiceConfig } from "./config.js";
+import type { McpServerConfig } from "./config.js";
 import { credentialInputSchemas } from "./config-schema.js";
 import { CSV_VIEWS, EXPORT_FORMATS } from "./csv.js";
 import { strictInput } from "./mcp-input.js";
@@ -136,10 +141,10 @@ export type ToolName = (typeof TOOL_NAMES)[number];
 export interface CreateMcpServerOpts {
   db: Db;
   /**
-   * The same policy an HTTP server is built with — an `ApiServerConfig` is
-   * accepted here, its token simply unused (see the module header).
+   * The same policy an HTTP server is built with, plus the one tenant this
+   * server acts for (see the module header). There is no default tenant.
    */
-  config: ServiceConfig;
+  config: McpServerConfig;
 }
 
 export interface AriadneMcpServer {
@@ -208,6 +213,7 @@ retrying or trying a different spelling of the host.`;
  */
 export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcpServer {
   const service = new ApiService(db, config);
+  const tenant = config.tenant;
   const log = config.log ?? ((line: string) => console.error(line));
   const server = new McpServer(
     { name: "ariadne", version: "0.0.1" },
@@ -304,7 +310,7 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
       // transports, so an argument this refuses is a body POST /crawls refuses.
       inputSchema: service.startBodySchema(),
     },
-    async (args) => run("crawl_start", () => service.startCrawl(args)),
+    async (args) => run("crawl_start", () => service.startCrawl(tenant, args)),
   );
 
   server.registerTool(
@@ -530,7 +536,7 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "dropped null is a crawl from before this was counted, not zero.",
       inputSchema: strictInput({ crawlId: crawlIdField() }),
     },
-    async ({ crawlId }) => run("crawl_status", () => service.getCrawl(crawlId)),
+    async ({ crawlId }) => run("crawl_status", () => service.getCrawl(tenant, crawlId)),
   );
 
   server.registerTool(
@@ -563,7 +569,7 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         cursor: cursorField(),
       }),
     },
-    async (args) => run("crawl_list", () => service.listCrawls(defined(args))),
+    async (args) => run("crawl_list", () => service.listCrawls(tenant, defined(args))),
   );
 
   server.registerTool(
@@ -642,7 +648,7 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
       inputSchema: strictInput({ crawlId: crawlIdField(), ...credentialInputSchemas() }),
     },
     async ({ crawlId, ...credentials }) =>
-      run("crawl_resume", () => service.resumeCrawl(crawlId, defined(credentials))),
+      run("crawl_resume", () => service.resumeCrawl(tenant, crawlId, defined(credentials))),
   );
 
   server.registerTool(
@@ -675,7 +681,7 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "already paused; a finished, failed or cancelled crawl, naming its status.",
       inputSchema: strictInput({ crawlId: crawlIdField() }),
     },
-    async ({ crawlId }) => run("crawl_pause", () => service.pauseCrawl(crawlId)),
+    async ({ crawlId }) => run("crawl_pause", () => service.pauseCrawl(tenant, crawlId)),
   );
 
   server.registerTool(
@@ -707,7 +713,7 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "crawl_rules to answer and ask again.",
       inputSchema: strictInput({ crawlId: crawlIdField() }),
     },
-    async ({ crawlId }) => run("crawl_cancel", () => service.cancelCrawl(crawlId)),
+    async ({ crawlId }) => run("crawl_cancel", () => service.cancelCrawl(tenant, crawlId)),
   );
 
   server.registerTool(
@@ -731,7 +737,7 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         confirm: z.string().describe("The crawl id again, exactly as in crawlId."),
       }),
     },
-    async ({ crawlId, confirm }) => run("crawl_delete", () => service.deleteCrawl(crawlId, confirm)),
+    async ({ crawlId, confirm }) => run("crawl_delete", () => service.deleteCrawl(tenant, crawlId, confirm)),
   );
 
   server.registerTool(
@@ -813,7 +819,7 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
       }),
     },
     async ({ crawlId, ...input }) =>
-      run("crawl_render", () => service.renderCrawl(crawlId, defined(input))),
+      run("crawl_render", () => service.renderCrawl(tenant, crawlId, defined(input))),
   );
 
   server.registerTool(
@@ -838,7 +844,7 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "Running it a second time re-judges the crawl with the current ruleset.",
       inputSchema: strictInput({ crawlId: crawlIdField() }),
     },
-    async ({ crawlId }) => run("crawl_rules", () => service.runRulesForCrawl(crawlId)),
+    async ({ crawlId }) => run("crawl_rules", () => service.runRulesForCrawl(tenant, crawlId)),
   );
 
   server.registerTool(
@@ -860,7 +866,7 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "better answer whenever the pages already fetched are worth keeping.",
       inputSchema: strictInput({ crawlId: crawlIdField() }),
     },
-    async ({ crawlId }) => run("crawl_mark_failed", () => service.markCrawlFailed(crawlId)),
+    async ({ crawlId }) => run("crawl_mark_failed", () => service.markCrawlFailed(tenant, crawlId)),
   );
 
   server.registerTool(
@@ -900,7 +906,7 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "(reasons: overrides | thresholds | findingCap).",
       inputSchema: strictInput({ crawlId: crawlIdField() }),
     },
-    async ({ crawlId }) => run("crawl_config_get", () => service.getCrawlConfig(crawlId)),
+    async ({ crawlId }) => run("crawl_config_get", () => service.getCrawlConfig(tenant, crawlId)),
   );
 
   server.registerTool(
@@ -981,7 +987,7 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
     },
     async ({ crawlId, crawl, judgement }) =>
       run("crawl_config_set", () =>
-        service.setCrawlConfig(crawlId, {
+        service.setCrawlConfig(tenant, crawlId, {
           ...(crawl === undefined ? {} : { crawl }),
           ...(judgement === undefined ? {} : { judgement }),
         }),
@@ -1119,7 +1125,7 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         cursor: cursorField(),
       }),
     },
-    async ({ crawlId, ...rest }) => run("issues_list", () => service.listIssues(crawlId, defined(rest))),
+    async ({ crawlId, ...rest }) => run("issues_list", () => service.listIssues(tenant, crawlId, defined(rest))),
   );
 
   server.registerTool(
@@ -1164,7 +1170,7 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
       }),
     },
     async ({ crawlId, ...rest }) =>
-      run("issues_overview", () => service.issuesOverview(crawlId, defined(rest))),
+      run("issues_overview", () => service.issuesOverview(tenant, crawlId, defined(rest))),
   );
 
   server.registerTool(
@@ -1217,7 +1223,7 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         crawlId: crawlIdField(),
       }),
     },
-    async ({ crawlId }) => run("crawl_overview", () => service.crawlOverview(crawlId)),
+    async ({ crawlId }) => run("crawl_overview", () => service.crawlOverview(tenant, crawlId)),
   );
 
   server.registerTool(
@@ -1282,7 +1288,7 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
       }),
     },
     async ({ crawlId, ruleId, ...rest }) =>
-      run("issue_urls", () => service.listIssueUrls(crawlId, ruleId, defined(rest))),
+      run("issue_urls", () => service.listIssueUrls(tenant, crawlId, ruleId, defined(rest))),
   );
 
   server.registerTool(
@@ -1334,7 +1340,7 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
       }),
     },
     async ({ crawlId, ruleId, ...rest }) =>
-      run("issue_inlinks", () => service.listIssueInlinks(crawlId, ruleId, defined(rest))),
+      run("issue_inlinks", () => service.listIssueInlinks(tenant, crawlId, ruleId, defined(rest))),
   );
 
   server.registerTool(
@@ -1388,7 +1394,7 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         cursor: cursorField(),
       }),
     },
-    async ({ crawlId, ...rest }) => run("metrics_get", () => service.listMetrics(crawlId, defined(rest))),
+    async ({ crawlId, ...rest }) => run("metrics_get", () => service.listMetrics(tenant, crawlId, defined(rest))),
   );
 
   server.registerTool(
@@ -1445,7 +1451,7 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
       }),
     },
     async ({ crawlId, metricId }) =>
-      run("metric_table", () => service.metricTable(crawlId, metricId)),
+      run("metric_table", () => service.metricTable(tenant, crawlId, metricId)),
   );
 
   server.registerTool(
@@ -1590,7 +1596,7 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         cursor: cursorField(),
       }),
     },
-    async ({ crawlId, ...rest }) => run("pages_query", () => service.listPages(crawlId, defined(rest))),
+    async ({ crawlId, ...rest }) => run("pages_query", () => service.listPages(tenant, crawlId, defined(rest))),
   );
 
   server.registerTool(
@@ -1627,7 +1633,7 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "robots.txt'.",
       inputSchema: strictInput({ crawlId: crawlIdField() }),
     },
-    async ({ crawlId }) => run("robots_get", () => service.getRobots(crawlId)),
+    async ({ crawlId }) => run("robots_get", () => service.getRobots(tenant, crawlId)),
   );
 
   server.registerTool(
@@ -1726,7 +1732,7 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
           .optional(),
       }),
     },
-    async (args) => run("rules_catalog", () => service.rulesCatalog(defined(args))),
+    async (args) => run("rules_catalog", () => service.rulesCatalog(tenant, defined(args))),
   );
 
   server.registerTool(
@@ -1809,7 +1815,7 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
       }),
     },
     async ({ baseCrawlId, headCrawlId }) =>
-      run("crawl_compare", () => service.compareCrawls(baseCrawlId, headCrawlId)),
+      run("crawl_compare", () => service.compareCrawls(tenant, baseCrawlId, headCrawlId)),
   );
 
   server.registerTool(
@@ -1861,7 +1867,7 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
     },
     async ({ baseCrawlId, headCrawlId, ruleId, set, ...rest }) =>
       run("compare_urls", () =>
-        service.listCompareUrls(baseCrawlId, headCrawlId, ruleId, set, defined(rest)),
+        service.listCompareUrls(tenant, baseCrawlId, headCrawlId, ruleId, set, defined(rest)),
       ),
   );
 
@@ -1985,7 +1991,7 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
           .optional(),
       }),
     },
-    async ({ crawlId, ...rest }) => run("export_crawl", () => service.exportCrawl(crawlId, defined(rest))),
+    async ({ crawlId, ...rest }) => run("export_crawl", () => service.exportCrawl(tenant, crawlId, defined(rest))),
   );
 
   // The other half of the list's guarantee: `named` cannot admit a name the

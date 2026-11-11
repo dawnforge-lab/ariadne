@@ -933,7 +933,7 @@ describe("robots.txt, per host, fetched once", () => {
 
     const service = new ApiService(db, { allowedDomains: ["127.0.0.1"], log: () => {} });
     try {
-      const detail = await service.getCrawl(crawlId);
+      const detail = await service.getCrawl(LOCAL_TENANT, crawlId);
       const census = detail.resources;
 
       // The two facts, side by side, on a crawl nothing seeded a `fetch_class`

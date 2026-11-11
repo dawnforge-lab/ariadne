@@ -26,8 +26,8 @@
  *
  * Once that holds, matching `queued`/`running` rows with no unexpired lease are,
  * one crawl at a time, set to `cancelled` (`deleteCrawl` refuses live statuses)
- * and deleted through `ApiService.deleteCrawl`, which removes every child table
- * and file. The lease check stays as a second guard: a queued/running match
+ * and deleted through `ApiService.deleteCrawl` as the crawl's own tenant (read
+ * from its row), which removes every child table and file. The lease check stays as a second guard: a queued/running match
  * holding an unexpired lease is listed as "live, skipped" and never cancelled or
  * deleted. A pending pause/cancel request on any matched crawl is cleared first
  * (no process will act on it; `deleteCrawl` refuses it), and flagged in the dry
@@ -42,6 +42,7 @@ import { and, eq, gt, inArray, notExists, sql } from "drizzle-orm";
 import { closeDb, createDb, type Db } from "../src/db/client.js";
 import { crawls, frontier } from "../src/db/schema.js";
 import { ApiService } from "../src/api/service.js";
+import { parseTenant } from "../src/api/tenant.js";
 
 const RESERVED_LABELS = ["localhost", "test", "example", "invalid"] as const;
 
@@ -123,7 +124,14 @@ export async function pruneTestCrawls(
   const startSessions = await otherSessions(db);
   if (options.confirm) await assertAlone();
   const rows = await db
-    .select({ id: crawls.id, status: crawls.status, siteUrl: crawls.siteUrl, pages: crawls.pagesCrawled, request: crawls.controlRequest })
+    .select({
+      id: crawls.id,
+      tenantId: crawls.tenantId,
+      status: crawls.status,
+      siteUrl: crawls.siteUrl,
+      pages: crawls.pagesCrawled,
+      request: crawls.controlRequest,
+    })
     .from(crawls)
     .orderBy(crawls.startedAt);
   const matches = rows.filter(
@@ -212,7 +220,9 @@ export async function pruneTestCrawls(
         if (live) cancelled += 1;
       }
       await assertAlone();
-      await service.deleteCrawl(r.id, r.id);
+      // As the crawl's own tenant, read off its row: the service resolves
+      // every crawl with its owner, and this script acts on every owner's.
+      await service.deleteCrawl(parseTenant(r.tenantId), r.id, r.id);
     } catch (error) {
       throw new Error(`could not prune crawl ${r.id} (${r.siteUrl}): ${(error as Error).message}`);
     }

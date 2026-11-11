@@ -56,7 +56,7 @@ afterAll(async () => {
 });
 
 async function get(path: string): Promise<unknown> {
-  const res = await fetch(`${base}${path}`, { headers: { authorization: `Bearer ${TOKEN}` } });
+  const res = await fetch(`${base}${path}`, { headers: { authorization: `Bearer ${TOKEN}`, "x-ariadne-tenant": "local" } });
   expect(res.status).toBe(200);
   return res.json();
 }

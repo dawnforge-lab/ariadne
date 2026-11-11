@@ -32,7 +32,7 @@ import { createApiServer, type ApiServer } from "../../src/api/http.js";
 import { createMcpServer, TOOL_NAMES, type AriadneMcpServer } from "../../src/api/mcp.js";
 import { mkDiscovery } from "../rules/mk-discovery.js";
 import { mkPage } from "../rules/mk-page.js";
-import { LOCAL_TENANT } from "../../src/api/tenant.js";
+import { LOCAL_TENANT, type TenantId } from "../../src/api/tenant.js";
 
 /** Test-controlled holds on a rules run and on a render pass (module header). */
 const gates = vi.hoisted(() => ({
@@ -100,7 +100,7 @@ interface Res {
 }
 
 async function call(method: string, path: string, opts: { body?: unknown; token?: string | null } = {}): Promise<Res> {
-  const headers: Record<string, string> = {};
+  const headers: Record<string, string> = { "x-ariadne-tenant": "local" };
   if (opts.token !== null) headers["authorization"] = `Bearer ${opts.token ?? TOKEN}`;
   if (opts.body !== undefined) headers["content-type"] = "application/json";
   const res = await fetch(`${base}${path}`, {
@@ -286,7 +286,7 @@ beforeAll(async () => {
 
   api = await newApi();
 
-  mcp = createMcpServer({ db, config: { allowedDomains: [], exportDir, renderDir, log: () => {} } });
+  mcp = createMcpServer({ db, config: { tenant: LOCAL_TENANT, allowedDomains: [], exportDir, renderDir, log: () => {} } });
   const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
   client = new Client({ name: "ariadne-test-lifecycle", version: "0.0.1" });
   await mcp.connect(serverSide);
@@ -906,7 +906,7 @@ describe("crawl_rules on a crawl that never ran (Ruling 11)", () => {
 describe("the rules guard claims before it reads (in-process TOCTOU)", () => {
   it("a crawl_resume issued while crawl_rules is between its read and its run is refused 409", async () => {
     const id = await seedPausedJudgeable();
-    const svc = api.service as unknown as { crawlRow: (crawlId: string) => Promise<unknown> };
+    const svc = api.service as unknown as { crawlRow: (tenant: TenantId, crawlId: string) => Promise<unknown> };
     const realRow = svc.crawlRow.bind(svc);
     let releaseRead!: () => void;
     const readHeld = new Promise<void>((r) => {
@@ -917,13 +917,13 @@ describe("the rules guard claims before it reads (in-process TOCTOU)", () => {
       enteredRead = r;
     });
     let held = false;
-    const spy = vi.spyOn(svc, "crawlRow").mockImplementation(async (crawlId: string) => {
+    const spy = vi.spyOn(svc, "crawlRow").mockImplementation(async (tenant: TenantId, crawlId: string) => {
       if (crawlId === id && !held) {
         held = true;
         enteredRead();
         await readHeld;
       }
-      return await realRow(crawlId);
+      return await realRow(tenant, crawlId);
     });
     const run = call("POST", `/crawls/${id}/rules`);
     try {

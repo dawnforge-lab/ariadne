@@ -75,7 +75,7 @@ interface Res {
 }
 
 async function call(method: string, path: string, body?: unknown): Promise<Res> {
-  const headers: Record<string, string> = { authorization: `Bearer ${TOKEN}` };
+  const headers: Record<string, string> = { authorization: `Bearer ${TOKEN}`, "x-ariadne-tenant": "local" };
   if (body !== undefined) headers["content-type"] = "application/json";
   const res = await fetch(`${base}${path}`, {
     method,
@@ -264,7 +264,7 @@ beforeAll(async () => {
   site = `http://127.0.0.1:${address.port}`;
 
   api = await newApi();
-  mcp = createMcpServer({ db, config: serviceConfig() });
+  mcp = createMcpServer({ db, config: { ...serviceConfig(), tenant: LOCAL_TENANT } });
   const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
   client = new Client({ name: "ariadne-test-credentials-restart", version: "0.0.1" });
   await mcp.connect(serverSide);

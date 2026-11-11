@@ -109,7 +109,7 @@ async function call(
   path: string,
   opts: { token?: string | null; body?: unknown; raw?: string; base?: string } = {},
 ): Promise<Res> {
-  const headers: Record<string, string> = {};
+  const headers: Record<string, string> = { "x-ariadne-tenant": "local" };
   const token = opts.token === undefined ? `Bearer ${TOKEN}` : opts.token;
   if (token !== null) headers["authorization"] = token;
   let payload: string | undefined;
@@ -802,14 +802,14 @@ describe("domain allowlist", () => {
   it("refuses every crawl when the allowlist is empty, but still answers queries", async () => {
     const started = await fetch(`${closedBase}/crawls`, {
       method: "POST",
-      headers: { authorization: `Bearer ${TOKEN}`, "content-type": "application/json" },
+      headers: { authorization: `Bearer ${TOKEN}`, "x-ariadne-tenant": "local", "content-type": "application/json" },
       body: JSON.stringify({ siteUrl: `${site}/` }),
     });
     expect(started.status).toBe(403);
     expect(String(((await started.json()) as Record<string, unknown>)["error"])).toContain("empty");
 
     const listed = await fetch(`${closedBase}/crawls`, {
-      headers: { authorization: `Bearer ${TOKEN}` },
+      headers: { authorization: `Bearer ${TOKEN}`, "x-ariadne-tenant": "local" },
     });
     expect(listed.status).toBe(200);
   });
@@ -875,7 +875,7 @@ describe("crawl lifecycle", () => {
     }
 
     const res = await fetch(`${base}/crawls/${crawlId}`, {
-      headers: { authorization: `Bearer ${TOKEN}` },
+      headers: { authorization: `Bearer ${TOKEN}`, "x-ariadne-tenant": "local" },
     });
     expect(res.status).toBe(200);
     const body = (await res.json()) as Record<string, unknown>;
@@ -1998,7 +1998,7 @@ describe("failure containment", () => {
     try {
       const res = await fetch(
         `${rig.base}/crawls/${crawlId}/export?format=csv&view=internal_urls`,
-        { headers: { authorization: `Bearer ${TOKEN}` } },
+        { headers: { authorization: `Bearer ${TOKEN}`, "x-ariadne-tenant": "local" } },
       );
       // The status and the headers are real: they were sent before anything
       // failed, which is precisely the situation under test.
@@ -2285,7 +2285,7 @@ describe("a client that leaves mid-export", () => {
   async function abandonMidExport(url: string): Promise<number> {
     const client = new AbortController();
     const res = await fetch(url, {
-      headers: { authorization: `Bearer ${TOKEN}` },
+      headers: { authorization: `Bearer ${TOKEN}`, "x-ariadne-tenant": "local" },
       signal: client.signal,
     });
     expect(res.status).toBe(200);
@@ -2394,11 +2394,11 @@ describe("GET /crawls/:id — the lifecycle fields (27b)", () => {
 describe("GET /crawls/:id carries the scope counter (27c T1)", () => {
   it("answers excludedDropped as null for a crawl nobody counted, and the stored count once set", async () => {
     const crawlId = await seedCrawl({ status: "finished" });
-    const bare = await fetch(`${base}/crawls/${crawlId}`, { headers: { authorization: `Bearer ${TOKEN}` } });
+    const bare = await fetch(`${base}/crawls/${crawlId}`, { headers: { authorization: `Bearer ${TOKEN}`, "x-ariadne-tenant": "local" } });
     expect(bare.status).toBe(200);
     expect(((await bare.json()) as Record<string, unknown>)["excludedDropped"]).toBeNull();
     await db.execute(sql`update crawls set excluded_dropped = 7 where id = ${crawlId}`);
-    const counted = await fetch(`${base}/crawls/${crawlId}`, { headers: { authorization: `Bearer ${TOKEN}` } });
+    const counted = await fetch(`${base}/crawls/${crawlId}`, { headers: { authorization: `Bearer ${TOKEN}`, "x-ariadne-tenant": "local" } });
     expect(((await counted.json()) as Record<string, unknown>)["excludedDropped"]).toBe(7);
   });
 });

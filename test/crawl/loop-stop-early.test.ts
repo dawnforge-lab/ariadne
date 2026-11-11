@@ -489,10 +489,10 @@ describe("a stop during the host probe", () => {
  */
 async function expectNeverRan(id: string): Promise<void> {
   const service = new ApiService(db, { allowedDomains: ["127.0.0.1"], log: () => {} });
-  const detail = await service.getCrawl(id);
+  const detail = await service.getCrawl(LOCAL_TENANT, id);
   expect(detail.status).toBe("cancelled");
   expect(detail.neverFetched).toBeNull();
-  await expect(service.runRulesForCrawl(id)).rejects.toThrow(/never ran \(it was cancelled before discovery\)/);
+  await expect(service.runRulesForCrawl(LOCAL_TENANT, id)).rejects.toThrow(/never ran \(it was cancelled before discovery\)/);
 }
 
 describe("a stop during the sitemap walk", () => {
@@ -1085,12 +1085,12 @@ describe("a stop during the render pass", () => {
     });
     renderHang = true;
     const before = hits(renderSite, (p) => p === "/");
-    const rendering = service.renderCrawl(first.crawlId);
+    const rendering = service.renderCrawl(LOCAL_TENANT, first.crawlId);
     rendering.catch(() => undefined);
     await until("the page in the browser", () => hits(renderSite, (p) => p === "/") > before, 30_000);
 
-    await expect(service.pauseCrawl(first.crawlId)).rejects.toMatchObject({ code: "CONFLICT" });
-    await expect(service.cancelCrawl(first.crawlId)).rejects.toThrow(/is .finished.: only a queued, running or paused crawl can be cancelled/);
+    await expect(service.pauseCrawl(LOCAL_TENANT, first.crawlId)).rejects.toMatchObject({ code: "CONFLICT" });
+    await expect(service.cancelCrawl(LOCAL_TENANT, first.crawlId)).rejects.toThrow(/is .finished.: only a queued, running or paused crawl can be cancelled/);
     renderHang = false;
     await rendering;
   }, 90_000);

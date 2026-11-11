@@ -83,7 +83,7 @@ async function seedCrawl(
 }
 
 async function overview(id: string = crawlId): Promise<CrawlOverview> {
-  return await service.crawlOverview(id);
+  return await service.crawlOverview(LOCAL_TENANT, id);
 }
 
 function section(o: CrawlOverview, id: string): OverviewSection {
@@ -108,7 +108,7 @@ async function pageCount(id: string): Promise<number> {
 }
 
 async function csvLines(id: string = crawlId): Promise<string[]> {
-  const stream = await service.prepareCsvExport(id, { view: "crawl_overview" });
+  const stream = await service.prepareCsvExport(LOCAL_TENANT, id, { view: "crawl_overview" });
   const out: string[] = [];
   for await (const record of stream.records()) out.push(record);
   return out;
@@ -202,7 +202,7 @@ beforeAll(async () => {
     { crawlId, url: `${SITE}/s.css`, kind: "css" },
     { crawlId, url: `${SITE}/app.js`, kind: "js" },
   ]);
-  await service.runRulesForCrawl(crawlId);
+  await service.runRulesForCrawl(LOCAL_TENANT, crawlId);
 
   await seedCrawl(unjudgedId, [{ path: "/" }]);
 
@@ -211,7 +211,7 @@ beforeAll(async () => {
     [RENDERED("/"), { path: "/x" }],
     { renderPassCount: 1 },
   );
-  await service.runRulesForCrawl(renderedId);
+  await service.runRulesForCrawl(LOCAL_TENANT, renderedId);
 
   await seedCrawl(
     renderedUnjudgedId,
@@ -220,10 +220,10 @@ beforeAll(async () => {
   );
 
   await seedCrawl(unknownRuleId, [{ path: "/" }]);
-  await service.runRulesForCrawl(unknownRuleId);
+  await service.runRulesForCrawl(LOCAL_TENANT, unknownRuleId);
 
   await seedCrawl(racedId, [{ path: "/" }, { path: "/slow", responseTimeMs: 5000 }]);
-  await service.runRulesForCrawl(racedId);
+  await service.runRulesForCrawl(LOCAL_TENANT, racedId);
   await db.insert(issues).values({
     crawlId: unknownRuleId,
     ruleId: "no.such-rule",
@@ -262,7 +262,7 @@ describe("crawl_overview on a judged, unrendered crawl", () => {
 
   it("takes every urls entry from the crawl_status field it names", async () => {
     const o = await overview();
-    const detail = await service.getCrawl(crawlId);
+    const detail = await service.getCrawl(LOCAL_TENANT, crawlId);
     const f = detail.frontier;
     const encountered =
       f.pending + f.leased + f.done + f.failed + f.renderPending + detail.robotsBlocked.recorded;
@@ -476,7 +476,7 @@ describe("crawl_overview on other crawls", () => {
     try {
       const get = (id: string): Promise<Response> =>
         fetch(`http://127.0.0.1:${port}/crawls/${id}/overview/crawl`, {
-          headers: { authorization: "Bearer t" },
+          headers: { authorization: "Bearer t", "x-ariadne-tenant": "local" },
         });
       const res = await get(crawlId);
       expect(res.status).toBe(200);
@@ -540,9 +540,9 @@ describe("the overviews read the judgement inside their snapshot", () => {
   });
 
   it("crawl_overview names issues-grid and click-depth as not measured, never zeros", async () => {
-    expect((await service.getCrawl(racedId)).rulesRunAt).not.toBeNull();
+    expect((await service.getCrawl(LOCAL_TENANT, racedId)).rulesRunAt).not.toBeNull();
     armed = true;
-    const o = await raced.crawlOverview(racedId);
+    const o = await raced.crawlOverview(LOCAL_TENANT, racedId);
     expect(armed).toBe(false); // the reset really landed mid-call
     expect(o.sections.map((s) => s.id)).not.toContain("issues-grid");
     expect(o.notMeasured.map((n) => n.id)).toEqual(
@@ -551,10 +551,10 @@ describe("the overviews read the judgement inside their snapshot", () => {
   });
 
   it("issues_overview refuses the crawl as unjudged rather than listing no rows", async () => {
-    await service.runRulesForCrawl(racedId);
-    expect((await service.issuesOverview(racedId, {})).rows.length).toBeGreaterThan(0);
+    await service.runRulesForCrawl(LOCAL_TENANT, racedId);
+    expect((await service.issuesOverview(LOCAL_TENANT, racedId, {})).rows.length).toBeGreaterThan(0);
     armed = true;
-    await expect(raced.issuesOverview(racedId, {})).rejects.toMatchObject({ code: "CONFLICT" });
+    await expect(raced.issuesOverview(LOCAL_TENANT, racedId, {})).rejects.toMatchObject({ code: "CONFLICT" });
     expect(armed).toBe(false);
   });
 });
@@ -671,7 +671,7 @@ describe("crawl_overview render section on a scoped crawl (27c)", () => {
       ],
       { renderPassCount: 1, pagesCrawled: 2 },
     );
-    await service.runRulesForCrawl(id);
+    await service.runRulesForCrawl(LOCAL_TENANT, id);
     const o = await overview(id);
     expect(section(o, "render").entries).toEqual([
       { label: "Pages rendered", value: 1, percent: 50 },
@@ -743,11 +743,11 @@ describe("crawl_overview counts scope-excluded URLs (27d)", () => {
   });
 
   it("export_crawl view=crawl_overview answers the notMeasured crawl_overview names", async () => {
-    const stream = await service.prepareCsvExport(unjudgedId, { view: "crawl_overview" });
+    const stream = await service.prepareCsvExport(LOCAL_TENANT, unjudgedId, { view: "crawl_overview" });
     const named = (await overview(unjudgedId)).notMeasured;
     expect(named.length).toBeGreaterThan(0);
     expect(stream.notMeasured).toEqual(named);
-    const answer = await service.exportCrawl(unjudgedId, { format: "csv", view: "crawl_overview" });
+    const answer = await service.exportCrawl(LOCAL_TENANT, unjudgedId, { format: "csv", view: "crawl_overview" });
     expect(answer.notMeasured).toEqual(named);
   });
 });

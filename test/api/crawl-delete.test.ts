@@ -61,7 +61,7 @@ interface Res {
 }
 
 async function call(method: string, path: string): Promise<Res> {
-  const res = await fetch(`${base}${path}`, { method, headers: { authorization: `Bearer ${TOKEN}` } });
+  const res = await fetch(`${base}${path}`, { method, headers: { authorization: `Bearer ${TOKEN}`, "x-ariadne-tenant": "local" } });
   const text = await res.text();
   return { status: res.status, body: text === "" ? {} : (JSON.parse(text) as Record<string, unknown>) };
 }
@@ -70,7 +70,7 @@ async function post(path: string, body?: unknown): Promise<Res> {
   const res = await fetch(`${base}${path}`, {
     method: "POST",
     headers: {
-      authorization: `Bearer ${TOKEN}`,
+      authorization: `Bearer ${TOKEN}`, "x-ariadne-tenant": "local",
       ...(body === undefined ? {} : { "content-type": "application/json" }),
     },
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
@@ -122,7 +122,7 @@ async function walk(dir: string): Promise<string[]> {
 }
 
 async function exportFilesOf(crawlId: string): Promise<string[]> {
-  return (await readdir(exportDir)).filter((n) => n.startsWith(`${slug(crawlId)}-`));
+  return (await readdir(join(exportDir, "local"))).filter((n) => n.startsWith(`${slug(crawlId)}-`));
 }
 
 async function settle(crawlId: string): Promise<void> {
@@ -149,8 +149,8 @@ async function fullCrawl(): Promise<string> {
   expect(exported.status).toBe(200);
   const rendered = await post(`/crawls/${id}/render`, { urls: [`${site}/a`] });
   expect(rendered.status).toBe(200);
-  await writeFile(join(exportDir, `${slug(id)}-pages.csv`), "url\n");
-  await writeFile(join(exportDir, `${slug(id)}-issues.jsonl.gz.tmp-1-abc`), "x");
+  await writeFile(join(exportDir, "local", `${slug(id)}-pages.csv`), "url\n");
+  await writeFile(join(exportDir, "local", `${slug(id)}-issues.jsonl.gz.tmp-1-abc`), "x");
   return id;
 }
 
@@ -240,7 +240,7 @@ beforeAll(async () => {
   api = createApiServer({ db, config });
   const bound = await api.listen(0);
   base = `http://127.0.0.1:${bound.port}`;
-  mcp = createMcpServer({ db, config });
+  mcp = createMcpServer({ db, config: { ...config, tenant: LOCAL_TENANT } });
   const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
   client = new Client({ name: "ariadne-test-delete", version: "0.0.1" });
   await mcp.connect(serverSide);
@@ -390,7 +390,7 @@ describe("crawl_delete refusals", () => {
     const holds = service as unknown as { judging: Set<string>; rendering: Set<string> };
     holds.judging.add(id);
     try {
-      const err = await refusal(service.deleteCrawl(id, id));
+      const err = await refusal(service.deleteCrawl(LOCAL_TENANT, id, id));
       expect(err.code).toBe("CONFLICT");
       expect(err.message).toContain("crawl_delete");
       expect(err.message).toContain("rules are running");
@@ -399,7 +399,7 @@ describe("crawl_delete refusals", () => {
     }
     holds.rendering.add(id);
     try {
-      const err = await refusal(service.deleteCrawl(id, id));
+      const err = await refusal(service.deleteCrawl(LOCAL_TENANT, id, id));
       expect(err.code).toBe("CONFLICT");
       expect(err.message).toContain("a render pass is running");
     } finally {
@@ -427,13 +427,13 @@ describe("crawl_delete file failures", () => {
     await writeFile(stuck, "url\n");
     // A directory that cannot be written to refuses the unlink of what is in it.
     const locked = await mkdtemp(join(tmpdir(), "ariadne-delete-locked-"));
-    await mkdir(locked, { recursive: true });
+    await mkdir(join(locked, "local"), { recursive: true });
     const lockedService = new ApiService(db, { allowedDomains: [], exportDir: locked, renderDir, log: () => {} });
-    const lockedFile = join(locked, `${slug(id)}-issues.jsonl.gz`);
+    const lockedFile = join(locked, "local", `${slug(id)}-issues.jsonl.gz`);
     await writeFile(lockedFile, "x");
-    await chmod(locked, 0o555);
+    await chmod(join(locked, "local"), 0o555);
     try {
-      const error = await lockedService.deleteCrawl(id, id).then(
+      const error = await lockedService.deleteCrawl(LOCAL_TENANT, id, id).then(
         () => null,
         (e: unknown) => e,
       );
@@ -444,7 +444,7 @@ describe("crawl_delete file failures", () => {
       expect(message).toContain(lockedFile);
       expect(message).not.toContain(stuck);
     } finally {
-      await chmod(locked, 0o755);
+      await chmod(join(locked, "local"), 0o755);
       await rm(locked, { recursive: true, force: true });
       await rm(stuck, { force: true });
     }
@@ -466,7 +466,7 @@ describe("crawl_delete's file step: unreadable directories and containment (27b 
     await chmod(join(renderRoot, "nested"), 0o000);
     await chmod(exports, 0o000);
     try {
-      const error = await deleteCrawlFiles(id, slug(id), renders, exports).then(
+      const error = await deleteCrawlFiles(id, slug(id), renders, exports, LOCAL_TENANT).then(
         () => null,
         (e: unknown) => e,
       );
@@ -493,7 +493,7 @@ describe("crawl_delete's file step: unreadable directories and containment (27b 
     await writeFile(join(outside, "keep.txt"), "x");
     try {
       for (const id of ["../outside", "..", ""]) {
-        const error = await deleteCrawlFiles(id, "x", renders, join(root, "exports")).then(
+        const error = await deleteCrawlFiles(id, "x", renders, join(root, "exports"), LOCAL_TENANT).then(
           () => null,
           (e: unknown) => e,
         );

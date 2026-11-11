@@ -92,7 +92,7 @@ interface Res {
 }
 
 async function call(method: string, path: string, body?: unknown): Promise<Res> {
-  const headers: Record<string, string> = { authorization: `Bearer ${TOKEN}` };
+  const headers: Record<string, string> = { authorization: `Bearer ${TOKEN}`, "x-ariadne-tenant": "local" };
   if (body !== undefined) headers["content-type"] = "application/json";
   const res = await fetch(`${base}${path}`, {
     method,
@@ -200,7 +200,7 @@ beforeAll(async () => {
   });
   base = `http://127.0.0.1:${(await api.listen(0)).port}`;
 
-  mcp = createMcpServer({ db, config: { allowedDomains: [], exportDir, log: () => {} } });
+  mcp = createMcpServer({ db, config: { tenant: LOCAL_TENANT, allowedDomains: [], exportDir, log: () => {} } });
   const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
   client = new Client({ name: "ariadne-test-judgement-config", version: "0.0.1" });
   await mcp.connect(serverSide);

@@ -81,7 +81,7 @@ const brokenId = `crawl_no_key_echo_broken_${randomUUID()}`;
 
 /** The whole answer as text: status line plus the body, exactly as sent. */
 async function http(method: string, path: string, body?: unknown): Promise<{ status: number; text: string }> {
-  const headers: Record<string, string> = { authorization: `Bearer ${TOKEN}` };
+  const headers: Record<string, string> = { authorization: `Bearer ${TOKEN}`, "x-ariadne-tenant": "local" };
   if (body !== undefined) headers["content-type"] = "application/json";
   const res = await fetch(`${base}${path}`, {
     method,
@@ -189,7 +189,7 @@ beforeAll(async () => {
   };
   api = createApiServer({ db, config: { ...config, token: TOKEN } });
   base = `http://127.0.0.1:${(await api.listen(0)).port}`;
-  mcp = createMcpServer({ db, config });
+  mcp = createMcpServer({ db, config: { ...config, tenant: LOCAL_TENANT } });
   const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
   client = new Client({ name: "ariadne-test-no-key-echo", version: "0.0.1" });
   await mcp.connect(serverSide);

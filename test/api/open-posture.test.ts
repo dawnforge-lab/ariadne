@@ -72,7 +72,7 @@ async function call(
   path: string,
   body?: unknown,
 ): Promise<Res> {
-  const headers: Record<string, string> = { authorization: `Bearer ${TOKEN}` };
+  const headers: Record<string, string> = { authorization: `Bearer ${TOKEN}`, "x-ariadne-tenant": "local" };
   let payload: string | undefined;
   if (body !== undefined) {
     payload = JSON.stringify(body);

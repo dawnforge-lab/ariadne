@@ -66,6 +66,7 @@ import { readFileSync } from "node:fs";
 import type { Db } from "../db/client.js";
 import { createApiServer, type ApiServer } from "../api/http.js";
 import type { ServiceConfig } from "../api/config.js";
+import { LOCAL_TENANT } from "../api/tenant.js";
 
 /**
  * The page, read once at import.
@@ -252,7 +253,13 @@ export function createDemoServer(opts: CreateDemoServerOpts): DemoServer {
         return;
       }
       const path = rest === "" || rest.startsWith("?") ? `/${rest}` : rest;
-      const headers: Record<string, string> = { authorization: `Bearer ${token}` };
+      // The demo is one local operator: it signs as the `local` tenant, as it
+      // signs with its own token. Named here, by the client — the API itself
+      // has no default tenant (Phase 28a).
+      const headers: Record<string, string> = {
+        authorization: `Bearer ${token}`,
+        "x-ariadne-tenant": LOCAL_TENANT,
+      };
       const contentType = req.headers["content-type"];
       if (contentType !== undefined) headers["content-type"] = contentType;
       const upstream = httpRequest(

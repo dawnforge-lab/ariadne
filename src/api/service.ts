@@ -224,7 +224,7 @@ import {
   type ExportFormat,
 } from "./csv.js";
 import { ServiceError, clip, unknownKeysMessage } from "./errors.js";
-import { LOCAL_TENANT } from "./tenant.js";
+import { tenantExportDir, type TenantId } from "./tenant.js";
 import {
   buildCrawlOverview,
   buildIssuesOverview,
@@ -2872,7 +2872,7 @@ export class ApiService {
    * Credential values go to `this.credentials` and nowhere else; the row
    * carries their shape (27c).
    */
-  async startCrawl(raw: unknown): Promise<CrawlAccepted> {
+  async startCrawl(tenant: TenantId, raw: unknown): Promise<CrawlAccepted> {
     if (this.closed) {
       throw new ServiceError("CONFLICT", "the server is shutting down and is not accepting crawls");
     }
@@ -2889,8 +2889,7 @@ export class ApiService {
     await this.db.transaction(async (tx) => {
       await tx.insert(crawls).values({
         id: crawlId,
-        // Task 2: replaced by the caller's tenant.
-        tenantId: LOCAL_TENANT,
+        tenantId: tenant,
         siteUrl: config.siteUrl,
         config,
         // Null when the request named no judgement — "no overrides", the state
@@ -2988,11 +2987,13 @@ export class ApiService {
    * host is another tenant's crawl list arriving as an answer.
    */
   async listCrawls(
+    tenant: TenantId,
     opts: { siteUrl?: string; limit?: number; cursor?: string } = {},
   ): Promise<Page<CrawlListItem>> {
     const limit = parseLimit(opts.limit);
     const cursor = opts.cursor === undefined ? null : decodeCrawlCursor(opts.cursor);
-    const where: SQL[] = [];
+    // The caller's own crawls and nobody else's: the first predicate, always.
+    const where: SQL[] = [eq(crawls.tenantId, tenant)];
     if (opts.siteUrl !== undefined) {
       where.push(sql`${CRAWL_HOSTNAME} = any(${sql.param(siteFamily(opts.siteUrl))}::text[])`);
     }
@@ -3022,7 +3023,7 @@ export class ApiService {
         renderPassCount: crawls.renderPassCount,
       })
       .from(crawls)
-      .where(where.length === 0 ? undefined : sql.join(where, sql` and `))
+      .where(sql.join(where, sql` and `))
       .orderBy(desc(crawls.startedAt), desc(crawls.id))
       .limit(limit + 1);
 
@@ -3080,7 +3081,8 @@ export class ApiService {
    * frontier counts, the lease count and the blocked-page count are each read
    * as one number, and none of them is interpreted through another.
    */
-  async getCrawl(crawlId: string): Promise<CrawlDetail> {
+  async getCrawl(tenant: TenantId, crawlId: string): Promise<CrawlDetail> {
+    await this.assertCrawl(tenant, crawlId);
     return await this.crawlDetailOn(this.db, crawlId);
   }
 
@@ -3421,8 +3423,8 @@ export class ApiService {
    * and "we have no record" must not be served as "the site has no robots.txt",
    * which is a fact with the opposite meaning.
    */
-  async getRobots(crawlId: string): Promise<RobotsEvidence> {
-    const row = await this.crawlRow(crawlId);
+  async getRobots(tenant: TenantId, crawlId: string): Promise<RobotsEvidence> {
+    const row = await this.crawlRow(tenant, crawlId);
     const robots = this.parseRobots(row.discovery, crawlId);
 
     let robotsUrl: string;
@@ -3489,8 +3491,8 @@ export class ApiService {
    * process's queue — which is why the row it closes is the one whose status it
    * read, and the update is conditioned on that status still being there.
    */
-  async markCrawlFailed(crawlId: string): Promise<CrawlDetail> {
-    const row = await this.crawlRow(crawlId);
+  async markCrawlFailed(tenant: TenantId, crawlId: string): Promise<CrawlDetail> {
+    const row = await this.crawlRow(tenant, crawlId);
     if (row.status !== "running" && row.status !== "queued") {
       throw new ServiceError(
         "CONFLICT",
@@ -3535,7 +3537,7 @@ export class ApiService {
       // was closed by its own worker) between the guard and here is left alone
       // rather than overwritten. `getCrawl` below reports what actually stands.
       .where(and(eq(crawls.id, crawlId), eq(crawls.status, row.status)));
-    return this.getCrawl(crawlId);
+    return this.getCrawl(tenant, crawlId);
   }
 
   /**
@@ -3564,8 +3566,8 @@ export class ApiService {
    * that drains its frontier before its next poll closes `finished` and clears
    * it. `crawl_status` is where the outcome is read.
    */
-  async pauseCrawl(crawlId: string): Promise<CrawlControlOut> {
-    const row = await this.crawlRow(crawlId);
+  async pauseCrawl(tenant: TenantId, crawlId: string): Promise<CrawlControlOut> {
+    const row = await this.crawlRow(tenant, crawlId);
     const pending = readControlRequest(row.controlRequest, crawlId);
     switch (row.status) {
       case "queued": {
@@ -3647,8 +3649,8 @@ export class ApiService {
    * (`refuseWhileBusy`): neither can be interrupted, and a cancel would change
    * the crawl under a pass that has already read it.
    */
-  async cancelCrawl(crawlId: string): Promise<CrawlControlOut> {
-    const row = await this.crawlRow(crawlId);
+  async cancelCrawl(tenant: TenantId, crawlId: string): Promise<CrawlControlOut> {
+    const row = await this.crawlRow(tenant, crawlId);
     const pending = readControlRequest(row.controlRequest, crawlId);
     if (row.status !== "queued" && row.status !== "running" && row.status !== "paused") {
       throw settledRefusal(crawlId, row.status, "cancelled");
@@ -3706,11 +3708,15 @@ export class ApiService {
    * The files go after the commit; a file that cannot be removed throws with
    * every path left on disk (`deleteCrawlFiles`), the rows already being gone.
    */
-  async deleteCrawl(crawlId: string, confirm: string | undefined): Promise<CrawlDeleted> {
+  async deleteCrawl(
+    tenant: TenantId,
+    crawlId: string,
+    confirm: string | undefined,
+  ): Promise<CrawlDeleted> {
     if (confirm !== crawlId) {
       throw new ServiceError("VALIDATION", "confirm must repeat the crawl id");
     }
-    const row = await this.crawlRow(crawlId);
+    const row = await this.crawlRow(tenant, crawlId);
     refuseDeleteWhile(crawlId, row.status, readControlRequest(row.controlRequest, crawlId));
     this.refuseWhileBusy(crawlId, "crawl_delete");
     const live = await this.liveLeaseCount(crawlId);
@@ -3726,7 +3732,7 @@ export class ApiService {
       const locked = await tx
         .select({ status: crawls.status, controlRequest: crawls.controlRequest })
         .from(crawls)
-        .where(eq(crawls.id, crawlId))
+        .where(and(eq(crawls.id, crawlId), eq(crawls.tenantId, tenant)))
         .limit(1)
         .for("update");
       const current = locked[0];
@@ -3739,7 +3745,7 @@ export class ApiService {
     // The rows are gone, so are the credentials (Deviation 9).
     this.credentials.delete(crawlId);
 
-    const files = await deleteCrawlFiles(crawlId, slug(crawlId), this.renderDir, this.exportDir);
+    const files = await deleteCrawlFiles(crawlId, slug(crawlId), this.renderDir, this.exportDir, tenant);
     return { crawlId, rows, files };
   }
 
@@ -3894,7 +3900,11 @@ export class ApiService {
    * server cannot tell the two apart from outside. Expired leases come back on
    * their own through `leaseBatch`; live ones stay with whoever holds them.
    */
-  async resumeCrawl(crawlId: string, input: CrawlCredentials = {}): Promise<CrawlAccepted> {
+  async resumeCrawl(
+    tenant: TenantId,
+    crawlId: string,
+    input: CrawlCredentials = {},
+  ): Promise<CrawlAccepted> {
     if (this.closed) {
       throw new ServiceError(
         "CONFLICT",
@@ -3904,7 +3914,7 @@ export class ApiService {
     // A malformed request is refused as one, before any fact about the crawl.
     const sent = credentialsInputOf(input);
 
-    const row = await this.crawlRow(crawlId);
+    const row = await this.crawlRow(tenant, crawlId);
 
     // Before the policy checks: a cancelled crawl is refused whatever its host,
     // and the answer should say the true reason.
@@ -4270,11 +4280,18 @@ export class ApiService {
    * request is refused as a malformed request; whether the crawl is live is a
    * fact about the world and is the driver's to state.
    */
-  async renderCrawl(crawlId: string, input: RenderCrawlInput = {}): Promise<RenderSummaryOut> {
+  async renderCrawl(
+    tenant: TenantId,
+    crawlId: string,
+    input: RenderCrawlInput = {},
+  ): Promise<RenderSummaryOut> {
     // The credentials sent, validated before anything is claimed: a malformed
     // request is refused as one (names only in the message, never a value).
     const { urls: _urls, ...credentialInput } = input;
     const sent = credentialsInputOf(credentialInput);
+    // Ownership BEFORE the busy check below: "a render pass is running for
+    // crawl X" is a fact about X, and another tenant's X answers as missing.
+    await this.assertCrawl(tenant, crawlId);
     // Check and claim in ONE synchronous step, before the first `await`, as
     // `runRulesForCrawl` claims `judging` (see there for the window a claim
     // taken after the reads left open): while the call runs, `refuseWhileBusy`
@@ -4292,7 +4309,7 @@ export class ApiService {
     this.rendering.add(crawlId);
     let summary: RenderPassSummary;
     try {
-      const row = await this.crawlRow(crawlId);
+      const row = await this.crawlRow(tenant, crawlId);
 
       let config: CrawlConfig;
       try {
@@ -4434,7 +4451,11 @@ export class ApiService {
    * "another run is producing it, ask again" is one an agent can act on, where
    * a silent block is a request that appears to hang.
    */
-  async runRulesForCrawl(crawlId: string): Promise<RunSummary> {
+  async runRulesForCrawl(tenant: TenantId, crawlId: string): Promise<RunSummary> {
+    // Ownership BEFORE the claim: "already being judged" is a fact about the
+    // crawl, and another tenant's crawl answers as missing. The claim below
+    // still precedes the status read, which is the window it closes.
+    await this.assertCrawl(tenant, crawlId);
     // Check and claim in ONE synchronous step, BEFORE the first `await`. Two
     // callers cannot both see an unheld crawl, and — the reason the claim
     // comes before the status read rather than after it — no command that
@@ -4453,7 +4474,7 @@ export class ApiService {
     }
     this.judging.add(crawlId);
     try {
-      const row = await this.crawlRow(crawlId);
+      const row = await this.crawlRow(tenant, crawlId);
       if (row.status === "queued" || row.status === "running") {
         throw new ServiceError(
           "CONFLICT",
@@ -4527,7 +4548,8 @@ export class ApiService {
    * stored override of a rule this ruleset lacks is a 409 naming it, which
    * `setCrawlConfig` is the way out of.
    */
-  async getCrawlConfig(crawlId: string): Promise<CrawlConfigOut> {
+  async getCrawlConfig(tenant: TenantId, crawlId: string): Promise<CrawlConfigOut> {
+    await this.assertCrawl(tenant, crawlId);
     // ONE read of the row, `loadJudgementView`'s columns plus `scope_changed_at`,
     // so the settings, the judgement and the stamp describe one instant.
     const rows = await this.db
@@ -4540,7 +4562,7 @@ export class ApiService {
         scopeChangedAt: crawls.scopeChangedAt,
       })
       .from(crawls)
-      .where(eq(crawls.id, crawlId))
+      .where(and(eq(crawls.id, crawlId), eq(crawls.tenantId, tenant)))
       .limit(1);
     const row = rows[0];
     if (row === undefined) throw new ServiceError("NOT_FOUND", `no such crawl '${clip(crawlId)}'`);
@@ -4628,7 +4650,7 @@ export class ApiService {
    * crawl between that check and this write reads either block, and stamps the
    * one it read, so `judgementStale` reports the outcome truthfully either way.
    */
-  async setCrawlConfig(crawlId: string, patch: unknown): Promise<CrawlConfigOut> {
+  async setCrawlConfig(tenant: TenantId, crawlId: string, patch: unknown): Promise<CrawlConfigOut> {
     if (!isPlainObject(patch)) {
       throw new ServiceError("VALIDATION", "request body must be a JSON object");
     }
@@ -4655,6 +4677,10 @@ export class ApiService {
       );
     }
     const crawlSet = crawlPatch === undefined ? null : this.parseCrawlPatch(crawlPatch);
+    // Ownership BEFORE the busy check: a refusal naming what this server is
+    // doing to the crawl is a fact about it, and another tenant's crawl
+    // answers as missing.
+    await this.assertCrawl(tenant, crawlId);
     this.refuseWhileConfigBusy(crawlId, crawlSet !== null);
 
     const { findingCap: capPatch, ...blockPatch } = judgementPatch ?? {};
@@ -4678,7 +4704,7 @@ export class ApiService {
           scopeChangedAt: crawls.scopeChangedAt,
         })
         .from(crawls)
-        .where(eq(crawls.id, crawlId))
+        .where(and(eq(crawls.id, crawlId), eq(crawls.tenantId, tenant)))
         .limit(1)
         .for("update");
       const row = rows[0];
@@ -4893,7 +4919,7 @@ export class ApiService {
       throw error;
     }
     staged.settle?.(true);
-    return await this.getCrawlConfig(crawlId);
+    return await this.getCrawlConfig(tenant, crawlId);
   }
 
   /**
@@ -5141,7 +5167,10 @@ export class ApiService {
    * same place twice — and by the DECLARED table order then id for the rules
    * that measure, which form one block at the end (see `catalogOrder`).
    */
-  async rulesCatalog(opts: { crawlId?: string } = {}): Promise<RulesCatalog> {
+  async rulesCatalog(tenant: TenantId, opts: { crawlId?: string } = {}): Promise<RulesCatalog> {
+    // Scoped only when a crawl is named: the bare catalog is the registry's,
+    // the same for every tenant.
+    if (opts.crawlId !== undefined) await this.assertCrawl(tenant, opts.crawlId);
     const ordered = [...this.registry.all()].sort(catalogOrder);
     // With a crawl named, its judgement: the copy is rendered with the
     // thresholds its findings were judged with, and type, priority and
@@ -5325,6 +5354,7 @@ export class ApiService {
    * front of you.
    */
   async listIssues(
+    tenant: TenantId,
     crawlId: string,
     opts: IssueQuery = {},
   ): Promise<
@@ -5334,7 +5364,7 @@ export class ApiService {
       judgementStale: JudgementStale;
     }
   > {
-    // The crawl's judgement, which also answers the 404 for a crawl nothing knows.
+    await this.assertCrawl(tenant, crawlId);
     const view = await this.judgementView(crawlId);
     const limit = parseLimit(opts.limit);
     const cursor = opts.cursor === undefined ? null : decodeIssueCursor(opts.cursor);
@@ -5431,9 +5461,11 @@ export class ApiService {
    * both this one answer.
    */
   async issuesOverview(
+    tenant: TenantId,
     crawlId: string,
     opts: { includeZero?: boolean } = {},
   ): Promise<IssuesOverview> {
+    await this.assertCrawl(tenant, crawlId);
     return (await this.issuesOverviewRead(crawlId, opts.includeZero === true)).overview;
   }
 
@@ -5462,7 +5494,8 @@ export class ApiService {
    * it reconciles with `crawl_status` by construction; an unknown crawl is the
    * `NOT_FOUND` `getCrawl` answers.
    */
-  async crawlOverview(crawlId: string): Promise<CrawlOverview> {
+  async crawlOverview(tenant: TenantId, crawlId: string): Promise<CrawlOverview> {
+    await this.assertCrawl(tenant, crawlId);
     return (await this.crawlOverviewRead(crawlId)).overview;
   }
 
@@ -5521,10 +5554,12 @@ export class ApiService {
    * URL, and no URL is empty (the `sitemap_urls.url_normalised` precedent).
    */
   async listIssueUrls(
+    tenant: TenantId,
     crawlId: string,
     ruleId: string,
     opts: { limit?: number; cursor?: string } = {},
   ): Promise<IssueUrlPage> {
+    await this.assertCrawl(tenant, crawlId);
     const view = await this.judgementView(crawlId);
     const rule = this.findingRule("ruleId", ruleId);
     // A disabled rule is refused rather than answered: its findings are stored,
@@ -5653,10 +5688,12 @@ export class ApiService {
    * has to expect destinations the findings page never showed it.
    */
   async listIssueInlinks(
+    tenant: TenantId,
     crawlId: string,
     ruleId: string,
     opts: { limit?: number; cursor?: string } = {},
   ): Promise<IssueInlinkPage> {
+    await this.assertCrawl(tenant, crawlId);
     const view = await this.judgementView(crawlId);
     this.findingRule("ruleId", ruleId);
     // Refused for a disabled rule, as `listIssueUrls` is, although this report
@@ -5782,7 +5819,10 @@ export class ApiService {
    *
    * ## The refusals, in the order they are checked
    *
-   *  1. **Either crawl unknown** — 404 naming it.
+   *  1. **Either crawl unknown, or another tenant's** — 404 naming it, one
+   *     answer for both. The pair is read WITH the tenant, so a foreign crawl
+   *     is missing here and never reaches the site check in (3), whose
+   *     refusal would name its host.
    *  2. **The same crawl twice** — a diff of a crawl against itself is every
    *     rule `persisting` and every delta zero, which a dashboard would paint as
    *     "nothing changed on this site". It is a caller mistake with a
@@ -5813,10 +5853,14 @@ export class ApiService {
    * "judged, and every finding resolved". This is `crawlRowWithCounts`' argument
    * where the two facts cannot be put in one statement.
    */
-  async compareCrawls(baseCrawlId: string, headCrawlId: string): Promise<CrawlComparison> {
+  async compareCrawls(
+    tenant: TenantId,
+    baseCrawlId: string,
+    headCrawlId: string,
+  ): Promise<CrawlComparison> {
     return await this.db.transaction(
       async (tx) => {
-        const { base, head } = await comparePair(tx, baseCrawlId, headCrawlId);
+        const { base, head } = await comparePair(tx, tenant, baseCrawlId, headCrawlId);
         const rows = await compareRuleRows(tx, baseCrawlId, headCrawlId);
 
         const caveats: CompareCaveat[] = [];
@@ -5954,6 +5998,7 @@ export class ApiService {
    * finding, which compares by rule presence.
    */
   async listCompareUrls(
+    tenant: TenantId,
     baseCrawlId: string,
     headCrawlId: string,
     ruleId: string,
@@ -5967,7 +6012,7 @@ export class ApiService {
 
     return await this.db.transaction(
       async (tx) => {
-        await comparePair(tx, baseCrawlId, headCrawlId);
+        await comparePair(tx, tenant, baseCrawlId, headCrawlId);
         // Which side leads the set operation IS the definition of the set:
         // `new` and `persisting` are questions about the head's URLs, `resolved`
         // is a question about the base's. The keyset predicate rides the leading
@@ -6006,6 +6051,7 @@ export class ApiService {
    * about what was counted between the rule and the reader.
    */
   async listMetrics(
+    tenant: TenantId,
     crawlId: string,
     opts: MetricQuery = {},
   ): Promise<Page<MetricRow> & { notMeasured: NotMeasured; judgementStale: JudgementStale }> {
@@ -6016,6 +6062,7 @@ export class ApiService {
     // metric a list crawl's run did not measure has no rows, and
     // `notMeasured` says so rather than letting the empty page read "clean"
     // (27c final wave M16).
+    await this.assertCrawl(tenant, crawlId);
     const view = await this.judgementView(crawlId);
     const limit = parseLimit(opts.limit);
     const cursor = opts.cursor === undefined ? null : decodeCursor(opts.cursor, 3);
@@ -6127,7 +6174,13 @@ export class ApiService {
    *    a measurement, and the note is what keeps it from reading as the refusals
    *    above.
    */
-  async metricTable(crawlId: string, metricId: string): Promise<MetricTableOut> {
+  async metricTable(tenant: TenantId, crawlId: string, metricId: string): Promise<MetricTableOut> {
+    await this.assertCrawl(tenant, crawlId);
+    return await this.metricTableRead(crawlId, metricId);
+  }
+
+  /** `metricTable` over a crawl its caller has already resolved for the tenant. */
+  private async metricTableRead(crawlId: string, metricId: string): Promise<MetricTableOut> {
     // `judgementStale` rides the table for `listMetrics`' reason.
     const { judgementStale, notMeasured } = await this.judgementView(crawlId);
     const rule = this.rules.get(metricId);
@@ -6204,8 +6257,8 @@ export class ApiService {
    * Ordered by URL, which is a total order within a crawl (`pages_crawl_url` is
    * unique), so the cursor is one column and exact.
    */
-  async listPages(crawlId: string, opts: PageQuery = {}): Promise<Page<PageRow>> {
-    await this.assertCrawl(crawlId);
+  async listPages(tenant: TenantId, crawlId: string, opts: PageQuery = {}): Promise<Page<PageRow>> {
+    await this.assertCrawl(tenant, crawlId);
     const limit = parseLimit(opts.limit);
     const cursor = opts.cursor === undefined ? null : decodeCursor(opts.cursor, 1);
 
@@ -6304,10 +6357,11 @@ export class ApiService {
    * a short crawl. The error surfaces either way.
    */
   async exportCrawl(
+    tenant: TenantId,
     crawlId: string,
     opts: { dataset?: string; format?: string; view?: string; ruleId?: string } = {},
   ): Promise<ExportResult | CsvExportResult> {
-    await this.assertCrawl(crawlId);
+    await this.assertCrawl(tenant, crawlId);
     const request = parseExportRequest(opts, (field, id) => this.findingRule(field, id));
 
     if (request.format === "csv") {
@@ -6318,6 +6372,7 @@ export class ApiService {
         request.metricId,
       );
       const { written, bytes, path } = await this.writeExport(
+        tenant,
         stream.filename,
         new PassThrough(),
         stream.records(),
@@ -6343,6 +6398,7 @@ export class ApiService {
     // what was left out. The other two datasets are not findings.
     const view = dataset === "issues" ? await this.judgementView(crawlId) : null;
     const { written, bytes, path } = await this.writeExport(
+      tenant,
       `${slug(crawlId)}-${dataset}.jsonl.gz`,
       createGzip(),
       this.jsonlRecords(crawlId, dataset, view),
@@ -6379,17 +6435,22 @@ export class ApiService {
    * failure it defends against is one failure.
    */
   private async writeExport(
+    tenant: TenantId,
     filename: string,
     sink: Duplex,
     records: AsyncIterable<string>,
   ): Promise<{ written: number; bytes: number; path: string }> {
-    await mkdir(this.exportDir, { recursive: true });
+    // Each tenant's exports live in a directory of their own, `<exportDir>/<tenant>/`.
+    // The tenant is `parseTenant` output (no separator, never `.` or `..`), and
+    // the containment check below holds the file to that directory regardless.
+    const tenantDir = tenantExportDir(this.exportDir, tenant);
+    await mkdir(tenantDir, { recursive: true });
     // The crawl id reaches this from the request path, so it is slugged before
-    // it becomes a filename and the result is checked to be inside the export
-    // directory. A caller names a crawl, never a path.
-    const file = joinPath(this.exportDir, filename);
-    if (!resolvePath(file).startsWith(this.exportDir + pathSep)) {
-      throw new Error(`export: refusing to write outside the export directory (${file})`);
+    // it becomes a filename and the result is checked to be inside the tenant's
+    // export directory. A caller names a crawl, never a path.
+    const file = joinPath(tenantDir, filename);
+    if (!resolvePath(file).startsWith(tenantDir + pathSep)) {
+      throw new Error(`export: refusing to write outside the tenant's export directory (${file})`);
     }
     const temp = `${file}.tmp-${process.pid}-${randomUUID().slice(0, 8)}`;
 
@@ -6451,6 +6512,7 @@ export class ApiService {
    * findings for a rule this ruleset has retired (see `assertViewAnswerable`).
    */
   async prepareCsvExport(
+    tenant: TenantId,
     crawlId: string,
     opts: {
       dataset?: string;
@@ -6460,7 +6522,7 @@ export class ApiService {
       metricId?: string;
     } = {},
   ): Promise<CsvStream> {
-    await this.assertCrawl(crawlId);
+    await this.assertCrawl(tenant, crawlId);
     const request = parseExportRequest(
       { ...opts, format: opts.format ?? "csv" },
       (field, id) => this.findingRule(field, id),
@@ -6675,7 +6737,7 @@ export class ApiService {
    * a comment line in a CSV is a row to every parser that opens it.
    */
   private async metricTableStream(crawlId: string, metricId: string): Promise<CsvStream> {
-    const table = await this.metricTable(crawlId, metricId);
+    const table = await this.metricTableRead(crawlId, metricId);
     return {
       view: "metric_table",
       ruleId: null,
@@ -7552,12 +7614,17 @@ export class ApiService {
     return untyped ? sql`${column} is null` : sql`${column} = ${pageType}`;
   }
 
-  /** A crawl id that exists, or a 404 — every query route's first question. */
-  private async assertCrawl(crawlId: string): Promise<void> {
+  /**
+   * A crawl id that exists AND belongs to `tenant`, or a 404 — every crawl
+   * route's first question. The two misses are one answer, from one statement:
+   * another tenant's crawl is a crawl that does not exist (obligation 6), with
+   * the same code and the same sentence.
+   */
+  private async assertCrawl(tenant: TenantId, crawlId: string): Promise<void> {
     const rows = await this.db
       .select({ id: crawls.id })
       .from(crawls)
-      .where(eq(crawls.id, crawlId))
+      .where(and(eq(crawls.id, crawlId), eq(crawls.tenantId, tenant)))
       .limit(1);
     if (rows.length === 0) {
       throw new ServiceError("NOT_FOUND", `no such crawl '${clip(crawlId)}'`);
@@ -7570,8 +7637,13 @@ export class ApiService {
     if (result.rows.length === 0) throw new ServiceError("VALIDATION", message);
   }
 
-  private async crawlRow(crawlId: string): Promise<typeof crawls.$inferSelect> {
-    const rows = await this.db.select().from(crawls).where(eq(crawls.id, crawlId)).limit(1);
+  /** The crawl row, matched on id AND tenant; a 404 for either miss, as `assertCrawl`. */
+  private async crawlRow(tenant: TenantId, crawlId: string): Promise<typeof crawls.$inferSelect> {
+    const rows = await this.db
+      .select()
+      .from(crawls)
+      .where(and(eq(crawls.id, crawlId), eq(crawls.tenantId, tenant)))
+      .limit(1);
     const row = rows[0];
     if (row === undefined) {
       throw new ServiceError("NOT_FOUND", `no such crawl '${clip(crawlId)}'`);
@@ -8002,6 +8074,7 @@ function sameSet(a: readonly string[], b: readonly string[]): boolean {
  */
 async function comparePair(
   reader: Reader,
+  tenant: TenantId,
   baseCrawlId: string,
   headCrawlId: string,
 ): Promise<{ base: Omit<CompareSide, "rulesetVersions" | "findingsCount">; head: Omit<CompareSide, "rulesetVersions" | "findingsCount"> }> {
@@ -8032,7 +8105,8 @@ async function comparePair(
            to_char(rules_run_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') as rules_run_at,
            config_jsonb
       from crawls
-     where id in (${baseCrawlId}, ${headCrawlId})`);
+     where id in (${baseCrawlId}, ${headCrawlId})
+       and tenant_id = ${tenant}`);
   const rows = new Map(result.rows.map((row) => [row.id, row]));
   const missing = [baseCrawlId, headCrawlId].filter((id) => !rows.has(id));
   if (missing.length > 0) {

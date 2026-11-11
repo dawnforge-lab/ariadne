@@ -1228,18 +1228,18 @@ each does are in the Phase 27c summary at the top of this document; this is what
   holding `:`, more than 20 headers or 50 cookies (400). **No refusal quotes a value**: the
   message names the field and the header or cookie name only — and a name that is not
   a token, or an unknown key, only by its position, never quoted (pinned:
-  `test/api/scope-start.test.ts:539` "is never echoed: each refusal names the position,
+  `test/api/scope-start.test.ts:540` "is never echoed: each refusal names the position,
   on HTTP and MCP, start, validate, set and resume").
 
 A list crawl's answer adds `listUrlCount` (distinct URLs) and `listDuplicates` (how
 many were collapsed as another's spelling); a spider crawl's has neither. Pinned:
-`test/api/scope-start.test.ts:279` "refuses an off-site URL, an excluded listed URL,
+`test/api/scope-start.test.ts:280` "refuses an off-site URL, an excluded listed URL,
 an excluded seed, a typo'd host and maxPages below the list",
-`test/api/scope-start.test.ts:375` "collapses two spellings of one URL, counts it, and
-stores the distinct URLs in order", `test/api/scope-start.test.ts:238` "413s a 1.5 MiB
+`test/api/scope-start.test.ts:376` "collapses two spellings of one URL, counts it, and
+stores the distinct URLs in order", `test/api/scope-start.test.ts:239` "413s a 1.5 MiB
 body to POST /crawls, and accepts 900 KiB carrying 10,000 URLs",
-`test/api/scope-start.test.ts:397` "refuses an invalid credential set with a body that
-quotes no secret, on both transports" and `test/api/scope-start.test.ts:431` "accepts
+`test/api/scope-start.test.ts:398` "refuses an invalid credential set with a body that
+quotes no secret, on both transports" and `test/api/scope-start.test.ts:432` "accepts
 a valid set and shows no value in crawl_status, effective, crawl_config_get, the row
 or the log". The crawl side: `test/crawl/list-mode.test.ts:180` "fetches every listed
 URL at depth 0 and follows redirects but no link", `test/crawl/scope-admission.test.ts:244`
@@ -1854,7 +1854,7 @@ the `issue_urls` CSV view) of one is refused 409 naming `crawl.list-mode`, and
 `metric_table` of a skipped metric says in its `note` that it was not measured (its
 JSON carries no `notMeasured`). The MCP answer of an `export_csv` over a findings view
 carries the same `{id, reason}` list. Before 27d every one of these was a bare list of ids.
-Pinned: `test/api/scope-start.test.ts:579` "issues_list and metrics_get name a
+Pinned: `test/api/scope-start.test.ts:580` "issues_list and metrics_get name a
 skipped rule in notMeasured, on HTTP and MCP, and never read it as clean".
 
 Pinned: `test/api/query.test.ts:1084` "groups by rule, orders by severity then

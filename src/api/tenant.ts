@@ -6,6 +6,8 @@
  * crawl insert unchecked; the only constructors are `parseTenant` and the
  * `LOCAL_TENANT` constant.
  */
+import { dirname, resolve as resolvePath } from "node:path";
+
 import { ServiceError } from "./errors.js";
 
 export type TenantId = string & { readonly __tenant: unique symbol };
@@ -33,3 +35,21 @@ export function parseTenant(raw: string | undefined): TenantId {
 
 /** The backfill value (migration 0037); used by scripts and tests. */
 export const LOCAL_TENANT: TenantId = parseTenant("local");
+
+/**
+ * Where a tenant's export files live: `<exportDir>/<tenant>/`, absolute. The
+ * writer (`ApiService.exportCrawl`) and the remover (`deleteCrawlFiles`) both
+ * ask here, so the two cannot disagree about where a tenant's files are.
+ *
+ * Throws if the directory would not be a direct child of `exportDir` — which a
+ * `parseTenant` value cannot produce (no separator; never `.` or `..`), and
+ * which a containment check that only looked at the file would not catch.
+ */
+export function tenantExportDir(exportDir: string, tenant: TenantId): string {
+  const base = resolvePath(exportDir);
+  const dir = resolvePath(base, tenant);
+  if (dirname(dir) !== base) {
+    throw new Error("export: a tenant's export directory must be a direct child of the export directory");
+  }
+  return dir;
+}
