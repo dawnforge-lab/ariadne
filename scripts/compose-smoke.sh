@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Boots the compose stack from throwaway secrets, checks it, tears it down.
 # Verifies: migrate exits 0; /readyz is 200 on the API and both workers; the
-# instances table holds 2 live worker rows (and an api row only once the API has run a job); after `compose stop worker` both worker
+# instances table holds 1 api + 2 worker live rows; after `compose stop worker` both worker
 # rows are no longer live and no crawl is `running`. Touches only the compose
 # project `ariadne-smoke` (its own network and volumes).
 set -euo pipefail
@@ -53,20 +53,13 @@ code="$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:${HOST_PORT}/he
 [ "$code" = 200 ] || fail "host /healthz: $code"
 
 roles="$(psql "select role||'='||count(*) from instances where stopped_at is null group by role order by role" | tr '\n' ' ')"
-# The API registers its own instance lazily, on the first render or rules job it
-# runs itself (ApiService.instanceId), so an idle API has no row: workers are
-# asserted, the api count is reported.
-case "$roles" in
-  "worker=2 "|"api=1 worker=2 ") ;;
-  *) fail "instances: '$roles'" ;;
-esac
+# api:serve registers its instance at boot, so exactly 1 api and 2 worker.
+[ "$roles" = "api=1 worker=2 " ] || fail "instances: '$roles'"
 echo "instances (live): $roles"
 
 dc stop worker >/dev/null 2>&1
 live="$(psql "select count(*) from instances where role='worker' and stopped_at is null and heartbeat_at > now() - interval '60 seconds'")"
 [ "$live" = 0 ] || fail "$live worker instance(s) still live after stop"
-stopped="$(psql "select count(*) from instances where role='worker' and stopped_at is not null")"
-[ "$stopped" = 2 ] || fail "expected 2 stopped worker rows, got $stopped"
 running="$(psql "select count(*) from crawls where status='running'")"
 [ "$running" = 0 ] || fail "$running crawl(s) running with no worker"
-echo "workers stopped: 2 rows not live, 0 running crawls"
+echo "workers stopped: no live worker instance, 0 running crawls"

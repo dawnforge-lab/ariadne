@@ -13,18 +13,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certifi
     && rm -rf /var/lib/apt/lists/*
 
 COPY package.json package-lock.json ./
-# Production dependencies only, then tsx at the version the lockfile pins: tsx is
-# a devDependency, but with no build step it IS the runtime. Everything else in
-# devDependencies (vitest, cheerio, drizzle-kit, typescript) stays out.
-# (npm will not install a package its own package.json lists under devDependencies
-# while dev is omitted, so tsx and its dependencies are installed in a scratch
-# directory and copied alongside; `cp -n` never overwrites a production package.)
+# Production dependencies only, exactly as package-lock.json pins them. tsx is a
+# runtime dependency: with no build step it is the loader every role runs under.
+# vitest, cheerio, drizzle-kit and typescript stay out.
 RUN npm ci --omit=dev \
-    && TSX_VERSION="$(node -p "require('./package-lock.json').packages['node_modules/tsx'].version")" \
-    && mkdir /tmp/tsx && cd /tmp/tsx && npm init -y >/dev/null && npm install --no-package-lock "tsx@${TSX_VERSION}" \
-    && cp -rn /tmp/tsx/node_modules/. /app/node_modules/ \
-    && rm -rf /tmp/tsx ~/.npm \
-    && cd /app && node --import tsx -e "console.log('tsx ok')"
+    && node --import tsx -e "console.log('tsx ok')"
 
 # Chromium at the locked Playwright version, plus the system libraries and
 # fonts-liberation (--with-deps, needs root, so it runs before USER). The

@@ -13,7 +13,7 @@ Any other command exits 64. There is no build step: the image runs the TypeScrip
 ## The image
 
 - `node:22-bookworm-slim`, runs as the non-root user `ariadne` (uid 10001).
-- Production dependencies only (`npm ci --omit=dev`) plus `tsx` at the version the lockfile pins. tsx is a devDependency but with no build step it is the runtime, so it is installed and copied in; vitest, cheerio, drizzle-kit and typescript are not in the image.
+- Production dependencies only (`npm ci --omit=dev`, everything pinned by the lockfile). `tsx` is a runtime dependency because with no build step it is the loader; vitest, cheerio, drizzle-kit and typescript are not in the image.
 - Chromium at the locked Playwright version, with its system libraries and `fonts-liberation` (`npx playwright install --with-deps chromium`), under `/ms-playwright`.
 - `HEALTHCHECK` curls `/healthz` on the worker port if `ARIADNE_WORKER_HTTP_PORT` is set, else the API port.
 - Build: `docker build --build-arg ARIADNE_GIT_SHA=$(git rev-parse HEAD) -t ariadne .` (size about 1.3 GB, mostly Chromium).
@@ -37,7 +37,7 @@ docker compose --env-file .env.compose up -d --build
 
 Services: `postgres` (16, own volume, **no host port**, reachable as `postgres:5432` inside the network), `migrate` (one-shot; `api` and `worker` wait for it to exit 0), `api` (published on `127.0.0.1:${ARIADNE_API_HOST_PORT:-18787}`), `worker` (2 replicas). Never commit `.env.compose` or any real key or token.
 
-`scripts/compose-smoke.sh` generates throwaway secrets, brings the stack up under the project name `ariadne-smoke`, checks that migrate exits 0, that `/readyz` is 200 on the API and both workers and that two worker instances are live, stops the workers and checks both rows are no longer live with no crawl `running`, then runs `docker compose down -v` (its own containers and volumes only). Note the API registers its `instances` row lazily, on the first render or rules job it runs itself, so an idle API has no row.
+`scripts/compose-smoke.sh` generates throwaway secrets, brings the stack up under the project name `ariadne-smoke`, checks that migrate exits 0, that `/readyz` is 200 on the API and both workers and that exactly 1 api and 2 worker instances are live, stops the workers and checks no worker instance is live and no crawl is `running`, then runs `docker compose down -v` (its own containers and volumes only). The API registers its `instances` row and starts heartbeating at boot, and marks it stopped on SIGTERM.
 
 ## Chromium sandbox
 

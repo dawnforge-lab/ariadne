@@ -55,6 +55,11 @@ const api = createApiServer({
   },
 });
 
+// Register this process's instance row and start its heartbeat NOW, not on the
+// first render or rules job it happens to run (28b R18: every process
+// heartbeats its instance row). A failed registration is a boot error.
+const instanceId = await api.service.instanceId();
+
 const reaper = new ReaperLoop(db, {
   vault: new CredentialVault(db, credentialKeys),
   retentionDays: credentialRetentionDays,
@@ -65,7 +70,7 @@ const reaper = new ReaperLoop(db, {
 reaper.start();
 
 const bound = await api.listen(config.port, process.env["ARIADNE_API_HOST"] ?? "127.0.0.1");
-console.error("ariadne api: crawls run on workers (npm run worker:serve); this process runs a reaper, not crawls");
+console.error(`ariadne api: instance ${instanceId}; crawls run on workers (npm run worker:serve); this process runs a reaper, not crawls`);
 console.error(
   `ariadne api listening on http://${bound.host}:${bound.port} — ` +
     `${config.allowedDomains.length} allowed domain(s)`,

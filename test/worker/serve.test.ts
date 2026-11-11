@@ -454,6 +454,30 @@ function workerEnv(): Record<string, string> {
   };
 }
 
+describe("api:serve boot", () => {
+  it("registers its `api` instance row at boot (before any render or rules job), and stops it on SIGTERM", async () => {
+    const proc = launch("src/api/serve.ts", {
+      DATABASE_URL: databaseUrl(),
+      ARIADNE_CREDENTIALS_KEY: TEST_CREDENTIAL_KEY_ENV,
+      ARIADNE_API_TOKEN: `api-token-${short()}-${short()}`,
+      ARIADNE_API_PORT: "0",
+      ARIADNE_ALLOWED_DOMAINS: "127.0.0.1",
+    });
+    const { stderr, exited } = track(proc);
+    const line = await until("the api's listening line", async () => stderr.join(""), (s) => /listening on/.test(s));
+    const instanceId = /instance_[0-9a-f-]+/.exec(line)?.[0];
+    expect(instanceId).toBeDefined();
+    createdInstances.push(instanceId as string);
+    const [row] = await db.select().from(instances).where(eq(instances.id, instanceId as string));
+    expect(row?.role).toBe("api");
+    expect(row?.stoppedAt).toBeNull();
+    proc.kill("SIGTERM");
+    expect(await exited).toBe(0);
+    const [after] = await db.select().from(instances).where(eq(instances.id, instanceId as string));
+    expect(after?.stoppedAt).not.toBeNull();
+  });
+});
+
 describe("worker:serve boot", () => {
   it.each(["ARIADNE_WORKER_HTTP_PORT", "ARIADNE_CREDENTIALS_KEY", "ARIADNE_ALLOWED_DOMAINS", "DATABASE_URL"])(
     "refuses to boot without %s, naming it",
