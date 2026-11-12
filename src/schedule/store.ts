@@ -35,8 +35,35 @@ export interface ScheduleCrawl {
   listed: string[] | null;
 }
 
-/** A `schedules` row, as drizzle reads it. */
+/** A `schedules` row, as drizzle reads it: every column, the full `config` with it. */
 export type ScheduleRow = typeof schedules.$inferSelect;
+
+/**
+ * A schedule as the surface reads it (final review M2): every column but
+ * `config`, and of `config` only its crawl config (`config->'config'`). The
+ * judgement and — for a list crawl — the listed URLs (up to a megabyte a row)
+ * stay in the database: `schedule_list` reads up to 200 rows a page, and
+ * nothing it answers needs them. Only a fire reads the full row (`ScheduleRow`,
+ * src/schedule/fire.ts).
+ */
+export type ScheduleView = Omit<ScheduleRow, "config"> & { crawlConfig: StoredConfig };
+
+/** The selection that reads a `ScheduleView`, for a select or a `returning`. */
+export const scheduleViewColumns = {
+  id: schedules.id,
+  tenantId: schedules.tenantId,
+  siteUrl: schedules.siteUrl,
+  crawlConfig: sql<StoredConfig>`${schedules.config}->'config'`,
+  render: schedules.render,
+  cron: schedules.cron,
+  timezone: schedules.timezone,
+  enabled: schedules.enabled,
+  nextRunAt: schedules.nextRunAt,
+  lastCrawlId: schedules.lastCrawlId,
+  credentialGeneration: schedules.credentialGeneration,
+  createdAt: schedules.createdAt,
+  updatedAt: schedules.updatedAt,
+};
 
 /** What `insertSchedule` writes; `created_at` and `updated_at` are the database's. */
 export interface NewSchedule {
@@ -69,7 +96,7 @@ export function newScheduleId(): string {
   return `sched_${randomUUID()}`;
 }
 
-export async function insertSchedule(tx: Writer, s: NewSchedule): Promise<ScheduleRow> {
+export async function insertSchedule(tx: Writer, s: NewSchedule): Promise<ScheduleView> {
   const [row] = await tx
     .insert(schedules)
     .values({
@@ -83,15 +110,15 @@ export async function insertSchedule(tx: Writer, s: NewSchedule): Promise<Schedu
       enabled: s.enabled,
       nextRunAt: s.nextRunAt,
     })
-    .returning();
+    .returning(scheduleViewColumns);
   if (row === undefined) throw new Error(`insertSchedule: the insert of ${s.id} returned no row`);
   return row;
 }
 
 /** The tenant's schedule `id`, or null when it is missing or another tenant's. */
-export async function getSchedule(db: Reader, tenant: TenantId, id: string): Promise<ScheduleRow | null> {
+export async function getSchedule(db: Reader, tenant: TenantId, id: string): Promise<ScheduleView | null> {
   const [row] = await db
-    .select()
+    .select(scheduleViewColumns)
     .from(schedules)
     .where(and(eq(schedules.id, id), eq(schedules.tenantId, tenant)));
   return row ?? null;
@@ -106,7 +133,7 @@ export async function listSchedules(
   db: Reader,
   tenant: TenantId,
   page: { limit?: number; cursor?: string },
-): Promise<Page<ScheduleRow>> {
+): Promise<Page<ScheduleView>> {
   const limit = parseLimit(page.limit);
   const after = page.cursor === undefined ? null : decodeScheduleCursor(page.cursor);
   const predicates: SQL[] = [eq(schedules.tenantId, tenant)];
@@ -117,7 +144,7 @@ export async function listSchedules(
   }
   const rows = await db
     .select({
-      row: schedules,
+      row: scheduleViewColumns,
       // THE CURSOR'S HALF OF THE SORT KEY, AND IT IS NOT `createdAt`: a JS
       // `Date` has milliseconds and the column has microseconds, so a cursor
       // built from the Date would skip or repeat rows created in the same
@@ -153,7 +180,7 @@ export async function updateSchedule(
   tenant: TenantId,
   id: string,
   patch: SchedulePatch,
-): Promise<ScheduleRow | null> {
+): Promise<ScheduleView | null> {
   const [row] = await tx
     .update(schedules)
     .set({
@@ -170,7 +197,7 @@ export async function updateSchedule(
       updatedAt: sql`clock_timestamp()`,
     })
     .where(and(eq(schedules.id, id), eq(schedules.tenantId, tenant)))
-    .returning();
+    .returning(scheduleViewColumns);
   return row ?? null;
 }
 

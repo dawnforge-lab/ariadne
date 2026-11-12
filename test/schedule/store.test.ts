@@ -122,6 +122,27 @@ afterAll(async () => {
 }, 60_000);
 
 describe("the store", () => {
+  it("getSchedule and listSchedules read the crawl config only, never the judgement or a list crawl's URLs (final review M2); the full config stays stored", async () => {
+    const listed = Array.from({ length: 500 }, (_, i) => `https://view.example/p/${i}`);
+    const s = scheduleOf(LOCAL_TENANT, {
+      crawl: { config: configFor("https://view.example/"), judgement: { rules: { "title.missing": { disabled: true } } }, listed },
+      siteUrl: "https://view.example/",
+    });
+    const inserted = await db.transaction(async (tx) => insertSchedule(tx, s));
+    createdSchedules.push(s.id);
+    const got = await getSchedule(db, LOCAL_TENANT, s.id);
+    const page = await listSchedules(db, LOCAL_TENANT, { limit: 200 });
+    const updated = await db.transaction(async (tx) => updateSchedule(tx, LOCAL_TENANT, s.id, { cron: "0 6 * * *" }));
+    for (const view of [inserted, got, page.items.find((r) => r.id === s.id), updated]) {
+      expect(view).toBeDefined();
+      expect(Object.keys(view!)).not.toContain("config");
+      expect(view!.crawlConfig).toEqual(s.crawl.config);
+      expect(JSON.stringify(view)).not.toContain("view.example/p/");
+    }
+    const [raw] = await db.select({ config: schedules.config }).from(schedules).where(eq(schedules.id, s.id));
+    expect(raw?.config).toEqual(s.crawl);
+  });
+
   it("insertSchedule and getSchedule round-trip every column", async () => {
     const s = scheduleOf(LOCAL_TENANT, {
       crawl: {
@@ -143,7 +164,7 @@ describe("the store", () => {
       id: s.id,
       tenantId: LOCAL_TENANT,
       siteUrl: "https://round.example/",
-      config: s.crawl,
+      crawlConfig: s.crawl.config,
       render: { urls: ["https://round.example/a"] },
       cron: "30 1 * * *",
       timezone: "Europe/London",

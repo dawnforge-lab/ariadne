@@ -266,9 +266,10 @@ import {
   insertSchedule,
   listSchedules,
   newScheduleId,
+  scheduleViewColumns,
   updateSchedule,
   type ScheduleCrawl,
-  type ScheduleRow,
+  type ScheduleView,
 } from "../schedule/store.js";
 import { tenantExportDir, type TenantId } from "../tenant.js";
 import {
@@ -4865,7 +4866,7 @@ export class ApiService {
     }
   }
 
-  private scheduleOut(row: ScheduleRow): ScheduleOut {
+  private scheduleOut(row: ScheduleView): ScheduleOut {
     return {
       scheduleId: row.id,
       siteUrl: row.siteUrl,
@@ -4875,7 +4876,7 @@ export class ApiService {
       nextRunAt: row.nextRunAt === null ? null : row.nextRunAt.toISOString(),
       lastCrawlId: row.lastCrawlId,
       render: row.render,
-      credentials: redactedCredentials(storedCredentialShape(row.config.config, row.id)),
+      credentials: redactedCredentials(storedCredentialShape(row.crawlConfig, row.id)),
       createdAt: row.createdAt.toISOString(),
       updatedAt: row.updatedAt.toISOString(),
     };
@@ -4927,7 +4928,7 @@ export class ApiService {
   }
 
   /** The tenant's schedule `id`; another tenant's is a schedule that does not exist. */
-  private async scheduleRow(tenant: TenantId, id: string): Promise<ScheduleRow> {
+  private async scheduleRow(tenant: TenantId, id: string): Promise<ScheduleView> {
     const row = await getSchedule(this.db, tenant, id);
     if (row === null) throw new ServiceError("NOT_FOUND", `no such schedule '${clip(id)}'`);
     return row;
@@ -4964,9 +4965,10 @@ export class ApiService {
       // key). A cron, zone or `enabled` read before the lock may have been
       // changed since, and `next_run_at` is null exactly when `enabled` is
       // false (the table's check), so a slot computed from a stale read could
-      // commit a row that check refuses.
+      // commit a row that check refuses. The view, not the full row: a list
+      // crawl's stored URLs are not needed here (final review M2).
       const [stored] = await tx
-        .select()
+        .select(scheduleViewColumns)
         .from(schedules)
         .where(and(eq(schedules.id, id), eq(schedules.tenantId, tenant)))
         .for("no key update");
@@ -4977,7 +4979,7 @@ export class ApiService {
       if (planned !== null || body.render !== undefined) {
         await this.assertScheduleRender(
           body.render === undefined ? stored.render : body.render,
-          planned === null ? stored.config.config : planned.crawl.config,
+          planned === null ? stored.crawlConfig : planned.crawl.config,
         );
       }
       const cron = body.cron ?? stored.cron;
