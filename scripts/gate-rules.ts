@@ -68,13 +68,14 @@
  * `allowPrivate: true` is the same sanctioned use as Phase 1: the site under
  * test is a loopback fixture (test/gate/site-server.ts).
  */
-import { readdirSync, readFileSync } from "node:fs";
+import { readdirSync, readFileSync, writeFileSync } from "node:fs";
 
 import { desc, eq, sql, type SQL } from "drizzle-orm";
 import { closeDb, createDb, type Db } from "../src/db/client.js";
 import { CRAWL_DEFAULTS, resumeCrawl, runCrawl, type CrawlSummary } from "../src/crawl/loop.js";
 import { setControlRequest } from "../src/crawl/control.js";
 import { crawls } from "../src/db/schema.js";
+import { inferPageTemplates } from "../src/crawl/page-type.js";
 import {
   RENDER_PASS_DEFAULTS,
   runRenderPass,
@@ -210,6 +211,24 @@ function excludePatterns(): string[] {
     i += 1;
   }
   return patterns;
+}
+
+/**
+ * `--json-out <path>` (Phase 28c): write the run's result as JSON — on success
+ * and on failure — for the CI workflow to read and upload. Null when the flag
+ * is absent. A flag with no path after it throws (no fallback to "no file").
+ */
+function jsonOutPath(): string | null {
+  const args = process.argv.slice(2);
+  const at = args.indexOf("--json-out");
+  if (at < 0) return null;
+  const raw = args[at + 1];
+  if (raw === undefined || raw === "" || raw.startsWith("--")) {
+    throw new RangeError(
+      `--json-out needs a path after it, got ${raw === undefined ? "nothing" : JSON.stringify(raw)}`,
+    );
+  }
+  return raw;
 }
 
 /** What the exclude patterns do to the fixture, worked out before the crawl. */
@@ -702,6 +721,16 @@ async function main(): Promise<number> {
   const reuse = reusedCrawlId();
   const isGate = pages === GATE_PAGES && reuse === null;
   const exclude = excludePatterns();
+  const jsonOut = jsonOutPath();
+  /** Every failure the run recorded, for the exit code and for `--json-out`. */
+  const recorded: string[] = [];
+  const fail = (message: string): number => {
+    console.error(`FAIL: ${message}`);
+    recorded.push(message);
+    return 1;
+  };
+  /** Phase wall times, kept as they are measured so a failed run reports what it reached. */
+  const durationsMs = { crawl: 0, render: 0, rules: 0, inferPageTemplates: 0 };
   if (exclude.length > 0 && reuse !== null) {
     throw new RangeError("gate: --exclude needs a crawl in this process; GATE_CRAWL_ID runs none");
   }
@@ -749,6 +778,8 @@ async function main(): Promise<number> {
   let crawlPeakBytes = 0;
   /** The exclude census, or null when no `--exclude` was given. */
   let census: ScopeCensus | null = null;
+  /** The rules phase's own peak; 0 until that phase ends. */
+  let rulesPeakBytes = 0;
 
   try {
     let crawlId: string;
@@ -858,8 +889,7 @@ async function main(): Promise<number> {
         if ("error" in watched) throw watched.error;
         const requested = watched.value;
         if (requested === null) {
-          console.error(`FAIL: the crawl ended '${first.status}' before the pause was requested`);
-          return 1;
+          return fail(`the crawl ended '${first.status}' before the pause was requested`);
         }
         const summaryMs = Date.now() - requested.requestedAt;
         if (requested.flippedAt === null) {
@@ -870,11 +900,10 @@ async function main(): Promise<number> {
         }
         const flipMs = requested.flippedAt - requested.requestedAt;
         if (first.status !== "paused" || first.pauseReason !== "request") {
-          console.error(
-            `FAIL: the pause at ${requested.done} done ended the run '${first.status}' ` +
+          return fail(
+            `the pause at ${requested.done} done ended the run '${first.status}' ` +
               `(reason ${first.pauseReason}), expected paused/request`,
           );
-          return 1;
         }
         console.log(
           line(
@@ -891,11 +920,33 @@ async function main(): Promise<number> {
         summary = await resumeCrawl(db, first.crawlId, { config });
       }
       const crawlMs = Date.now() - crawlStartedAt;
+      durationsMs.crawl = crawlMs;
       const crawlRss = sampler.endPhase();
       crawlPeakBytes = crawlRss.peakBytes;
       crawlId = summary.crawlId;
 
+      // 27d open item: how long the crawl-end template inference takes at this
+      // size. The crawl loop runs it inside its close and does not report a
+      // time, so it is re-run here, over the crawl's now-collapsed population
+      // (a no-op retype, the same population scan). The re-run restamps
+      // `crawls.template_inference_jsonb` with a zero-retype record, so the real
+      // record is read first and put back: the row ends as the crawl left it.
+      // It runs after the crawl phase's RSS reading, so it is in no phase peak.
+      const stamped = await db
+        .select({ record: crawls.templateInferenceJsonb })
+        .from(crawls)
+        .where(eq(crawls.id, crawlId));
+      if (stamped.length === 0) throw new Error(`gate: crawl ${crawlId} vanished before the inference timing`);
+      const inferStartedAt = performance.now();
+      await inferPageTemplates(db, crawlId);
+      durationsMs.inferPageTemplates = Math.round(performance.now() - inferStartedAt);
+      await db
+        .update(crawls)
+        .set({ templateInferenceJsonb: stamped[0]?.record ?? null })
+        .where(eq(crawls.id, crawlId));
+
       console.log(line("crawl id", summary.crawlId));
+      console.log(`inferPageTemplates   ${durationsMs.inferPageTemplates} ms`);
       console.log(
         line("status", `${summary.status}${summary.note === null ? "" : ` (${summary.note})`}`),
       );
@@ -919,11 +970,10 @@ async function main(): Promise<number> {
       // reach exactly the rest.
       const expectedFetched = pages - (census?.matched ?? 0);
       if (summary.pagesCrawled !== expectedFetched) {
-        console.error(
-          `FAIL: crawled ${summary.pagesCrawled} pages, expected exactly ${expectedFetched}` +
+        return fail(
+          `crawled ${summary.pagesCrawled} pages, expected exactly ${expectedFetched}` +
             (census === null ? "" : ` (${pages} less the ${census.matched} the exclude patterns refuse)`),
         );
-        return 1;
       }
 
       if (census !== null) {
@@ -988,7 +1038,7 @@ async function main(): Promise<number> {
         }
         if (fetchedRefused !== 0) censusFailures.push(`${fetchedRefused} fetched rows match the exclude patterns`);
         if (censusFailures.length > 0) {
-          for (const failure of censusFailures) console.error(`FAIL: ${failure}`);
+          for (const failure of censusFailures) fail(failure);
           return 1;
         }
       }
@@ -1016,6 +1066,7 @@ async function main(): Promise<number> {
         },
       });
       const renderMs = Date.now() - renderStartedAt;
+      durationsMs.render = renderMs;
       const renderRss = sampler.endPhase();
       const servedAfter = site.served();
 
@@ -1089,11 +1140,10 @@ async function main(): Promise<number> {
       // The pass's own invariant, checked rather than trusted: a URL is leased
       // once, rendered once and completed once, so nothing may be left over.
       if (attempted !== render.selection.selected.length || render.unrendered !== 0) {
-        console.error(
-          `FAIL: render pass attempted ${attempted} of ${render.selection.selected.length} ` +
+        return fail(
+          `render pass attempted ${attempted} of ${render.selection.selected.length} ` +
             `selected URLs and left ${render.unrendered} in render_pending`,
         );
-        return 1;
       }
       // THE BUDGET CONTRACT, asserted on the count the pass was ALLOWED to make
       // rather than the count it happened to make — a pass that selected 3,000
@@ -1106,11 +1156,10 @@ async function main(): Promise<number> {
       // agree, so this is a hole in the small sizes, not in the gate run.
       const renderCeiling = Math.ceil((summary.pagesCrawled * GATE_RENDER_PCT) / 100);
       if (render.selection.selected.length > renderCeiling) {
-        console.error(
-          `FAIL: render pass selected ${render.selection.selected.length} URLs, over the ` +
+        return fail(
+          `render pass selected ${render.selection.selected.length} URLs, over the ` +
             `${GATE_RENDER_PCT}% ceiling of ${renderCeiling} for a ${summary.pagesCrawled}-page crawl`,
         );
-        return 1;
       }
       renderReport = { summary: render, ms: renderMs, rss: renderRss };
 
@@ -1136,7 +1185,9 @@ async function main(): Promise<number> {
     const rulesStartedAt = performance.now();
     const run = await runRules(db, crawlId, registry);
     const rulesMs = performance.now() - rulesStartedAt;
+    durationsMs.rules = Math.round(rulesMs);
     const rulesRss = sampler.endPhase();
+    rulesPeakBytes = rulesRss.peakBytes;
 
     // The phase boundaries, as the runner walked them. The runner asks the
     // registry for a kind exactly once per phase, and every rule reports when it
@@ -1207,8 +1258,7 @@ async function main(): Promise<number> {
       if (timing === undefined) {
         // A rule id that has moved on cannot be reported as "fast": it was never
         // measured (hard rule 7).
-        console.error(`FAIL: '${id}' is not in the registry — this gate cannot re-measure it`);
-        return 1;
+        return fail(`'${id}' is not in the registry — this gate cannot re-measure it`);
       }
       const rank = timings.findIndex((t) => t.id === id) + 1;
       console.log(line(`${(timing.ms / 1000).toFixed(2)}s`, `${id} (rank ${rank} of ${timings.length})`));
@@ -1251,8 +1301,7 @@ async function main(): Promise<number> {
     if (coverageRow === undefined) {
       // A gate that printed nothing here would be a gate whose render evidence
       // has no denominator, and every zero above would be unreadable.
-      console.error("FAIL: render.coverage wrote no site row for this crawl");
-      return 1;
+      return fail("render.coverage wrote no site row for this crawl");
     }
     console.log(line("render.coverage", JSON.stringify(coverageRow.value_jsonb)));
 
@@ -1295,7 +1344,7 @@ async function main(): Promise<number> {
     if (missing.length > 0) failures.push(`metric rules that never ran: ${missing.join(", ")}`);
 
     if (failures.length > 0) {
-      for (const failure of failures) console.error(`FAIL: ${failure}`);
+      for (const failure of failures) fail(failure);
       return 1;
     }
     console.log(
@@ -1304,7 +1353,36 @@ async function main(): Promise<number> {
     // The rows stay: the crawl id above identifies them for inspection. Drop
     // them with `delete from crawls where id = '<crawl id>'` (cascades).
     return 0;
+  } catch (error) {
+    // The run threw: record it for the JSON, then let it surface unchanged.
+    recorded.push(`threw: ${error instanceof Error ? error.message : String(error)}`);
+    throw error;
   } finally {
+    // Written on success and on failure, before anything below can throw, with
+    // what the run had measured by then (a phase it never reached reads 0).
+    if (jsonOut !== null) {
+      writeFileSync(
+        jsonOut,
+        `${JSON.stringify(
+          {
+            node: process.version,
+            pages,
+            passed: recorded.length === 0,
+            failures: recorded,
+            peaks: {
+              crawlBytes: crawlPeakBytes,
+              renderBytes: renderReport?.rss.peakBytes ?? 0,
+              rulesBytes: rulesPeakBytes,
+              overallBytes: sampler.peakBytes(),
+            },
+            durationsMs,
+          },
+          null,
+          2,
+        )}\n`,
+      );
+      console.log(line("json out", jsonOut));
+    }
     sampler.stop();
     await closeDb(db);
     // The happy path closed the fixture after the render pass — the last phase
