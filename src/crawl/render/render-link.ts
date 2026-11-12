@@ -31,7 +31,7 @@ import { isUrlAllowed, UrlPolicyError, type AddressResolver } from "../url-polic
 import type { TenantId } from "../../tenant.js";
 import { storedCredentialsOf } from "../../worker/crawl-job.js";
 import { RenderPassRefusal, runRenderPass, type RenderPassSummary } from "./run-render.js";
-import { resolveRenderConfig } from "./select.js";
+import { resolveRenderConfig, type RenderSelectionConfig } from "./select.js";
 
 /**
  * How many unrenderable URLs a refusal spells out before it says "…".
@@ -242,6 +242,11 @@ export async function credentialsFor(
  * under both rules, and they are here anyway: the request is a fetch
  * instruction from a client, and hard rule 5 admits no "it was checked
  * earlier" exemption.
+ *
+ * Steps 1–6 are `checkRenderUrlList`, which needs no crawl: a schedule's
+ * `render.urls` are put through it when the schedule is written (final review
+ * I2), against the crawl the schedule will fire. Step 7 can only be asked of a
+ * crawl that exists, so a schedule meets it at fire time, here.
  */
 async function checkRenderUrls(
   db: Db,
@@ -251,71 +256,7 @@ async function checkRenderUrls(
   allowPrivate: boolean,
   hostAllowed: (host: string) => boolean,
 ): Promise<string[]> {
-  if (urls.length === 0) {
-    throw new ServiceError(
-      "VALIDATION",
-      "urls was given as an empty list: a render pass with no pages is a pass not " +
-        "run. Omit urls to let the engine select, or name at least one page",
-    );
-  }
-
-  const normalised: string[] = [];
-  const seen = new Set<string>();
-  for (const entry of urls) {
-    const url = normalizeUrl(entry);
-    if (url === null) {
-      throw new ServiceError(
-        "VALIDATION",
-        `urls entry '${clip(entry)}' is not an http(s) URL this engine can render`,
-      );
-    }
-    if (seen.has(url)) continue;
-    seen.add(url);
-    normalised.push(url);
-  }
-
-  const { renderMaxPages } = resolveRenderConfig(config);
-  if (normalised.length > renderMaxPages) {
-    throw new ServiceError(
-      "VALIDATION",
-      `urls names ${normalised.length} distinct pages, above this crawl's ` +
-        `renderMaxPages of ${renderMaxPages}. The list is not silently trimmed — ` +
-        `a named list is a statement about which pages matter, so shorten it to ` +
-        `${renderMaxPages} or fewer. A crawl's renderMaxPages is fixed at ` +
-        `crawl_start and cannot be changed afterwards: a bigger budget means a ` +
-        `new crawl started with a higher renderMaxPages`,
-    );
-  }
-
-  // The site's own spellings, from the crawl's stored `siteUrl`. It reaches
-  // `hostProbeStarts` unvalidated as a URL — `parseStoredConfig` checks it is
-  // a string — so a row nothing this engine wrote could produce a throw here.
-  // That is the crawl's config being unreadable, not the caller's list being
-  // wrong, and it gets the 409 `parseStoredConfig`'s own failure gets.
-  let own: Set<string>;
-  try {
-    own = new Set(hostProbeStarts(config.siteUrl).map((start) => new URL(start).hostname));
-  } catch (error) {
-    throw new ServiceError("CONFLICT", messageOf(error));
-  }
-  for (const url of normalised) {
-    const verdict = await isUrlAllowed(url, { allowPrivate });
-    if (!verdict.allowed) {
-      throw new ServiceError(
-        "FORBIDDEN",
-        `urls entry '${clip(url)}' refused by the URL policy: ` +
-          `${verdict.reason ?? "no reason given"}`,
-      );
-    }
-    const host = new URL(url).hostname;
-    if (!own.has(host) && !hostAllowed(host)) {
-      throw new ServiceError(
-        "FORBIDDEN",
-        `urls entry '${clip(url)}' is on '${host}', which is neither a spelling of ` +
-          `this crawl's own site nor in this server's crawl allowlist`,
-      );
-    }
-  }
+  const normalised = await checkRenderUrlList(urls, config, allowPrivate, hostAllowed, "crawl");
 
   // One statement for the whole list. `= any(...)` rather than a round trip
   // per URL, and the answer is the SET that resolved — the missing ones are
@@ -345,6 +286,95 @@ async function checkRenderUrls(
     );
   }
 
+  return normalised;
+}
+
+/**
+ * Steps 1–6 of `checkRenderUrls` (its header has the order and the reasons):
+ * the list non-empty, each entry a URL, de-duplicated, within `renderMaxPages`,
+ * admitted by the URL policy and by the allowlist posture — everything that
+ * can be known without a crawl. Answers the normalised, de-duplicated list.
+ *
+ * `whose` names what the cap and the site belong to in the refusal: a crawl's
+ * (`crawl_render`, a chain's render link) or a schedule's (`schedule_create`
+ * and `schedule_update`, whose caller can still raise `crawl.renderMaxPages`).
+ */
+export async function checkRenderUrlList(
+  urls: readonly string[],
+  config: RenderSelectionConfig & { siteUrl: string },
+  allowPrivate: boolean,
+  hostAllowed: (host: string) => boolean,
+  whose: "crawl" | "schedule",
+): Promise<string[]> {
+  if (urls.length === 0) {
+    throw new ServiceError(
+      "VALIDATION",
+      "urls was given as an empty list: a render pass with no pages is a pass not " +
+        "run. Omit urls to let the engine select, or name at least one page",
+    );
+  }
+
+  const normalised: string[] = [];
+  const seen = new Set<string>();
+  for (const entry of urls) {
+    const url = normalizeUrl(entry);
+    if (url === null) {
+      throw new ServiceError(
+        "VALIDATION",
+        `urls entry '${clip(entry)}' is not an http(s) URL this engine can render`,
+      );
+    }
+    if (seen.has(url)) continue;
+    seen.add(url);
+    normalised.push(url);
+  }
+
+  const { renderMaxPages } = resolveRenderConfig(config);
+  if (normalised.length > renderMaxPages) {
+    throw new ServiceError(
+      "VALIDATION",
+      `urls names ${normalised.length} distinct pages, above this ${whose}'s ` +
+        `renderMaxPages of ${renderMaxPages}. The list is not silently trimmed — ` +
+        `a named list is a statement about which pages matter, so shorten it to ` +
+        `${renderMaxPages} or fewer. ` +
+        (whose === "crawl"
+          ? `A crawl's renderMaxPages is fixed at crawl_start and cannot be changed ` +
+            `afterwards: a bigger budget means a new crawl started with a higher renderMaxPages`
+          : `A bigger budget is a higher crawl.renderMaxPages on the schedule`),
+    );
+  }
+
+  // The site's own spellings, from the `siteUrl`. A crawl's reaches
+  // `hostProbeStarts` unvalidated as a URL — `parseStoredConfig` checks it is
+  // a string — so a row nothing this engine wrote could produce a throw here.
+  // That is the crawl's config being unreadable, not the caller's list being
+  // wrong, and it gets the 409 `parseStoredConfig`'s own failure gets. (A
+  // schedule's was planned by `crawl_start`'s planner as it was written.)
+  let own: Set<string>;
+  try {
+    own = new Set(hostProbeStarts(config.siteUrl).map((start) => new URL(start).hostname));
+  } catch (error) {
+    throw new ServiceError("CONFLICT", messageOf(error));
+  }
+  for (const url of normalised) {
+    const verdict = await isUrlAllowed(url, { allowPrivate });
+    if (!verdict.allowed) {
+      throw new ServiceError(
+        "FORBIDDEN",
+        `urls entry '${clip(url)}' refused by the URL policy: ` +
+          `${verdict.reason ?? "no reason given"}`,
+      );
+    }
+    const host = new URL(url).hostname;
+    if (!own.has(host) && !hostAllowed(host)) {
+      throw new ServiceError(
+        "FORBIDDEN",
+        `urls entry '${clip(url)}' is on '${host}', which is neither a spelling of ` +
+          `this ${whose === "crawl" ? "crawl's own site" : "schedule's crawl.siteUrl"} ` +
+          `nor in this server's crawl allowlist`,
+      );
+    }
+  }
   return normalised;
 }
 

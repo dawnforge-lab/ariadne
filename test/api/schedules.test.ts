@@ -377,6 +377,78 @@ describe("refusals", () => {
   });
 });
 
+describe("render.urls is checked when the schedule is written (final review I2)", () => {
+  /** A create refused with `status` and `code`, its message led by `render.urls`, that stores nothing. */
+  async function refusedCreate(
+    status: number,
+    code: string,
+    render: unknown,
+    crawl: Record<string, unknown> = {},
+  ): Promise<string> {
+    const before = await http("GET", "/schedules?limit=200");
+    const body = { crawl: { siteUrl: SITE, ...crawl }, cron: "0 * * * *", timezone: "UTC", render };
+    const res = await http("POST", "/schedules", body);
+    expect(res.status, res.text).toBe(status);
+    expect(res.body).toMatchObject({ code });
+    expect(String(res.body["error"])).toMatch(/^render\.urls /);
+    const viaMcp = await tool("schedule_create", body);
+    expect(viaMcp.isError).toBe(true);
+    expect(viaMcp.body).toMatchObject({ code });
+    expect((await http("GET", "/schedules?limit=200")).body).toEqual(before.body);
+    return String(res.body["error"]);
+  }
+
+  it("a URL the URL policy refuses is a 403 FORBIDDEN at create", async () => {
+    const error = await refusedCreate(403, "FORBIDDEN", { urls: ["http://169.254.169.254/latest"] });
+    expect(error).toContain("refused by the URL policy");
+  });
+
+  it("a URL on a host neither the crawl's own site nor in the allowlist is a 403 FORBIDDEN at create", async () => {
+    const error = await refusedCreate(403, "FORBIDDEN", { urls: [`${SITE}a`, "http://elsewhere.example/a"] });
+    expect(error).toContain("'elsewhere.example'");
+  });
+
+  it("more distinct URLs than the planned crawl's renderMaxPages is a 400 VALIDATION at create", async () => {
+    const error = await refusedCreate(400, "VALIDATION", { urls: [`${SITE}a`, `${SITE}b`, `${SITE}c`] }, {
+      renderMaxPages: 2,
+    });
+    expect(error).toContain("above this schedule's renderMaxPages of 2");
+    // Duplicates are counted once, as crawl_render counts them: two distinct pages fit.
+    const made = await create({ render: { urls: [`${SITE}a`, `${SITE}a`, `${SITE}b`] } }, { renderMaxPages: 2 });
+    expect(made["render"]).toEqual({ urls: [`${SITE}a`, `${SITE}b`] });
+  });
+
+  it("an update's render is checked against the stored crawl, and changes nothing when refused", async () => {
+    const made = await create({}, { renderMaxPages: 1 });
+    const id = String(made["scheduleId"]);
+    const before = await snapshot(id);
+    const cap = await http("PATCH", `/schedules/${id}`, { render: { urls: [`${SITE}a`, `${SITE}b`] } });
+    expect(cap.status, cap.text).toBe(400);
+    expect(cap.body).toMatchObject({ code: "VALIDATION" });
+    expect(String(cap.body["error"])).toMatch(/^render\.urls names 2 distinct pages/);
+    const offSite = await tool("schedule_update", { scheduleId: id, render: { urls: ["http://elsewhere.example/"] } });
+    expect(offSite.isError).toBe(true);
+    expect(offSite.body).toMatchObject({ code: "FORBIDDEN" });
+    expect(String(offSite.body["error"])).toMatch(/^render\.urls entry/);
+    expect(await snapshot(id)).toEqual(before);
+  });
+
+  it("an update's crawl is checked against the stored render.urls, and changes nothing when refused", async () => {
+    const made = await create({ render: { urls: [`${SITE}a`, `${SITE}b`] } });
+    const id = String(made["scheduleId"]);
+    const before = await snapshot(id);
+    const res = await http("PATCH", `/schedules/${id}`, { crawl: { siteUrl: SITE, renderMaxPages: 1 } });
+    expect(res.status, res.text).toBe(400);
+    expect(res.body).toMatchObject({ code: "VALIDATION" });
+    expect(String(res.body["error"])).toMatch(/^render\.urls names 2 distinct pages/);
+    expect(await snapshot(id)).toEqual(before);
+    // The same crawl with the render dropped in one update is accepted: the pair is checked as it will stand.
+    const both = await http("PATCH", `/schedules/${id}`, { crawl: { siteUrl: SITE, renderMaxPages: 1 }, render: {} });
+    expect(both.status, both.text).toBe(200);
+    expect(both.body["render"]).toEqual({});
+  });
+});
+
 describe("interleaved updates (the row is locked and read under the lock)", () => {
   /**
    * `first` runs in a transaction on its own connection that holds the row

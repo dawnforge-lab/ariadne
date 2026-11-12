@@ -166,7 +166,13 @@ import { timingWith, type Timing } from "../worker/timing.js";
 import { JobRunner } from "../worker/runner.js";
 import { crawlJobExecutor, storedCredentialsOf } from "../worker/crawl-job.js";
 import { chainJobExecutor } from "../worker/chain-job.js";
-import { credentialsFor, mapRenderPassError, parseRobots, runRenderLink } from "../crawl/render/render-link.js";
+import {
+  checkRenderUrlList,
+  credentialsFor,
+  mapRenderPassError,
+  parseRobots,
+  runRenderLink,
+} from "../crawl/render/render-link.js";
 import { rulesWhileLive, runRulesLink } from "../rules/rules-link.js";
 import {
   hostProbeStarts,
@@ -4833,6 +4839,32 @@ export class ApiService {
     if (!check.ok) throw new ServiceError("VALIDATION", `${check.field}: ${check.message}`);
   }
 
+  /**
+   * A schedule's `render.urls` against the crawl it will fire (final review
+   * I2): everything `crawl_render` checks of a caller's list that is knowable
+   * before there is a crawl — the URL policy, the allowlist posture and the
+   * planned config's `renderMaxPages` (`checkRenderUrlList`) — with the
+   * process trust and allowlist `crawl_render` uses. Refused with
+   * `crawl_render`'s own code and sentence, its path prefixed `render.`. That
+   * each URL is a 200 page of the fired crawl is only knowable at fire time:
+   * a miss there fails the render link (`schedule_chain_failed`).
+   */
+  private async assertScheduleRender(render: ChainRender | null, config: StoredConfig): Promise<void> {
+    if (render?.urls === undefined) return;
+    try {
+      await checkRenderUrlList(
+        render.urls,
+        config,
+        this.config.crawlDefaults?.allowPrivate === true,
+        (host) => this.crawlHostAllowed(host),
+        "schedule",
+      );
+    } catch (error) {
+      if (error instanceof ServiceError) throw new ServiceError(error.code, `render.${error.message}`);
+      throw error;
+    }
+  }
+
   private scheduleOut(row: ScheduleRow): ScheduleOut {
     return {
       scheduleId: row.id,
@@ -4866,6 +4898,7 @@ export class ApiService {
     const timezone = body.timezone as string;
     this.assertCron(cron, timezone);
     const { crawl, credentials } = await this.planScheduleCrawl(body.crawl);
+    await this.assertScheduleRender(body.render ?? null, crawl.config);
     const enabled = body.enabled ?? true;
     const nextRunAt = enabled ? this.nextSlotOrRefuse(cron, timezone) : null;
     const id = newScheduleId();
@@ -4938,6 +4971,15 @@ export class ApiService {
         .where(and(eq(schedules.id, id), eq(schedules.tenantId, tenant)))
         .for("no key update");
       if (stored === undefined) throw new ServiceError("NOT_FOUND", `no such schedule '${clip(id)}'`);
+      // The render list and the crawl as they will stand together, read under
+      // the lock: a new list against the stored crawl, a new crawl against the
+      // stored list, or both new (final review I2).
+      if (planned !== null || body.render !== undefined) {
+        await this.assertScheduleRender(
+          body.render === undefined ? stored.render : body.render,
+          planned === null ? stored.config.config : planned.crawl.config,
+        );
+      }
       const cron = body.cron ?? stored.cron;
       const timezone = body.timezone ?? stored.timezone;
       const enabled = body.enabled ?? stored.enabled;
