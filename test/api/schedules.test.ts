@@ -17,6 +17,7 @@ import { closeFetchAgents } from "../../src/crawl/http.js";
 import { createApiServer, type ApiServer } from "../../src/api/http.js";
 import { createMcpServer, type AriadneMcpServer } from "../../src/api/mcp.js";
 import { parseTenant, type TenantId } from "../../src/tenant.js";
+import { nextSlot } from "../../src/schedule/cron.js";
 import { TEST_CREDENTIAL_KEYS } from "../helpers/credential-keys.js";
 
 const TOKEN = "test-token-schedules-0123456789abcdef";
@@ -81,6 +82,13 @@ async function create(
   expect(res.status, res.text).toBe(201);
   created.push(String(res.body["scheduleId"]));
   return res.body;
+}
+
+/** The schedule row and its credential rows: everything a refused update could have touched. */
+async function snapshot(id: string): Promise<unknown> {
+  const [row] = await db.select().from(schedules).where(eq(schedules.id, id));
+  const credentials = await db.select().from(scheduleCredentials).where(eq(scheduleCredentials.scheduleId, id));
+  return { row, credentials };
 }
 
 const idsOf = (body: Record<string, unknown>): string[] =>
@@ -336,10 +344,127 @@ describe("refusals", () => {
     expect(String(zone.body["error"])).toMatch(/^timezone:/);
   });
 
+  it("an update with a disallowed crawl host is a 403 with the crawl. prefix and changes nothing", async () => {
+    const made = await create({}, { requestHeaders: { "x-token": SECRET } });
+    const id = String(made["scheduleId"]);
+    const before = await snapshot(id);
+    const res = await http("PATCH", `/schedules/${id}`, { crawl: { siteUrl: "http://not-allowed.example/" } });
+    expect(res.status, res.text).toBe(403);
+    expect(String(res.body["error"])).toContain("crawl.siteUrl");
+    expect(await snapshot(id)).toEqual(before);
+    expect((await http("GET", `/schedules/${id}`)).body).toEqual(made);
+  });
+
+  it("an update with a bad cron is a 400 VALIDATION naming cron and changes nothing", async () => {
+    const made = await create();
+    const id = String(made["scheduleId"]);
+    const before = await snapshot(id);
+    const res = await http("PATCH", `/schedules/${id}`, { cron: "0 0 30 2 *" });
+    expect(res.status, res.text).toBe(400);
+    expect(res.body).toMatchObject({ code: "VALIDATION" });
+    expect(String(res.body["error"])).toMatch(/^cron:/);
+    const viaMcp = await tool("schedule_update", { scheduleId: id, cron: "* * * * * *" });
+    expect(viaMcp.isError).toBe(true);
+    expect(viaMcp.body).toMatchObject({ code: "VALIDATION" });
+    expect(await snapshot(id)).toEqual(before);
+  });
+
   it("missing keys and a non-object body are 400s", async () => {
     for (const body of [{}, { crawl: { siteUrl: SITE } }, { crawl: { siteUrl: SITE }, cron: "0 * * * *" }, [], "x"]) {
       const res = await http("POST", "/schedules", body);
       expect(res.status, JSON.stringify(body)).toBe(400);
     }
+  });
+});
+
+describe("interleaved updates (the row is locked and read under the lock)", () => {
+  /**
+   * `first` runs in a transaction on its own connection that holds the row
+   * (`FOR NO KEY UPDATE`, as the scheduler's claim does) and writes its change;
+   * `PATCH second` is sent while it is open and must wait for it, then derive
+   * its change from what `first` committed. Returns the PATCH's answer.
+   */
+  async function interleave(
+    id: string,
+    first: { enabled: boolean; nextRunAt: Date | null },
+    second: Record<string, unknown>,
+  ): Promise<HttpAnswer> {
+    let locked!: () => void;
+    const held = new Promise<void>((r) => (locked = r));
+    let release!: () => void;
+    const open = new Promise<void>((r) => (release = r));
+    const holder = db.transaction(async (tx) => {
+      await tx.select().from(schedules).where(eq(schedules.id, id)).for("no key update");
+      await tx.update(schedules).set(first).where(eq(schedules.id, id));
+      locked();
+      await open;
+    });
+    await held;
+    let settled = false;
+    const patch = http("PATCH", `/schedules/${id}`, second).then((a) => {
+      settled = true;
+      return a;
+    });
+    await new Promise((r) => setTimeout(r, 400));
+    expect(settled, "the PATCH did not wait for the row lock").toBe(false);
+    release();
+    await holder;
+    return await patch;
+  }
+
+  const finalRowIsConsistent = async (id: string): Promise<typeof schedules.$inferSelect> => {
+    const [row] = await db.select().from(schedules).where(eq(schedules.id, id));
+    if (row === undefined) throw new Error("schedule vanished");
+    expect(row.enabled).toBe(row.nextRunAt !== null);
+    if (row.nextRunAt !== null) {
+      expect(row.nextRunAt.getTime()).toBeGreaterThan(Date.now() - 1000);
+      expect(row.nextRunAt).toEqual(nextSlot(row.cron, row.timezone, new Date(row.nextRunAt.getTime() - 1)));
+    }
+    return row;
+  };
+
+  it("a cron-only patch after a concurrent disable commits a disabled row with no slot, and answers 200", async () => {
+    const made = await create();
+    const id = String(made["scheduleId"]);
+    const res = await interleave(id, { enabled: false, nextRunAt: null }, { cron: "*/5 * * * *" });
+    expect(res.status, res.text).toBe(200);
+    const row = await finalRowIsConsistent(id);
+    expect(row).toMatchObject({ enabled: false, nextRunAt: null, cron: "*/5 * * * *" });
+  });
+
+  it("a cron-only patch after a concurrent enable computes the slot of the committed state", async () => {
+    const made = await create({ enabled: false });
+    const id = String(made["scheduleId"]);
+    const res = await interleave(id, { enabled: true, nextRunAt: new Date(Date.now() + 3_600_000) }, { cron: "*/5 * * * *" });
+    expect(res.status, res.text).toBe(200);
+    const row = await finalRowIsConsistent(id);
+    expect(row).toMatchObject({ enabled: true, cron: "*/5 * * * *" });
+    expect(row.nextRunAt).not.toBeNull();
+    expect(row.nextRunAt!.getTime() - Date.now()).toBeLessThanOrEqual(5 * 60_000 + 1000);
+  });
+
+  it("an enable after a concurrent disable-and-recron answers 200 with a slot of the final cron", async () => {
+    const made = await create();
+    const id = String(made["scheduleId"]);
+    // The holder changes the cron and disables; the PATCH enables under the lock.
+    let release!: () => void;
+    const open = new Promise<void>((r) => (release = r));
+    let locked!: () => void;
+    const held = new Promise<void>((r) => (locked = r));
+    const holder = db.transaction(async (tx) => {
+      await tx.select().from(schedules).where(eq(schedules.id, id)).for("no key update");
+      await tx.update(schedules).set({ enabled: false, nextRunAt: null, cron: "0 12 * * *" }).where(eq(schedules.id, id));
+      locked();
+      await open;
+    });
+    await held;
+    const patch = http("PATCH", `/schedules/${id}`, { enabled: true });
+    await new Promise((r) => setTimeout(r, 300));
+    release();
+    await holder;
+    const res = await patch;
+    expect(res.status, res.text).toBe(200);
+    const row = await finalRowIsConsistent(id);
+    expect(row).toMatchObject({ enabled: true, cron: "0 12 * * *" });
   });
 });

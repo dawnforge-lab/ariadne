@@ -77,7 +77,7 @@ import { createGzip } from "node:zlib";
 import { and, asc, desc, eq, getTableColumns, gt, inArray, isNotNull, isNull, sql, type SQL } from "drizzle-orm";
 
 import type { Db } from "../db/client.js";
-import { crawls, frontier, issues, jobs, pages } from "../db/schema.js";
+import { crawls, frontier, issues, jobs, pages, schedules } from "../db/schema.js";
 import { deleteCrawlFiles, deleteCrawlRows } from "./crawl-delete.js";
 import {
   CRAWL_DEFAULTS,
@@ -4836,18 +4836,33 @@ export class ApiService {
       throw new ServiceError("CONFLICT", "the server is shutting down and is not accepting schedules");
     }
     // Ownership first, so a foreign id is the missing answer whatever the body is.
-    const stored = await this.scheduleRow(tenant, id);
+    await this.scheduleRow(tenant, id);
     const body = parseScheduleBody(raw, "update");
-    const cron = body.cron ?? stored.cron;
-    const timezone = body.timezone ?? stored.timezone;
-    const enabled = body.enabled ?? stored.enabled;
-    const slotMoved = body.cron !== undefined || body.timezone !== undefined;
-    if (slotMoved) this.assertCron(cron, timezone);
+    // The expensive part, outside the transaction: the plan reads nothing of the row.
     const planned = body.crawl === undefined ? null : await this.planScheduleCrawl(body.crawl);
-    let nextRunAt: Date | null | undefined;
-    if (!enabled) nextRunAt = null;
-    else if (slotMoved || !stored.enabled) nextRunAt = this.nextSlotOrRefuse(cron, timezone);
+    const slotMoved = body.cron !== undefined || body.timezone !== undefined;
     const row = await this.db.transaction(async (tx) => {
+      // THE ROW, LOCKED, AND EVERYTHING BELOW DERIVED FROM IT. `FOR NO KEY
+      // UPDATE`: it serialises against another update and against the
+      // scheduler's claim of the same row (also NO KEY UPDATE), but not
+      // against a fired crawl's event inserts (KEY SHARE through the foreign
+      // key). A cron, zone or `enabled` read before the lock may have been
+      // changed since, and `next_run_at` is null exactly when `enabled` is
+      // false (the table's check), so a slot computed from a stale read could
+      // commit a row that check refuses.
+      const [stored] = await tx
+        .select()
+        .from(schedules)
+        .where(and(eq(schedules.id, id), eq(schedules.tenantId, tenant)))
+        .for("no key update");
+      if (stored === undefined) throw new ServiceError("NOT_FOUND", `no such schedule '${clip(id)}'`);
+      const cron = body.cron ?? stored.cron;
+      const timezone = body.timezone ?? stored.timezone;
+      const enabled = body.enabled ?? stored.enabled;
+      if (slotMoved) this.assertCron(cron, timezone);
+      let nextRunAt: Date | null | undefined;
+      if (!enabled) nextRunAt = null;
+      else if (slotMoved || !stored.enabled) nextRunAt = this.nextSlotOrRefuse(cron, timezone);
       const updated = await updateSchedule(tx, tenant, id, {
         ...(planned === null ? {} : { siteUrl: planned.crawl.config.siteUrl, crawl: planned.crawl }),
         ...(body.render === undefined ? {} : { render: body.render }),
