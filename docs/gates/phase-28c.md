@@ -19,8 +19,10 @@ word, one route line in a header comment and the identifier guard's field source
 - The route line is in `src/api/http.ts`'s header comment.
 - The guard gains the two new answer shapes.
 
-**Verdict: clauses 1 and 2 pass on the code (run `ca43a7`, `GATE PASSED`); clause 3 is pending
-on the PR.**
+**Verdict: all three clauses pass. Clauses 1 and 2 pass on the code (run `ca43a7`, `GATE
+PASSED`). Clause 3 passes: `gate.yml` ran green on PR #31 with peak 293.9 MB against the 512 MB
+limit. Its advisory warning fired above 290.2 MB on the runner. A local run on the same head
+read 275.5 MB (§3).**
 
 - **Clause 1:** a one-minute schedule fired **exactly 10 times in its 10 slots** while the leader
   was `kill -9`'d. Another candidate led **28.4 s** later. Each fire ran crawl and then rules,
@@ -185,14 +187,36 @@ Runs 2 and 3 read the same sequence.
 
 ## 3. `gate.yml` runs green once, and its artifact holds the peaks
 
-**Pending: runs on the PR via the `pull_request` trigger (call C6).** GitHub dispatches only
+**Passes, on the PR via the `pull_request` trigger (call C6).** GitHub dispatches only
 workflows that already exist on the default branch, so `workflow_dispatch` on this branch is not
 possible until it merges. `gate.yml` therefore also runs on a pull request that changes
 `gate.yml`, which this PR does.
 
-- Run URL: _(pending; the controller fills it)_
-- Result and the artifact's peaks (`crawlBytes`, `renderBytes`, `rulesBytes`, `overallBytes`)
-  and durations: _(pending)_
+- Run URL: https://github.com/dawnforge-lab/ariadne/actions/runs/43303512174 (PR #31, head
+  `59f5055`, 2026-11-12, 15 min 44 s). Job `gate`: **success**. The `gate-json` artifact was
+  uploaded.
+- The artifact (Node v22.23.4) reads `isGate: true`, `passed: true` and `failures: []`.
+
+  | phase | peak (bytes) | MiB | duration |
+  |---|---|---|---|
+  | crawl | 305,606,656 | 291.4 | 609.7 s |
+  | render | 306,917,376 | 292.7 | 8.7 s |
+  | rules | 308,158,464 | 293.9 | 277.0 s |
+  | overall | 308,158,464 | 293.9 | |
+
+  `inferPageTemplatesRescanMs`: 282. The browser's RSS (1,251.2 MB, 14 processes) is not gated.
+- **The warning step fired: `crawl phase peak 291.4 MB exceeds 290.2 MB`.** This is the designed
+  annotation, not a failure. The design (item 17) sets the warning at the last local bound
+  "since runner hardware differs from the dev machine". The hard limit is 512 MB, 218 MB above
+  this peak.
+- **Is it the runner or the code?** The same command was run locally on the same head, `59f5055`
+  (`ariadne_gate28c`, Node v22.23.2). It peaked at **275.5 MB**: crawl 275.5, render 275.5, rules
+  269.7. The crawl took 1,035.6 s and rules 374.3 s, and the result was `GATE PASSED`. That
+  matches the earlier local runs without `--exclude` (275.7 MB and 281.5 MB in 27d §5) and sits
+  under 290.2 MB, so 28c added no crawl-phase memory. The runner crawled 1.7× faster and read
+  16 MB higher. That is the hardware difference the design anticipated. The weekly artifacts are
+  now the drift series to watch. Each week's run is compared with the earlier runner figures,
+  not with a local one.
 
 Task 8 ran the script's 200-page smoke locally (`GATE_PAGES=200 … --json-out`). It wrote
 `passed: true`, crawl peak 246.7 MB and `inferPageTemplates` 5 ms. That is not the gate.
