@@ -145,7 +145,7 @@ import {
   RENDER_HTML_DIR,
   type RenderPassSummary,
 } from "../crawl/render/run-render.js";
-import { insertCrawl, type StoredConfig } from "../crawl/insert-crawl.js";
+import { insertCrawl, type ChainRender, type StoredConfig } from "../crawl/insert-crawl.js";
 import {
   busySentences,
   enqueueJob,
@@ -250,6 +250,18 @@ import {
 import { ServiceError, clip, unknownKeysMessage } from "./errors.js";
 import { decodeCursor, encodeCursor, parseLimit } from "./paging.js";
 import { listEvents, type CrawlEvent } from "../events/events.js";
+import { parseScheduleBody } from "../schedule/body.js";
+import { NoCronSlotError, nextSlot, parseCron } from "../schedule/cron.js";
+import {
+  deleteSchedule,
+  getSchedule,
+  insertSchedule,
+  listSchedules,
+  newScheduleId,
+  updateSchedule,
+  type ScheduleCrawl,
+  type ScheduleRow,
+} from "../schedule/store.js";
 import { tenantExportDir, type TenantId } from "../tenant.js";
 import {
   buildCrawlOverview,
@@ -1137,6 +1149,26 @@ export interface ThresholdSetting {
   max: number;
   /** True when the crawl's block sets this threshold, whatever the value. */
   overridden: boolean;
+}
+
+/**
+ * A schedule as `schedule_get` and the other schedule tools answer it (28c).
+ * `credentials` is the crawl's credential shape as `crawl_config_get` shows
+ * it: the names and kinds, every value `[redacted]`.
+ */
+export interface ScheduleOut {
+  scheduleId: string;
+  siteUrl: string;
+  cron: string;
+  timezone: string;
+  enabled: boolean;
+  /** The next slot (ISO 8601); null while the schedule is disabled. */
+  nextRunAt: string | null;
+  lastCrawlId: string | null;
+  render: ChainRender | null;
+  credentials: ReturnType<typeof redactedCredentials>;
+  createdAt: string;
+  updatedAt: string;
 }
 
 /**
@@ -4665,6 +4697,195 @@ export class ApiService {
   ): Promise<Page<CrawlEvent>> {
     await this.assertCrawl(tenant, crawlId);
     return listEvents(this.db, { tenant, crawlId }, opts);
+  }
+
+  /**
+   * A schedule's crawl, planned by `crawl_start`'s own `planStart` (call C2):
+   * the effective config, judgement and listed URLs a fire will insert, and the
+   * credential values. A refusal is `crawl_start`'s, code for code, with its
+   * path prefixed `crawl.` so the caller can tell which half of the body it is.
+   */
+  private async planScheduleCrawl(
+    raw: unknown,
+  ): Promise<{ crawl: ScheduleCrawl; credentials: CrawlCredentials | undefined }> {
+    const { check, listed, credentials } = await this.planStart(raw);
+    const refusal = check.errors[0];
+    if (refusal !== undefined) {
+      // A message that already leads with its own path ("judgement.thresholds: ...")
+      // is not given the path twice.
+      const message =
+        refusal.path === ""
+          ? `crawl: ${refusal.message}`
+          : refusal.message.startsWith(`${refusal.path}:`)
+            ? `crawl.${refusal.message}`
+            : `crawl.${refusal.path}: ${refusal.message}`;
+      throw new ServiceError(serviceCodeOf(refusal.code), message);
+    }
+    if (check.effective === null) {
+      throw new Error("checkStartBody answered valid with no effective config");
+    }
+    const { judgement, ...config } = check.effective;
+    return {
+      crawl: {
+        config,
+        judgement: judgement === null ? null : storableBlock(judgement),
+        listed: listed === null ? null : listed.urls,
+      },
+      credentials,
+    };
+  }
+
+  /** The next slot after now, or the 400 naming `cron` when there is none. */
+  private nextSlotOrRefuse(cron: string, timezone: string): Date {
+    try {
+      return nextSlot(cron, timezone, new Date());
+    } catch (error) {
+      if (error instanceof NoCronSlotError) throw new ServiceError("VALIDATION", `cron: ${error.message}`);
+      throw error;
+    }
+  }
+
+  /** `parseCron`'s refusal as the 400 it is, naming the field. */
+  private assertCron(cron: string, timezone: string): void {
+    const check = parseCron(cron, timezone);
+    if (!check.ok) throw new ServiceError("VALIDATION", `${check.field}: ${check.message}`);
+  }
+
+  private scheduleOut(row: ScheduleRow): ScheduleOut {
+    return {
+      scheduleId: row.id,
+      siteUrl: row.siteUrl,
+      cron: row.cron,
+      timezone: row.timezone,
+      enabled: row.enabled,
+      nextRunAt: row.nextRunAt === null ? null : row.nextRunAt.toISOString(),
+      lastCrawlId: row.lastCrawlId,
+      render: row.render,
+      credentials: redactedCredentials(storedCredentialShape(row.config.config, row.id)),
+      createdAt: row.createdAt.toISOString(),
+      updatedAt: row.updatedAt.toISOString(),
+    };
+  }
+
+  /**
+   * `schedule_create` / `POST /schedules`: a schedule that fires `crawl` on
+   * `cron` in `timezone`. `crawl` is planned now, as `crawl_start` plans it, so
+   * every refusal `crawl_start` gives is given here (path prefixed `crawl.`);
+   * its credentials are stored encrypted beside the schedule, in the one
+   * transaction that inserts it. A cron with no slot in the next 366 days is a
+   * 400 naming `cron`.
+   */
+  async createSchedule(tenant: TenantId, raw: unknown): Promise<ScheduleOut> {
+    if (this.closed) {
+      throw new ServiceError("CONFLICT", "the server is shutting down and is not accepting schedules");
+    }
+    const body = parseScheduleBody(raw, "create");
+    const cron = body.cron as string;
+    const timezone = body.timezone as string;
+    this.assertCron(cron, timezone);
+    const { crawl, credentials } = await this.planScheduleCrawl(body.crawl);
+    const enabled = body.enabled ?? true;
+    const nextRunAt = enabled ? this.nextSlotOrRefuse(cron, timezone) : null;
+    const id = newScheduleId();
+    const row = await this.db.transaction(async (tx) => {
+      const inserted = await insertSchedule(tx, {
+        id,
+        tenant,
+        siteUrl: crawl.config.siteUrl,
+        crawl,
+        render: body.render ?? null,
+        cron,
+        timezone,
+        enabled,
+        nextRunAt,
+      });
+      if (credentials !== undefined) await this.vault.writeSchedule(tx, tenant, id, credentials);
+      return inserted;
+    });
+    return this.scheduleOut(row);
+  }
+
+  /** `schedule_list` / `GET /schedules`: the tenant's schedules, newest first. */
+  async listSchedules(tenant: TenantId, opts: { limit?: number; cursor?: string } = {}): Promise<Page<ScheduleOut>> {
+    const page = await listSchedules(this.db, tenant, opts);
+    return { items: page.items.map((row) => this.scheduleOut(row)), nextCursor: page.nextCursor };
+  }
+
+  /** The tenant's schedule `id`; another tenant's is a schedule that does not exist. */
+  private async scheduleRow(tenant: TenantId, id: string): Promise<ScheduleRow> {
+    const row = await getSchedule(this.db, tenant, id);
+    if (row === null) throw new ServiceError("NOT_FOUND", `no such schedule '${clip(id)}'`);
+    return row;
+  }
+
+  /** `schedule_get` / `GET /schedules/:id`. */
+  async getSchedule(tenant: TenantId, id: string): Promise<ScheduleOut> {
+    return this.scheduleOut(await this.scheduleRow(tenant, id));
+  }
+
+  /**
+   * `schedule_update` / `PATCH /schedules/:id`. Any key may be omitted and
+   * stays as it is. `crawl` replaces the stored crawl AND its credentials
+   * together (call C8): a `crawl` that carries none removes the stored ones,
+   * as a new `crawl_start` would carry none. `nextRunAt` is recomputed from now
+   * when the cron or zone changes or the schedule is enabled; `enabled: false`
+   * clears it.
+   */
+  async updateSchedule(tenant: TenantId, id: string, raw: unknown): Promise<ScheduleOut> {
+    if (this.closed) {
+      throw new ServiceError("CONFLICT", "the server is shutting down and is not accepting schedules");
+    }
+    // Ownership first, so a foreign id is the missing answer whatever the body is.
+    const stored = await this.scheduleRow(tenant, id);
+    const body = parseScheduleBody(raw, "update");
+    const cron = body.cron ?? stored.cron;
+    const timezone = body.timezone ?? stored.timezone;
+    const enabled = body.enabled ?? stored.enabled;
+    const slotMoved = body.cron !== undefined || body.timezone !== undefined;
+    if (slotMoved) this.assertCron(cron, timezone);
+    const planned = body.crawl === undefined ? null : await this.planScheduleCrawl(body.crawl);
+    let nextRunAt: Date | null | undefined;
+    if (!enabled) nextRunAt = null;
+    else if (slotMoved || !stored.enabled) nextRunAt = this.nextSlotOrRefuse(cron, timezone);
+    const row = await this.db.transaction(async (tx) => {
+      const updated = await updateSchedule(tx, tenant, id, {
+        ...(planned === null ? {} : { siteUrl: planned.crawl.config.siteUrl, crawl: planned.crawl }),
+        ...(body.render === undefined ? {} : { render: body.render }),
+        ...(body.cron === undefined ? {} : { cron }),
+        ...(body.timezone === undefined ? {} : { timezone }),
+        ...(body.enabled === undefined ? {} : { enabled }),
+        ...(nextRunAt === undefined ? {} : { nextRunAt }),
+      });
+      if (updated === null) throw new ServiceError("NOT_FOUND", `no such schedule '${clip(id)}'`);
+      if (planned !== null) {
+        if (planned.credentials === undefined) await this.vault.removeSchedule(tx, id);
+        else await this.vault.writeSchedule(tx, tenant, id, planned.credentials);
+      }
+      return updated;
+    });
+    return this.scheduleOut(row);
+  }
+
+  /**
+   * `schedule_delete` / `DELETE /schedules/:id`. The crawls it fired stay,
+   * with their history; its own fire and skip events and its credentials go
+   * with it (`deleteSchedule`).
+   */
+  async deleteSchedule(tenant: TenantId, id: string): Promise<{ scheduleId: string; deleted: true }> {
+    if (!(await deleteSchedule(this.db, tenant, id))) {
+      throw new ServiceError("NOT_FOUND", `no such schedule '${clip(id)}'`);
+    }
+    return { scheduleId: id, deleted: true };
+  }
+
+  /** `schedule_history` / `GET /schedules/:id/history`: its fire and skip events, oldest first. */
+  async scheduleHistory(
+    tenant: TenantId,
+    id: string,
+    opts: { limit?: number; cursor?: string } = {},
+  ): Promise<Page<CrawlEvent>> {
+    await this.scheduleRow(tenant, id);
+    return listEvents(this.db, { tenant, scheduleId: id }, opts);
   }
 
   /**

@@ -1,8 +1,9 @@
 /**
- * The MCP transport: twenty-eight tools over the same service layer the HTTP
- * routes use. Nine of them change something (`crawl_start`, `crawl_resume`,
+ * The MCP transport: thirty-four tools over the same service layer the HTTP
+ * routes use. Twelve of them change something (`crawl_start`, `crawl_resume`,
  * `crawl_pause`, `crawl_cancel`, `crawl_delete`, `crawl_render`, `crawl_rules`,
- * `crawl_mark_failed`, `crawl_config_set`); every other one only reads.
+ * `crawl_mark_failed`, `crawl_config_set`, `schedule_create`, `schedule_update`,
+ * `schedule_delete`); every other one only reads.
  *
  * This is a SECOND TRANSPORT, not a second API. Every tool below is a schema, a
  * description written for an agent, and one call into `ApiService` — there is no
@@ -120,6 +121,12 @@ export const TOOL_NAMES = [
   "crawl_config_get",
   "crawl_config_set",
   "crawl_history",
+  "schedule_create",
+  "schedule_list",
+  "schedule_get",
+  "schedule_update",
+  "schedule_delete",
+  "schedule_history",
   "config_schema",
   "config_validate",
   "robots_get",
@@ -913,6 +920,143 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
       inputSchema: strictInput({ crawlId: crawlIdField(), limit: limitField(), cursor: cursorField() }),
     },
     async ({ crawlId, ...page }) => run("crawl_history", () => service.crawlHistory(tenant, crawlId, defined(page))),
+  );
+
+  // ---------------------------------------------------------------- schedules
+
+  const scheduleIdField = () =>
+    z.string().describe("The schedule id, as schedule_create returned it or schedule_list reported it.");
+  const crawlBodyField = () =>
+    z
+      .record(z.string(), z.unknown())
+      .describe(
+        "A crawl_start body (config_schema lists its fields), planned now exactly as crawl_start " +
+          "plans it: every refusal crawl_start gives is given here with its path prefixed 'crawl.'. " +
+          "Credentials in it (requestHeaders, httpAuth, cookies) are stored encrypted for the " +
+          "schedule's fires, never logged or answered.",
+      );
+  const cronField = () =>
+    z
+      .string()
+      .describe(
+        "Exactly five whitespace-separated fields: minute hour day-of-month month day-of-week " +
+          "('30 1 * * *'). Six fields (seconds), '@daily'-style aliases and 'H' are refused, and so " +
+          "is an expression with no slot in the next 366 days ('0 0 30 2 *').",
+      );
+  const timezoneField = () =>
+    z.string().describe("An IANA zone name the cron is read in, such as Europe/London or UTC.");
+  const enabledField = () =>
+    z.boolean().describe("Whether the schedule fires. false keeps it, with nextRunAt null.");
+  const renderField = () =>
+    z
+      .record(z.string(), z.unknown())
+      .nullable()
+      .describe(
+        "What follows a fired crawl: null (the default) is the rules run alone; {} adds a render " +
+          "pass over the engine's own selection; {urls: [...]} renders exactly those pages.",
+      );
+
+  server.registerTool(
+    named("schedule_create"),
+    {
+      title: "Schedule a crawl",
+      description:
+        "Fire a crawl on a cron, unattended: answers the schedule {scheduleId, siteUrl, cron, " +
+        "timezone, enabled, nextRunAt, lastCrawlId, render, credentials, createdAt, updatedAt}. " +
+        "credentials shows the NAMES of the stored credentials, every value '[redacted]'.\n\n" +
+        "crawl is a crawl_start body, validated now (a host off the allowlist is refused 403 " +
+        "NOT_ALLOWED here as it is at crawl_start). Each slot fires one crawl of it, then the " +
+        "rules run (and the render pass, when render asks for one). A slot that finds the " +
+        "schedule's previous crawl still queued, running or paused is skipped, never stacked; " +
+        "schedule_history says so.",
+      inputSchema: strictInput({
+        crawl: crawlBodyField(),
+        cron: cronField(),
+        timezone: timezoneField(),
+        enabled: enabledField().optional(),
+        render: renderField().optional(),
+      }),
+    },
+    async (args) => run("schedule_create", () => service.createSchedule(tenant, args)),
+  );
+
+  server.registerTool(
+    named("schedule_list"),
+    {
+      title: "Your schedules",
+      description:
+        "The caller's schedules, newest first: {items, nextCursor}, each as schedule_get " +
+        `answers it. limit defaults to ${PAGE_SIZE_DEFAULT}, maximum ${PAGE_SIZE_MAX}. Pass ` +
+        "nextCursor back as cursor to continue.",
+      inputSchema: strictInput({ limit: limitField(), cursor: cursorField() }),
+    },
+    async (args) => run("schedule_list", () => service.listSchedules(tenant, defined(args))),
+  );
+
+  server.registerTool(
+    named("schedule_get"),
+    {
+      title: "One schedule",
+      description:
+        "A schedule: {scheduleId, siteUrl, cron, timezone, enabled, nextRunAt, lastCrawlId, " +
+        "render, credentials, createdAt, updatedAt}. nextRunAt is null while it is disabled.",
+      inputSchema: strictInput({ scheduleId: scheduleIdField() }),
+    },
+    async ({ scheduleId }) => run("schedule_get", () => service.getSchedule(tenant, scheduleId)),
+  );
+
+  server.registerTool(
+    named("schedule_update"),
+    {
+      title: "Change a schedule",
+      description:
+        "Change a schedule; send at least one of crawl, cron, timezone, enabled, render. What " +
+        "you omit stays. crawl REPLACES the stored crawl and its credentials together: a crawl " +
+        "without credential fields removes the stored ones. Changing the cron or timezone, or " +
+        "enabling, recomputes nextRunAt from now; enabled false clears it. Answers the schedule " +
+        "as schedule_get does. A refused request changes nothing.",
+      inputSchema: strictInput({
+        scheduleId: scheduleIdField(),
+        crawl: crawlBodyField().optional(),
+        cron: cronField().optional(),
+        timezone: timezoneField().optional(),
+        enabled: enabledField().optional(),
+        render: renderField().optional(),
+      }),
+    },
+    async ({ scheduleId, ...body }) =>
+      run("schedule_update", () => service.updateSchedule(tenant, scheduleId, defined(body))),
+  );
+
+  server.registerTool(
+    named("schedule_delete"),
+    {
+      title: "Delete a schedule",
+      description:
+        "Delete a schedule: {scheduleId, deleted: true}. Its stored credentials and its own " +
+        "fire and skip history go with it. The crawls it already fired stay, as do their " +
+        "findings and their lifecycle history.",
+      inputSchema: strictInput({ scheduleId: scheduleIdField() }),
+    },
+    async ({ scheduleId }) => run("schedule_delete", () => service.deleteSchedule(tenant, scheduleId)),
+  );
+
+  server.registerTool(
+    named("schedule_history"),
+    {
+      title: "What a schedule did, in order",
+      description:
+        "A schedule's own events, oldest first: {id, at, kind, scheduleId, crawlId, detail}. " +
+        "kind is schedule_fired {crawlId} (a crawl was queued; look it up with crawl_status), " +
+        "schedule_skipped {reason: overlap | not-allowed | credentials_unreadable, crawlId on " +
+        "overlap: the crawl still holding the schedule}, or schedule_chain_failed {link, " +
+        "reason} (a fired crawl's render or rules link failed). " +
+        `Paginated: {items, nextCursor}; limit defaults to ${PAGE_SIZE_DEFAULT}, ` +
+        `maximum ${PAGE_SIZE_MAX}.`,
+      inputSchema: strictInput({ scheduleId: scheduleIdField(), limit: limitField(), cursor: cursorField() }),
+    },
+    async ({ scheduleId, ...page }) =>
+      run("schedule_history", () => service.scheduleHistory(tenant, scheduleId, defined(page))),
   );
 
   server.registerTool(

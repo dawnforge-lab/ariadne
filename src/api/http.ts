@@ -16,6 +16,11 @@
  * ## The routes
  *
  *   POST /crawls                       accept a crawl (allowlist + URL policy) -> 202
+ *   POST /schedules                    schedule a crawl (28c): `{crawl, cron, timezone,
+ *                                      enabled?, render?}`, `crawl` a `POST /crawls` body -> 201
+ *   GET  /schedules                    the tenant's schedules, newest first, paginated
+ *   GET/PATCH/DELETE /schedules/:id    one schedule; PATCH takes the create keys, all optional
+ *   GET  /schedules/:id/history        its fire and skip events, oldest first
  *   GET  /crawls                       list crawls, newest first, paginated.
  *                                      `?siteUrl=` narrows it to one site — the
  *                                      apex/www family, any scheme, any port
@@ -539,6 +544,70 @@ function buildRoutes(): Route[] {
       handler: async (service, ctx) => ({
         status: 200,
         body: await service.crawlHistory(ctx.tenant, param(ctx, "id"), {
+          ...optionalNumber(ctx.query, "limit"),
+          ...optionalString(ctx.query, "cursor"),
+        }),
+      }),
+    },
+    {
+      // A schedule (28c): `crawl` is a `crawl_start` body, so the list a list
+      // crawl names and its credentials ride this body (see `LARGE_BODY_BYTES`).
+      method: "POST",
+      pattern: ["schedules"],
+      query: [],
+      maxBodyBytes: LARGE_BODY_BYTES,
+      handler: async (service, ctx) => ({
+        status: 201,
+        body: await service.createSchedule(ctx.tenant, ctx.body),
+      }),
+    },
+    {
+      method: "GET",
+      pattern: ["schedules"],
+      query: PAGINATION_PARAMS,
+      handler: async (service, ctx) => ({
+        status: 200,
+        body: await service.listSchedules(ctx.tenant, {
+          ...optionalNumber(ctx.query, "limit"),
+          ...optionalString(ctx.query, "cursor"),
+        }),
+      }),
+    },
+    {
+      method: "GET",
+      pattern: ["schedules", id],
+      query: [],
+      handler: async (service, ctx) => ({
+        status: 200,
+        body: await service.getSchedule(ctx.tenant, param(ctx, "id")),
+      }),
+    },
+    {
+      method: "PATCH",
+      pattern: ["schedules", id],
+      query: [],
+      maxBodyBytes: LARGE_BODY_BYTES,
+      handler: async (service, ctx) => ({
+        status: 200,
+        body: await service.updateSchedule(ctx.tenant, param(ctx, "id"), ctx.body),
+      }),
+    },
+    {
+      method: "DELETE",
+      pattern: ["schedules", id],
+      query: [],
+      handler: async (service, ctx) => {
+        noBody(ctx);
+        return { status: 200, body: await service.deleteSchedule(ctx.tenant, param(ctx, "id")) };
+      },
+    },
+    {
+      method: "GET",
+      pattern: ["schedules", id, "history"],
+      query: PAGINATION_PARAMS,
+      handler: async (service, ctx) => ({
+        status: 200,
+        body: await service.scheduleHistory(ctx.tenant, param(ctx, "id"), {
           ...optionalNumber(ctx.query, "limit"),
           ...optionalString(ctx.query, "cursor"),
         }),

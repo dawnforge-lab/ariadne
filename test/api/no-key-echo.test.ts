@@ -31,7 +31,8 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 
 import { closeDb, createDb, type Db } from "../../src/db/client.js";
 import { runMigrations } from "../../src/db/migrate.js";
-import { crawlEvents, crawls } from "../../src/db/schema.js";
+import { crawlEvents, crawls, schedules } from "../../src/db/schema.js";
+import { insertSchedule, newScheduleId } from "../../src/schedule/store.js";
 import { closeFetchAgents } from "../../src/crawl/http.js";
 import { createApiServer, type ApiServer } from "../../src/api/http.js";
 import { createMcpServer, type AriadneMcpServer } from "../../src/api/mcp.js";
@@ -83,6 +84,8 @@ const crawlId = `crawl_no_key_echo_${randomUUID()}`;
 const brokenId = `crawl_no_key_echo_broken_${randomUUID()}`;
 /** Crawls the crawl-events case (28c) started, deleted with the two above. */
 const eventCrawls: string[] = [];
+/** A schedule row for the update cases (28c T4); the allowlist is empty, so none can be created through the surface. */
+const scheduleId = newScheduleId();
 
 /** The whole answer as text: status line plus the body, exactly as sent. */
 async function http(method: string, path: string, body?: unknown): Promise<{ status: number; text: string }> {
@@ -176,6 +179,17 @@ beforeAll(async () => {
     status: "finished",
     pagesCrawled: 0,
   });
+  await insertSchedule(db, {
+    id: scheduleId,
+    tenant: LOCAL_TENANT,
+    siteUrl: `${SITE}/`,
+    crawl: { config: { siteUrl: `${SITE}/` } as never, judgement: null, listed: null },
+    render: null,
+    cron: "0 3 * * *",
+    timezone: "UTC",
+    enabled: false,
+    nextRunAt: null,
+  });
   for (const method of ["error", "warn", "log", "info"] as const) {
     consoleSpies.push(
       vi.spyOn(console, method).mockImplementation((...args: unknown[]) => {
@@ -208,6 +222,7 @@ afterAll(async () => {
   await api.close();
   await closeFetchAgents();
   await db.delete(crawls).where(inArray(crawls.id, [crawlId, brokenId, ...eventCrawls]));
+  await db.delete(schedules).where(eq(schedules.id, scheduleId));
   await closeDb(db);
   await rm(exportDir, { recursive: true, force: true });
   await rm(renderDir, { recursive: true, force: true });
@@ -347,6 +362,63 @@ describe("MCP: no tool quotes a key it was sent", () => {
     const read = await tool("issues_list", { crawlId, [SENTINEL]: 1 });
     expect(read.isError).toBe(true);
     refusedWithoutEcho("issues_list", read.text, 2);
+  });
+});
+
+/**
+ * The schedule bodies (28c T4): the top level, inside `crawl` (a `crawl_start`
+ * body, refused by its own parser with the path prefixed) and inside `render`.
+ * [label, body, the position named].
+ */
+const SCHEDULE_BODY_CASES: [string, Record<string, unknown>, number][] = [
+  ["unknown top-level key", { crawl: { siteUrl: `${SITE}/` }, cron: "0 * * * *", timezone: "UTC", [SENTINEL]: 1 }, 4],
+  ["unknown key inside crawl", { crawl: { siteUrl: `${SITE}/`, [SENTINEL]: 1 }, cron: "0 * * * *", timezone: "UTC" }, 2],
+  [
+    "unknown key inside crawl.judgement.thresholds",
+    { crawl: { siteUrl: `${SITE}/`, judgement: { thresholds: { [SENTINEL]: 3 } } }, cron: "0 * * * *", timezone: "UTC" },
+    1,
+  ],
+  ["unknown key inside render", { crawl: { siteUrl: `${SITE}/` }, cron: "0 * * * *", timezone: "UTC", render: { [SENTINEL]: 1 } }, 1],
+];
+const SCHEDULE_PATCH_CASES: [string, Record<string, unknown>, number][] = [
+  ["unknown top-level key", { enabled: false, [SENTINEL]: 1 }, 2],
+  ["unknown key inside crawl", { crawl: { siteUrl: `${SITE}/`, [SENTINEL]: 1 } }, 2],
+  ["unknown key inside render", { render: { urls: [`${SITE}/a`], [SENTINEL]: 1 } }, 2],
+];
+
+describe("schedule bodies never quote a key they were sent", () => {
+  it("POST /schedules", async () => {
+    for (const [label, body, position] of SCHEDULE_BODY_CASES) {
+      const res = await http("POST", "/schedules", body);
+      expect(res.status, `POST /schedules ${label}: ${res.text}`).toBe(400);
+      refusedWithoutEcho(`POST /schedules ${label}`, res.text, position);
+    }
+  });
+
+  it("PATCH /schedules/:id", async () => {
+    for (const [label, body, position] of SCHEDULE_PATCH_CASES) {
+      const res = await http("PATCH", `/schedules/${scheduleId}`, body);
+      expect(res.status, `PATCH /schedules ${label}: ${res.text}`).toBe(400);
+      refusedWithoutEcho(`PATCH /schedules ${label}`, res.text, position);
+    }
+  });
+
+  it("schedule_create", async () => {
+    for (const [label, body, position] of SCHEDULE_BODY_CASES) {
+      const answer = await tool("schedule_create", body);
+      expect(answer.isError, `schedule_create ${label}: ${answer.text}`).toBe(true);
+      refusedWithoutEcho(`schedule_create ${label}`, answer.text, position);
+    }
+  });
+
+  it("schedule_update", async () => {
+    // The tool's own `scheduleId` is key 1, so a top-level unknown key is one place later.
+    for (const [label, body, position] of SCHEDULE_PATCH_CASES) {
+      const args = { scheduleId, ...body };
+      const answer = await tool("schedule_update", args);
+      expect(answer.isError, `schedule_update ${label}: ${answer.text}`).toBe(true);
+      refusedWithoutEcho(`schedule_update ${label}`, answer.text, label === "unknown top-level key" ? position + 1 : position);
+    }
   });
 });
 
