@@ -297,6 +297,24 @@ what it costs if wrong.
   visibly and naming the crawl, until an agent runs `crawl_rules`.
 - **Task 9:** Step 3 (push, PR, the `gate.yml` run) is the controller's, after asking the owner.
   Cost if wrong: none (ordering only).
+- **Task 9:** `schedule_history` was fixed inside Task 9 (`d1413f8`, "What did not go as first
+  written", run 3) rather than sent back to Tasks 1 and 4. Cost if wrong: Task 1's
+  `listEvents` and Task 4's `scheduleHistory` changed outside their own reviews; Task 9's
+  review covered the change.
+- **Task 9:** after run 1 was interrupted, its 3 schedules were disabled on `ariadne_gate28c` by
+  a direct `update schedules set enabled = false, next_run_at = null where enabled` (run 1,
+  below). Cost if wrong: a hand edit of a scratch gate database, recorded here; the dev database
+  was not touched, and the script's SIGINT handler now disables its own schedules.
+- **Final review I1:** a render or rules link whose process stopped is not retried. The reaper
+  abandons it — running, or queued for a stopped pin — and records `schedule_chain_failed`
+  `{link, reason: "the process running it stopped" | "the process it was pinned to stopped"}`
+  in the same transaction; a queued pinned CRAWL job stays for `crawl_resume`. Cost if wrong: a
+  deploy whose grace period is shorter than a link loses that fire's judgement, visibly (the
+  event in both histories; `docs/deploy.md` says to size the grace period).
+- **Final review I2:** `render.urls` are checked at `schedule_create`/`schedule_update` as far as
+  knowable (URL policy, allowlist, the planned `renderMaxPages`), and "a 200 page of this
+  crawl" stays a strict fire-time check. Cost if wrong: one missing page costs that fire its
+  rules, visibly (`schedule_chain_failed` `{link: "render"}` naming the page).
 
 ## Open items carried forward
 
@@ -312,22 +330,33 @@ what it costs if wrong.
   answer one (clause 1, "Plan"). A partial index on the three schedule kinds would make the
   read O(answer). It is not needed at today's sizes: a weekly schedule writes about 400 rows a
   year.
-- **The zombie leader during a network partition** (Task 5, recommended before merge).
-  Server-side TCP keepalive defaults to about 2 h, so a leader cut off by a partition keeps the
-  advisory lock: nothing fires and nothing is logged. The fix is to set per-session keepalives
-  on the scheduler client (`-c tcp_keepalives_idle=30 -c tcp_keepalives_interval=10 -c
-  tcp_keepalives_count=3`).
+- **The zombie leader during a network partition** (Task 5): **fixed in the final wave**
+  (I3). The scheduler's session sets `tcp_keepalives_idle=30`, `tcp_keepalives_interval=10`
+  and `tcp_keepalives_count=3`, so the server ends a partitioned leader's session about a
+  minute after its last traffic instead of after the ~2 h default; a failed try logs the
+  holder's `application_name`. `idle_session_timeout` was not set: a leader's session is idle
+  while a long `fireDue` runs on the pool.
 - **The per-tenant cap does not count a chain's render and rules links** in the worker pool
   (Task 6), a fairness gap.
-- **A chain link pinned to a dead instance** (Task 6) waits until an agent adopts it. The
-  backlog fix is for the reaper to abandon queued render and rules jobs pinned to a dead
-  instance and record `schedule_chain_failed`, or for the overlap read to check link liveness.
-- **`gate-rules.ts` JSON** (Task 8, recommended in the final wave):
-  - the `inferPageTemplates` figure is a rescan of the collapsed population (a lower bound),
-    not the crawl's own first pass;
-  - peaks for phases not reached read 0, not null;
-  - there is no `isGate` field, so a smoke's `passed: true` reads like a gate pass;
-  - the failing path was never run.
+- **A chain link pinned to a dead instance** (Task 6): **fixed in the final wave where a reaper
+  runs** (I1): the reaper abandons it and records `schedule_chain_failed`. An in-process
+  deployment runs no reaper (R10), so there the link still waits for an agent's `crawl_rules`
+  (or `crawl_render`), and `close()` logs it with that remedy (M7).
+- **`gate-rules.ts` JSON** (Task 8): **fixed in the final wave** (I4). The re-run must retype
+  nothing and is named `inferPageTemplatesRescanMs`; phases not reached read `null`; the JSON
+  carries `isGate`; a failed write fails the run loudly while the cleanup still runs (exercised:
+  a write to a missing directory exited 1 with `FAIL: writing --json-out …`).
+- **A synchronous `crawl_render`/`crawl_rules` on a fired crawl whose process dies mid-call**
+  records `schedule_chain_failed` too (final review I1 keys on the crawl's `schedule_chain`, not
+  on how the job was made). Such a call is not a chain link, so the event's kind overstates it;
+  its reason ("the process running it stopped") is still true. Telling the two apart needs a
+  marker on the job row.
+- **Schedule event retention.** Fire and skip rows grow with the slots and are deleted only with
+  their schedule: a `* * * * *` schedule writes about 525,000 a year, a weekly one about 50.
+  Nothing prunes them yet.
+- **`ScheduleOut` does not expose the stored crawl config** (owner call). A caller sees
+  `siteUrl`, the cron, `render` and the credential names, not the planned config a fire will
+  insert; `crawl_config_get` on a fired crawl shows it after the fact.
 - **Smaller deferred minors from the reviews** (ledger, "minor (deferred)"):
   - Stale comments: `crawls.status` (trigger 0046 is a third reader); `crawl_history`'s
     description hand-lists pause reasons.
@@ -337,7 +366,8 @@ what it costs if wrong.
   - Test-only seams: the `beforeRead` seam sits on `runRulesLink`'s exported signature; an
     empty `onlyTenants` is refused per tick, not at construction.
   - Over-refusal: `Etc/GMT±N` zones are refused.
-  - `render.urls` are not checked at create (they are checked at fire, Task 6).
+  - `render.urls` are not checked at create (they are checked at fire, Task 6). Fixed in the
+    final wave (I2), except the fire-time "a 200 page of this crawl".
   - A no-op update bumps `updated_at`.
   - Shutdown: client `end()` calls are untimed in two places.
   - Tests:

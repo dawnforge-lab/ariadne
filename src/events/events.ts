@@ -165,6 +165,16 @@ export async function recordEvent(
  * they are that crawl's history, read by crawl id — not the schedule's. The
  * `crawl_events_schedule` index (`schedule_id, id`) still drives the read; the
  * kind is a filter on the rows it walks.
+ *
+ * THE KEYSET CAN SKIP A LATE COMMIT (final review M4; documented, not
+ * redesigned). `id` is a bigserial, taken when the row is inserted and seen
+ * only when its transaction commits. With concurrent writers — a lifecycle
+ * trigger in one transaction, a schedule event or the reaper in another — an
+ * event can commit after a higher-numbered one did; a page read between the
+ * two ends past it, and the next page (`id >` the cursor) never shows it. A
+ * read from the start, after the writers have committed, is complete. The
+ * surface says so on `crawl_history` and `schedule_history`
+ * (docs/talos-surface.md).
  */
 export async function listEvents(
   db: Writer,

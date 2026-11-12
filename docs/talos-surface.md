@@ -1,6 +1,6 @@
 # The Ariadne surface Talos codes against
 
-**Status:** the contract as of Phase 28c (ruleset 0.25.1, migrations 0000–0049,
+**Status:** the contract as of Phase 28c (ruleset 0.25.1, migrations 0000–0050,
 34 MCP tools / 34 HTTP routes; every column label in this document is served
 under the ruleset version the engine reports — `rules_catalog`'s
 `rulesetVersion`, which the metric-table pass moves).
@@ -10,7 +10,8 @@ it; this document says *what the seam is*.
 **What Phase 28c changed here (2026-11-12): schedules, and a crawl's history.** Seven
 tools and seven routes are added (34 MCP tools / 34 HTTP routes), `crawl_status` gains
 one field, and the ruleset is unchanged (0.25.1); migrations 0045–0049 add
-`crawl_events`, its triggers, `schedules` and `schedule_credentials`. Gate evidence:
+`crawl_events`, its triggers, `schedules` and `schedule_credentials`, and 0050 a partial
+index that keeps `renderDocuments` from scanning a crawl's pages. Gate evidence:
 `docs/gates/phase-28c.md`.
 
 - **`crawl_history` (`GET /crawls/:id/history`)** answers a crawl's lifecycle events,
@@ -29,7 +30,12 @@ one field, and the ruleset is unchanged (0.25.1); migrations 0045–0049 add
   status was changed, so no transition goes unrecorded; the application writes only the
   three schedule kinds. Events are O(lifecycle), never O(URLs), and `detail` is built
   from an allowlist per kind: no credential name or value and no key a caller sent can
-  reach it. Another tenant's crawl is a 404, as on every crawl route.
+  reach it. Another tenant's crawl is a 404, as on every crawl route. The cursor is a
+  keyset on the event's `id`, which is assigned when the event is written but visible
+  only when its transaction commits: an event written by a transaction still open when
+  a page is read, and committed after a later-numbered one was read, falls behind the
+  cursor and is not on a later page. So read the history again from the start (no
+  `cursor`) when it must be complete — after the crawl and its chain have ended, it is.
 - **Schedules: `schedule_create` (`POST /schedules`, 201), `schedule_list` (`GET
   /schedules`), `schedule_get` (`GET /schedules/:id`), `schedule_update` (`PATCH
   /schedules/:id`), `schedule_delete` (`DELETE /schedules/:id`) and `schedule_history`
@@ -65,12 +71,29 @@ one field, and the ruleset is unchanged (0.25.1); migrations 0045–0049 add
     deleted with the schedule; retention does not apply to a schedule's own copy.
   - **`render`**: null (the default) is crawl then rules; `{}` adds a render pass over
     the engine's own selection between them; `{urls: [...]}` renders exactly those
-    pages. The URLs are checked when the render runs, as `crawl_render` checks a
-    caller's list (URL policy, the allowlist, a page of this crawl that answered 200).
+    pages. The URLs are checked when the schedule is written, as far as anything can be
+    known before there is a crawl: the URL policy (403 `FORBIDDEN`), the allowlist —
+    a host of the crawl's own site, or one in the server's allowlist (403 `FORBIDDEN`)
+    — and no more distinct URLs than the planned crawl's `renderMaxPages` (400
+    `VALIDATION`), refused with `crawl_render`'s own sentences prefixed `render.`
+    (`render.urls entry …`). `schedule_update` checks the list and the crawl as they
+    will stand together, so a new `crawl` with a lower `renderMaxPages` is refused
+    against the stored list too. The rest is checked when the render runs, as
+    `crawl_render` checks a caller's list: each URL must be a page of THAT fire's crawl
+    that answered 200. **A named page missing from a fire's crawl costs that fire its
+    render and its rules**, visibly: the render link fails `VALIDATION` and the chain
+    ends with `schedule_chain_failed` `{link: "render"}` naming the missing page. The
+    next fire tries again.
 - **A fire is a chain: crawl, then render if asked, then rules.** Each link is a job
   queued in the same transaction that closes the link before it, with the crawl job's
   pin: none for a fired crawl, so any worker runs it. A link that fails ends the chain with `schedule_chain_failed` `{link,
-  reason}` in the crawl's history and the schedule's; the crawl keeps what it has. A
+  reason}` in the crawl's history and the schedule's; the crawl keeps what it has. So
+  does a link whose process stopped (killed mid-link, or past its orchestrator's grace
+  period: a link is not interrupted by a shutdown, it is waited out): the reaper
+  abandons the job and records `{link, reason: "the process running it stopped"}`, or,
+  for a link still queued for a process that stopped, `"the process it was pinned to
+  stopped"`. A link is not retried; `crawl_rules` (after `crawl_render`, if asked) gives
+  that crawl its judgement. A
   fired crawl that ends `paused` or `cancelled` ends the chain silently (the pause or
   cancel is its own event). So two fired crawls are each judged, and `crawl_compare`
   between them answers `comparable: true` (the gate's clause 1).
@@ -79,9 +102,13 @@ one field, and the ruleset is unchanged (0.25.1); migrations 0045–0049 add
   every 30 s it fires or skips what is due. **The stdio MCP server is not a candidate**
   (it lives as long as one agent session, and a leader that exits strands what it
   pinned): a local user runs `worker:serve` or `api:serve` beside it for schedules to
-  fire. A process tries for the lock 30 s after it boots. A leader that dies frees the
-  lock with its session, and another candidate leads at its next try, within 30 s; slots
-  missed meanwhile fire once, late, not once each. No slot fires twice, whoever leads
+  fire. A process tries for the lock 30 s after it boots. A leader frees the lock with
+  its database session, and another candidate leads at its next try, within 30 s of the
+  leader's process or session ending. A leader cut off by the network has its session
+  ended by the server about a minute after its last traffic (server-side TCP
+  keepalives on the scheduler's connection: 30 s idle, then 3 probes 10 s apart), so a
+  partition stops firing for at most about 90 s. Slots missed meanwhile fire once,
+  late, not once each. No slot fires twice, whoever leads
   (the claim of a due schedule is `SKIP LOCKED`, with the slot moved in the same
   transaction).
 - **A slot fires or is skipped, and the skip is recorded.** `schedule_history` answers
@@ -90,12 +117,17 @@ one field, and the ruleset is unchanged (0.25.1); migrations 0045–0049 add
   `crawlId` null at the top level and names the crawl in `detail`, so its record
   outlives a deleted crawl. `schedule_history` answers these three kinds only: a fired
   crawl's lifecycle events carry the schedule's `scheduleId` too, and they are read with
-  `crawl_history`. The skip reasons, checked in this order:
+  `crawl_history`. Its cursor is the same keyset on the event `id`, with the same
+  caveat (an event committed after a later-numbered one was read can fall behind the
+  cursor; a read from the start, once its writers have committed, is complete). The skip reasons, checked in this order:
   - `overlap`: a crawl this schedule fired is still `queued`, `running` or `paused`, or
     one of its chain links is queued or running. `detail.crawlId` names it. A schedule
-    never stacks crawls. A system pause resumes by itself (Phase 28b), so a deploy does
-    not hold a schedule; an agent's pause does, deliberately, until the crawl is resumed
-    or cancelled.
+    never stacks crawls. A `shutdown` pause, and a `worker_lost` one up to three in a
+    row (`AUTO_RESUME_LIMIT`), resume by themselves (Phase 28b), so a deploy does not
+    hold a schedule. Every other pause holds it until the crawl is resumed or
+    cancelled: an agent's (`request`), deliberately; `worker_lost` past the limit;
+    `credentials_unreadable` (only new values continue it); and `not_allowed` (a
+    worker's allowlist refused the host). `crawl_history` names the pause reason.
   - `not-allowed`: the leading process's allowlist does not admit the crawl's `siteUrl`,
     `legacyHosts` or `sitemapUrls`. The allowlist is checked at fire time as well as at
     create, so a host removed from it stops its schedules firing.
@@ -127,15 +159,23 @@ one field, and the ruleset is unchanged (0.25.1); migrations 0045–0049 add
   `test/schedule/scheduler.test.ts:327` ("(e) not-allowed: hostAllowed false skips the slot"),
   `test/schedule/scheduler.test.ts:342` ("(f) credentials_unreadable"),
   `test/schedule/scheduler.test.ts:575` ("(g) the leader's connection killed"),
-  `test/schedule/scheduler.test.ts:801` ("the candidates are api:serve and worker:serve"),
-  `test/worker/chain.test.ts:194` ("(a) two fires of a render-less schedule are each judged
-  last, and compare comparable: true"), `test/worker/chain.test.ts:226` ("schedule_history answers the schedule's own events only"), `test/worker/chain.test.ts:372` ("(e) the schedule
+  `test/schedule/scheduler.test.ts:854` ("the candidates are api:serve and worker:serve"),
+  `test/worker/chain.test.ts:196` ("(a) two fires of a render-less schedule are each judged
+  last, and compare comparable: true"), `test/worker/chain.test.ts:228` ("schedule_history answers the schedule's own events only"), `test/worker/chain.test.ts:374` ("(e) the schedule
   deleted after the fire"), `test/crawl/render-link.test.ts:143` ("renders, writes no file
   and leaves rendered_html_path null"), `test/events/crawl-events.test.ts:206` ("(a) reads
   queued, claimed, started, paused{request}, resumed{auto:false}"),
-  `test/api/no-key-echo.test.ts:633` ("no event detail carries any of it") and
+  `test/api/no-key-echo.test.ts:633` ("no event detail carries any of it"),
   `test/api/tenant-isolation.test.ts:560` ("an invalid body against a foreign schedule is
-  still the missing answer").
+  still the missing answer"), `test/api/schedules.test.ts:401` ("a URL the URL policy
+  refuses is a 403 FORBIDDEN at create"), `test/api/schedules.test.ts:436` ("an update's
+  crawl is checked against the stored render.urls"), `test/worker/chain.test.ts:529` ("a
+  RUNNING render link of a dead instance"), `test/worker/chain.test.ts:551` ("a QUEUED
+  rules link pinned to a dead instance"), `test/schedule/scheduler.test.ts:618` ("the
+  leader's session carries server-side TCP keepalives"),
+  `test/schedule/scheduler.test.ts:638` ("logs the holder's application_name, once per
+  change of holder") and `test/crawl/render-link.test.ts:205` ("is an index read over the
+  crawl's kept documents").
 - **Not in 28c**: the domain allowlist is still one operator-set list (a per-tenant
   allowlist is an open item); nothing bounds how long a live crawl holds a host from other
   tenants; the per-tenant cap does not count a chain's render and rules links. All three
@@ -4394,15 +4434,21 @@ byte for byte, as it writes it".
   operator default (the config defaults, a politeness floor) reaches it only when it is
   updated with its `crawl` again. The allowlist and the credentials are the two things
   re-checked at every fire.
-- **A skip is per slot, and an agent's pause holds a schedule.** A fired crawl an agent
-  paused makes every later slot an `overlap` skip until it is resumed or cancelled, by
-  design; `schedule_history` names the crawl on each skip.
+- **A skip is per slot, and any pause the engine does not undo holds a schedule.** A
+  fired crawl paused `request` (an agent's pause, by design), `worker_lost` more than
+  three times in a row, `credentials_unreadable` or `not_allowed` makes every later slot
+  an `overlap` skip until it is resumed or cancelled; `schedule_history` names the crawl
+  on each skip, and `crawl_history` its pause reason. Only `shutdown`, and `worker_lost`
+  up to the limit, resume by themselves.
 - **The per-tenant cap (`ARIADNE_TENANT_MAX_RUNNING`) counts crawl jobs, not a chain's
   render and rules links**, which any worker may run beside the tenant's crawl.
-- **A chain link pinned to a process that stopped stays queued.** Only a fired crawl
-  resumed through the stdio MCP server pins its chain to that process; if it exits
-  mid-chain the link waits, the schedule skips as `overlap` naming the crawl, and the
-  tenant's `crawl_rules` (or `crawl_render`) adopts the link and runs it.
+- **A chain link pinned to a process that stopped waits only where no reaper runs.**
+  Only a fired crawl resumed through the stdio MCP server pins its chain to that
+  process. Where a worker or the API in workers mode shares the database, its reaper
+  abandons such a link and records `schedule_chain_failed` (`"the process it was pinned
+  to stopped"`), ending the chain. With no reaper (the stdio server alone), the link
+  waits, the schedule skips as `overlap` naming the crawl, and the tenant's
+  `crawl_rules` (or `crawl_render`) adopts the link and runs it.
 
 ## Cross-references
 

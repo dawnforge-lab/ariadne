@@ -132,13 +132,20 @@ crawler inside Talos. The intended shape:
    schedule (`schedule_create`, a cron in an IANA zone) fires a crawl unattended, then
    the render pass if it asks for one, then the rules, so two fired crawls can be
    compared. A slot whose previous fired crawl is still queued, running or **paused**
-   is skipped as `overlap`, never stacked. Because system pauses resume by themselves
-   (above), a deploy does not hold a schedule; an agent's pause (`request`) does, by
-   design, until Talos resumes or cancels that crawl, and `schedule_history` names the
-   crawl on every skip. A host the allowlist no longer admits is skipped `not-allowed` at
-   fire time. One process leads the firing (a Postgres advisory lock among every
-   `api:serve` and `worker:serve`; not the stdio MCP server), a leader that dies is
-   replaced within 30 s, and no slot fires twice. `crawl_history` answers what happened
+   is skipped as `overlap`, never stacked. Because a `shutdown` pause, and a
+   `worker_lost` one up to `AUTO_RESUME_LIMIT` (3) in a row, resume by themselves
+   (above), a deploy does not hold a schedule. Every other pause does, until Talos
+   resumes or cancels that crawl: an agent's pause (`request`), by design; a crawl lost
+   with its worker more than three times in a row (`worker_lost` past the limit);
+   credentials no process can read (`credentials_unreadable`, which only new values
+   continue); and a host a worker's allowlist refused (`not_allowed`). `schedule_history`
+   names the crawl on every skip, and `crawl_history` its pause reason. A host the
+   allowlist no longer admits is skipped `not-allowed` at fire time. One process leads
+   the firing (a Postgres advisory lock among every `api:serve` and `worker:serve`; not
+   the stdio MCP server); another candidate leads within 30 s of the leader's process or
+   database session ending, and a leader cut off by the network has its session ended by
+   the server about a minute after its last traffic (server-side TCP keepalives: 30 s
+   idle, then 3 probes 10 s apart). No slot fires twice. `crawl_history` answers what happened
    to any crawl, in order (claims, pauses with their reason, worker losses, automatic and
    agent resumes, the render and rules links), so Talos can explain a crawl's state
    instead of inferring it from `crawl_status`. The surface is `docs/talos-surface.md`'s

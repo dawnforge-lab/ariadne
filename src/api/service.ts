@@ -7322,7 +7322,12 @@ export class ApiService {
     }
     // A fired crawl's chain link (28c) queued for this instance: no other
     // process runs it, and its schedule skips its slots as `overlap` while it
-    // stands. Said, by crawl, so an operator can find it.
+    // stands. Said, by crawl, with the two ways it ends (final review M7): an
+    // agent's crawl_rules / crawl_render adopts it, or — where a worker or the
+    // API in workers mode shares the database — that process's reaper abandons
+    // it and records `schedule_chain_failed` (src/worker/reaper.ts, step 1).
+    // Kept, because an in-process deployment runs no reaper (R10): there the
+    // log line is the only place the stranded link is named.
     const links = await this.db
       .select({ crawlId: jobs.crawlId, kind: jobs.kind })
       .from(jobs)
@@ -7333,7 +7338,10 @@ export class ApiService {
         `api: ${links.length} schedule chain link(s) left queued and unstarted ` +
           `(${links.map((l) => `${l.kind} of ${l.crawlId}`).join(", ")}), pinned to this instance ` +
           `(${instanceId}), which is now stopped: no other process runs them, and each one's schedule ` +
-          "skips its slots as overlap while the link stands",
+          "skips its slots as overlap while the link stands. crawl_rules (crawl_render for a render " +
+          "link) on the crawl, from any server, adopts the link and runs it; where a worker or the API " +
+          "in workers mode shares this database, its reaper instead ends the chain and records " +
+          "schedule_chain_failed",
       );
     }
   }

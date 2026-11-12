@@ -916,7 +916,9 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "same three for rules_*. A crawl that ran in one go reads queued, claimed, " +
         "started, finished.\n\n" +
         `Paginated: {items, nextCursor}; limit defaults to ${PAGE_SIZE_DEFAULT}, ` +
-        `maximum ${PAGE_SIZE_MAX}. Pass nextCursor back as cursor to continue.`,
+        `maximum ${PAGE_SIZE_MAX}. Pass nextCursor back as cursor to continue. A page read ` +
+        "while the crawl is still moving can miss an event committed late; a read from the " +
+        "start (no cursor) once the crawl has settled is complete.",
       inputSchema: strictInput({ crawlId: crawlIdField(), limit: limitField(), cursor: cursorField() }),
     },
     async ({ crawlId, ...page }) => run("crawl_history", () => service.crawlHistory(tenant, crawlId, defined(page))),
@@ -953,7 +955,12 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
       .nullable()
       .describe(
         "What follows a fired crawl: null (the default) is the rules run alone; {} adds a render " +
-          "pass over the engine's own selection; {urls: [...]} renders exactly those pages.",
+          "pass over the engine's own selection; {urls: [...]} renders exactly those pages. The " +
+          "urls are checked now as crawl_render checks them (URL policy, allowlist, at most " +
+          "crawl.renderMaxPages distinct pages; refused with the path 'render.urls'). That each is " +
+          "a page of the fired crawl that answered 200 is checked when the render runs: a page " +
+          "missing from a fire's crawl ends that fire's chain (schedule_chain_failed, link render), " +
+          "so it gets no rules run.",
       );
 
   server.registerTool(
@@ -1050,9 +1057,11 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "kind is schedule_fired {crawlId} (a crawl was queued; look it up with crawl_status), " +
         "schedule_skipped {reason: overlap | not-allowed | credentials_unreadable, crawlId on " +
         "overlap: the crawl still holding the schedule}, or schedule_chain_failed {link, " +
-        "reason} (a fired crawl's render or rules link failed). " +
+        "reason} (a fired crawl's render or rules link failed, or the process running it " +
+        "stopped). " +
         `Paginated: {items, nextCursor}; limit defaults to ${PAGE_SIZE_DEFAULT}, ` +
-        `maximum ${PAGE_SIZE_MAX}.`,
+        `maximum ${PAGE_SIZE_MAX}. A page read while events are still being written can miss ` +
+        "one committed late; read again from the start (no cursor) for the complete list.",
       inputSchema: strictInput({ scheduleId: scheduleIdField(), limit: limitField(), cursor: cursorField() }),
     },
     async ({ scheduleId, ...page }) =>
