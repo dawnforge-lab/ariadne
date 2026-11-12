@@ -9,9 +9,11 @@
  * and the migration count. The count compares the rows applied in
  * `drizzle.__drizzle_migrations` with the entries of this code's
  * `drizzle/meta/_journal.json`. Fewer applied means a migration has not run;
- * more means the database is ahead of this code (a rolled-back deploy). Either
- * is "not ready". A failed query is not ready either: nothing here swallows an
- * error into a green answer.
+ * more means the database is ahead of this code, which is the NORMAL state of
+ * a migrate-then-roll deploy (migrations are additive; Ruling R19) and is
+ * READY, with one log line naming the counts. Behind is "not ready". A failed
+ * query is not ready either: nothing here swallows an error into a green
+ * answer.
  *
  * THE ANSWER IS UNAUTHENTICATED, so its reasons are FIXED, CLASSIFIED strings:
  * a pg error carries the server's host and port, relation names and detail,
@@ -57,6 +59,9 @@ function describeError(error: unknown): string {
   return parts.join("\n  caused by: ");
 }
 
+/** The applied count last logged as "ahead", so a probe loop logs the transition once. */
+let aheadLogged: number | null = null;
+
 export async function readyz(db: Pick<Db, "execute">, log: (line: string) => void): Promise<Readyz> {
   let applied: number;
   try {
@@ -67,17 +72,21 @@ export async function readyz(db: Pick<Db, "execute">, log: (line: string) => voi
     return { status: 503, body: { status: "not_ready", reason: "database unreachable" } };
   }
   const expected = journalMigrationCount();
-  if (applied !== expected) {
+  if (applied < expected) {
     return {
       status: 503,
-      body: {
-        status: "not_ready",
-        reason:
-          applied < expected
-            ? `schema behind: ${applied} of ${expected} migrations applied`
-            : `schema ahead: ${applied} migrations applied, this code knows ${expected}`,
-      },
+      body: { status: "not_ready", reason: `schema behind: ${applied} of ${expected} migrations applied` },
     };
+  }
+  if (applied > expected) {
+    // Ruling R19: migrate-then-roll means old replicas run against a newer,
+    // additive schema. Ready; said once per transition, not once per probe.
+    if (aheadLogged !== applied) {
+      aheadLogged = applied;
+      log(`ops: /readyz schema ahead — ${applied} migrations applied, this code knows ${expected}; ready (additive newer schema)`);
+    }
+  } else {
+    aheadLogged = null;
   }
   return { status: 200, body: { status: "ready" } };
 }

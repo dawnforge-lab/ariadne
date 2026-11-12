@@ -608,6 +608,52 @@ describe("a runner that lost its job", () => {
     }
   }, 60_000);
 
+  it("a LIVE-but-stalled runner: a real reaper takes its job, its loop's close meets paused/worker_lost and writes nothing", async () => {
+    const i = await instanceAt(0);
+    const crawlId = await queuedSiteCrawl();
+    const job = await enqueueJob(db, { tenant: LOCAL_TENANT, crawlId, kind: "crawl", pinnedTo: i });
+    const log: string[] = [];
+    // The runner is alive and working but its heartbeat has stalled (it never
+    // beats): the instance and the job both age past `deadAfter`.
+    const runner = new JobRunner(db, {
+      instanceId: i,
+      kinds: ["crawl"],
+      pinnedTo: i,
+      concurrency: 1,
+      heartbeat: false,
+      log: (line) => log.push(line),
+      execute: crawlJobExecutor({
+        hostAllowed: (host) => isHostAllowed(host, ["127.0.0.1"]),
+        db,
+        vault,
+        processTrust: { allowPrivate: true },
+        log: (line) => log.push(line),
+        logPrefix: "worker",
+      }),
+      timing: TIGHT,
+    });
+    runner.start();
+    try {
+      await until("the crawl running with a page", async () => [(await crawlRow(crawlId)).status, await pagesOf(crawlId)] as const, ([s, n]) => s === "running" && n > 0);
+      // A real reaper, confined to this instance, ticking until it takes the job.
+      const taken = await until(
+        "the reaper took the stalled runner's job",
+        () => reap([i]),
+        (summary) => summary.abandonedJobs === 1,
+      );
+      expect(taken).toMatchObject({ abandonedJobs: 1, pausedCrawls: 1 });
+      // The stalled runner does not beat, so nothing tells its loop mid-run;
+      // stopping it makes the loop close its run, which is the close under test.
+      await runner.stop();
+      expect(runner.runningJobIds()).toEqual([]);
+      // The loop's own close met the paused/worker_lost row and wrote nothing over it.
+      expect(await crawlRow(crawlId)).toMatchObject({ status: "paused", pauseReason: "worker_lost", failureReason: null });
+      expect((await jobRow(job)).status).toBe("abandoned");
+    } finally {
+      await runner.stop();
+    }
+  }, 60_000);
+
   it("a job abandoned between its claim and the crawl's start never starts the crawl", async () => {
     const i = await instanceAt(0);
     const crawlId = await queuedSiteCrawl();

@@ -74,7 +74,8 @@ contract moves in these ways, none of them a new call:
 - **Three endpoints answer before the bearer and tenant checks**, listed in
   `PRE_AUTH_ROUTES` (`src/api/http.ts`) and in the tenant sentinel: `GET /healthz`
   (liveness, 200), `GET /readyz` (200 when the database is reachable and its migrations
-  are the ones the code expects; otherwise 503 with a FIXED reason such as "database
+  are the ones the code expects or more, since an older replica runs against a newer
+  additive schema during a deploy; otherwise 503 with a FIXED reason such as "database
   unreachable" or "schema behind", never an error message) and `GET /metrics`
   (Prometheus; its own bearer, `ARIADNE_METRICS_TOKEN`, which must differ from the API
   token and opens nothing else; unset means 404, never served open). No metric label

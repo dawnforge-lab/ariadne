@@ -29,7 +29,9 @@ RUN npx playwright install --with-deps chromium \
 COPY tsconfig.json drizzle.config.ts ./
 COPY drizzle ./drizzle
 COPY src ./src
-COPY scripts ./scripts
+# Only the launch check docs/deploy.md runs in the image; the gate and trusted
+# (allowPrivate) scripts stay out.
+COPY scripts/render-launch-check.ts ./scripts/render-launch-check.ts
 COPY docker-entrypoint.sh /usr/local/bin/ariadne
 RUN chmod +x /usr/local/bin/ariadne
 

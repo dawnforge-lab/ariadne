@@ -650,10 +650,9 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "CREDENTIALS. A crawl started with requestHeaders, httpAuth or cookies keeps " +
         "them stored encrypted, and a resume uses them without your sending them, after " +
         "a server restart too. When the stored copy cannot be read (the server's key " +
-        "changed, or it was deleted after the crawl finished), the crawl is paused " +
-        "'credentials_unreadable' and this tool refuses with code CREDENTIALS_REQUIRED " +
-        "(409), naming the fields and header/cookie names it needs, until you send them " +
-        "again here — exactly those " +
+        "changed, or it was deleted after the crawl finished), a queued crawl is " +
+        "paused 'credentials_unreadable' when a runner picks it up; this tool refuses with " +
+        "code CREDENTIALS_REQUIRED (409) until you re-send the credentials, naming the fields and header/cookie names it needs — send exactly those " +
         "kinds and names (crawl_config_get shows them, values [redacted]); another " +
         "shape is a VALIDATION refusal. A crawl that needed them never runs without " +
         "them. Values sent replace the stored copy and are never logged or answered. A crawl started " +

@@ -382,10 +382,11 @@ describe("the secret scan", () => {
     }
 
     // The one column that holds the values (28b): encrypted, so its bytes carry
-    // none of them as UTF-8. Every row in the table, not only this crawl's.
+    // none of them as UTF-8. Only this suite's own crawls: the table is shared, and a 3-byte secret would collide with other suites' ciphertext by chance.
     const vaultRows = await db
       .select({ crawlId: crawlCredentials.crawlId, ciphertext: crawlCredentials.ciphertext })
-      .from(crawlCredentials);
+      .from(crawlCredentials)
+      .where(inArray(crawlCredentials.crawlId, createdCrawls));
     expect(vaultRows.map((r) => r.crawlId)).toContain(id);
     for (const { crawlId, ciphertext } of vaultRows) {
       for (const secret of SCAN_SECRETS) {

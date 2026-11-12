@@ -168,6 +168,27 @@ describe("/readyz", () => {
     expect((await readyz(db, () => undefined)).status).toBe(200);
   });
 
+  it("answers 200 ready and logs the counts once when the database is AHEAD (migrate-then-roll, R19)", async () => {
+    const abort = new Error("rollback");
+    const lines: string[] = [];
+    const answers: Awaited<ReturnType<typeof readyz>>[] = [];
+    await expect(
+      db.transaction(async (tx) => {
+        await tx.execute(
+          sql`insert into drizzle.__drizzle_migrations (hash, created_at) values ('test-ahead-orphan', 9999999999999)`,
+        );
+        answers.push(await readyz(tx, (l) => lines.push(l)));
+        answers.push(await readyz(tx, (l) => lines.push(l)));
+        throw abort;
+      }),
+    ).rejects.toBe(abort);
+    expect(answers.map((a) => a.status)).toEqual([200, 200]);
+    expect(answers[0]?.body).toEqual({ status: "ready" });
+    // One line for the transition, not one per probe, and it names the counts.
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toMatch(/schema ahead — \d+ migrations applied, this code knows \d+/);
+  });
+
   it("answers 503 when the database is unreachable", async () => {
     const res = await fetch(`${deadApiBase}/readyz`);
     expect(res.status).toBe(503);

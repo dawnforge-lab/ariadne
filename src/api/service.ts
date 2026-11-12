@@ -4968,7 +4968,7 @@ export class ApiService {
    * pending URLs the new lists refuse (`refileOutOfScope`, Task 4).
    *
    * The read-merge-write is one transaction holding the crawl row
-   * (`for update`), so two concurrent patches cannot each lose the other's
+   * (`for no key update`), so two concurrent patches cannot each lose the other's
    * key. The in-flight check is in-process, as `runRulesForCrawl`'s own is
    * (see there for why the hold is not in the database). A run that claims the
    * crawl between that check and this write reads either block, and stamps the
@@ -7094,15 +7094,21 @@ export class ApiService {
    */
   async close(): Promise<void> {
     this.closed = true;
-    if (this.beat !== null) clearInterval(this.beat);
-    this.beat = null;
     if (this.sweepTimer !== null) clearInterval(this.sweepTimer);
     this.sweepTimer = null;
     if (this.sweeping !== null) await this.sweeping;
     const building = this.runner;
     // A runner whose build failed told its caller so; there is nothing to stop.
     const runner = building === null ? null : await building.catch(() => null);
-    if (runner !== null) await runner.stop();
+    // Keep heartbeating while the runner drains: a drain longer than deadAfter
+    // must not let a reaper abandon the job (the crawl would end worker_lost
+    // instead of shutdown). The beat stops only once the runner has.
+    try {
+      if (runner !== null) await runner.stop();
+    } finally {
+      if (this.beat !== null) clearInterval(this.beat);
+      this.beat = null;
+    }
     const registering = this.instance;
     if (registering === null) return;
     // A registration that failed told its caller so; no instance to stop.
@@ -9045,7 +9051,7 @@ function rulesWhileLive(crawlId: string, status: string): ServiceError {
  * commit — no render pass or rules run can take the crawl in between.
  */
 async function lockCrawlRow(tx: Writer, crawlId: string): Promise<void> {
-  await tx.select({ id: crawls.id }).from(crawls).where(eq(crawls.id, crawlId)).for("update");
+  await tx.select({ id: crawls.id }).from(crawls).where(eq(crawls.id, crawlId)).for("no key update");
 }
 
 /** The lifecycle refusals of `deleteCrawl`: a live crawl, or one with a request pending. */

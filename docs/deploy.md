@@ -26,7 +26,13 @@ API: `ARIADNE_API_TOKEN` (at least 16 characters), `ARIADNE_API_HOST=0.0.0.0` (t
 
 Worker: `ARIADNE_WORKER_HTTP_PORT`, `ARIADNE_WORKER_CONCURRENCY` (default 1), `ARIADNE_TENANT_MAX_RUNNING`. Scale workers by running more containers.
 
+`ARIADNE_ALLOWED_DOMAINS` must be IDENTICAL on the API and on every worker. A worker whose list lacks a crawl's host pauses that crawl `not_allowed`, by design (Ruling R16): the allowlist is enforced where the fetching happens.
+
 `/healthz`, `/readyz` and `/metrics` are served before auth on the API port and on each worker's port.
+
+## Rolling a deploy
+
+Run `migrate` first, then roll the API and the workers. Migrations are additive, so replicas still running the old code stay ready against the newer schema: `/readyz` answers 200 when the database has MORE migrations applied than the code knows (and logs one line naming the counts, once per transition; Ruling R19). It answers 503 `schema behind` only when FEWER are applied than the code knows, i.e. a new replica started before `migrate` ran, and 503 `database unreachable` when the database cannot be reached.
 
 ## Compose (local and the 28b gate)
 

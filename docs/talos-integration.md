@@ -124,6 +124,9 @@ crawler inside Talos. The intended shape:
    `paused` as possibly transient: poll `crawl_status` and read `pauseReason` before it
    decides a human or an agent has to act (`docs/talos-surface.md`, the Phase 28b
    summary).
+   Host exclusivity (one running crawl per host across all workers, rule 9) keys on the
+   seed host (www and non-www alike, plus a non-default port); `legacyHosts` probes,
+   `sitemapUrls` on other hosts and redirect targets are low-volume and not covered by it.
 8. **Talos is still the source of truth for a crawl's credentials; Ariadne keeps an
    encrypted copy for reruns.** Since Phase 27c a crawl can carry custom request
    headers, HTTP Basic auth and cookies (staging sites, pre-issued sessions). Since
