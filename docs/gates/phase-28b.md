@@ -75,10 +75,15 @@ SIGKILL.
 - At that moment `crawl_status.liveLeases` was **0** and **0** frontier rows were `leased`.
 - It stayed `paused` for three more seconds (cap spent: not requeued), then `crawl_resume`
   answered **202** and the crawl finished on the **other** worker: jobs `abandoned` (the victim)
-  then `done` (the survivor).
-- **150 `pages` rows, 150 distinct URLs**: no duplicate.
+  then `done` (a live worker other than the victim; the replacement worker spawned before the
+  resume was equally eligible, and the check requires only that, not that it be the survivor).
+- **150 `pages` rows, 150 distinct URLs.** That alone proves nothing (the `pages_crawl_url` unique
+  index makes it impossible to fail), so the real check is the fixture's own request count: the
+  host served **151 page requests for 150 pages**, against an allowance of 150 plus **1** (one
+  request is outstanding when a worker with `maxConcurrency` 1 is killed; that fetch is lost and
+  redone). A page re-fetched after the kill would push the count past 151 and fail the clause.
 
-**3a, the automatic requeue** (cap not spent). Killed the same way, the crawl was requeued by the
+**3a, the automatic requeue** (cap not spent; 151 page requests for 150 pages in the final run too). Killed the same way, the crawl was requeued by the
 surviving worker's reaper with `auto_resume_count` 1, finished on the surviving worker
 (jobs `abandoned` then `done`), **150 rows, 150 distinct URLs**, **85.4 s** after the kill. In this
 run the poll (every 50 ms) did not catch the `paused (worker_lost)` state, because the reaper
@@ -355,6 +360,31 @@ every other runner's claim waits that long. At 10,000 it is under 60 ms; at 100,
 about half a second, which is the point at which the per-claim cost deserves a look (for example a
 lateral scan per host, or a bounded candidate window). Not a defect at the sizes the engine runs at.
 
+## Fix round 1 (review of the first record)
+
+The review accepted the gate's honesty, the scan breadth, the worker-RSS sampling and the docs
+against the code, and asked for five changes, all made in `scripts/gate-workers.ts`, the surface
+doc and this file; `gate-workers.ts` was then re-run in full on `ariadne_gate28b` (run
+**`b2c286`**, all clauses PASS; clause 6 and the smoke are unchanged code and were not re-run):
+
+1. **"No duplicate pages" was true by construction.** Replaced by the fixture's request count
+   against the page count plus a stated in-flight allowance (1) in 3a, 3b and 4a. Run `b2c286`:
+   3b 151 requests / 150 pages, 3a 151 / 150, 4a 151 served / 150 pages, all within the allowance.
+2. The surface doc's `/metrics` sentence now says what is true (no label carries a tenant, crawl id,
+   host or URL; the engine's metrics use five names; the default Node metrics add theirs).
+3. 3a now asserts what it saw (reason `worker_lost`, 0 leased rows, within 90 s) when its poll
+   catches the paused state, and the script header and this file say it may miss it (it did, again,
+   in `b2c286`) while 3b holds it (`b2c286`: paused `worker_lost` 77.6 s after the kill, 0 live
+   leases, 0 leased frontier rows).
+4. 3b's finish is on "a live worker other than the victim", worded so above.
+5. The scan fails if the vault holds no row (it held 9 in `b2c286`).
+
+Run `b2c286` evidence otherwise matches the numbers above (clause 2: queued every sample with a
+worker idle; clause 1: max 2 running; 4a: 0 401s, values intact; 4c: both `credentials_unreadable`
+and 409; 4b: 18 tables, 161 columns, 805 probes, 13 texts, no hit; clause 5: 200/200, 401/401/200,
+1 api and 2 workers). The tables in sections 1 to 4 quote run `392327`; the new run's figures
+differ only in timings and ids.
+
 ## Dev database note
 
 The dev database's `drizzle.__drizzle_migrations` has one orphan row: id 44, hash prefix
@@ -372,7 +402,7 @@ The dev database's `drizzle.__drizzle_migrations` has one orphan row: id 44, has
   `patch`, `space` and `type`); the property that matters, no tenant, crawl, host or URL in any label
   value, held and is checked on the values. The allowlist was widened for those six names and the
   whole gate re-run from the start. The numbers in this file are that second run.
-- **Clause 3a did not catch `paused (worker_lost)` in the second run** (it did in the first); see 3.
+- **Clause 3a did not catch `paused (worker_lost)` in the second or third run** (it did in the first); see 3.
   Clause 3b exists because of that.
 - The scripts print their progress and a JSON summary; the full JSON of the second run is not
   committed (it holds instance ids and a run id only, no secret), and the clauses above quote it.

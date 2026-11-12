@@ -13,8 +13,12 @@
  *     with a worker idle the whole time.
  *  3. `kill -9` of the worker holding a crawl: within 90 s the crawl is
  *     `paused` (`worker_lost`) with its leases released, and a resume finishes
- *     on another worker with no duplicate `pages` rows. The automatic requeue
- *     (the common path) is run too.
+ *     on another worker with no page fetched twice (the host's own request
+ *     count must be the page count plus one request in flight at the kill; the
+ *     `pages` unique index would hide a re-fetch). The automatic requeue (the
+ *     common path) is run too; it passes through `paused` within one reaper
+ *     tick, so 3a MAY MISS that state (it asserts it when seen) and 3b, which
+ *     spends the auto-resume cap first, is the evidence for it.
  *  4. A credentialed crawl whose worker is `kill -9`'d finishes on another
  *     worker with its values intact; a secret scan of every table, both
  *     workers' logs, the API's log and responses and every `/metrics` finds no
@@ -77,6 +81,9 @@ const CREDENTIALS = {
   cookies: [{ name: "session", value: SECRET_COOKIE }],
 };
 
+/** One crawl request is outstanding when a worker (maxConcurrency 1) is killed; its fetch is lost and redone. */
+const KILL_IN_FLIGHT_ALLOWANCE = 1;
+
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 const say = (line: string): void => console.log(`[${new Date().toISOString().slice(11, 19)}] ${line}`);
 
@@ -95,6 +102,8 @@ interface HostStats {
   /** Gated hosts only: requests answered 401, and pages served to a request that carried all three credentials. */
   unauthorized: number;
   gatedOk: number;
+  /** Requests for a page that exists on this site (`/` or `/t/N`, N < size): the fetches a crawl made of its pages. */
+  pageHits: number;
 }
 
 interface FixtureHost {
@@ -111,7 +120,7 @@ interface FixtureHost {
  * (robots.txt stays open).
  */
 async function startHost(ip: string, size: number, delayMs: number, gated: boolean): Promise<FixtureHost> {
-  const stats: HostStats = { requests: 0, inFlight: 0, maxInFlight: 0, unauthorized: 0, gatedOk: 0 };
+  const stats: HostStats = { requests: 0, inFlight: 0, maxInFlight: 0, unauthorized: 0, gatedOk: 0, pageHits: 0 };
   const handler = (req: IncomingMessage, res: ServerResponse): void => {
     const path = (req.url ?? "/").split("?")[0] ?? "/";
     stats.requests += 1;
@@ -127,6 +136,7 @@ async function startHost(ip: string, size: number, delayMs: number, gated: boole
       res.end("not found");
       return;
     }
+    stats.pageHits += 1;
     if (gated) {
       const cookie = String(req.headers["cookie"] ?? "");
       const ok =
@@ -523,7 +533,13 @@ async function clause3(apiInstance: string): Promise<Record<string, unknown>> {
       const counts = await pageCounts(id);
       const lastJob = jobs[jobs.length - 1];
       check(failures, done.status === "finished", `3b: ended ${done.status}`);
-      check(failures, counts.rows === 150 && counts.distinct === 150, `3b: ${counts.rows} pages rows, ${counts.distinct} distinct (want 150, no duplicates)`);
+      check(failures, counts.rows === 150 && counts.distinct === 150, `3b: ${counts.rows} pages rows, ${counts.distinct} distinct (want 150)`);
+      // The unique index on pages makes rows == distinct true by construction. The real
+      // risk is RE-FETCHING pages the dead worker already crawled, which the fixture's own
+      // request count shows: 150 pages plus at most ONE page in flight at the kill
+      // (maxConcurrency 1, so one request was outstanding; its fetch is lost and redone).
+      check(failures, host.stats.pageHits <= 150 + KILL_IN_FLIGHT_ALLOWANCE, `3b: the host served ${host.stats.pageHits} page requests for 150 pages (allowance ${150 + KILL_IN_FLIGHT_ALLOWANCE}): pages were fetched again`);
+      check(failures, host.stats.pageHits >= 150, `3b: the host served only ${host.stats.pageHits} page requests for 150 pages`);
       check(failures, lastJob?.status === "done" && lastJob.claimed_by !== victim.instanceId && live().some((w) => w.instanceId === lastJob.claimed_by), `3b: the last job is ${lastJob?.status} on ${lastJob?.claimed_by} (want done, on a live worker other than the victim)`);
       evidence["3b_paused_worker_lost"] = {
         victim: victim.instanceId,
@@ -534,6 +550,8 @@ async function clause3(apiInstance: string): Promise<Record<string, unknown>> {
         jobs: jobs.map((j) => ({ status: j.status, claimedBy: j.claimed_by })),
         pagesRows: counts.rows,
         distinctUrls: counts.distinct,
+        hostPageRequests: host.stats.pageHits,
+        pageRequestAllowance: 150 + KILL_IN_FLIGHT_ALLOWANCE,
         finishedOn: lastJob?.claimed_by,
         resumeStatus: resumed.status,
       };
@@ -568,11 +586,21 @@ async function clause3(apiInstance: string): Promise<Record<string, unknown>> {
       check(failures, jobs.length === 2 && first?.status === "abandoned" && first.claimed_by === victim.instanceId, `3a: jobs ${JSON.stringify(jobs.map((j) => [j.status, j.claimed_by]))} (want the victim's job abandoned, then a second)`);
       check(failures, lastJob?.status === "done" && lastJob.claimed_by !== victim.instanceId, `3a: the last job is ${lastJob?.status} on ${lastJob?.claimed_by}`);
       check(failures, counts.rows === 150 && counts.distinct === 150, `3a: ${counts.rows} pages rows, ${counts.distinct} distinct (want 150)`);
+      check(failures, host.stats.pageHits >= 150 && host.stats.pageHits <= 150 + KILL_IN_FLIGHT_ALLOWANCE, `3a: the host served ${host.stats.pageHits} page requests for 150 pages (allowance ${150 + KILL_IN_FLIGHT_ALLOWANCE}): pages were fetched again`);
+      // The transient paused state is asserted when the poll caught it; 3b is the clause's
+      // evidence for it, because the reaper requeues within one tick.
+      const seen = sawPaused as { afterMs: number; reason: string | null; liveLeases: number } | null;
+      if (seen !== null) {
+        check(failures, seen.reason === "worker_lost", `3a: paused for '${seen.reason}' (want worker_lost)`);
+        check(failures, seen.liveLeases === 0, `3a: ${seen.liveLeases} leased frontier rows while paused (want 0)`);
+        check(failures, seen.afterMs <= 90_000, `3a: paused ${seen.afterMs} ms after the kill (want <= 90000)`);
+      }
       evidence["3a_automatic_requeue"] = {
         victim: victim.instanceId,
         jobs: jobs.map((j) => ({ status: j.status, claimedBy: j.claimed_by })),
         autoResumeCount: done.auto_resume_count,
         pausedWorkerLostSeen: sawPaused,
+        hostPageRequests: host.stats.pageHits,
         pagesRows: counts.rows,
         distinctUrls: counts.distinct,
         finishedAfterKillMs: Date.now() - killedAt,
@@ -606,6 +634,7 @@ async function clause4Credentialed(apiInstance: string): Promise<Record<string, 
     check(failures, jobs.length === 2 && jobs[0]?.status === "abandoned" && jobs[0].claimed_by === victim.instanceId, `4: jobs ${JSON.stringify(jobs.map((j) => [j.status, j.claimed_by]))}`);
     check(failures, lastJob?.status === "done" && lastJob.claimed_by !== victim.instanceId, `4: finished on ${lastJob?.claimed_by}`);
     check(failures, counts.rows === 150 && counts.distinct === 150 && counts.notOk === 0, `4: ${counts.rows} pages rows (${counts.distinct} distinct, ${counts.notOk} not 200/ok) (want 150, 150, 0)`);
+    check(failures, host.stats.pageHits >= 150 && host.stats.pageHits <= 150 + KILL_IN_FLIGHT_ALLOWANCE, `4: the host served ${host.stats.pageHits} page requests for 150 pages (allowance ${150 + KILL_IN_FLIGHT_ALLOWANCE}): pages were fetched again`);
     check(failures, host.stats.unauthorized === 0, `4: the gated host answered ${host.stats.unauthorized} 401(s): a request went out without a credential`);
     check(failures, intact, "4: the stored copy does not decrypt to the values that were sent");
     return {
@@ -702,6 +731,7 @@ async function secretScan(metricsTexts: string[]): Promise<Record<string, unknow
     for (const secret of SECRETS) if (text.includes(secret)) failures.push(`${where} carries a credential value`);
   }
   const vault = await db.execute(sql`select count(*)::int as n from crawl_credentials`);
+  if (Number((vault.rows[0] as { n: number }).n) === 0) failures.push("the vault holds no rows: a scan of an empty vault proves nothing");
   return {
     tablesScanned: tables.size,
     columnsScanned: columns.length,

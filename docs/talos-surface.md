@@ -77,9 +77,11 @@ contract moves in these ways, none of them a new call:
   are the ones the code expects; otherwise 503 with a FIXED reason such as "database
   unreachable" or "schema behind", never an error message) and `GET /metrics`
   (Prometheus; its own bearer, `ARIADNE_METRICS_TOKEN`, which must differ from the API
-  token and opens nothing else; unset means 404, never served open). Metrics labels are
-  `kind`, `status`, `fetch_class`, `role`, `outcome` and nothing else: no tenant, crawl
-  id, host or URL is ever a label. A worker serves the same three on
+  token and opens nothing else; unset means 404, never served open). No metric label
+  ever carries a tenant, crawl id, host or URL: the engine's own metrics use only
+  `kind`, `status`, `fetch_class`, `role` and `outcome`, and the default Node process
+  metrics add their own (`le`, `quantile`, `version`, `major`, `minor`, `patch`,
+  `space`, `type`). A worker serves the same three on
   `ARIADNE_WORKER_HTTP_PORT`.
 - **Environment.** API: `ARIADNE_API_TOKEN`, `ARIADNE_API_PORT`, `ARIADNE_API_HOST`,
   `ARIADNE_ALLOWED_DOMAINS`, `ARIADNE_CREDENTIALS_KEY` (required),
