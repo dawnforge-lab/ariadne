@@ -316,6 +316,48 @@
       "when": 1794430979516,
       "tag": "0044_requeue_index_r17",
       "breakpoints": true
+    },
+    {
+      "idx": 45,
+      "version": "7",
+      "when": 1794485846921,
+      "tag": "0045_crawl_events",
+      "breakpoints": true
+    },
+    {
+      "idx": 46,
+      "version": "7",
+      "when": 1794485851146,
+      "tag": "0046_crawl_events_triggers",
+      "breakpoints": true
+    },
+    {
+      "idx": 47,
+      "version": "7",
+      "when": 1794490174944,
+      "tag": "0047_schedules",
+      "breakpoints": true
+    },
+    {
+      "idx": 48,
+      "version": "7",
+      "when": 1794490181645,
+      "tag": "0048_schedule_event_triggers",
+      "breakpoints": true
+    },
+    {
+      "idx": 49,
+      "version": "7",
+      "when": 1794491415573,
+      "tag": "0049_job_event_schedule_lock",
+      "breakpoints": true
+    },
+    {
+      "idx": 50,
+      "version": "7",
+      "when": 1794507161597,
+      "tag": "0050_rendered_doc_index",
+      "breakpoints": true
     }
   ]
 }

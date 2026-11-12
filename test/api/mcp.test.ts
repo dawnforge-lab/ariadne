@@ -670,13 +670,13 @@ afterAll(async () => {
 });
 
 describe("the tool surface", () => {
-  it("advertises exactly the twenty-seven tools of the agent surface, each described", async () => {
+  it("advertises exactly the thirty-four tools of the agent surface, each described", async () => {
     const listed = await client.listTools();
     expect(listed.tools.map((t) => t.name).sort()).toEqual(
       [
         "compare_urls", "config_schema", "config_validate", "crawl_compare", "crawl_config_get", "crawl_config_set", "crawl_list",
         "crawl_mark_failed", "crawl_overview", "crawl_render", "crawl_resume", "crawl_rules", "crawl_start", "crawl_pause", "crawl_cancel", "crawl_delete",
-        "crawl_status", "export_crawl", "issue_inlinks", "issue_urls", "issues_list",
+        "crawl_history", "schedule_create", "schedule_list", "schedule_get", "schedule_update", "schedule_delete", "schedule_history", "crawl_status", "export_crawl", "issue_inlinks", "issue_urls", "issues_list",
         "issues_overview", "metric_table", "metrics_get", "pages_query", "robots_get", "rules_catalog",
       ].sort(),
     );
@@ -689,7 +689,7 @@ describe("the tool surface", () => {
         tool.name === "pages_query" ||
         tool.name === "issue_urls" ||
         tool.name === "issue_inlinks" ||
-        tool.name === "compare_urls"
+        tool.name === "compare_urls" || tool.name === "crawl_history" || tool.name === "schedule_history"
       ) {
         expect(tool.description, `${tool.name} does not state the pagination contract`)
           .toContain("nextCursor");

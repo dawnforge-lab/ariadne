@@ -361,7 +361,7 @@ describe("the write-ahead interrupted mark (28a T5)", () => {
       siteUrl: "http://mark.invalid/", hostKey: hostKeyOf("http://mark.invalid/"),
       config: {},
       rulesetVersion: "test",
-      status: "completed",
+      status: "finished",
       discovery: discovery as never,
     });
     createdCrawls.push(id);

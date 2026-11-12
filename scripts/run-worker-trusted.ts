@@ -29,6 +29,20 @@
  *    reaper on a short clock would settle other suites' rows. Without the
  *    variable the reaper is confined to this worker alone.
  *
+ * THE SCHEDULER (28c) is off unless the parent asks for it ON THE COMMAND LINE,
+ * never through the environment (`worker:serve` turns it on in code; no
+ * variable reaches either):
+ *
+ *  - `--scheduler`: this worker is a scheduler candidate on the PRODUCTION lock
+ *    key, firing every tenant's schedules — what a deployed worker does. Only a
+ *    database of its own may see one (the 28c gate's `ariadne_gate28c`): it
+ *    would fire any due schedule it finds.
+ *  - `--schedule-every-ms=<n>`: its `Timing.scheduleEvery` (30 s when absent);
+ *    only with `--scheduler`. `TRUSTED_WORKER_TIMING` may not carry
+ *    `scheduleEvery`, so the value has one source.
+ *
+ * Any other argument is refused, by position, before anything starts.
+ *
  * It prints one line, `READY {"instanceId": …, "port": …}`, on stdout once the
  * worker is registered and listening (diagnostics go to stderr), and shuts down
  * gracefully on SIGTERM or SIGINT, exiting 0, as `worker:serve` does.
@@ -46,8 +60,42 @@ function required(name: string): string {
   return value;
 }
 
+interface SchedulerArgs {
+  scheduler: boolean;
+  scheduleEvery: number | null;
+}
+
+/** The command line (module header): `--scheduler` and `--schedule-every-ms=<n>`, nothing else. */
+function parseArgs(argv: readonly string[]): SchedulerArgs {
+  const out: SchedulerArgs = { scheduler: false, scheduleEvery: null };
+  for (const [index, arg] of argv.entries()) {
+    if (arg === "--scheduler") {
+      out.scheduler = true;
+      continue;
+    }
+    const every = /^--schedule-every-ms=(\d+)$/.exec(arg);
+    if (every !== null) {
+      out.scheduleEvery = Number(every[1]);
+      continue;
+    }
+    throw new Error(
+      `run-worker-trusted: argument ${index + 1} is not one this script takes ` +
+        "(--scheduler, --schedule-every-ms=<n>)",
+    );
+  }
+  if (out.scheduleEvery !== null && !out.scheduler) {
+    throw new Error("run-worker-trusted: --schedule-every-ms is a scheduler setting and needs --scheduler");
+  }
+  return out;
+}
+
+const args = parseArgs(process.argv.slice(2));
 const db = createDb(required("DATABASE_URL"));
 const timing = JSON.parse(process.env["TRUSTED_WORKER_TIMING"] ?? "{}") as Partial<Timing>;
+if (timing.scheduleEvery !== undefined) {
+  throw new Error("run-worker-trusted: TRUSTED_WORKER_TIMING may not carry scheduleEvery; pass --schedule-every-ms=<n>");
+}
+if (args.scheduleEvery !== null) timing.scheduleEvery = args.scheduleEvery;
 const peersFile = process.env["TRUSTED_WORKER_PEERS_FILE"];
 
 const worker = await startWorker({
@@ -62,6 +110,8 @@ const worker = await startWorker({
   allowedDomains: ["127.0.0.1", "127.0.0.2", "127.0.0.3", "127.0.0.4"],
   processTrust: { allowPrivate: true },
   timing,
+  // From the command line only (module header): the production key, every tenant.
+  scheduler: args.scheduler,
   reaperOnlyInstances: (own) => {
     const peers = peersFile === undefined ? [] : (JSON.parse(readFileSync(peersFile, "utf8")) as string[]);
     return [...new Set([own, ...peers])];

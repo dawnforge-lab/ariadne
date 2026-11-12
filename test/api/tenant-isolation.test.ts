@@ -22,7 +22,17 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 
 import { closeDb, createDb, type Db } from "../../src/db/client.js";
 import { runMigrations } from "../../src/db/migrate.js";
-import { crawls, issues, jobs, links, metrics, pages } from "../../src/db/schema.js";
+import {
+  crawlEvents,
+  crawls,
+  issues,
+  jobs,
+  links,
+  metrics,
+  pages,
+  scheduleCredentials,
+  schedules,
+} from "../../src/db/schema.js";
 import { EXTRACTION_VERSION } from "../../src/crawl/versions.js";
 import { RULESET_VERSION } from "../../src/rules/registry/registry.js";
 import { closeFetchAgents } from "../../src/crawl/http.js";
@@ -45,6 +55,9 @@ interface HttpCase {
 }
 type HttpBuilder = (crawlId: string, otherCrawlId: string) => HttpCase;
 type ToolBuilder = (crawlId: string, otherCrawlId: string) => Record<string, unknown>;
+/** The scoped-schedule cases are built from one schedule id. */
+type ScheduleHttpBuilder = (scheduleId: string) => HttpCase;
+type ScheduleToolBuilder = (scheduleId: string) => Record<string, unknown>;
 
 /**
  * Routes and tools that are NOT scoped to a crawl, and why. Nothing else may be
@@ -55,13 +68,22 @@ const GLOBAL_ROUTES: ReadonlySet<string> = new Set([
   "POST /config/validate", // dry run of a body; reads no crawl
   "POST /crawls", // creates a crawl FOR the caller
   "GET /crawls", // the caller's own listing, asserted separately below
+  "POST /schedules", // creates a schedule FOR the caller
+  "GET /schedules", // the caller's own listing, asserted separately below
   // Served BEFORE the bearer and tenant checks (28b T6), for an orchestrator's probe and a scraper:
   // they read no crawl and name no tenant. Asserted separately below.
   "GET /healthz", // liveness
   "GET /readyz", // database + migration count
   "GET /metrics", // its own bearer (ARIADNE_METRICS_TOKEN); labels carry no tenant
 ]);
-const GLOBAL_TOOLS: ReadonlySet<string> = new Set(["config_schema", "config_validate", "crawl_start", "crawl_list"]);
+const GLOBAL_TOOLS: ReadonlySet<string> = new Set([
+  "config_schema",
+  "config_validate",
+  "crawl_start",
+  "crawl_list",
+  "schedule_create", // creates a schedule FOR the caller
+  "schedule_list", // the caller's own listing, asserted separately below
+]);
 
 const crawlRoute =
   (method: string, suffix: string, body?: unknown): HttpBuilder =>
@@ -77,6 +99,7 @@ const SCOPED_ROUTES: Record<string, HttpBuilder> = {
   "POST /crawls/:id/render": crawlRoute("POST", "/render"),
   "POST /crawls/:id/rules": crawlRoute("POST", "/rules"),
   "GET /crawls/:id/config": crawlRoute("GET", "/config"),
+  "GET /crawls/:id/history": crawlRoute("GET", "/history"),
   "PATCH /crawls/:id/config": crawlRoute("PATCH", "/config", { judgement: { rules: null } }),
   "GET /crawls/:id/issues": crawlRoute("GET", "/issues"),
   "GET /crawls/:id/issues/:ruleId/urls": crawlRoute("GET", "/issues/title.missing/urls"),
@@ -108,6 +131,7 @@ const SCOPED_TOOLS: Record<string, ToolBuilder> = {
   crawl_render: only,
   crawl_rules: only,
   crawl_config_get: only,
+  crawl_history: only,
   crawl_config_set: (c) => ({ crawlId: c, judgement: { rules: null } }),
   robots_get: only,
   issues_list: only,
@@ -124,8 +148,32 @@ const SCOPED_TOOLS: Record<string, ToolBuilder> = {
   compare_urls: (c, o) => ({ baseCrawlId: c, headCrawlId: o, ruleId: "title.missing", set: "new" }),
 };
 
+/**
+ * The scoped-schedule table (28c T4), built from a schedule id: beta against
+ * acme's schedule must answer exactly as against a schedule that does not
+ * exist, and change nothing of acme's. The bodies are VALID, so the 404 is the
+ * ownership refusal and not a validation one.
+ */
+const SCOPED_SCHEDULE_ROUTES: Record<string, ScheduleHttpBuilder> = {
+  "GET /schedules/:id": (s) => ({ method: "GET", path: `/schedules/${s}` }),
+  "PATCH /schedules/:id": (s) => ({ method: "PATCH", path: `/schedules/${s}`, body: { enabled: false } }),
+  "DELETE /schedules/:id": (s) => ({ method: "DELETE", path: `/schedules/${s}` }),
+  "GET /schedules/:id/history": (s) => ({ method: "GET", path: `/schedules/${s}/history` }),
+};
+const SCOPED_SCHEDULE_TOOLS: Record<string, ScheduleToolBuilder> = {
+  schedule_get: (s) => ({ scheduleId: s }),
+  schedule_update: (s) => ({ scheduleId: s, enabled: false }),
+  schedule_delete: (s) => ({ scheduleId: s }),
+  schedule_history: (s) => ({ scheduleId: s }),
+};
+
 /** Every `METHOD /path` and every tool name that is scoped, with its request builder. */
-const SCOPED_CASES: Record<string, HttpBuilder | ToolBuilder> = { ...SCOPED_ROUTES, ...SCOPED_TOOLS };
+const SCOPED_CASES: Record<string, HttpBuilder | ToolBuilder | ScheduleHttpBuilder | ScheduleToolBuilder> = {
+  ...SCOPED_ROUTES,
+  ...SCOPED_TOOLS,
+  ...SCOPED_SCHEDULE_ROUTES,
+  ...SCOPED_SCHEDULE_TOOLS,
+};
 
 function databaseUrl(): string {
   const url = process.env.DATABASE_URL;
@@ -145,7 +193,10 @@ let betaClient: Client;
 let acmeCrawl: string;
 let acmeOther: string;
 let betaCrawl: string;
+let acmeSchedule: string;
+let betaSchedule: string;
 const createdCrawls: string[] = [];
+const createdSchedules: string[] = [];
 
 interface Answer {
   status: number;
@@ -206,7 +257,9 @@ async function startAs(tenant: TenantId): Promise<string> {
 
 /** Everything about a crawl a refused command could have touched. */
 async function snapshot(crawlId: string): Promise<unknown> {
-  const count = async (table: typeof pages | typeof issues | typeof metrics | typeof links): Promise<number> => {
+  const count = async (
+    table: typeof pages | typeof issues | typeof metrics | typeof links | typeof crawlEvents,
+  ): Promise<number> => {
     const [row] = await db.select({ n: sql<number>`count(*)::int` }).from(table).where(eq(table.crawlId, crawlId));
     return row?.n ?? -1;
   };
@@ -217,7 +270,17 @@ async function snapshot(crawlId: string): Promise<unknown> {
     issues: await count(issues),
     metrics: await count(metrics),
     links: await count(links),
+    // A refused command writes no lifecycle event either (28c).
+    events: await count(crawlEvents),
   };
+}
+
+/** Everything about a schedule a refused command could have touched. */
+async function scheduleSnapshot(scheduleId: string): Promise<unknown> {
+  const [row] = await db.select().from(schedules).where(eq(schedules.id, scheduleId));
+  const credentials = await db.select().from(scheduleCredentials).where(eq(scheduleCredentials.scheduleId, scheduleId));
+  const events = await db.select().from(crawlEvents).where(eq(crawlEvents.scheduleId, scheduleId));
+  return { row, credentials, events };
 }
 
 beforeAll(async () => {
@@ -280,6 +343,36 @@ beforeAll(async () => {
     status: "finished",
   });
   createdCrawls.push(betaCrawl);
+
+  // acme's schedule, with a credential and an event of its own: were a foreign
+  // id ever resolved, an update, a delete or a history read would show it.
+  const made = await http(ACME, {
+    method: "POST",
+    path: "/schedules",
+    body: {
+      crawl: { siteUrl: `${site}/`, requestHeaders: { "x-isolation": "acme-only-secret" } },
+      cron: "0 3 * * *",
+      timezone: "UTC",
+    },
+  });
+  expect(made.status).toBe(201);
+  acmeSchedule = String((made.body as Record<string, unknown>)["scheduleId"]);
+  createdSchedules.push(acmeSchedule);
+  await db.insert(crawlEvents).values({
+    tenantId: ACME,
+    crawlId: null,
+    scheduleId: acmeSchedule,
+    kind: "schedule_skipped",
+    detail: { reason: "overlap" },
+  });
+  const betas = await http(BETA, {
+    method: "POST",
+    path: "/schedules",
+    body: { crawl: { siteUrl: `${site}/` }, cron: "0 4 * * *", timezone: "UTC" },
+  });
+  expect(betas.status).toBe(201);
+  betaSchedule = String((betas.body as Record<string, unknown>)["scheduleId"]);
+  createdSchedules.push(betaSchedule);
 }, 120_000);
 
 afterAll(async () => {
@@ -287,6 +380,7 @@ afterAll(async () => {
   await betaMcp.close();
   await api.close();
   await new Promise<void>((r) => siteServer.close(() => r()));
+  if (createdSchedules.length > 0) await db.delete(schedules).where(inArray(schedules.id, createdSchedules));
   if (createdCrawls.length > 0) await db.delete(crawls).where(inArray(crawls.id, createdCrawls));
   await rm(exportDir, { recursive: true, force: true });
   await rm(renderDir, { recursive: true, force: true });
@@ -330,11 +424,20 @@ describe("coverage: every route and tool is scoped or explicitly global", () => 
         "GET /healthz",
         "GET /metrics",
         "GET /readyz",
+        "GET /schedules",
         "POST /config/validate",
         "POST /crawls",
+        "POST /schedules",
       ].sort(),
     );
-    expect([...GLOBAL_TOOLS].sort()).toEqual(["config_schema", "config_validate", "crawl_list", "crawl_start"]);
+    expect([...GLOBAL_TOOLS].sort()).toEqual([
+      "config_schema",
+      "config_validate",
+      "crawl_list",
+      "crawl_start",
+      "schedule_create",
+      "schedule_list",
+    ]);
   });
 });
 
@@ -420,6 +523,60 @@ describe("a foreign crawl answers exactly like a missing one, and a refusal writ
     const asAcme = ids(await http(ACME, { method: "GET", path: "/crawls?limit=200" }));
     expect(asAcme).toContain(acmeCrawl);
     expect(asAcme).not.toContain(betaCrawl);
+  });
+});
+
+describe("a foreign schedule answers exactly like a missing one, and a refusal writes nothing", () => {
+  it("has a fixture worth protecting: a credential and an event", async () => {
+    const snap = (await scheduleSnapshot(acmeSchedule)) as { credentials: unknown[]; events: unknown[] };
+    expect(snap.credentials).toHaveLength(1);
+    expect(snap.events).toHaveLength(1);
+  });
+
+  it.each(Object.keys(SCOPED_SCHEDULE_ROUTES))("HTTP %s", async (signature) => {
+    const build = SCOPED_SCHEDULE_ROUTES[signature] as ScheduleHttpBuilder;
+    const before = await scheduleSnapshot(acmeSchedule);
+    const missing = `sched_${randomUUID()}`;
+    const foreign = await http(BETA, build(acmeSchedule));
+    const absent = await http(BETA, build(missing));
+    expect(foreign.status).toBe(404);
+    expect(foreign.body).toMatchObject({ code: "NOT_FOUND" });
+    expect(substituted(foreign, acmeSchedule, missing)).toEqual(absent);
+    expect(await scheduleSnapshot(acmeSchedule)).toEqual(before);
+  });
+
+  it.each(Object.keys(SCOPED_SCHEDULE_TOOLS))("MCP %s", async (name) => {
+    const build = SCOPED_SCHEDULE_TOOLS[name] as ScheduleToolBuilder;
+    const before = await scheduleSnapshot(acmeSchedule);
+    const missing = `sched_${randomUUID()}`;
+    const foreign = await tool(betaClient, name, build(acmeSchedule));
+    const absent = await tool(betaClient, name, build(missing));
+    expect(foreign.status).toBe(1);
+    expect(foreign.body).toMatchObject({ code: "NOT_FOUND" });
+    expect(substituted(foreign, acmeSchedule, missing)).toEqual(absent);
+    expect(await scheduleSnapshot(acmeSchedule)).toEqual(before);
+  });
+
+  it("an invalid body against a foreign schedule is still the missing answer (ownership first)", async () => {
+    const missing = `sched_${randomUUID()}`;
+    const foreign = await http(BETA, { method: "PATCH", path: `/schedules/${acmeSchedule}`, body: {} });
+    const absent = await http(BETA, { method: "PATCH", path: `/schedules/${missing}`, body: {} });
+    expect(foreign.status).toBe(404);
+    expect(substituted(foreign, acmeSchedule, missing)).toEqual(absent);
+  });
+
+  it("lists only the caller's own schedules, over HTTP and MCP", async () => {
+    const ids = (answer: Answer): string[] =>
+      (answer.body as { items: { scheduleId: string }[] }).items.map((item) => item.scheduleId);
+    const asBeta = ids(await http(BETA, { method: "GET", path: "/schedules?limit=200" }));
+    expect(asBeta).toContain(betaSchedule);
+    expect(asBeta).not.toContain(acmeSchedule);
+    const viaMcp = ids(await tool(betaClient, "schedule_list", { limit: 200 }));
+    expect(viaMcp).toContain(betaSchedule);
+    expect(viaMcp).not.toContain(acmeSchedule);
+    const asAcme = ids(await http(ACME, { method: "GET", path: "/schedules?limit=200" }));
+    expect(asAcme).toContain(acmeSchedule);
+    expect(asAcme).not.toContain(betaSchedule);
   });
 });
 

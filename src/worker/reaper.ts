@@ -19,7 +19,15 @@
  *     attempt refunded (`releaseLeases(…, null, {refundAttempt: true})`: every
  *     live lease in the crawl, which is safe only because the one process that
  *     could hold them is dead). A `render` or `rules` job's crawl is left as
- *     it was before the call: a re-run is the caller's to ask for.
+ *     it was before the call: a re-run is the caller's to ask for. But when
+ *     that crawl was fired by a schedule (`schedule_chain` non-null), the job
+ *     was a chain link and the chain ends with it: `schedule_chain_failed
+ *     {link, reason: "the process running it stopped"}` is recorded in the
+ *     same transaction (final review I1), with the crawl's id and its
+ *     `schedule_id`, so `schedule_history` says why the judgement never came.
+ *     A QUEUED render or rules job pinned to a dead instance is settled the
+ *     same way (`reason: "the process it was pinned to stopped"`): only a
+ *     chain queues one, and nothing but its stopped pin would ever claim it.
  *  2. **System pauses are requeued.** A crawl with no live job whose LATEST
  *     crawl job was unpinned — a worker-pool crawl — and that is `paused`
  *     either `shutdown` (always: a graceful stop is a deploy, not a crash, and
@@ -30,7 +38,9 @@
  *     state change as `crawl_resume`, made by the engine. Never `request` (an
  *     agent's pause is never undone), never `credentials_unreadable` (only new
  *     values continue it), never a pinned (in-process) crawl, whose process is
- *     the only runner of its pin (R10).
+ *     the only runner of its pin (R10). Its `resumed` event (28c) is `auto:
+ *     true` — a shutdown requeue's too, though it raises no count — because
+ *     this transaction marks itself the reaper's (`ariadne.event_source`).
  *  3. **Expired credentials are swept** (`CredentialVault.sweepExpired`,
  *     retention `retentionDays`).
  *  4. **Dead instance rows are deleted** once older than
@@ -38,10 +48,12 @@
  *     `running` job, so a queued job still pinned to one stays readable as
  *     "pinned to a dead instance" until `crawl_resume` adopts it.
  *
- * QUEUED JOBS PINNED TO A DEAD INSTANCE ARE LEFT ALONE (R10 revised): their
- * crawl is `queued`, and `crawl_resume` adopts it (a fresh job, this caller's
- * pin and versions). Abandoning one here would strand a queued crawl with no
- * job at all.
+ * QUEUED CRAWL JOBS PINNED TO A DEAD INSTANCE ARE LEFT ALONE (R10 revised):
+ * their crawl is `queued`, and `crawl_resume` adopts it (a fresh job, this
+ * caller's pin and versions). Abandoning one here would strand a queued crawl
+ * with no job at all. A queued chain link (step 1) is different: its crawl is
+ * `finished`, so abandoning it strands nothing, and the event says the chain
+ * stopped.
  *
  * ## Two reapers, and the locks
  *
@@ -74,8 +86,9 @@
  *
  * ## `onlyInstances` — TEST ONLY (Ruling R11)
  *
- * Confines steps 1, 2 and 4 to those instances: dead jobs they claimed, crawls
- * whose latest crawl job one of them claimed, their own instance rows. The
+ * Confines steps 1, 2 and 4 to those instances: dead jobs they claimed, queued
+ * chain links pinned to them, crawls whose latest crawl job one of them
+ * claimed, their own instance rows. The
  * test suite's files share one database and test the reaper on a 300 ms clock;
  * an unconfined tick would pause, requeue and delete other suites' rows.
  * Production never passes it. (Step 3 is the sweep's own: it reads no
@@ -88,6 +101,7 @@ import { crawls, jobs } from "../db/schema.js";
 import type { CredentialVault } from "../crawl/credential-vault.js";
 import { crawledRows, frontierCounts, releaseLeases } from "../crawl/frontier.js";
 import { PAUSE_REASONS, type PauseReason } from "../crawl/control.js";
+import { recordEvent } from "../events/events.js";
 import { enqueueJob, JobBusyError, liveHolderSql, liveInstanceSql, type Writer } from "./jobs.js";
 import type { Timing } from "./timing.js";
 import type { TenantId } from "../tenant.js";
@@ -115,8 +129,13 @@ export interface ReapOptions {
 
 /** What one tick did. Each count is rows this tick moved, never rows it read. */
 export interface ReapSummary {
-  /** Running jobs of dead instances, now `abandoned`. */
+  /**
+   * Jobs of dead instances, now `abandoned`: running jobs of every kind, and
+   * queued chain links (render, rules) pinned to one.
+   */
   abandonedJobs: number;
+  /** Of those, the chain links of fired crawls: each recorded `schedule_chain_failed`. */
+  chainLinksFailed: number;
   /** Their crawls closed `paused` (`worker_lost`, or `request` when a pause was pending). */
   pausedCrawls: number;
   /** Their crawls closed `cancelled`, because an agent's cancel was pending on the dead run. */
@@ -136,6 +155,7 @@ export async function reapOnce(db: Writer, opts: ReapOptions): Promise<ReapSumma
   }
   const summary: ReapSummary = {
     abandonedJobs: 0,
+    chainLinksFailed: 0,
     pausedCrawls: 0,
     cancelledCrawls: 0,
     requeuedCrawls: 0,
@@ -166,12 +186,36 @@ export async function reapOnce(db: Writer, opts: ReapOptions): Promise<ReapSumma
         summary.abandonedJobs += 1;
         if (reaped === "paused") summary.pausedCrawls += 1;
         if (reaped === "cancelled") summary.cancelledCrawls += 1;
+        if (reaped === "link failed") summary.chainLinksFailed += 1;
       } catch (error) {
         failed(`reaping job ${candidate.id} (crawl ${candidate.crawl_id}) failed`, error);
       }
     }
   } catch (error) {
     failed("reading the dead running jobs failed", error);
+  }
+
+  //    …and queued chain links pinned to a dead instance (module header, step
+  //    1): only that instance would ever claim one. As many as there are fired
+  //    crawls between two links; read through the queued partial index.
+  try {
+    const stranded = await db.execute<{ id: string; crawl_id: string }>(sql`
+      select j.id, j.crawl_id from jobs j
+       where j.status = 'queued' and j.kind in ('render', 'rules') and j.pinned_to is not null
+         and not ${liveInstanceSql(sql`j.pinned_to`, deadAfter)}
+         ${confined(sql`j.pinned_to`, opts.onlyInstances)}
+       order by j.queued_at, j.id`);
+    for (const candidate of stranded.rows) {
+      try {
+        if (!(await reapQueuedLink(db, candidate.id, candidate.crawl_id, deadAfter))) continue;
+        summary.abandonedJobs += 1;
+        summary.chainLinksFailed += 1;
+      } catch (error) {
+        failed(`reaping queued chain link ${candidate.id} (crawl ${candidate.crawl_id}) failed`, error);
+      }
+    }
+  } catch (error) {
+    failed("reading the queued chain links pinned to dead instances failed", error);
   }
 
   // 2. System pauses back in the queue. One crawl per transaction; a crawl a
@@ -241,11 +285,54 @@ function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+/** The two reasons a dead chain link's `schedule_chain_failed` gives (module header, step 1). */
+export const LINK_STOPPED_REASONS = {
+  running: "the process running it stopped",
+  queued: "the process it was pinned to stopped",
+} as const;
+
+/** The crawl row `reapJob` and `reapQueuedLink` lock first, with what a chain failure needs of it. */
+async function lockCrawl(
+  tx: Writer,
+  crawlId: string,
+): Promise<{ tenant_id: string; schedule_id: string | null; chained: boolean } | undefined> {
+  // NO KEY UPDATE: module header, "Two reapers, and the locks".
+  const locked = await tx.execute<{ tenant_id: string; schedule_id: string | null; chained: boolean }>(sql`
+    select tenant_id, schedule_id, schedule_chain is not null as chained
+      from crawls where id = ${crawlId} for no key update skip locked`);
+  return locked.rows[0];
+}
+
+/**
+ * `schedule_chain_failed` for a link a dead process took with it, in the
+ * reaper's transaction for that job: the crawl's id, its current
+ * `schedule_id` (null once the schedule was deleted), the link's kind.
+ */
+async function recordLinkStopped(
+  tx: Writer,
+  crawl: { tenant_id: string; schedule_id: string | null },
+  crawlId: string,
+  kind: string,
+  how: keyof typeof LINK_STOPPED_REASONS,
+): Promise<void> {
+  if (kind !== "render" && kind !== "rules") {
+    throw new Error(`reaper: crawl ${crawlId}'s job of kind '${kind}' is not a chain link (render or rules)`);
+  }
+  await recordEvent(tx, {
+    tenant: crawl.tenant_id as TenantId,
+    crawlId,
+    scheduleId: crawl.schedule_id,
+    kind: "schedule_chain_failed",
+    detail: { link: kind, reason: LINK_STOPPED_REASONS[how] },
+  });
+}
+
 /**
  * Settle one dead running job, or null when it is no longer this tick's: its
  * crawl row is locked by another writer (skipped — the next tick sees it), or
  * the job, re-read under the locks, is settled or live again. Answers what
- * became of its crawl.
+ * became of its crawl — `link failed` for a render or rules job of a fired
+ * crawl, whose chain failure it recorded.
  */
 async function reapJob(
   db: Writer,
@@ -253,11 +340,10 @@ async function reapJob(
   crawlId: string,
   deadAfter: number,
   vault: CredentialVault,
-): Promise<"paused" | "cancelled" | "untouched" | null> {
+): Promise<"paused" | "cancelled" | "untouched" | "link failed" | null> {
   return db.transaction(async (tx) => {
-    // NO KEY UPDATE: module header, "Two reapers, and the locks".
-    const locked = await tx.execute(sql`select id from crawls where id = ${crawlId} for no key update skip locked`);
-    if (locked.rows.length === 0) return null;
+    const crawl = await lockCrawl(tx, crawlId);
+    if (crawl === undefined) return null;
     const found = await tx.execute<{ kind: string }>(sql`
       select j.kind from jobs j
        where j.id = ${jobId} and j.status = 'running' and not ${liveHolderSql(deadAfter)}
@@ -268,7 +354,11 @@ async function reapJob(
       .update(jobs)
       .set({ status: "abandoned", finishedAt: new Date(), error: null })
       .where(eq(jobs.id, jobId));
-    if (job.kind !== "crawl") return "untouched";
+    if (job.kind !== "crawl") {
+      if (!crawl.chained) return "untouched";
+      await recordLinkStopped(tx, crawl, crawlId, job.kind, "running");
+      return "link failed";
+    }
 
     // The dead run's close, as its own stopped close would have written it
     // (src/crawl/loop.ts, `closeCrawlOn`): the request on the row decides,
@@ -308,6 +398,41 @@ async function reapJob(
       );
     }
     return "paused";
+  });
+}
+
+/**
+ * Settle one queued chain link pinned to a dead instance (module header, step
+ * 1): abandoned, and `schedule_chain_failed` recorded, in one transaction that
+ * locks the crawl row and then the job, as `reapJob` does. False when it is no
+ * longer this tick's: the crawl row locked by another writer, or the job,
+ * re-read under the locks, claimed, settled, or its instance live again. A
+ * queued render or rules job on a crawl no schedule fired is a defect (only a
+ * chain queues one) and throws, naming it.
+ */
+async function reapQueuedLink(db: Writer, jobId: string, crawlId: string, deadAfter: number): Promise<boolean> {
+  return db.transaction(async (tx) => {
+    const crawl = await lockCrawl(tx, crawlId);
+    if (crawl === undefined) return false;
+    const found = await tx.execute<{ kind: string }>(sql`
+      select j.kind from jobs j
+       where j.id = ${jobId} and j.status = 'queued' and j.kind in ('render', 'rules')
+         and j.pinned_to is not null and not ${liveInstanceSql(sql`j.pinned_to`, deadAfter)}
+       for update of j`);
+    const job = found.rows[0];
+    if (job === undefined) return false;
+    if (!crawl.chained) {
+      throw new Error(
+        `reaper: crawl ${crawlId} has a queued ${job.kind} job ${jobId} and no schedule_chain; only a chain ` +
+          "queues one, so this is a defect",
+      );
+    }
+    await tx
+      .update(jobs)
+      .set({ status: "abandoned", finishedAt: new Date(), error: null })
+      .where(eq(jobs.id, jobId));
+    await recordLinkStopped(tx, crawl, crawlId, job.kind, "queued");
+    return true;
   });
 }
 
@@ -353,6 +478,11 @@ async function requeueOne(
       picked = found.rows[0];
       if (picked === undefined) return null;
       const crawlId = picked.id;
+      // The requeue's `resumed` event says `auto: true` (28c): the crawl
+      // trigger reads this setting (migration 0046). Transaction-local (`true`),
+      // so it ends with this transaction and no later write on the connection
+      // is mistaken for the reaper's.
+      await tx.execute(sql`select set_config('ariadne.event_source', 'reaper', true)`);
       const moved = await tx
         .update(crawls)
         .set({

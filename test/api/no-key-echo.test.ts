@@ -20,17 +20,19 @@
  * rather than starting a crawl — and the status check says which happened.
  */
 import { randomUUID } from "node:crypto";
+import { createServer, type Server } from "node:http";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it, vi, type MockInstance } from "vitest";
-import { inArray } from "drizzle-orm";
+import { eq, inArray, sql } from "drizzle-orm";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 
 import { closeDb, createDb, type Db } from "../../src/db/client.js";
 import { runMigrations } from "../../src/db/migrate.js";
-import { crawls } from "../../src/db/schema.js";
+import { crawlEvents, crawls, schedules } from "../../src/db/schema.js";
+import { insertSchedule, newScheduleId } from "../../src/schedule/store.js";
 import { closeFetchAgents } from "../../src/crawl/http.js";
 import { createApiServer, type ApiServer } from "../../src/api/http.js";
 import { createMcpServer, type AriadneMcpServer } from "../../src/api/mcp.js";
@@ -80,6 +82,10 @@ const crawlId = `crawl_no_key_echo_${randomUUID()}`;
  * sink that demonstrably received a line carrying the refusal.
  */
 const brokenId = `crawl_no_key_echo_broken_${randomUUID()}`;
+/** Crawls the crawl-events case (28c) started, deleted with the two above. */
+const eventCrawls: string[] = [];
+/** A schedule row for the update cases (28c T4); the allowlist is empty, so none can be created through the surface. */
+const scheduleId = newScheduleId();
 
 /** The whole answer as text: status line plus the body, exactly as sent. */
 async function http(method: string, path: string, body?: unknown): Promise<{ status: number; text: string }> {
@@ -173,6 +179,17 @@ beforeAll(async () => {
     status: "finished",
     pagesCrawled: 0,
   });
+  await insertSchedule(db, {
+    id: scheduleId,
+    tenant: LOCAL_TENANT,
+    siteUrl: `${SITE}/`,
+    crawl: { config: { siteUrl: `${SITE}/` } as never, judgement: null, listed: null },
+    render: null,
+    cron: "0 3 * * *",
+    timezone: "UTC",
+    enabled: false,
+    nextRunAt: null,
+  });
   for (const method of ["error", "warn", "log", "info"] as const) {
     consoleSpies.push(
       vi.spyOn(console, method).mockImplementation((...args: unknown[]) => {
@@ -204,7 +221,8 @@ afterAll(async () => {
   await mcp.close();
   await api.close();
   await closeFetchAgents();
-  await db.delete(crawls).where(inArray(crawls.id, [crawlId, brokenId]));
+  await db.delete(crawls).where(inArray(crawls.id, [crawlId, brokenId, ...eventCrawls]));
+  await db.delete(schedules).where(eq(schedules.id, scheduleId));
   await closeDb(db);
   await rm(exportDir, { recursive: true, force: true });
   await rm(renderDir, { recursive: true, force: true });
@@ -347,6 +365,63 @@ describe("MCP: no tool quotes a key it was sent", () => {
   });
 });
 
+/**
+ * The schedule bodies (28c T4): the top level, inside `crawl` (a `crawl_start`
+ * body, refused by its own parser with the path prefixed) and inside `render`.
+ * [label, body, the position named].
+ */
+const SCHEDULE_BODY_CASES: [string, Record<string, unknown>, number][] = [
+  ["unknown top-level key", { crawl: { siteUrl: `${SITE}/` }, cron: "0 * * * *", timezone: "UTC", [SENTINEL]: 1 }, 4],
+  ["unknown key inside crawl", { crawl: { siteUrl: `${SITE}/`, [SENTINEL]: 1 }, cron: "0 * * * *", timezone: "UTC" }, 2],
+  [
+    "unknown key inside crawl.judgement.thresholds",
+    { crawl: { siteUrl: `${SITE}/`, judgement: { thresholds: { [SENTINEL]: 3 } } }, cron: "0 * * * *", timezone: "UTC" },
+    1,
+  ],
+  ["unknown key inside render", { crawl: { siteUrl: `${SITE}/` }, cron: "0 * * * *", timezone: "UTC", render: { [SENTINEL]: 1 } }, 1],
+];
+const SCHEDULE_PATCH_CASES: [string, Record<string, unknown>, number][] = [
+  ["unknown top-level key", { enabled: false, [SENTINEL]: 1 }, 2],
+  ["unknown key inside crawl", { crawl: { siteUrl: `${SITE}/`, [SENTINEL]: 1 } }, 2],
+  ["unknown key inside render", { render: { urls: [`${SITE}/a`], [SENTINEL]: 1 } }, 2],
+];
+
+describe("schedule bodies never quote a key they were sent", () => {
+  it("POST /schedules", async () => {
+    for (const [label, body, position] of SCHEDULE_BODY_CASES) {
+      const res = await http("POST", "/schedules", body);
+      expect(res.status, `POST /schedules ${label}: ${res.text}`).toBe(400);
+      refusedWithoutEcho(`POST /schedules ${label}`, res.text, position);
+    }
+  });
+
+  it("PATCH /schedules/:id", async () => {
+    for (const [label, body, position] of SCHEDULE_PATCH_CASES) {
+      const res = await http("PATCH", `/schedules/${scheduleId}`, body);
+      expect(res.status, `PATCH /schedules ${label}: ${res.text}`).toBe(400);
+      refusedWithoutEcho(`PATCH /schedules ${label}`, res.text, position);
+    }
+  });
+
+  it("schedule_create", async () => {
+    for (const [label, body, position] of SCHEDULE_BODY_CASES) {
+      const answer = await tool("schedule_create", body);
+      expect(answer.isError, `schedule_create ${label}: ${answer.text}`).toBe(true);
+      refusedWithoutEcho(`schedule_create ${label}`, answer.text, position);
+    }
+  });
+
+  it("schedule_update", async () => {
+    // The tool's own `scheduleId` is key 1, so a top-level unknown key is one place later.
+    for (const [label, body, position] of SCHEDULE_PATCH_CASES) {
+      const args = { scheduleId, ...body };
+      const answer = await tool("schedule_update", args);
+      expect(answer.isError, `schedule_update ${label}: ${answer.text}`).toBe(true);
+      refusedWithoutEcho(`schedule_update ${label}`, answer.text, label === "unknown top-level key" ? position + 1 : position);
+    }
+  });
+});
+
 describe("a near miss is answered with the accepted name it most likely meant", () => {
   it("resume: requestHeaderz → did you mean 'requestHeaders'?", async () => {
     const res = await http("POST", `/crawls/${crawlId}/resume`, { requestHeaderz: {} });
@@ -481,4 +556,122 @@ describe("100,000 unknown keys", () => {
     expect(args.value.error?.issues).toHaveLength(1);
     expect(args.value.error?.issues[0]?.message).toContain(`(key 2 in the order sent) (and ${MANY - 1} more)`);
   });
+});
+
+/**
+ * Phase 28c: crawl events are written by triggers from named columns only, so
+ * a crawl started with credentials — and asked things with unknown keys beside
+ * them — leaves neither a credential name or value nor a sent key in any
+ * event's `detail`.
+ */
+describe("crawl events: no credential and no sent key in any detail", () => {
+  const RUN = randomUUID().slice(0, 8);
+  const HEADER_NAME = `X-Events-Header-${RUN}`;
+  const HEADER_VALUE = `events-header-value-${RUN}`;
+  const USERNAME = `events-user-${RUN}`;
+  const PASSWORD = `events-password-${RUN}`;
+  const COOKIE_NAME = `events_cookie_${RUN}`;
+  const COOKIE_VALUE = `events-cookie-value-${RUN}`;
+  let site: Server;
+  let siteBase: string;
+  let credApi: ApiServer;
+  let credBase: string;
+
+  beforeAll(async () => {
+    site = createServer((req, res) => {
+      const path = (req.url ?? "/").split("?")[0] ?? "/";
+      if (path === "/robots.txt") {
+        res.writeHead(200, { "content-type": "text/plain" });
+        res.end("User-agent: *\nAllow: /\n");
+        return;
+      }
+      res.writeHead(path === "/" || path === "/a" ? 200 : 404, { "content-type": "text/html" });
+      res.end(
+        `<!doctype html><html lang="en"><head><title>Events credentials fixture ${path}</title></head>` +
+          `<body><a href="/a">A</a></body></html>`,
+      );
+    });
+    await new Promise<void>((r) => site.listen(0, "127.0.0.1", () => r()));
+    const address = site.address();
+    if (address === null || typeof address === "string") throw new Error("site server bound oddly");
+    siteBase = `http://127.0.0.1:${address.port}`;
+    // This file's servers allow no host; this one allows the fixture, so a crawl really runs.
+    credApi = createApiServer({
+      db,
+      config: {
+        credentialKeys: TEST_CREDENTIAL_KEYS,
+        token: TOKEN,
+        allowedDomains: ["127.0.0.1"],
+        crawlDefaults: { allowPrivate: true, probeHosts: false, perHostDelayMs: 0 },
+        exportDir,
+        renderDir,
+        log: (line: string) => {
+          logLines.push(line);
+        },
+      },
+    });
+    credBase = `http://127.0.0.1:${(await credApi.listen(0)).port}`;
+  });
+
+  afterAll(async () => {
+    await credApi.close();
+    await new Promise<void>((r) => site.close(() => r()));
+  });
+
+  async function call(method: string, path: string, body?: unknown): Promise<{ status: number; body: Record<string, unknown> }> {
+    const headers: Record<string, string> = { authorization: `Bearer ${TOKEN}`, "x-ariadne-tenant": "local" };
+    if (body !== undefined) headers["content-type"] = "application/json";
+    const res = await fetch(`${credBase}${path}`, {
+      method,
+      headers,
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    });
+    const text = await res.text();
+    return { status: res.status, body: text === "" ? {} : (JSON.parse(text) as Record<string, unknown>) };
+  }
+
+  it("a credentialed crawl, refused unknown keys beside its credentials, a rules run: no event detail carries any of it", async () => {
+    const credentials = {
+      requestHeaders: { [HEADER_NAME]: HEADER_VALUE },
+      httpAuth: { username: USERNAME, password: PASSWORD },
+      cookies: [{ name: COOKIE_NAME, value: COOKIE_VALUE }],
+    };
+    const started = await call("POST", "/crawls", { siteUrl: `${siteBase}/`, maxPages: 3, ...credentials });
+    expect(started.status, JSON.stringify(started.body)).toBe(202);
+    const id = String(started.body["crawlId"]);
+    eventCrawls.push(id);
+
+    // A start refused for an unknown key beside the credentials creates nothing.
+    expect((await call("POST", "/crawls", { siteUrl: `${siteBase}/`, ...credentials, [SENTINEL]: 1 })).status).toBe(400);
+
+    const deadline = Date.now() + 30_000;
+    for (;;) {
+      const status = (await call("GET", `/crawls/${id}`)).body["status"];
+      if (status === "finished") break;
+      if (status !== "queued" && status !== "running") throw new Error(`crawl ${id} ended ${String(status)}`);
+      if (Date.now() > deadline) throw new Error(`crawl ${id} still ${String(status)}`);
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    // Unknown keys sent beside credentials, on the crawl itself.
+    expect((await call("POST", `/crawls/${id}/resume`, { ...credentials, [SENTINEL]: 1 })).status).toBe(400);
+    expect((await call("PATCH", `/crawls/${id}/config`, { crawl: { ...credentials, [SENTINEL]: 1 } })).status).toBe(400);
+    expect((await call("POST", `/crawls/${id}/rules`)).status).toBe(200);
+
+    const rows = await db.select().from(crawlEvents).where(eq(crawlEvents.crawlId, id));
+    expect(rows.map((r) => r.kind)).toEqual(
+      expect.arrayContaining(["queued", "claimed", "started", "finished", "rules_started", "rules_finished"]),
+    );
+    const forbidden = [HEADER_NAME, HEADER_VALUE, USERNAME, PASSWORD, COOKIE_NAME, COOKIE_VALUE, SENTINEL];
+    const own = rows.map((r) => JSON.stringify(r.detail)).join("\n").toLowerCase();
+    for (const value of forbidden) {
+      expect(own, `an event of ${id} carries a credential or a sent key`).not.toContain(value.toLowerCase());
+    }
+    // And no event anywhere, case-insensitively (a header name's case is not its identity).
+    for (const value of forbidden) {
+      const hits = await db.execute<{ n: number }>(
+        sql`select count(*)::int as n from crawl_events where detail::text ilike ${`%${value}%`}`,
+      );
+      expect(hits.rows[0]?.n, "a crawl_events.detail carries a credential or a sent key").toBe(0);
+    }
+  }, 60_000);
 });

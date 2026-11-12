@@ -1,0 +1,79 @@
+name: gate
+
+# The 50k memory gate (hard rule 6): crawl + render + rules over 50,000 fixture
+# pages with the V8 heap capped at 512 MB. Too long for every PR, so it runs
+# weekly and on demand; a PR that edits this file runs it too, so the workflow
+# itself is exercised before it lands.
+on:
+  schedule:
+    - cron: "0 3 * * 1"
+  workflow_dispatch:
+  pull_request:
+    paths: [.github/workflows/gate.yml]
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: ariadne
+          POSTGRES_PASSWORD: ariadne
+          POSTGRES_DB: ariadne
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U ariadne" --health-interval 5s
+          --health-timeout 5s --health-retries 10
+    env:
+      DATABASE_URL: postgresql://ariadne:ariadne@localhost:5432/ariadne
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      # The gate renders a sample of the fixture in a real Chromium; see ci.yml
+      # for why the version is read from the lockfile and why the install runs
+      # on a cache hit too.
+      - name: Resolve the locked Playwright version
+        id: playwright
+        run: |
+          echo "version=$(node -p "require('./package-lock.json').packages['node_modules/playwright'].version")" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-playwright-${{ steps.playwright.outputs.version }}
+      - run: npx playwright install --with-deps chromium
+      - run: npm run db:migrate
+      # A non-zero exit fails the job: the script exits 1 on any recorded
+      # failure (including a peak over 512 MB) and throws on an error. The JSON
+      # is written either way and uploaded by the step below.
+      - name: Run the 50k gate
+        env:
+          GATE_PAGES: "50000"
+        run: node --max-old-space-size=512 --import tsx scripts/gate-rules.ts --json-out gate.json
+      # Early warning, not a failure: the crawl phase's peak against 290.2 MB
+      # (the level that leaves the 512 MB contract little headroom).
+      - name: Warn when the crawl phase peak is high
+        if: always()
+        run: |
+          node -e '
+            const fs = require("node:fs");
+            if (!fs.existsSync("gate.json")) { console.log("::warning::gate.json was not written; no crawl peak to check"); process.exit(0); }
+            const { peaks } = JSON.parse(fs.readFileSync("gate.json", "utf8"));
+            const limit = 290.2 * 1024 * 1024;
+            if (peaks.crawlBytes === null) {
+              console.log("::warning::crawl phase not reached; no crawl peak to check");
+            } else if (peaks.crawlBytes > limit) {
+              console.log(`::warning::crawl phase peak ${(peaks.crawlBytes / 1048576).toFixed(1)} MB exceeds 290.2 MB`);
+            }
+          '
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: gate-json
+          path: gate.json
+          if-no-files-found: error

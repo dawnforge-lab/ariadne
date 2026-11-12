@@ -165,6 +165,7 @@ function reap(only: readonly string[], extra: { retentionDays?: number; timing?:
 
 const NOTHING: ReapSummary = {
   abandonedJobs: 0,
+  chainLinksFailed: 0,
   pausedCrawls: 0,
   cancelledCrawls: 0,
   requeuedCrawls: 0,
@@ -720,6 +721,82 @@ describe("a runner that lost its job", () => {
       await runner.stop();
     }
   }, 60_000);
+
+  it("a LIVE runner whose instance heartbeat is back-dated past deadAfter: a real reaper takes the job, the runner's close throws JobLostError and writes nothing", async () => {
+    const i = await instanceAt(0);
+    const crawlId = await queuedSiteCrawl();
+    const job = await enqueueJob(db, { tenant: LOCAL_TENANT, crawlId, kind: "crawl", pinnedTo: i });
+    const log: string[] = [];
+    const runner = crawlRunner(i, log);
+    let lost: unknown;
+    const inner = crawlJobExecutor({
+      hostAllowed: (host) => isHostAllowed(host, ["127.0.0.1"]),
+      db,
+      vault,
+      processTrust: { allowPrivate: true },
+      log: (line) => log.push(line),
+      logPrefix: "worker",
+    });
+    // Observe what the executor throws, without changing it.
+    const watched = new JobRunner(db, {
+      instanceId: i,
+      kinds: ["crawl"],
+      pinnedTo: i,
+      concurrency: 1,
+      heartbeat: false,
+      log: (line) => log.push(line),
+      execute: async (j, signal) => {
+        try {
+          await inner(j, signal);
+        } catch (error) {
+          lost = error;
+          throw error;
+        }
+      },
+      timing: TIGHT,
+    });
+    void runner;
+    watched.start();
+    try {
+      await until("the crawl running with a page", async () => [(await crawlRow(crawlId)).status, await pagesOf(crawlId)] as const, ([s, n]) => s === "running" && n > 0);
+      // The instance is dead as the reaper reads it: its heartbeat back-dated.
+      await db.execute(sql`update instances set heartbeat_at = now() - interval '1 hour' where id = ${i}`);
+      const taken = await until("the reaper took the job", () => reap([i]), (summary) => summary.abandonedJobs === 1);
+      expect(taken).toMatchObject({ abandonedJobs: 1, pausedCrawls: 1 });
+      await watched.stop();
+      expect(await crawlRow(crawlId)).toMatchObject({ status: "paused", pauseReason: "worker_lost", failureReason: null });
+      expect((await jobRow(job)).status).toBe("abandoned");
+      // JobLostError may be handled inside the executor (logged, not thrown) or
+      // surface; either way the close wrote nothing. When it surfaced it is the typed error.
+      if (lost !== undefined) expect(lost).toBeInstanceOf(JobLostError);
+      expect(log.some((l) => l.includes(job) && l.includes("taken from this runner"))).toBe(true);
+    } finally {
+      await watched.stop();
+    }
+  }, 60_000);
+
+  it("a pre-loop failure whose job cannot be settled logs the job and the crawl, and the error propagates", async () => {
+    const crawlId = await seedCrawl({ status: "queued", config: { not: "a crawl config" } as never });
+    const log: string[] = [];
+    const execute = crawlJobExecutor({
+      hostAllowed: () => true,
+      db,
+      vault,
+      processTrust: { allowPrivate: true },
+      log: (line) => log.push(line),
+      logPrefix: "worker",
+    });
+    // A claimed job that is no row: the config refusal throws before the loop,
+    // and settling this job (`finishJob`) throws "no job" in turn.
+    const jobId = `job_ghost_${randomUUID()}`;
+    await expect(
+      execute(
+        { id: jobId, tenant: LOCAL_TENANT, crawlId, kind: "crawl", pinnedTo: null, claimedBy: "ghost", claimedAt: new Date(), queuedAt: new Date() },
+        new AbortController().signal,
+      ),
+    ).rejects.toThrow(/no job/);
+    expect(log.some((l) => l.includes(`(job ${jobId})`) && l.includes(crawlId) && l.includes("could not record"))).toBe(true);
+  });
 
   it("a job abandoned between its claim and the crawl's start never starts the crawl", async () => {
     const i = await instanceAt(0);

@@ -1,0 +1,1 @@
+CREATE INDEX "pages_crawl_rendered_doc" ON "pages" USING btree ("crawl_id") WHERE "pages"."rendered_html_path" is not null;

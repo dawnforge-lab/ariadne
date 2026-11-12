@@ -96,7 +96,8 @@ function reapedSomething(summary: ReapSummary): boolean {
 
 function describeReap(summary: ReapSummary): string {
   return (
-    `${summary.abandonedJobs} dead job(s) abandoned, ${summary.pausedCrawls} crawl(s) paused, ` +
+    `${summary.abandonedJobs} dead job(s) abandoned (${summary.chainLinksFailed} of them chain links, ` +
+    `schedule_chain_failed recorded), ${summary.pausedCrawls} crawl(s) paused, ` +
     `${summary.cancelledCrawls} cancelled, ${summary.requeuedCrawls} requeued, ` +
     `${summary.credentialsSwept} expired credential row(s) swept, ` +
     `${summary.instancesDeleted} dead instance(s) deleted`

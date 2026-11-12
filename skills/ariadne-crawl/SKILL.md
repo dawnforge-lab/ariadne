@@ -71,6 +71,13 @@ same JSON:
 | `crawl_rules` | `POST /crawls/:id/rules` |
 | `crawl_resume` | `POST /crawls/:id/resume` |
 | `crawl_mark_failed` | `POST /crawls/:id/fail` |
+| `crawl_history` | `GET /crawls/:id/history` |
+| `schedule_create` | `POST /schedules` |
+| `schedule_list` | `GET /schedules` |
+| `schedule_get` | `GET /schedules/:id` |
+| `schedule_update` | `PATCH /schedules/:id` |
+| `schedule_delete` | `DELETE /schedules/:id` |
+| `schedule_history` | `GET /schedules/:id/history` |
 | `issues_list` | `GET /crawls/:id/issues` |
 | `issue_urls` | `GET /crawls/:id/issues/:ruleId/urls` |
 | `issue_inlinks` | `GET /crawls/:id/issues/:ruleId/inlinks` |
@@ -92,6 +99,24 @@ better than a fresh one an hour from now, and a site does not enjoy being crawle
 twice in a day. Re-crawl when the site has changed, when the last crawl stopped
 short (`status` not `finished`), or when the audit needs a render pass the old crawl
 never got.
+
+**A schedule may already be crawling it.** `schedule_list` answers the tenant's
+schedules: `{scheduleId, siteUrl, cron, timezone, enabled, nextRunAt, lastCrawlId,
+render, credentials, createdAt, updatedAt}`. A schedule fires a crawl on its cron and
+then runs the rules on it (and a render pass between, when its `render` asks for one),
+so `lastCrawlId` is usually a judged crawl you can audit without starting anything, and
+two of its crawls compare (`crawl_compare`) without a rules run of yours. Set one up
+with `schedule_create` `{crawl: <a crawl_start body>, cron: "0 3 * * 1", timezone:
+"Europe/London", render: null}` when the site is to be watched rather than audited
+once: five cron fields only, an IANA zone, and the `crawl` body is checked now exactly
+as `crawl_start` checks it. `schedule_history` says what each slot did (a fired
+crawl's own lifecycle is in `crawl_history`): fired (naming the crawl) or skipped,
+with the reason — overlap (its previous crawl is still queued,
+running or paused, so a schedule never stacks crawls; a crawl you paused holds it until
+you resume or cancel that crawl), not-allowed (the host left the allowlist) or
+credentials_unreadable (send the credentials again with `schedule_update`). Schedules
+fire only while an `api:serve` or `worker:serve` process runs; the stdio server alone
+stores them and never fires them.
 
 ## Step 1 — start it
 
@@ -312,7 +337,7 @@ target is not something this skill can crawl.
 
 ```
 {crawlId, siteUrl, status, startedAt, finishedAt, pagesCrawled, pagesTotal,
- renderPassCount, rulesetVersion, controlRequested, pauseReason, cancelledAt,
+ renderPassCount, renderDocuments, rulesetVersion, controlRequested, pauseReason, cancelledAt,
  neverFetched, failureReason, legacyHosts, sitemapUrls, findingCap,
  frontier: {pending, leased, done, failed, renderPending},
  queuePosition, job, liveLeases, blockedPages, hostSpacingMs, throttle,
@@ -851,6 +876,12 @@ failure will just recur.
 (`pauseReason: "shutdown"`). It is the most resumable state there is: a stop decides
 nothing about the work it did not reach, so `crawl_resume` picks up exactly the URLs
 and files nobody has asked about yet.
+
+**Why is it in this state?** `crawl_history` answers the crawl's lifecycle, oldest
+first: `{id, at, kind, scheduleId, crawlId, detail}`, each kind with its detail — which
+process claimed it, when it was paused and why, whether a worker was lost, whether a
+resume was the engine's (its detail's `auto` true) or an agent's, and the render and rules
+runs with their outcome. Read it before guessing from `crawl_status` alone.
 
 **`status: "cancelled"`** — an agent's `crawl_cancel`. It is **final**:
 `crawl_resume` refuses it (409). What was crawled stays judgeable and exportable,

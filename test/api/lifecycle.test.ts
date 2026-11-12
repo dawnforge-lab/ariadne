@@ -41,7 +41,23 @@ import { hostKeyOf } from "../../src/crawl/host-key.js";
 const gates = vi.hoisted(() => ({
   rules: { hold: null as Promise<void> | null, entered: null as (() => void) | null },
   render: { hold: null as Promise<void> | null, entered: null as (() => void) | null },
+  /** Holds the rules link at its crawl read — after the claim, before the status read. */
+  rulesRead: { hold: null as Promise<void> | null, entered: null as (() => void) | null },
 }));
+
+vi.mock("../../src/rules/rules-link.js", async (importOriginal) => {
+  const real = await importOriginal<typeof import("../../src/rules/rules-link.js")>();
+  return {
+    ...real,
+    runRulesLink: (db: Parameters<typeof real.runRulesLink>[0], tenant: Parameters<typeof real.runRulesLink>[1], crawlId: string, registry: Parameters<typeof real.runRulesLink>[3]) =>
+      real.runRulesLink(db, tenant, crawlId, registry, async () => {
+        if (gates.rulesRead.hold !== null) {
+          gates.rulesRead.entered?.();
+          await gates.rulesRead.hold;
+        }
+      }),
+  };
+});
 
 vi.mock("../../src/rules/run.js", async (importOriginal) => {
   const real = await importOriginal<typeof import("../../src/rules/run.js")>();
@@ -917,25 +933,19 @@ describe("crawl_rules on a crawl that never ran (Ruling 11)", () => {
 describe("the rules guard claims before it reads (in-process TOCTOU)", () => {
   it("a crawl_resume issued while crawl_rules is between its read and its run is refused 409", async () => {
     const id = await seedPausedJudgeable();
-    const svc = api.service as unknown as { crawlRow: (tenant: TenantId, crawlId: string) => Promise<unknown> };
-    const realRow = svc.crawlRow.bind(svc);
+    // The hold sits at the rules link's crawl read (its `beforeRead` seam): the
+    // job is claimed, the status read still ahead — so a resume refused here
+    // proves the claim comes first. Since 28c the read lives in the link, no
+    // longer in a service method a test could spy on.
     let releaseRead!: () => void;
-    const readHeld = new Promise<void>((r) => {
+    gates.rulesRead.hold = new Promise<void>((r) => {
       releaseRead = r;
     });
     let enteredRead!: () => void;
     const reading = new Promise<void>((r) => {
       enteredRead = r;
     });
-    let held = false;
-    const spy = vi.spyOn(svc, "crawlRow").mockImplementation(async (tenant: TenantId, crawlId: string) => {
-      if (crawlId === id && !held) {
-        held = true;
-        enteredRead();
-        await readHeld;
-      }
-      return await realRow(tenant, crawlId);
-    });
+    gates.rulesRead.entered = enteredRead;
     const run = call("POST", `/crawls/${id}/rules`);
     try {
       await reading;
@@ -945,7 +955,8 @@ describe("the rules guard claims before it reads (in-process TOCTOU)", () => {
       expect((await stored(id)).status).toBe("paused");
     } finally {
       releaseRead();
-      spy.mockRestore();
+      gates.rulesRead.hold = null;
+      gates.rulesRead.entered = null;
     }
     expect((await run).status).toBe(200);
   }, 60_000);

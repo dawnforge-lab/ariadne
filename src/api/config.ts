@@ -21,6 +21,7 @@ import type { CredentialKeys } from "../crawl/credential-vault.js";
 import type { CrawlConfig } from "../crawl/loop.js";
 import type { AddressResolver } from "../crawl/url-policy.js";
 import type { Timing } from "../worker/timing.js";
+import type { SchedulerTestSeam } from "../schedule/scheduler.js";
 import { ServiceError } from "./errors.js";
 import { parseTenant, type TenantId } from "../tenant.js";
 
@@ -179,6 +180,24 @@ export interface ServiceConfig {
    * environment; a test injects a short clock.
    */
   timing?: Partial<Timing>;
+  /**
+   * Whether this process is a scheduler candidate (Phase 28c,
+   * src/schedule/scheduler.ts): off when absent, as the library's other
+   * background work is opt-in (call C3). `api:serve` sets `true`; the stdio
+   * MCP entry does not (a process that lives one agent session must not lead:
+   * the crawls it fired, pinned to it, would be stranded when it exits). The
+   * scheduler starts when the instance registers (`api:serve` awaits
+   * `instanceId()` at boot), fires crawls with this service's crawl pin (C4:
+   * its own instance in-process, the pool in `workers` mode) and its
+   * allowlist, and is stopped first: `stopScheduler()`, which `close()` calls
+   * before anything else.
+   *
+   * The object form is TEST ONLY (`SchedulerTestSeam`): a lock key and the
+   * tenants a suite's scheduler is confined to, so parallel suites never fire
+   * each other's schedules. Code-only, like `crawlDefaults`: nothing reads it
+   * from the environment or the wire.
+   */
+  scheduler?: boolean | SchedulerTestSeam;
   /**
    * Where the server writes its own diagnostics — a queue pick-up, a crawl that
    * threw, the stack behind a 500. Never the response body (a stack trace in a

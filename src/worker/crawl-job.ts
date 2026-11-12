@@ -51,7 +51,7 @@
 import { and, eq } from "drizzle-orm";
 
 import type { Db } from "../db/client.js";
-import { crawls } from "../db/schema.js";
+import { crawls, jobs } from "../db/schema.js";
 import {
   ClaimLostError,
   failureReasonOf,
@@ -65,7 +65,9 @@ import {
 import { hostProbeStarts } from "../crawl/parse/url-utils.js";
 import { describeShape, sameShape, shapeOf, type CrawlCredentials, type CredentialShape } from "../crawl/credentials.js";
 import type { CredentialRead, CredentialVault } from "../crawl/credential-vault.js";
-import { finishJob, type ClaimedJob, type JobOutcome } from "./jobs.js";
+import { readScheduleChain } from "../crawl/insert-crawl.js";
+import type { TenantId } from "../tenant.js";
+import { enqueueJob, finishJob, type ClaimedJob, type JobOutcome } from "./jobs.js";
 
 export interface CrawlJobDeps {
   db: Db;
@@ -97,10 +99,38 @@ export function crawlJobOutcome(closed: Parameters<CloseHook>[1]): JobOutcome {
   return "done";
 }
 
-/** The loop's close hook for one job: settle it in the close's transaction. */
-export function crawlJobCloseHook(jobId: string): CloseHook {
+/**
+ * The loop's close hook for one job: settle it in the close's transaction —
+ * and, on a `finished` close of a crawl a schedule fired (`schedule_chain`
+ * non-null, 28c), enqueue the chain's first link in that same transaction:
+ * `render` when the chain renders, `rules` otherwise, pinned as the crawl job
+ * was (`pinnedTo`, call C4). One transaction, so no reader sees the crawl
+ * finished with neither its crawl job nor its first link live — the
+ * scheduler's overlap read, above all, which would fire the next crawl into
+ * that gap. The crawl job is settled first: a crawl has one live job at a time.
+ *
+ * Any other close — paused, cancelled, failed — enqueues nothing: a chain
+ * judges a crawl that finished, and nothing else. A chain this engine never
+ * wrote throws, and the close rolls back with it (the run fails loudly).
+ */
+export function crawlJobCloseHook(jobId: string, pinnedTo: string | null): CloseHook {
   return async (tx, closed) => {
     await finishJob(tx, jobId, crawlJobOutcome(closed), closed.failureReason ?? undefined);
+    if (closed.status !== "finished") return;
+    const [row] = await tx
+      .select({ crawlId: crawls.id, tenant: crawls.tenantId, chain: crawls.scheduleChain })
+      .from(jobs)
+      .innerJoin(crawls, eq(crawls.id, jobs.crawlId))
+      .where(eq(jobs.id, jobId));
+    if (row === undefined) throw new Error(`crawl job ${jobId}: at its crawl's close, no such job or crawl`);
+    if (row.chain === null) return;
+    const chain = readScheduleChain(row.chain, row.crawlId);
+    await enqueueJob(tx, {
+      tenant: row.tenant as TenantId,
+      crawlId: row.crawlId,
+      kind: chain.render === null ? "rules" : "render",
+      ...(pinnedTo === null ? {} : { pinnedTo }),
+    });
   };
 }
 
@@ -243,7 +273,9 @@ async function runCrawlJob(deps: CrawlJobDeps, job: ClaimedJob, signal: AbortSig
       config,
       signal,
       expectStatus: "queued",
-      onClose: crawlJobCloseHook(job.id),
+      // The close settles the job — and, for a fired crawl that finished,
+      // enqueues its chain's first link with this job's pin (C4).
+      onClose: crawlJobCloseHook(job.id, job.pinnedTo),
       // The run writes the crawl only while this job is still its own (28b
       // T4b): a job abandoned by a reaper or adopted by a resume never starts
       // the crawl, and its close is not written over the crawl's new holder.
@@ -320,7 +352,8 @@ async function runCrawlJob(deps: CrawlJobDeps, job: ClaimedJob, signal: AbortSig
       });
     } catch (recordError) {
       log(
-        `${p}: crawl ${crawlId} — the queue runner itself failed and could not record it: ` +
+        `${p}: crawl ${crawlId} (job ${job.id}) — the queue runner itself failed and could not ` +
+          `record it, so the job is left as it was: ` +
           messageOf(recordError),
       );
       throw recordError;

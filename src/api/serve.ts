@@ -18,6 +18,10 @@
  * pool for `npm run worker:serve`. It does run a REAPER (R10), so it settles
  * its own dead render and rules jobs and sweeps expired credentials whether or
  * not a worker is up. Render and rules calls still run here, synchronously.
+ *
+ * IT IS A SCHEDULER CANDIDATE (28c, `scheduler: true`): if it holds the leader
+ * lock it fires due schedules into the worker pool; the service stops it first
+ * when it closes.
  */
 import { closeDb, createDb } from "../db/client.js";
 import { CredentialVault, parseCredentialKeys, parseCredentialRetentionDays } from "../crawl/credential-vault.js";
@@ -46,6 +50,9 @@ const api = createApiServer({
     credentialKeys,
     credentialRetentionDays,
     crawlRunner: "workers",
+    // A scheduler candidate (28c): it starts with the instance, below, and
+    // fires into the worker pool.
+    scheduler: true,
     // Undefined means each field's own default — `exports/` and `renders/`; see
     // `ServiceConfig`. Unlike `crawlDefaults` these ARE environment knobs, and
     // safely so: they name where the server keeps its own output, not what it
@@ -103,8 +110,16 @@ for (const signal of ["SIGINT", "SIGTERM"] as const) {
     console.error(`ariadne api: ${signal} — closing (a running crawl is paused (shutdown), not killed)`);
     // The queue's close aborts the crawl in flight and waits for it to write
     // its `paused` (shutdown) row, so a restart resumes rather than re-crawls.
-    reaper
-      .stop()
+    // The scheduler first (nothing is fired into a closing process), then the
+    // reaper, then the surface.
+    // A scheduler that could not release its lock is said and the shutdown
+    // goes on: its session is ended either way, which frees the lock.
+    api.service
+      .stopScheduler()
+      .catch((error: unknown) => {
+        console.error(`ariadne api: the scheduler did not stop cleanly — ${String(error)}`);
+      })
+      .then(() => reaper.stop())
       .then(() => api.close())
       .then(() => closeDb(db))
       .then(() => process.exit(0))
