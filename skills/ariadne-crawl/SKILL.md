@@ -109,10 +109,9 @@ two of its crawls compare (`crawl_compare`) without a rules run of yours. Set on
 with `schedule_create` `{crawl: <a crawl_start body>, cron: "0 3 * * 1", timezone:
 "Europe/London", render: null}` when the site is to be watched rather than audited
 once: five cron fields only, an IANA zone, and the `crawl` body is checked now exactly
-as `crawl_start` checks it. `schedule_history` says what each slot did (it currently
-also lists the fired crawls' own lifecycle events, a known defect: read the entries
-whose kind starts with "schedule" and skip the rest): fired (naming the crawl) or
-skipped, with the reason — overlap (its previous crawl is still queued,
+as `crawl_start` checks it. `schedule_history` says what each slot did (a fired
+crawl's own lifecycle is in `crawl_history`): fired (naming the crawl) or skipped,
+with the reason — overlap (its previous crawl is still queued,
 running or paused, so a schedule never stacks crawls; a crawl you paused holds it until
 you resume or cancel that crawl), not-allowed (the host left the allowlist) or
 credentials_unreadable (send the credentials again with `schedule_update`). Schedules

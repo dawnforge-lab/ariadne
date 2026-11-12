@@ -88,11 +88,9 @@ one field, and the ruleset is unchanged (0.25.1); migrations 0045–0049 add
   the schedule's own events: `schedule_fired` `{crawlId}`, `schedule_skipped` `{reason,
   crawlId?}` and `schedule_chain_failed` `{link, reason}`. A fire or skip carries
   `crawlId` null at the top level and names the crawl in `detail`, so its record
-  outlives a deleted crawl. **Known defect at this commit** (found by the gate,
-  `docs/gates/phase-28c.md` clause 1d; fix pending): `schedule_history` also answers
-  every lifecycle event of the crawls the schedule fired, because those carry its
-  `scheduleId` too. Until it is fixed, read the three schedule kinds and skip the rest;
-  `crawl_history` is the place for a fired crawl's lifecycle. The skip reasons, checked in this order:
+  outlives a deleted crawl. `schedule_history` answers these three kinds only: a fired
+  crawl's lifecycle events carry the schedule's `scheduleId` too, and they are read with
+  `crawl_history`. The skip reasons, checked in this order:
   - `overlap`: a crawl this schedule fired is still `queued`, `running` or `paused`, or
     one of its chain links is queued or running. `detail.crawlId` names it. A schedule
     never stacks crawls. A system pause resumes by itself (Phase 28b), so a deploy does
@@ -131,7 +129,7 @@ one field, and the ruleset is unchanged (0.25.1); migrations 0045–0049 add
   `test/schedule/scheduler.test.ts:575` ("(g) the leader's connection killed"),
   `test/schedule/scheduler.test.ts:801` ("the candidates are api:serve and worker:serve"),
   `test/worker/chain.test.ts:194` ("(a) two fires of a render-less schedule are each judged
-  last, and compare comparable: true"), `test/worker/chain.test.ts:334` ("(e) the schedule
+  last, and compare comparable: true"), `test/worker/chain.test.ts:226` ("schedule_history answers the schedule's own events only"), `test/worker/chain.test.ts:372` ("(e) the schedule
   deleted after the fire"), `test/crawl/render-link.test.ts:143` ("renders, writes no file
   and leaves rendered_html_path null"), `test/events/crawl-events.test.ts:206` ("(a) reads
   queued, claimed, started, paused{request}, resumed{auto:false}"),

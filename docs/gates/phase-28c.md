@@ -2,35 +2,45 @@
 
 Date: 2026-11-12. Spec: `docs/superpowers/specs/2026-11-11-phase-28-cloud-foundations-design.md`
 ("Gates" 28c, items 13 to 17). Plan: `docs/superpowers/plans/2026-11-12-phase-28c-scheduler.md`.
-Branch `worktree-phase-28c`, built on `cf1f311` (main) plus the plan (`23a12db`). Code under test:
-`0d55e5b` (Task 8's commit, the last product change) plus `4f35379`, which adds the gate script
-and a command-line scheduler switch to the trusted test worker. This task otherwise adds docs, a
-skill section, one tool-description word (`src/api/mcp.ts`: `schedule_create`'s allowlist code
-was written `NOT_ALLOWED`; the code is `FORBIDDEN`), one route line in `src/api/http.ts`'s header
-comment, and the identifier guard's field sources for the two new answer shapes.
+Branch `worktree-phase-28c`, built on `cf1f311` (main) plus the plan (`23a12db`).
 
-**Verdict: clause 1 does not pass as the gate script states it, because of one product defect;
-everything the spec's clause 1 names passed; clause 2 passes; clause 3 is pending.**
+Code under test: `d1413f8`. That is Task 8's `0d55e5b` plus three commits from this task:
 
-- **Clause 1:** in two full runs, a one-minute schedule fired **exactly 10 times in its 10 slots**
-  while the leader was `kill -9`'d. Another candidate led **29.3 s** later. Each fire ran crawl
-  and then rules, the compare is `comparable: true`, and the overlap and not-allowed skips were
-  recorded.
-- **The defect:** the script also checks that `schedule_history` answers the schedule's own
-  events only (spec item 16: "one schedule's fires and skips"). It does not. It also answers
-  every lifecycle event of the crawls the schedule fired (`queued`, `claimed`, `started`,
-  `paused`, and on a finished crawl `finished` and the `rules_*` kinds), because those carry the
-  schedule's id and the history lists by that id. That is a defect in earlier tasks' code (see
-  "The defect" below). It is reported and not fixed here, and the script prints `GATE FAILED`
-  until it is fixed.
+- `4f35379`: the gate script, and a command-line scheduler switch for the trusted test worker.
+- `50049da`: docs and this record.
+- `d1413f8`: the fix the gate's first full runs called for. `schedule_history` now reads the
+  schedule's own events only; see "What did not go as first written".
+
+This task otherwise touches no product code beyond docs, a skill section, one tool-description
+word, one route line in a header comment and the identifier guard's field sources:
+
+- The word is in `src/api/mcp.ts`: `schedule_create`'s allowlist code was written
+  `NOT_ALLOWED`; the code is `FORBIDDEN`.
+- The route line is in `src/api/http.ts`'s header comment.
+- The guard gains the two new answer shapes.
+
+**Verdict: clauses 1 and 2 pass on the code (run `ca43a7`, `GATE PASSED`); clause 3 is pending
+on the PR.**
+
+- **Clause 1:** a one-minute schedule fired **exactly 10 times in its 10 slots** while the leader
+  was `kill -9`'d. Another candidate led **28.4 s** later. Each fire ran crawl and then rules,
+  the compare between two fired crawls is `comparable: true`, and the overlap and not-allowed
+  skips are recorded in `schedule_history`, which holds the schedules' own events only.
 - **Clause 2:** passes, by test and in the live run.
-- **Clause 3** is the PR's run of `gate.yml`, pending.
+- **What it took:** the gate printed `GATE FAILED` twice before this. The first full failing run
+  found a real defect (`schedule_history` returned its fired crawls' lifecycle events), fixed in
+  `d1413f8`. The record of those runs is kept at the end.
 
 All runs used a database made for them, `ariadne_gate28c`, on the dev container (`create database
 ariadne_gate28c`, then `npm run db:migrate`: 50 migrations applied, 50 journal entries). The
-script refuses any other database, and also one with a queued or running job, an enabled
-schedule, or the scheduler lock already held. The dev database `ariadne` was never connected to
-by the gate. `ariadne_gate28c` is kept; dropping it waits for the owner's OK.
+script refuses:
+
+- any database other than `ariadne_gate28c`;
+- one with a queued or running job, or an enabled schedule;
+- one where the scheduler lock is already held.
+
+The dev database `ariadne` was never connected to by the gate. `ariadne_gate28c` is kept;
+dropping it waits for the owner's OK.
 
 ```
 DATABASE_URL=postgresql://ariadne:ariadne@localhost:5440/ariadne_gate28c \
@@ -38,123 +48,111 @@ DATABASE_URL=postgresql://ariadne:ariadne@localhost:5440/ariadne_gate28c \
 npx vitest run test/events/crawl-events.test.ts                     # clause 2's tested proof
 ```
 
-The full logs are kept outside the repository, in the SDD workspace
-(`.superpowers/sdd/2026-11-12-phase-28c-scheduler/gate-schedules-run-{1,2,3}.log`, with every
-worker's own output under `gate-run-{2,3}/`).
+The full logs are kept outside the repository, in the SDD workspace:
+`.superpowers/sdd/2026-11-12-phase-28c-scheduler/gate-schedules-run-{1,2,3,4}.log`, with every
+worker's own output and the API's log under `gate-run-{2,3,4}/`.
 
 ## How the gate runs
 
 - **The candidates.** The API service runs in the gate process (`crawlRunner: "workers"`,
-  `scheduler: false`), so it accepts and answers and is NOT a candidate. Two
-  `scripts/run-worker-trusted.ts --scheduler --schedule-every-ms=30000` children are the two
-  candidates. They run on the production clock: `scheduleEvery` 30 s, heartbeat 10 s, dead after
-  60 s, reaper every 30 s. Each uses the production lock key (`SCHEDULER_LOCK`, 2028004002) and
-  fires every tenant's due schedules, which is why the database must be the gate's own. The
-  scheduler switch is a command-line flag, never an environment variable (pinned in
-  `test/worker/serve.test.ts`, beside the process-trust pin).
+  `scheduler: false`). It accepts and answers, and it is NOT a candidate.
+  - Two `scripts/run-worker-trusted.ts --scheduler --schedule-every-ms=30000` children are the
+    two candidates, on the production clock: `scheduleEvery` 30 s, heartbeat 10 s, dead after
+    60 s, reaper every 30 s.
+  - Each uses the production lock key (`SCHEDULER_LOCK`, 2028004002) and fires every tenant's due
+    schedules. That is why the database must be the gate's own.
+  - The scheduler switch is a command-line flag, never an environment variable (pinned in
+    `test/worker/serve.test.ts`, beside the process-trust pin).
 - **The leader** is read from the database, never from a process's own account. It is the
   backend in `pg_stat_activity` named `ariadne-scheduler:<instanceId>` that holds the granted
   advisory lock in `pg_locks` (classid = key >> 32, objid = key & 0xffffffff, objsubid = 1, in
-  this database): the same test the scheduler applies to its own session. It was sampled every
-  second for the whole run.
+  this database). That is the same test the scheduler applies to its own session. The gate
+  samples it every second for the whole run.
 - **The timeline.** A scheduler's first lock try is one `scheduleEvery` after it starts. So the
-  schedules are created only once a leader is seen (about 28 s after the workers boot), and never
-  within 5 s of a minute boundary, so that all three share their first slot T0.
+  schedules are created only once a leader is seen (about 30 s after the workers boot), and never
+  within 5 s of a minute boundary, so that all three share their first slot, T0.
 - **The schedules**, each in a tenant of its own, all `* * * * *` in `UTC`, all `render: null`:
   - **S1** crawls a 20-page loopback site (127.0.0.1, 50 ms a page). One crawl plus its rules
     takes about 3 s.
   - **S2** crawls a 600-page site (127.0.0.2, 100 ms a page). Its first crawl is paused with
     `POST /crawls/:id/pause` once 3 pages are stored.
-  - **S3** names 127.0.0.5. The API's allowlist admits that host; the workers' allowlist, which
-    is 127.0.0.1 to .4 in code, does not.
-- **The kill.** Once only: after S1's third fire has finished its rules, with no S1 crawl or
-  chain link live (the overlap read's own predicate) and S1's next slot at least 15 s away. The
-  leader's process gets SIGKILL. A third worker (C) is then started, so two candidates remain.
+  - **S3** names 127.0.0.5. The API's allowlist admits it; the workers' allowlist (127.0.0.1 to
+    .4, in code) does not.
+- **The kill** happens once only, when three conditions hold: S1's third fire has finished its
+  rules; no S1 crawl or chain link is live (the overlap read's own predicate); and S1's next slot
+  is at least 15 s away. The leader's process gets SIGKILL, and a third worker (C) is started so
+  that two candidates remain.
 - **The window** is T0 to T0 + 10 min. A fire is counted by its `schedule_fired` event's time.
-  A slot cannot fire before it is due (the claim's predicate), and every fire in the run came
-  within 21 s of its slot, so the count over the window is the count over the ten slots. The
-  schedules are disabled when the window closes; any crawl S1 fired after it would be left to
-  settle.
+  A slot cannot fire before it is due (the claim's predicate), and every fire came within 26 s of
+  its slot, so the count over the window is the count over the ten slots. The schedules are
+  disabled when the window closes.
 
 ## 1. Two candidates; a one-minute schedule fires exactly 10 times while the leader is killed
 
-Run `60c153` (run 3, the run of the committed script). The window ran from 16:54:00 to
-17:04:00 UTC.
+Run `ca43a7` (run 4, on `d1413f8`). The window ran from 17:21:00 to 17:31:00 UTC.
 
 | | |
 |---|---|
-| leader before the kill | worker A `instance_ad1f1efd…`, from 16:53:44 (about 30 s after the workers started) |
-| kill -9 | 16:56:16.798, worker A (pid 3468101), after S1's 3rd fire; nothing of S1 live; next slot 16:57:00 |
-| replacement | worker C `instance_7936d445…` ready 16:56:18.7 |
-| takeover | worker B `instance_57314c63…` leads at 16:56:46.073, **29,275 ms** after the kill (bound: one `scheduleEvery` + 5 s = 35 s) |
-| leader samples | 652, **0** with two leaders |
+| leader before the kill | worker A `instance_141ef33a…`, from 17:20:24 (about 30 s after the workers started) |
+| kill -9 | 17:23:28.327, worker A (pid 3546083), after S1's 3rd fire; nothing of S1 live; next slot 17:24:00 |
+| replacement | worker C `instance_1bc26dbb…` |
+| takeover | worker B `instance_97b8e9a3…` leads at 17:23:56.703, **28,376 ms** after the kill (bound: one `scheduleEvery` + 5 s = 35 s) |
+| leader samples | 672, **0** with two leaders |
 | S1 fires in the window | **10**, per minute `[1,1,1,1,1,1,1,1,1,1]` |
-| fire lag after each slot (s) | 14.2, 14.2, 14.2, 16.1, 16.1, 16.1, 16.0, 16.1, 16.1, 16.1 |
+| fire lag after each slot (s) | 23.8, 23.8, 23.8, 25.8, 25.8, 25.8, 25.8, 25.8, 25.8, 25.8 |
 | S1 skips in the window | **0** |
 | fires before / after the kill | 3 / 7 |
 | candidates at the end | B and C, both live |
 
-The lag is the leader's own tick phase: its 30 s interval runs from its own start. It moved by
-2 s when worker B took over at 16:56:46, which is its own phase, and the fire of the 16:57 slot
-came at 16:57:16. No slot was missed and none fired twice. Worker A logged
-`leading (advisory lock 2028004002)` at 16:53:44; worker B logged the same at 16:56:46.
+**Why the lag looks like that.** The lag is the leader's own tick phase: its 30 s interval runs
+from its own start. It moved by 2 s when worker B took over, and B fired the 17:24 slot at
+17:24:25.8. No slot was missed and none fired twice.
 
-Run `4b824b` (run 2, the same script before the 1d check was split) gave the same picture:
+**Runs 2 and 3**, on the code before the fix, gave the same picture for this part of the clause.
+Each had 10 fires, one per minute, and 0 S1 skips. Takeover took **28,775 ms** and **29,275 ms**.
+Neither saw a two-leader sample (647 and 652 samples). Over the three runs the takeover was 28.4
+to 29.3 s.
 
-- 10 fires, one per minute.
-- The lag was 18.6 to 20.6 s.
-- The kill came at 16:42:22.5 after fire 3.
-- Takeover took **28,775 ms**.
-- There were 0 S1 skips and 0 two-leader samples in 647 samples.
+**Each fire ran crawl and then rules.**
 
-**Each fire ran crawl and then rules.** For each of the ten crawls, `GET /crawls/:id` is
-`finished` with 20 pages and `renderDocuments: "not kept"`. `GET /crawls/:id/history` reads
-exactly `queued, claimed, started, finished, rules_queued, rules_started, rules_finished`, with
-`rules_finished` `{outcome: "done"}` after `finished`. No `render_*` event appears (the schedule
-says `render: null`), and no `schedule_chain_failed`. Every event carries S1's `scheduleId`.
+- For each of the ten crawls, `GET /crawls/:id` is `finished` with 20 pages and
+  `renderDocuments: "not kept"`.
+- `GET /crawls/:id/history` reads exactly `queued, claimed, started, finished, rules_queued,
+  rules_started, rules_finished`, with `rules_finished` `{outcome: "done"}` after `finished`.
+- No `render_*` event appears (the schedule says `render: null`), and no
+  `schedule_chain_failed`.
+- Every event carries S1's `scheduleId`.
 
 **The compare.** `GET /compare?baseCrawlId=<1st fire>&headCrawlId=<10th fire>` answered
-`comparable: true` with no caveats (`crawl_ec9322c9…` against `crawl_751d5684…`; run 2 also
-compared its first and tenth fires with `comparable: true`).
+`comparable: true` with no caveats (`crawl_fc7a6941…` against `crawl_75561cf2…`).
 
 **The skips**, read through `GET /schedules/:id/history`:
 
-- **S2** fired once, at its first slot. Its crawl `crawl_e2a9f025…` was paused at 16:54:15 (pause
-  reason `request`). Each of its next **9** slots was `schedule_skipped` `{reason: "overlap",
-  crawlId: "crawl_e2a9f025…"}`.
+- **S2** fired once, at its first slot. Its crawl `crawl_8267e618…` was paused at 17:21:25 (reason
+  `request`). Each of its next **9** slots was `schedule_skipped` `{reason: "overlap", crawlId:
+  "crawl_8267e618…"}`.
 - **S3** fired **0** times and recorded **10** `schedule_skipped` `{reason: "not-allowed"}`. Its
-  host saw **0** requests. Each skip was also logged by the leader
-  (`siteUrl is on '127.0.0.5', which is not in this process's crawl allowlist`).
+  host saw **0** requests. The leader also logged each skip (`siteUrl is on '127.0.0.5', which is
+  not in this process's crawl allowlist`).
 - Every fire and skip event carries `crawlId` null at the top level and names the crawl in
   `detail` (call C9).
+- **The histories hold the schedules' own kinds only:** S2 has `{schedule_fired: 1,
+  schedule_skipped: 9}`, and S3 has `{schedule_skipped: 10}`. S2's fired crawl's `queued`,
+  `claimed`, `started` and `paused` are in its `crawl_history`, not here. Run 3 failed on exactly
+  this check; see the end.
 
-### The defect
+**The fix's test** is `test/worker/chain.test.ts`, "schedule_history answers the schedule's own
+events only; the fired crawl's lifecycle stays in crawl_history". It fires a real crawl through
+`fireDue` and runs it to its rules. The schedule's history must be exactly
+`[schedule_fired]`, while `crawl_history` holds the seven lifecycle events. Chain test (c) now
+also reads a `schedule_chain_failed` in the schedule's history. Both failed before `d1413f8`.
 
-**The one failure of clause 1d:**
-
-> schedule_history answers 4 events of kinds other than the schedule's own (queued, claimed,
-> started, paused): its fired crawls' lifecycle events
-
-S2's history held 1 `schedule_fired`, 9 `schedule_skipped`, and the paused crawl's `queued`,
-`claimed`, `started` and `paused`. A schedule whose crawls finish (S1) would also list
-`finished` and the three `rules_*` events of every fire: O(fires × lifecycle) in what the spec
-calls "one schedule's fires and skips".
-
-The cause is in two places:
-
-- `ApiService.scheduleHistory` (Task 4) calls `listEvents(db, {tenant, scheduleId}, …)`
-  (Task 1), which filters on `crawl_events.schedule_id` alone.
-- Since Ruling P3, every lifecycle event of a fired crawl carries that id.
-
-The tool description (`schedule_history`: "kind is schedule_fired …, schedule_skipped …, or
-schedule_chain_failed") and Ruling P2 ("fires and skips … only readable through
-schedule_history") describe the intended answer. `test/api/schedules.test.ts`'s history test
-inserts only skip rows, so nothing caught it.
-
-The likely fix is a kind filter on the schedule branch of `listEvents`: the three application
-kinds, `APP_EVENT_KINDS`, which include `schedule_chain_failed` with its crawl id. Add a test
-that fires a real crawl. That is outside this task and is reported to the controller.
-`docs/talos-surface.md` and the crawl skill say so beside the description until it lands.
+**Plan.** The read is still driven by the partial index `crawl_events_schedule` (`schedule_id,
+id`). The kind is a filter on the rows it walks. On `ariadne_gate28c`, with sequential scans
+disabled to show the index path at this table's small size (256 rows), S1's history scans 80
+index rows to return its 10. That is about 7 lifecycle rows walked per fire, O(fires ×
+lifecycle) rows read for O(fires) answered. A partial index on the three schedule kinds would
+make it exact; it is an open item.
 
 ## 2. `crawl_history` reads a crawl that was paused, resumed and finished
 
@@ -162,27 +160,26 @@ that fires a real crawl. That is outside this task and is reported to the contro
 paused{request}, resumed{auto:false}, claimed, started, finished{pagesCrawled} — gate clause 2".
 It passed in the full suite below.
 
-**Live, run `60c153`:** after the window, S2 was disabled. Its paused crawl was then resumed with
-`POST /crawls/:id/resume` (202, `queuePosition` 1), and it finished on worker B. Its chain then
-ran, because a resumed fired crawl that finishes still enqueues its rules. `GET
-/crawls/crawl_e2a9f025…/history`:
+**Live, run `ca43a7`:** after the window, S2 was disabled and its paused crawl resumed with
+`POST /crawls/:id/resume` (202, `queuePosition` 1). It finished on worker B. Its chain then ran,
+because a resumed fired crawl that finishes still enqueues its rules.
+`GET /crawls/crawl_8267e618…/history`:
 
 ```
-16:54:14 queued
-16:54:14 claimed        {role: worker, instanceId: instance_ad1f1efd…}   (worker A, later killed)
-16:54:14 started
-16:54:15 paused         {reason: request}
-17:04:06 resumed        {auto: false}
-17:04:06 claimed        {role: worker, instanceId: instance_57314c63…}   (worker B)
-17:04:06 started
-17:05:16 finished       {pagesCrawled: 600}
-17:05:16 rules_queued
-17:05:16 rules_started
-17:05:18 rules_finished {outcome: done}
+17:21:23 queued
+17:21:24 claimed        {role: worker, instanceId: instance_141ef33a…}   (worker A, later killed)
+17:21:24 started
+17:21:25 paused         {reason: request}
+17:31:05 resumed        {auto: false}
+17:31:05 claimed        {role: worker, instanceId: instance_97b8e9a3…}   (worker B)
+17:31:05 started
+17:32:18 finished       {pagesCrawled: 600}
+17:32:18 rules_queued
+17:32:18 rules_started
+17:32:20 rules_finished {outcome: done}
 ```
 
-Run 2 read the same sequence: claimed first by the worker that was later killed, then by the
-replacement worker C.
+Runs 2 and 3 read the same sequence.
 
 ## 3. `gate.yml` runs green once, and its artifact holds the peaks
 
@@ -201,9 +198,10 @@ Task 8 ran the script's 200-page smoke locally (`GATE_PAGES=200 … --json-out`)
 ## Suite and tsc
 
 - `npx tsc --noEmit`: clean.
-- `npm test` (dev database): **174 files, 4,672 tests, all passing** (566 s), on the tree this
-  file is committed with. Baseline before 28c (P4): 167 files, 4,520 tests; 28c added 7 files
-  and 152 tests.
+- `npm test` (dev database): **174 files, 4,673 tests, all passing** (526 s), on the tree this
+  file is committed with (the fix `d1413f8` and these docs). Baseline before 28c (P4): 167
+  files, 4,520 tests. 28c added 7 files and 153 tests. Before the fix the count was 4,672 (566
+  s); the fix adds one test.
 - `test/skills/identifier-guard.test.ts`: 25 of 25. It first flagged two citations on the new
   surface text:
   - one quoted test-title fragment shorter than its 16-character minimum (lengthened);
@@ -264,8 +262,8 @@ what it costs if wrong.
   which answers 404 once the schedule is gone.
 - **P3:** Task 3's migration re-creates both trigger functions (crawl and job) to fill
   `schedule_id` from `crawls.schedule_id`. Cost if wrong: job events of scheduled crawls lack
-  `schedule_id`. (P3 is also why the defect in clause 1d shows: every fired crawl's lifecycle
-  carries the id that `schedule_history` lists by.)
+  `schedule_id`. (P3 is also why `schedule_history` must filter by kind: every fired crawl's
+  lifecycle carries the id it lists by. Run 3 found the missing filter; `d1413f8` added it.)
 - **P4:** the Task 0 baseline is 167 files / 4,520 tests on `f3356ef`. Cost if wrong: a stale
   baseline count, caught by Task 1's full run.
 - **P5:** `resumed.auto` is "requeued by the reaper", marked by
@@ -309,7 +307,11 @@ what it costs if wrong.
   28b, together with the thin counters module for the crawl hot path.
 - **Per-tenant domain allowlists.** The allowlist is still one operator-set list, and now also
   the leader's, at every fire. A multi-tenant Talos needs each tenant's domains on it.
-- **The `schedule_history` defect above.** It needs fixing before merge.
+- **An exact index for `schedule_history`.** The read walks `crawl_events_schedule`
+  (`schedule_id, id`) and filters by kind, so it reads about 7 lifecycle rows per fire to
+  answer one (clause 1, "Plan"). A partial index on the three schedule kinds would make the
+  read O(answer). It is not needed at today's sizes: a weekly schedule writes about 400 rows a
+  year.
 - **The zombie leader during a network partition** (Task 5, recommended before merge).
   Server-side TCP keepalive defaults to about 2 h, so a leader cut off by a partition keeps the
   advisory lock: nothing fires and nothing is logged. The fix is to set per-session keepalives
@@ -366,12 +368,30 @@ what it costs if wrong.
   - Run 1's rows stay in the database: 2 S1 fires, 2 S2 fires, 2 S3 not-allowed skips. The
     machinery already worked there: crawl and rules in about 3 s, with one leader throughout.
 - **Run 2 (`4b824b`) failed clause 1d on a check that named the wrong property.** The check
-  required every event in the two schedule histories to carry `crawl_id` null (C9), which
-  failed. What it had found was the defect above: the histories hold the fired crawls' own
-  events, whose `crawl_id` is set.
-  - The check now states the two properties apart: fires and skips carry `crawl_id` null, which
-    holds, and the history answers the schedule's own kinds only, which fails.
-  - Run 3 is that script, unchanged since, and committed.
-  - Every other clause passed in both run 2 and run 3.
+  required every event in the two schedule histories to carry `crawl_id` null (C9), and it
+  failed. What it had actually found was a defect: the histories held the fired crawls' own
+  lifecycle events, whose `crawl_id` is set.
+  - The check was split into the two properties: fires and skips carry `crawl_id` null, and
+    the history answers the schedule's own kinds only.
+- **Run 3 (`60c153`, the committed script, on `50049da`) printed `GATE FAILED` on that second
+  property:**
+
+  > schedule_history answers 4 events of kinds other than the schedule's own (queued, claimed,
+  > started, paused): its fired crawls' lifecycle events
+
+  - The cause: `ApiService.scheduleHistory` (Task 4) read `listEvents(db, {tenant,
+    scheduleId})` (Task 1), which filtered on `crawl_events.schedule_id` alone. Since Ruling P3,
+    every lifecycle event of a fired crawl carries that id.
+  - So S2's history held its fire, its 9 skips and its paused crawl's `queued`, `claimed`,
+    `started` and `paused`. A schedule whose crawls finish would have listed `finished` and the
+    `rules_*` events of every fire too.
+  - The spec (item 16, "one schedule's fires and skips"), the tool description and Ruling P2's
+    premise all describe the schedule's own events.
+  - Why no test caught it: `test/api/schedules.test.ts`'s history test inserted only skip rows.
+  - **Fixed in `d1413f8`** (controller ruling, in this task): `listEvents`' schedule form
+    filters to `APP_EVENT_KINDS`, which also includes `schedule_chain_failed`, the schedule's
+    own record of a failed link. The test is in clause 1, RED before the fix and GREEN after.
+  - Run 4 (`ca43a7`) on the fix passed every clause.
+  - Every other clause passed in runs 2 and 3 as well.
 - The JSON of each run is in its log and is not committed. It holds instance ids, tenants and
   run ids only; no secret is sent by this gate.
