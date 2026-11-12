@@ -27,6 +27,8 @@ on the PR.**
   the compare between two fired crawls is `comparable: true`, and the overlap and not-allowed
   skips are recorded in `schedule_history`, which holds the schedules' own events only.
 - **Clause 2:** passes, by test and in the live run.
+- **After the final review's fix wave** clauses 1 and 2 were run again on `adb89e9` (run 5,
+  `da8fd7`): `GATE PASSED`, takeover 30.2 s after the kill (see the end of this file).
 - **What it took:** the gate printed `GATE FAILED` twice before this. The first full failing run
   found a real defect (`schedule_history` returned its fired crawls' lifecycle events), fixed in
   `d1413f8`. The record of those runs is kept at the end.
@@ -202,6 +204,11 @@ Task 8 ran the script's 200-page smoke locally (`GATE_PAGES=200 … --json-out`)
   file is committed with (the fix `d1413f8` and these docs). Baseline before 28c (P4): 167
   files, 4,520 tests. 28c added 7 files and 153 tests. Before the fix the count was 4,672 (566
   s); the fix adds one test.
+- After the final review's fix wave (`adb89e9` plus this record): `npx tsc --noEmit` clean;
+  `npx vitest run`: **174 files, 4,685 tests, all passing** (547 s). The wave adds 12 tests: 3
+  for dead chain links (I1), 5 for `render.urls` at write time (I2), 2 for the scheduler's
+  keepalives and holder log (I3), 1 for the schedule view (M2), 1 for the `renderDocuments`
+  index (M3).
 - `test/skills/identifier-guard.test.ts`: 25 of 25. It first flagged two citations on the new
   surface text:
   - one quoted test-title fragment shorter than its 16-character minimum (lengthened);
@@ -423,5 +430,17 @@ what it costs if wrong.
     own record of a failed link. The test is in clause 1, RED before the fix and GREEN after.
   - Run 4 (`ca43a7`) on the fix passed every clause.
   - Every other clause passed in runs 2 and 3 as well.
+- **Run 5 (`da8fd7`, on `adb89e9`, the final-review fix wave) printed `GATE PASSED`.** It was
+  re-run because the wave changed the scheduler's connection (server-side keepalives, the
+  holder log) and the reaper's handling of chain links. `ariadne_gate28c` was migrated to 0050
+  first. Clause 1a: 10 fires in the 10 slots, the leader `kill -9`'d after S1's third fire,
+  another candidate leading **30.2 s** after the kill (the gate's own 1 s sampler; run 4 read
+  28.4 s — a candidate tries every 30 s, so the takeover lands up to one period after the
+  session ends, plus the try itself). Clauses 1b–1d and 2 passed. Each non-leading candidate
+  logged the holder once, e.g. `scheduler instance_c508…: does not lead: the leader lock is
+  held by the session 'ariadne-scheduler:instance_2e3c…' (backend pid 123709, advisory
+  2028004002)`, and again only when the holder changed. Log:
+  `.superpowers/sdd/2026-11-12-phase-28c-scheduler/gate-schedules-run-5.log`, workers under
+  `gate-run-5/`.
 - The JSON of each run is in its log and is not committed. It holds instance ids, tenants and
   run ids only; no secret is sent by this gate.
