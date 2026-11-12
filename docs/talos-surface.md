@@ -1,11 +1,107 @@
 # The Ariadne surface Talos codes against
 
-**Status:** the contract as of Phase 28a (ruleset 0.25.0, migrations 0000–0037,
+**Status:** the contract as of Phase 28b (ruleset 0.25.1, migrations 0000–0044,
 27 MCP tools / 27 HTTP routes; every column label in this document is served
 under the ruleset version the engine reports — `rules_catalog`'s
 `rulesetVersion`, which the metric-table pass moves).
 `docs/talos-integration.md` says *why* the seam exists and what obligations bind
 it; this document says *what the seam is*.
+
+**What Phase 28b changed here (2026-11-11): crawls run on worker processes, and a
+crawl's credentials survive a restart.** Ruleset **0.25.1** (`sitemap.invalid` now
+judges an earlier, kept walk's failures), migrations 0038–0044, no tool or route added
+(27 MCP tools / 27 HTTP routes); three operational endpoints, not tools, answer
+before authentication. Gate evidence: `docs/gates/phase-28b.md`. The agent-facing
+contract moves in these ways, none of them a new call:
+
+- **A crawl start queues in the database and any worker claims it.** `api:serve` no
+  longer runs crawls: it accepts and answers, and `worker:serve` processes claim the
+  `crawl` jobs (`SELECT … FOR UPDATE SKIP LOCKED`). A crawl waits when its host is
+  already being fetched by another crawl, whoever's it is (one site, one fetcher; hard
+  rule 9), and when its tenant already has its cap of running crawls
+  (`ARIADNE_TENANT_MAX_RUNNING`, default 1). **One tenant's long crawl therefore
+  delays another tenant's crawl of the same host**, and nothing yet bounds a live host
+  hold (an open item in the gate record).
+- **`crawl_status.job` is `{kind, status, claimedBy?}` or null.** `kind` is `crawl`,
+  `render` or `rules`; `status` is `queued | running | done | failed | abandoned`;
+  `claimedBy` is the instance id once a runner has the job. It is the engine's
+  bookkeeping behind `status` and never replaces it. A crawl no job ever ran has null.
+- **`queuePosition` is tenant-scoped.** `0` means running (the crawl is starting), `1 + n`
+  means n of the CALLER's tenant's queued crawls are ahead, and **null means not
+  positioned**: a crawl that is not queued, a queued crawl with no live crawl job, a job
+  another engine version's runner alone could claim (a rolling deploy), and a job pinned
+  to an instance that is no longer live. It is an order among your own crawls, not a
+  promise of when anything starts and not a view of anyone else's load.
+- **`pauseReason` has five values**: `request | shutdown | worker_lost |
+  credentials_unreadable | not_allowed`. `request` is an agent's `crawl_pause` and is
+  never undone by the engine. `shutdown` is a worker told to stop (a deploy, SIGTERM);
+  `worker_lost` is a worker that stopped heartbeating (a crash, `kill -9`, a lost
+  host): the reaper pauses the crawl, releases its leases and abandons its job.
+  `credentials_unreadable` is a runner that found the stored copy of the crawl's
+  credentials unreadable before any request. `not_allowed` is a runner whose own
+  allowlist no longer admits the crawl's `siteUrl`, `legacyHosts` or `sitemapUrls`.
+- **System pauses resume by themselves, up to a cap.** For a crawl run by the worker
+  pool, `shutdown` is always requeued (a graceful stop is a deploy, and spends nothing)
+  and `worker_lost` is requeued up to **3 times in a row** (`crawls.auto_resume_count`,
+  which only `worker_lost` spends and which an agent's `crawl_resume` resets to 0); a
+  fourth stays `paused`/`worker_lost` for an agent. `request`, `credentials_unreadable`
+  and `not_allowed` are never requeued. A crawl accepted by a LOCAL process (the stdio
+  MCP server, the library) is never auto-requeued: if that process dies the crawl reads
+  `queuePosition: null`, `crawl_mark_failed` works on it and `crawl_resume` adopts it
+  (it runs on the process that resumed it).
+- **Credentials are stored, encrypted.** The values of `requestHeaders`, `httpAuth` and
+  `cookies` are kept as AES-256-GCM ciphertext in `crawl_credentials`, under a key the
+  database never holds (`ARIADNE_CREDENTIALS_KEY`, on every process that accepts or runs
+  crawls). A restart, a deploy, a crawl another process picks up and a render on a
+  finished crawl all run with the stored copy, so Talos no longer re-sends them. They are
+  deleted on `crawl_cancel`, on `crawl_delete`, when `crawl_config_set` removes the last
+  kind, and 30 days after the crawl settles (`ARIADNE_CREDENTIALS_RETENTION_DAYS`).
+  **`CREDENTIALS_REQUIRED` (409) now answers only when the stored copy is unreadable**:
+  the key was rotated past it, retention removed it, or the row was tampered with. A
+  QUEUED crawl in that state is paused `credentials_unreadable` by its runner, with no
+  request sent; re-supply the values on `crawl_resume` (or `crawl_config_set` while it is
+  paused) and it runs. Values still never reach a response, a log line, a metric or an
+  export (the secret scan in the gate record). `crawl_resume` and `crawl_config_set`
+  decrypt in the API process, only to check the copy is readable or to merge a partial
+  patch; the values are discarded after the call.
+- **`HOST_BUSY` (409).** A synchronous `crawl_render` refuses while another crawl's job
+  (crawl or render) holds the same host key, which is the host plus its port when the URL
+  names a non-default one. The sentence names the caller's crawl and that host only. It
+  reveals that some crawl holds the host, never whose. Render and rules on one crawl now
+  refuse each other (one live job per crawl), and `crawl_render` on a queued or running
+  crawl answers 409 before it answers a 400 for a malformed `urls` list.
+- **`crawl_delete`'s `rows` gains `crawl_credentials` and `jobs`.**
+- **Three endpoints answer before the bearer and tenant checks**, listed in
+  `PRE_AUTH_ROUTES` (`src/api/http.ts`) and in the tenant sentinel: `GET /healthz`
+  (liveness, 200), `GET /readyz` (200 when the database is reachable and its migrations
+  are the ones the code expects; otherwise 503 with a FIXED reason such as "database
+  unreachable" or "schema behind", never an error message) and `GET /metrics`
+  (Prometheus; its own bearer, `ARIADNE_METRICS_TOKEN`, which must differ from the API
+  token and opens nothing else; unset means 404, never served open). Metrics labels are
+  `kind`, `status`, `fetch_class`, `role`, `outcome` and nothing else: no tenant, crawl
+  id, host or URL is ever a label. A worker serves the same three on
+  `ARIADNE_WORKER_HTTP_PORT`.
+- **Environment.** API: `ARIADNE_API_TOKEN`, `ARIADNE_API_PORT`, `ARIADNE_API_HOST`,
+  `ARIADNE_ALLOWED_DOMAINS`, `ARIADNE_CREDENTIALS_KEY` (required),
+  `ARIADNE_CREDENTIALS_KEY_PREVIOUS`, `ARIADNE_CREDENTIALS_RETENTION_DAYS`,
+  `ARIADNE_METRICS_TOKEN`, `ARIADNE_EXPORT_DIR`, `ARIADNE_RENDER_DIR`,
+  `ARIADNE_GIT_SHA`. Worker (`npm run worker:serve`, run beside the API): `DATABASE_URL`,
+  `ARIADNE_CREDENTIALS_KEY`, `ARIADNE_WORKER_HTTP_PORT` and `ARIADNE_ALLOWED_DOMAINS`
+  required (**a worker re-checks every crawl it claims against its OWN allowlist**, so a
+  host removed from it pauses the crawl `not_allowed` before any fetch; an empty list
+  refuses every crawl); `ARIADNE_WORKER_CONCURRENCY` (default 1),
+  `ARIADNE_TENANT_MAX_RUNNING` (default 1), `ARIADNE_METRICS_TOKEN`,
+  `ARIADNE_CREDENTIALS_KEY_PREVIOUS`, `ARIADNE_CREDENTIALS_RETENTION_DAYS` optional.
+  Local stdio MCP needs `ARIADNE_TENANT` and `ARIADNE_CREDENTIALS_KEY`; the demo and the
+  prune script need `ARIADNE_CREDENTIALS_KEY` too. Process trust (`allowPrivate`) is
+  still code-only and no variable reaches it.
+- **Pinned** by `test/worker/runner.test.ts`, `test/worker/reaper.test.ts`,
+  `test/worker/serve.test.ts`, `test/api/credential-vault.test.ts`,
+  `test/api/credentials-restart.test.ts`, `test/ops/health.test.ts`,
+  `test/ops/metrics.test.ts` and `test/api/tenant-isolation.test.ts`.
+- **Not in 28b**: rendered documents stay synchronous in the API process, which keeps
+  writing them as today; the rule that a worker keeps no documents arrives with 28c's
+  unattended render chains (`docs/gates/phase-28b.md`, deviation 2).
 
 **What Phase 28a changed here (2026-11-11): every request names its tenant. Talos must
 send the header before it upgrades.** No tool or route is added (27 / 27) and the
@@ -163,14 +259,16 @@ existing one. The gate evidence is `docs/gates/phase-27c.md`.
   token; one that is not, and an unknown key, it names by position only
   (`requestHeaders entry 2`, `cookies[0].name`, `httpAuth has an unknown field (key
   3 in the order sent; …)`), so a value pasted into a name is never echoed. `Set-Cookie` from
-  the site is ignored. **They are held only in this server's memory**: never in
-  `config_jsonb`, a log line, an error or a response, and dropped on `crawl_cancel`
-  and `crawl_delete`. What is stored is which kinds were given and the header and
-  cookie names, shown by `crawl_config_get` with every value `"[redacted]"` (§4.9).
-  **After a restart** a crawl that needs them is refused by `crawl_resume` and
-  `crawl_render` with **`CREDENTIALS_REQUIRED` (409)** until they are sent again on
-  that call, of exactly the stored kinds and names; a crawl that needed them never
-  runs without them. `crawl_config_set` takes them too while the crawl is queued or
+  the site is ignored. **Their values were held only in this server's memory in 27c;
+  since Phase 28b they are stored encrypted** (the Phase 28b summary above): never in
+  `config_jsonb`, a log line, an error, a metric or a response, and deleted on
+  `crawl_cancel` and `crawl_delete`. What `config_jsonb` holds is which kinds were given
+  and the header and cookie names, shown by `crawl_config_get` with every value
+  `"[redacted]"` (§4.9). **When the stored copy is unreadable** (key rotated past it,
+  retention expired, tampering; formerly after every restart) a crawl that needs them is
+  refused by `crawl_resume` and `crawl_render` with **`CREDENTIALS_REQUIRED` (409)** until
+  they are sent again on that call, of exactly the stored kinds and names; a crawl that
+  needed them never runs without them. `crawl_config_set` takes them too while the crawl is queued or
   paused, and a patch that replaces one kind after a restart must send the other
   kinds the crawl needs in the same call, or it is `CREDENTIALS_REQUIRED` as well.
   Credentials cannot be added on `crawl_resume` or `crawl_render` to a crawl that
@@ -1150,7 +1248,10 @@ config_validate ──▶ crawl_start ──▶ crawl_status (poll until status 
                                 crawl_compare · compare_urls (two judged crawls of one site)
 ```
 
-One crawl runs at a time per server process; `crawl_start` answers
+Crawls run on worker processes (Phase 28b): a worker runs `ARIADNE_WORKER_CONCURRENCY`
+at once (default 1), never two crawls of one host at once and never more than
+`ARIADNE_TENANT_MAX_RUNNING` of one tenant's (default 1); a crawl accepted by a local
+stdio or library process runs there, one at a time. `crawl_start` answers
 `{crawlId, status: "queued", queuePosition}` immediately. There are **no
 webhooks**: polling `crawl_status` is the contract until Talos asks otherwise.
 
@@ -1233,7 +1334,7 @@ every MCP tool's arguments. `crawl_start` and `config_validate` answer ONE
 `unknown_field` error per object, not one per key, so a body of a hundred thousand
 unknown keys is one short refusal, read in linear time. Rule ids in `judgement` are
 positional too, with the ruleset version (`key 2 in the order sent names no rule in
-ruleset 0.25.0`). Two things are still named: a credential header or cookie name that
+ruleset 0.25.1`). Two things are still named: a credential header or cookie name that
 is a valid HTTP token (27c), and a rule id already **stored** in a crawl's judgement
 that the ruleset no longer has, because that is the repair path (`crawl_config_set`,
 §4.9). "In the order sent" is `Object.keys` order, so an integer-like key counts first.
@@ -1376,16 +1477,18 @@ expired leases, unasked resource rows); the allowlist (403, naming the host); an
 the row changing state under the call (409 — see the race below).
 
 **Credentials and scope on a resume (Phase 27c).** A crawl started with
-`requestHeaders`, `httpAuth` or `cookies` resumes with the values this server holds.
-After a restart it holds none, and the resume is refused **409 `CREDENTIALS_REQUIRED`**,
+`requestHeaders`, `httpAuth` or `cookies` resumes with the stored values (since Phase 28b they survive a restart).
+If the stored copy is unreadable, the resume is refused **409 `CREDENTIALS_REQUIRED`**,
 naming the kinds and the header and cookie names it needs, until the same call sends
 them (`{requestHeaders?, httpAuth?, cookies?}` in the body; over MCP beside `crawlId`).
 What is sent must be exactly the stored kinds and names, or it is a 400 naming both
 shapes (names only); a crawl that started without credentials cannot gain them here
 (400, pointing at `crawl_config_set` while paused). Nothing is written by a refused
-resume, and the values sent are never stored, logged or answered. `crawl_render`
-takes the same three fields on the same terms, and stores what it was sent only once
-the render is accepted, so a refused render leaves the held values as they were. A
+resume, and the values sent are never logged or answered (a resume that sends them
+replaces the stored copy only once it is accepted, and an agent's resume resets the
+auto-resume count). `crawl_render` takes the same three fields on the same terms, and
+stores what it was sent only once the render is accepted, so a refused render leaves the
+stored values as they were. A
 resume also re-applies the crawl's current `exclude`/`include` before its first lease,
 both ways (the Phase 27c summary at the top). Pinned:
 `test/api/credentials-restart.test.ts:347` "answers crawl_resume and crawl_render 409
@@ -1523,7 +1626,7 @@ the count is unknown.
 **`crawl_delete`** takes `{crawlId, confirm}` (`DELETE /crawls/:id?confirm=<crawlId>`;
 the confirm is a query parameter because DELETE bodies are poorly supported) and
 answers `{crawlId, rows, files}`: the rows removed per table (`crawls: 1`
-included) and `{renders, exports}`, the files removed from this server. **There is no
+included; since Phase 28b `crawl_credentials` and `jobs` appear too) and `{renders, exports}`, the files removed from this server. **There is no
 undo and no soft delete.** `confirm` must repeat `crawlId` exactly (400 otherwise).
 Refused (409), each naming what holds the crawl: a `queued` or `running` crawl (pause or
 cancel it and wait until it stops), a crawl with a pause or cancel pending, a crawl this
@@ -1825,8 +1928,12 @@ own answer, not an invented example).
 **Lifecycle fields (Phase 27b)**, beside `status`, null unless stated:
 - **`controlRequested`** is `pause` or `cancel` while a request waits on a `running`
   crawl, and null otherwise. Do not call `crawl_resume` while it is set.
-- **`pauseReason`** is `request` (an agent's `crawl_pause`) or `shutdown` (the server
-  stopped mid-run) on a `paused` crawl, and null otherwise.
+- **`pauseReason`** is `request` (an agent's `crawl_pause`), `shutdown` (a runner
+  stopped mid-run), and since Phase 28b `worker_lost` (a worker stopped heartbeating),
+  `credentials_unreadable` and `not_allowed` (see the Phase 28b summary) on a `paused`
+  crawl, and null otherwise.
+- **`job`** (Phase 28b) is `{kind, status, claimedBy?}` of the crawl's latest job, or null
+  when no job ever ran; `queuePosition` is tenant-scoped (null means not positioned).
 - **`cancelledAt`** is the time of the cancel on a `cancelled` crawl.
 - **`neverFetched`** is the frontier's `pending` count on a `cancelled` crawl: the URLs
   it never asked for. It is computed, not stored (a cancel is final, so the frontier no
@@ -2610,7 +2717,7 @@ reported but not in the published schema), **`whenPaused`** (`maxPages`, `maxDep
 `paused`, so pause a running crawl, set, then `crawl_resume`) or **`always`**
 (`judgement`). A credential sent back as `"[redacted]"` is "no change", like any field
 sent with the value `crawl_config_get` shows; a partial redaction is refused. A
-credential sent with values replaces that kind whole in this server's memory (the
+credential sent with values replaces that kind whole in the encrypted store (the
 row stores only the new kinds and names), and an empty `requestHeaders` or `cookies`, or
 `httpAuth: null` (the one `null` a crawl field accepts), drops it. A changed `exclude`
 or `include` is checked as `crawl_start` checks it and stamps `scopeChangedAt`; the
@@ -3510,8 +3617,8 @@ Six postures a Talos integrator should know about rather than discover:
    answers 404, so a caller can delete only its own crawls; the confirm echo remains
    the guard against a mistaken delete.
 6. **A crawl's credentials never come back** (Phase 27c). `requestHeaders`,
-   `httpAuth` and `cookies` values are held in this server's memory only and appear in
-   no stored column, log line, error message or response: refusals name the field and
+   `httpAuth` and `cookies` values are stored only as AES-256-GCM ciphertext (Phase 28b;
+   before it, in memory) and appear in no readable stored column, log line, metric, error message or response: refusals name the field and
    a header or cookie NAME, never a value; `crawl_config_get` shows `"[redacted]"`;
    the stored request-header evidence redacts the custom header names as it already
    redacted `authorization` and `cookie`. The names themselves are stored and shown,
@@ -3556,9 +3663,9 @@ Six postures a Talos integrator should know about rather than discover:
   `howToFix` copy.**
 - **No webhooks, no scheduling, no cron.** `crawl_status` polling is the
   contract.
-- **No stored credentials, no login flows, no robots override** (Phase 27c). Basic
-  auth, cookies and custom headers are held in memory for the crawl and re-supplied
-  after a restart; there is no form login, no JavaScript-driven login and no session
+- **No plaintext credentials, no login flows, no robots override** (Phase 27c, 28b). Basic
+  auth, cookies and custom headers are kept encrypted for the crawl (28b; re-supplied
+  only when the stored copy is unreadable); there is no form login, no JavaScript-driven login and no session
   refresh. No credential, header or cookie changes the user agent, the delay floor
   or robots.txt. No regular expressions in scope patterns, and no proxies.
 - **No per-tenant tokens** (Phase 28a): one bearer token per server proves the caller
@@ -3574,7 +3681,7 @@ Six postures a Talos integrator should know about rather than discover:
 
 ## 11. Versioning, and what a ruleset change does to a served crawl
 
-`RULESET_VERSION` (**0.25.0** as of Phase 27d) stamps **judgement**: bump it when
+`RULESET_VERSION` (**0.25.1** as of Phase 28b) stamps **judgement**: bump it when
 a rule's verdict or copy changes. Adding a rule or a metric family adds rows
 without changing a verdict — `metrics` rows carry no version column at all —
 which is the argument Phase 10 held 0.7.0 on.
@@ -4107,10 +4214,11 @@ byte for byte, as it writes it".
   threshold by name, so a release that adds one to the allowlist must rewrite
   the stored stamps with the value those runs used, as migration 0033 did;
   until then such a stamp is a loud error, never "judged with the new default".
-- **Credentials live in ONE server process's memory** (Phase 27c). A second Ariadne
-  process pointed at the same database does not hold them, so a crawl that needs them
-  is `CREDENTIALS_REQUIRED` there exactly as after a restart; Talos, which holds the
-  secrets, re-supplies them to whichever process it asks. (Until 27d a `crawl_config_set`
+- **Credentials are stored, encrypted, under a key every process must hold** (Phase 28b;
+  in 27c they lived in ONE process's memory). A process holding another key cannot read
+  the copy, so the crawl is `CREDENTIALS_REQUIRED` there; a rotation that keeps the old
+  key as `ARIADNE_CREDENTIALS_KEY_PREVIOUS` reads it and re-encrypts at the next write.
+  Talos, which holds the secrets, can always re-supply them. (Until 27d a `crawl_config_set`
   that replaced a queued crawl's credentials in the instant a runner dequeued it could
   leave the runner with the new shape and the old values; the store is now keyed by
   shape, a runner reads the values of the shape its row states, and a failed
@@ -4131,6 +4239,9 @@ byte for byte, as it writes it".
 - `docs/gates/phase-10.md` and `docs/gates/phase-11.md` — the measurements
   behind this file's Phase 10 and Phase 11 numbers; each number here also names
   the test or the measurement it came from directly.
+- `docs/gates/phase-28b.md` — the Phase 28b gate: workers killed with `kill -9`, the
+  encrypted credentials and their secret scan, the health endpoints and the 50k crawl as
+  a worker job.
 - `docs/gates/phase-28a.md` — the Phase 28a gate: the tenant sentinel, the backfill
   on the dev database and the carried loop fixes.
 - `docs/gates/phase-27a.md` — the Phase 27a gate: the overviews reconciled with

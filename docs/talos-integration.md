@@ -108,23 +108,53 @@ crawler inside Talos. The intended shape:
    destroys a crawl, guarded by its confirm echo and, since Phase 28a, by the tenant key
    (`docs/talos-surface.md` §4.1c and §9).
 
-8. **Talos holds a crawl's credentials; Ariadne only borrows them.** Since Phase 27c a
-   crawl can carry custom request headers, HTTP Basic auth and cookies (staging sites,
-   pre-issued sessions). Ariadne keeps their values in the API process's memory for
-   the crawl and nowhere else: never in a stored column, a log line, an error or a
-   response, encrypted or not. It stores which kinds were given and the header and
-   cookie names, and drops the values on cancel and delete. **After an Ariadne restart
-   the values are gone**: `crawl_resume` and `crawl_render` answer 409 with `code:
-   "CREDENTIALS_REQUIRED"` (`crawl_config_set` too, for a patch that would keep a kind
-   it no longer holds) until Talos sends them again on that call, of exactly the
-   stored kinds and names. A crawl that needed them never runs without them, so a
-   restart never turns a gated site into a crawl of 401 rows. So the secret store is
-   Talos's (tenant-scoped, like model keys), and every Talos call that resumes or
-   renders a credentialed crawl must be able to re-supply them; match on `code`, not
-   on the sentence. The values are sent only to the crawl's own site family, never
-   to another host, and cannot change the user agent, the delay floor or robots
-   (obligation 4). The surface is `docs/talos-surface.md`'s Phase 27c summary, §1 and
-   §4.1a.
+   **Amended in Phase 28b: system pauses resume by themselves, an agent's pause is never
+   undone.** Crawls run on worker processes, and a worker that is told to stop
+   (`shutdown`, a deploy) or that stops heartbeating (`worker_lost`, a crash or a lost
+   host) leaves its crawl `paused` with its leases released and its job abandoned; the
+   reaper then requeues it and another worker continues the same crawl. `shutdown` is
+   always requeued; `worker_lost` up to **3 times in a row** (only `worker_lost` spends
+   the count, and an agent's `crawl_resume` resets it), after which it waits for an agent,
+   so a crawl that kills its worker every time cannot loop forever. A pause an agent asked
+   for (`request`), a crawl whose stored credentials are unreadable
+   (`credentials_unreadable`) and one a worker's own allowlist no longer admits
+   (`not_allowed`) are never requeued. A crawl run by a local stdio or library process is
+   never requeued by anyone: if that process dies the crawl reads `queuePosition: null`,
+   and `crawl_mark_failed` or `crawl_resume` is Talos's to call. So Talos must treat
+   `paused` as possibly transient: poll `crawl_status` and read `pauseReason` before it
+   decides a human or an agent has to act (`docs/talos-surface.md`, the Phase 28b
+   summary).
+8. **Talos is still the source of truth for a crawl's credentials; Ariadne keeps an
+   encrypted copy for reruns.** Since Phase 27c a crawl can carry custom request
+   headers, HTTP Basic auth and cookies (staging sites, pre-issued sessions). Since
+   Phase 28b Ariadne stores their values as **AES-256-GCM ciphertext** in
+   `crawl_credentials`, under a key (`ARIADNE_CREDENTIALS_KEY`, held by every process
+   that accepts or runs crawls) that **the database never holds**, so a restart, a
+   deploy or a crawl another worker picks up runs with the stored copy and Talos need
+   not re-send it. The associated data binds each ciphertext to its crawl and write, so
+   a row copied to another crawl or replayed fails authentication. The values never
+   reach a log line, an error, a response, a metric or an export, and the plaintext is
+   never in a stored column; the gate's secret scan of every table, both workers' logs,
+   the API's log and `/metrics` is the evidence (`docs/gates/phase-28b.md`, clause 4).
+   Ariadne stores which kinds were given and the header and cookie names, and deletes
+   the values on `crawl_cancel`, on `crawl_delete`, when `crawl_config_set` removes the
+   last kind, and 30 days after the crawl settles (`ARIADNE_CREDENTIALS_RETENTION_DAYS`).
+   **`CREDENTIALS_REQUIRED` (409, `code: "CREDENTIALS_REQUIRED"`) is now rare**: it
+   answers only when the stored copy is unreadable (the key was rotated past it,
+   retention removed it, or the row was tampered with) on `crawl_resume`,
+   `crawl_render` and a credential patch to `crawl_config_set`, and a QUEUED crawl in
+   that state is paused `credentials_unreadable` by its runner before any request. Talos
+   then re-sends the values on the call, of exactly the stored kinds and names. A crawl
+   that needed credentials never runs without them, so a rotation never turns a gated
+   site into a crawl of 401 rows. The secret store therefore remains Talos's
+   (tenant-scoped, like model keys) and Talos must keep being able to re-supply them;
+   match on `code`, not on the sentence. `crawl_resume` and `crawl_config_set` decrypt in
+   the API process only to check the copy or merge a partial patch, and discard the
+   values. The values are sent only to the crawl's own site family, never to another
+   host, and cannot change the user agent, the delay floor or robots (obligation 4). A
+   key is rotated by deploying the new one as `ARIADNE_CREDENTIALS_KEY` with the old as
+   `ARIADNE_CREDENTIALS_KEY_PREVIOUS`; a write re-encrypts under the new key. The surface
+   is `docs/talos-surface.md`'s Phase 28b and 27c summaries, §1 and §4.1a.
 
 9. **Tenancy: Talos names the tenant on every call, and a foreign crawl is a missing
    crawl.** Since Phase 28a every HTTP request carries `X-Ariadne-Tenant` beside the
@@ -143,7 +173,10 @@ crawler inside Talos. The intended shape:
 - Decide deployment topology (Ariadne as a sidecar service vs shared instance)
   and credential management (admin-managed, like model keys).
 - Hold each tenant's crawl credentials (headers, Basic auth, cookies) and re-supply
-  them on `CREDENTIALS_REQUIRED` (obligation 8): Ariadne never stores them.
+  them on `CREDENTIALS_REQUIRED` (obligation 8): Ariadne keeps only an encrypted copy for
+  reruns, and a rotated key or an expired retention makes it unreadable.
+- Run `worker:serve` beside `api:serve`, give both the same database and credentials
+  key, and give every worker the crawl allowlist (below).
 - Update `docs/talos/api-contract.md` if any tenant-visible surface changes.
 
 ## Runtime requirements
@@ -152,13 +185,30 @@ crawler inside Talos. The intended shape:
   `pg_input_is_valid`, which Postgres added in 16. On an older server that rule
   errors loudly rather than reporting nothing, so a deployment, a sidecar or a
   shared instance must run 16+. The dev container and CI already do.
-- **Node 22**, and **Chromium** wherever a crawl's render pass runs.
+- **Node 22**, and **Chromium** wherever a crawl's render pass runs. Since Phase 28b the
+  render pass still runs synchronously in the API process, so the API image carries
+  Chromium; the worker image is the same image.
+- **Workers (Phase 28b).** `api:serve` accepts and answers and runs no crawl;
+  `npm run worker:serve` claims and runs them, and at least one must be running for a
+  crawl to start. Both processes need `DATABASE_URL` and `ARIADNE_CREDENTIALS_KEY`
+  (`<id>:<base64 of 32 bytes>`; the key is required, and a missing or malformed one is a
+  boot error). A worker also needs `ARIADNE_WORKER_HTTP_PORT` (health and metrics) and
+  `ARIADNE_ALLOWED_DOMAINS`: **a worker re-checks every crawl it claims against its own
+  allowlist**, so set it to the API's. Tunables: `ARIADNE_WORKER_CONCURRENCY` (default
+  1), `ARIADNE_TENANT_MAX_RUNNING` (default 1), `ARIADNE_CREDENTIALS_RETENTION_DAYS`
+  (default 30), `ARIADNE_CREDENTIALS_KEY_PREVIOUS` for a rotation, `ARIADNE_METRICS_TOKEN`
+  (must differ from `ARIADNE_API_TOKEN`; unset makes `/metrics` a 404). `/healthz`,
+  `/readyz` and `/metrics` answer before authentication on the API and each worker; point
+  the orchestrator's probes at them. `docs/deploy.md` has the image and compose layout and
+  `docs/gates/phase-28b.md` the measured behaviour, including that a worker's 50,000-page
+  crawl peaked at 188.3 MB against a 290.2 MB bound.
 
 ## Cross-references
 
 - The surface contract: `docs/talos-surface.md`. Obligation 9 (tenancy) is met as of
   Phase 28a: the listing and every per-crawl read are scoped by the tenant header
-  (`docs/gates/phase-28a.md`).
+  (`docs/gates/phase-28a.md`). Obligations 7 and 8 were amended in Phase 28b (workers,
+  auto-resume, encrypted credentials; `docs/gates/phase-28b.md`).
 - Talos repo pointer to this project: `docs/talos/crawler-engine.md` in the
   talos repo (`github.com/dawnforge-lab/talos`, local `/home/eugen-dev/Documents/Workflows/talos`).
 - Talos deep history: serena memory `talos-rewrite-status` in the talos

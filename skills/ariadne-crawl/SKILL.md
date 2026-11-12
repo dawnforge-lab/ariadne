@@ -235,12 +235,16 @@ refusal never quotes a name that is not an HTTP token (it names its position): a
 value pasted into a name is not echoed back. They go only to the site's own hosts, never to a
 CDN, another host or a redirect that leaves the site, and an https site never sends
 them over http. They cannot change the user agent, the delay floor or robots.txt.
-**The engine never stores them**: they live in the server's memory, `crawl_config_get`
-shows the names with every value `"[redacted]"`, and a cancel or delete drops them.
-**The restart rule:** after the server restarts it no longer holds them, so
-`crawl_resume` and `crawl_render` refuse with code `CREDENTIALS_REQUIRED` (409) until
-you send the same kinds and names again on that call. Keep the values where you got
-them for as long as the crawl may be resumed or rendered. A gated page fetched without
+**The engine stores them encrypted** (AES-256-GCM under `ARIADNE_CREDENTIALS_KEY`, a key
+the database never holds; the local MCP server needs that variable at boot beside
+`ARIADNE_TENANT`): `crawl_config_get` shows the names with every value `"[redacted]"`, a
+cancel or delete removes them, and so does retention 30 days after the crawl settles.
+**The unreadable-copy rule:** a restart no longer loses them, but if the stored copy
+cannot be read (the key was rotated past it, retention removed it) `crawl_resume` and
+`crawl_render` refuse with code `CREDENTIALS_REQUIRED` (409) until you send the same
+kinds and names again on that call, and a queued crawl in that state pauses with
+pause reason credentials unreadable (`pauseReason` says which). Keep the values where you got them for as long
+as the crawl may be resumed or rendered. A gated page fetched without
 its credential is a `blocked` row (401 or 403), never a silent gap. Credentials cannot
 be added on a resume or a render to a crawl that started without any: set them with
 `crawl_config_set` while the crawl is paused.

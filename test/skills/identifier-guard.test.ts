@@ -138,12 +138,27 @@ const CHECK_IDS = new Set(
  * The read is the definition. A variable the skills tell an operator to set and
  * nothing reads is exactly the failure this catches.
  */
-const ENV_READS = new Set(
-  sourceFiles(join(ROOT, "src")).flatMap((file) =>
-    [...readFileSync(file, "utf8").matchAll(/\benv\[\s*"([A-Z][A-Z0-9_]*)"\s*\]/g)].map(
-      (m) => m[1]!,
+const SRC_TEXTS = sourceFiles(join(ROOT, "src")).map((file) => readFileSync(file, "utf8"));
+/**
+ * `const CREDENTIALS_KEY_VAR = "ARIADNE_CREDENTIALS_KEY"`, so that
+ * `env[CREDENTIALS_KEY_VAR]` is a read of the named variable (Phase 28b: the
+ * credential vault names its variables once, in constants).
+ */
+const ENV_NAME_CONSTANTS = new Map(
+  SRC_TEXTS.flatMap((text) =>
+    [...text.matchAll(/\bconst\s+([A-Z][A-Z0-9_]*)\s*(?::\s*string\s*)?=\s*"([A-Z][A-Z0-9_]*)"/g)].map(
+      (m) => [m[1]!, m[2]!] as const,
     ),
   ),
+);
+const ENV_READS = new Set(
+  SRC_TEXTS.flatMap((text) => [
+    ...[...text.matchAll(/\benv\[\s*"([A-Z][A-Z0-9_]*)"\s*\]/g)].map((m) => m[1]!),
+    ...[...text.matchAll(/\benv\[\s*([A-Z][A-Z0-9_]*)\s*\]/g)].flatMap((m) => {
+      const named = ENV_NAME_CONSTANTS.get(m[1]!);
+      return named === undefined ? [] : [named];
+    }),
+  ]),
 );
 
 /**

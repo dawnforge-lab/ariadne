@@ -50,6 +50,21 @@ trust) and `npm run mcp:serve` (MCP over stdio, process trust). The crawl
 domain allowlist binds both. Every request names its tenant
 (`X-Ariadne-Tenant` over HTTP, `ARIADNE_TENANT` at boot over stdio).
 
+Crawls run on worker processes (Phase 28b): `api:serve` accepts and answers, and
+`npm run worker:serve` claims the jobs from Postgres (`docs/deploy.md` has the image and
+compose layout). Environment:
+
+| process | required | optional |
+|---|---|---|
+| `api:serve` | `DATABASE_URL`, `ARIADNE_API_TOKEN`, `ARIADNE_CREDENTIALS_KEY` | `ARIADNE_API_PORT`, `ARIADNE_API_HOST`, `ARIADNE_ALLOWED_DOMAINS`, `ARIADNE_CREDENTIALS_KEY_PREVIOUS`, `ARIADNE_CREDENTIALS_RETENTION_DAYS`, `ARIADNE_METRICS_TOKEN`, `ARIADNE_EXPORT_DIR`, `ARIADNE_RENDER_DIR`, `ARIADNE_GIT_SHA` |
+| `worker:serve` | `DATABASE_URL`, `ARIADNE_CREDENTIALS_KEY`, `ARIADNE_WORKER_HTTP_PORT`, `ARIADNE_ALLOWED_DOMAINS` | `ARIADNE_WORKER_CONCURRENCY` (1), `ARIADNE_TENANT_MAX_RUNNING` (1), `ARIADNE_METRICS_TOKEN`, `ARIADNE_CREDENTIALS_KEY_PREVIOUS`, `ARIADNE_CREDENTIALS_RETENTION_DAYS` |
+| `mcp:serve` (stdio) | `DATABASE_URL`, `ARIADNE_TENANT`, `ARIADNE_CREDENTIALS_KEY` | `ARIADNE_ALLOWED_DOMAINS`, `ARIADNE_EXPORT_DIR`, `ARIADNE_RENDER_DIR` |
+| `npm run demo`, `scripts/prune-test-crawls.ts` | `ARIADNE_CREDENTIALS_KEY` | |
+
+`ARIADNE_CREDENTIALS_KEY` is `<id>:<base64 of 32 bytes>`, the AES-256-GCM key a crawl's
+credentials are stored under; the database never holds it. `/healthz`, `/readyz` and
+`/metrics` answer before authentication on the API and each worker.
+
 Hard memory contract: RAM is O(concurrency), not O(URLs). 50k pages under
 512MB is the Phase 1 gate; 1M under 512MB is the target.
 
