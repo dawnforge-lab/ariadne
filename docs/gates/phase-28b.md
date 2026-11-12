@@ -401,9 +401,9 @@ differ only in timings and ids.
 
 ## Dev database note
 
-The dev database's `drizzle.__drizzle_migrations` has one orphan row: id 44, hash prefix
-981a5c9c7a02, left by an earlier regenerated migration. So `/readyz` on the dev database answers
-503. Cleaning it up waits for the owner's OK. The gate uses `ariadne_gate28b`.
+The dev database's `drizzle.__drizzle_migrations` had one extra row: a duplicate record of `0027`
+(ids 28 and 29, same hash and created_at). Row 29 was deleted with the owner's OK on 2026-11-12;
+row 44 is the real `0042` migration. The gate uses `ariadne_gate28b`.
 
 ## What did not go as first written
 

@@ -352,7 +352,8 @@ async function runCrawlJob(deps: CrawlJobDeps, job: ClaimedJob, signal: AbortSig
       });
     } catch (recordError) {
       log(
-        `${p}: crawl ${crawlId} — the queue runner itself failed and could not record it: ` +
+        `${p}: crawl ${crawlId} (job ${job.id}) — the queue runner itself failed and could not ` +
+          `record it, so the job is left as it was: ` +
           messageOf(recordError),
       );
       throw recordError;

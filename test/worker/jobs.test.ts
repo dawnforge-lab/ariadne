@@ -32,6 +32,7 @@ import { crawls, instances, jobs } from "../../src/db/schema.js";
 import { ServiceError } from "../../src/api/errors.js";
 import { hostKeyOf } from "../../src/crawl/host-key.js";
 import { EXTRACTION_VERSION } from "../../src/crawl/versions.js";
+import { AUTO_RESUME_LIMIT, SYSTEM_PAUSE_REASONS } from "../../src/worker/reaper.js";
 import { RULESET_VERSION } from "../../src/rules/registry/registry.js";
 import { LOCAL_TENANT, parseTenant, type TenantId } from "../../src/tenant.js";
 import {
@@ -713,5 +714,18 @@ describe("fair claims (28b T4a)", () => {
     for (const bad of ["", "0", "-1", "1.5", "two", " 2", "2 ", "1e3", "01"]) {
       expect(() => parseTenantMaxRunning(bad), JSON.stringify(bad)).toThrow(/ARIADNE_TENANT_MAX_RUNNING/);
     }
+  });
+
+  it("the reaper's partial index carries the literals of AUTO_RESUME_LIMIT and SYSTEM_PAUSE_REASONS (0043, replaced by 0044)", async () => {
+    // 0043's `crawls_system_paused` is gone (0044 dropped it); the live index is
+    // `crawls_requeuable`. The migration writes the constants as literals so the
+    // planner can use it, so a changed constant with no new migration fails here.
+    const rows = (await db.execute(sql`
+      select indexname, indexdef from pg_indexes
+      where schemaname = 'public' and tablename = 'crawls' and indexname in ('crawls_system_paused', 'crawls_requeuable')`)).rows as { indexname: string; indexdef: string }[];
+    expect(rows.map((r) => r.indexname)).toEqual(["crawls_requeuable"]);
+    const def = rows[0]!.indexdef;
+    for (const reason of SYSTEM_PAUSE_REASONS) expect(def, reason).toContain(`'${reason}'`);
+    expect(def).toContain(`auto_resume_count < ${AUTO_RESUME_LIMIT})`);
   });
 });
