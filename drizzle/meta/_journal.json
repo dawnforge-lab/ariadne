@@ -344,6 +344,13 @@
       "when": 1794490181645,
       "tag": "0048_schedule_event_triggers",
       "breakpoints": true
+    },
+    {
+      "idx": 49,
+      "version": "7",
+      "when": 1794491415573,
+      "tag": "0049_job_event_schedule_lock",
+      "breakpoints": true
     }
   ]
 }

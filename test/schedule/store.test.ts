@@ -32,7 +32,7 @@ import { hostKeyOf } from "../../src/crawl/host-key.js";
 import type { JudgementBlock } from "../../src/rules/judgement.js";
 import { RULESET_VERSION } from "../../src/rules/registry/registry.js";
 import { recordEvent } from "../../src/events/events.js";
-import { enqueueJob } from "../../src/worker/jobs.js";
+import { enqueueJob, finishJob } from "../../src/worker/jobs.js";
 import {
   deleteSchedule,
   getSchedule,
@@ -93,6 +93,19 @@ async function seed(tenant: TenantId, fields: Partial<NewSchedule> = {}): Promis
   return s.id;
 }
 
+/** The constraint a refused statement names (drizzle wraps the driver's error as its `cause`). */
+async function refusedBy(statement: PromiseLike<unknown>): Promise<string> {
+  try {
+    await statement;
+  } catch (error) {
+    const pgError = (error as { cause?: { constraint?: unknown } }).cause ?? (error as { constraint?: unknown });
+    const constraint = (pgError as { constraint?: unknown }).constraint;
+    if (typeof constraint !== "string") throw error;
+    return constraint;
+  }
+  throw new Error("the statement was not refused");
+}
+
 beforeAll(async () => {
   db = createDb(databaseUrl());
   await runMigrations(db);
@@ -145,9 +158,13 @@ describe("the store", () => {
 
   it("an enabled schedule has a next run and a disabled one has none: the database refuses either mismatch", async () => {
     const enabledWithout = scheduleOf(LOCAL_TENANT, { enabled: true, nextRunAt: null });
-    await expect(db.transaction(async (tx) => insertSchedule(tx, enabledWithout))).rejects.toThrow();
+    expect(await refusedBy(db.transaction(async (tx) => insertSchedule(tx, enabledWithout)))).toBe(
+      "schedules_next_run_while_enabled",
+    );
     const disabledWith = scheduleOf(LOCAL_TENANT, { enabled: false, nextRunAt: new Date() });
-    await expect(db.transaction(async (tx) => insertSchedule(tx, disabledWith))).rejects.toThrow();
+    expect(await refusedBy(db.transaction(async (tx) => insertSchedule(tx, disabledWith)))).toBe(
+      "schedules_next_run_while_enabled",
+    );
     expect(await getSchedule(db, LOCAL_TENANT, enabledWithout.id)).toBeNull();
   });
 
@@ -344,7 +361,7 @@ describe("insertCrawl", () => {
   it("the database refuses a crawl with a schedule_id and no schedule_chain", async () => {
     const scheduleId = await seed(LOCAL_TENANT);
     const siteUrl = `https://check-${randomUUID()}.example/`;
-    await expect(
+    const refused = refusedBy(
       db.insert(crawls).values({
         id: `crawl_${randomUUID()}`,
         tenantId: LOCAL_TENANT,
@@ -354,7 +371,8 @@ describe("insertCrawl", () => {
         rulesetVersion: RULESET_VERSION,
         scheduleId,
       }),
-    ).rejects.toThrow();
+    );
+    expect(await refused).toBe("crawls_schedule_has_chain");
   });
 });
 
@@ -408,5 +426,126 @@ describe("the event triggers fill schedule_id (Ruling P3)", () => {
     expect(
       await db.select().from(crawlEvents).where(and(eq(crawlEvents.scheduleId, scheduleId), isNull(crawlEvents.crawlId))),
     ).toEqual([]);
+  });
+});
+
+describe("a write racing deleteSchedule (Review Focus 4: no foreign-key error, no orphan job)", () => {
+  /** A fired crawl, finished, its crawl job done: ready for a rules job. */
+  async function finishedFiredCrawl(scheduleId: string): Promise<string> {
+    const crawlId = `crawl_${randomUUID()}`;
+    await db.transaction(async (tx) =>
+      insertCrawl(tx, vault, {
+        tenant: LOCAL_TENANT,
+        crawlId,
+        config: configFor(`https://race-${randomUUID()}.example/`),
+        judgement: null,
+        listed: null,
+        pinnedTo: PIN,
+        scheduleId,
+        chain: { render: null },
+      }),
+    );
+    createdCrawls.push(crawlId);
+    await db.update(jobs).set({ status: "done", finishedAt: new Date() }).where(eq(jobs.crawlId, crawlId));
+    await db
+      .update(crawls)
+      .set({ status: "finished", finishedAt: new Date(), pagesCrawled: 0 })
+      .where(eq(crawls.id, crawlId));
+    return crawlId;
+  }
+
+  /**
+   * `deleteSchedule` run to its last statement and held open on its own
+   * connection: the schedule row is deleted, not committed. `commit` lets it go.
+   */
+  async function deleteHeldOpen(scheduleId: string): Promise<{ commit: () => Promise<void> }> {
+    let open!: () => void;
+    const gate = new Promise<void>((resolve) => (open = resolve));
+    let deleted!: () => void;
+    const ready = new Promise<void>((resolve) => (deleted = resolve));
+    const done = db.transaction(async (tx) => {
+      expect(await deleteSchedule(tx, LOCAL_TENANT, scheduleId)).toBe(true);
+      deleted();
+      await gate;
+    });
+    await Promise.race([ready, done]);
+    return {
+      commit: async () => {
+        open();
+        await done;
+      },
+    };
+  }
+
+  /** `write`, on another connection, started while the delete is held open: it waits, then succeeds. */
+  async function racing(scheduleId: string, write: () => PromiseLike<unknown>): Promise<void> {
+    const held = await deleteHeldOpen(scheduleId);
+    let settled = false;
+    const racer = Promise.resolve(write()).then(
+      () => ({ error: null as unknown }),
+      (error: unknown) => ({ error }),
+    );
+    void racer.then(() => (settled = true));
+    await new Promise((r) => setTimeout(r, 300));
+    // It waits on the delete's uncommitted locks: the race is real.
+    expect(settled).toBe(false);
+    await held.commit();
+    const { error } = await racer;
+    expect(error).toBeNull();
+  }
+
+  async function eventsOf(crawlId: string): Promise<[string, string | null][]> {
+    const rows = await db.select().from(crawlEvents).where(eq(crawlEvents.crawlId, crawlId)).orderBy(asc(crawlEvents.id));
+    return rows.map((e) => [e.kind, e.scheduleId]);
+  }
+
+  it("a job settle: the job settles, and its event carries schedule_id null", async () => {
+    const scheduleId = await seed(LOCAL_TENANT);
+    const crawlId = await finishedFiredCrawl(scheduleId);
+    const jobId = await enqueueJob(db, { tenant: LOCAL_TENANT, crawlId, kind: "rules", pinnedTo: PIN });
+    await db.update(jobs).set({ status: "running", claimedBy: PIN, claimedAt: new Date() }).where(eq(jobs.id, jobId));
+
+    await racing(scheduleId, () => finishJob(db, jobId, "done"));
+
+    const [job] = await db.select().from(jobs).where(eq(jobs.id, jobId));
+    expect(job?.status).toBe("done");
+    expect(await eventsOf(crawlId)).toEqual([
+      ["queued", null],
+      ["finished", null],
+      ["rules_queued", null],
+      ["rules_started", null],
+      ["rules_finished", null],
+    ]);
+    expect(await getSchedule(db, LOCAL_TENANT, scheduleId)).toBeNull();
+  });
+
+  it("a job insert: the job is queued, and its event carries schedule_id null", async () => {
+    const scheduleId = await seed(LOCAL_TENANT);
+    const crawlId = await finishedFiredCrawl(scheduleId);
+
+    await racing(scheduleId, () => enqueueJob(db, { tenant: LOCAL_TENANT, crawlId, kind: "rules", pinnedTo: PIN }));
+
+    const rulesJobs = await db.select().from(jobs).where(and(eq(jobs.crawlId, crawlId), eq(jobs.kind, "rules")));
+    expect(rulesJobs.map((j) => j.status)).toEqual(["queued"]);
+    expect(await eventsOf(crawlId)).toEqual([
+      ["queued", null],
+      ["finished", null],
+      ["rules_queued", null],
+    ]);
+  });
+
+  it("a crawl status write: it waits for the delete's crawl lock and writes its event with schedule_id null", async () => {
+    const scheduleId = await seed(LOCAL_TENANT);
+    const crawlId = await finishedFiredCrawl(scheduleId);
+
+    await racing(scheduleId, () =>
+      db.update(crawls).set({ status: "failed", failureReason: "race" }).where(eq(crawls.id, crawlId)),
+    );
+
+    expect(await eventsOf(crawlId)).toEqual([
+      ["queued", null],
+      ["finished", null],
+      ["failed", null],
+    ]);
   });
 });

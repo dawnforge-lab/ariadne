@@ -191,7 +191,11 @@ export async function deleteSchedule(db: Writer, tenant: TenantId, id: string): 
     // takes a key-share lock on the schedule; the delete's ON DELETE SET NULL
     // updates those same crawl rows. Taking them first — `FOR NO KEY UPDATE`,
     // as every crawl-row lock (src/worker/reaper.ts) — and the schedule after
-    // keeps the two from waiting on each other.
+    // keeps the two from waiting on each other, and a status write that waits
+    // here runs after the delete on a row whose `schedule_id` is null. A JOB
+    // write does not take the crawl row; its trigger reads the schedule
+    // `FOR KEY SHARE` instead (migration 0049), so it waits for this delete
+    // and then reads no schedule.
     await tx
       .select({ id: crawls.id })
       .from(crawls)

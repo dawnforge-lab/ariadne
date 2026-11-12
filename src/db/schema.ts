@@ -424,7 +424,7 @@ export const crawls = pgTable("crawls", {
   // a fired crawl's chain runs to its end (Review Focus 4): `schedule_chain`
   // non-null is "a schedule fired this crawl", `schedule_id` is "and it still
   // exists". The check below holds the one direction that is always true.
-  // The event triggers (0048) copy `schedule_id` onto every event of the
+  // The event triggers (0048, 0049) copy `schedule_id` onto every event of the
   // crawl and of its jobs.
   scheduleId: text("schedule_id").references((): AnyPgColumn => schedules.id, { onDelete: "set null" }),
   scheduleChain: jsonb("schedule_chain").$type<ScheduleChain>(),
@@ -1617,7 +1617,7 @@ export const instances = pgTable("instances", {
  *    `schedule_skipped` name their crawl in `detail`, C9). Deleted with the
  *    crawl.
  *  - `schedule_id`: the schedule behind the event, or null: a schedule's own
- *    events name it, and the triggers (0048) copy `crawls.schedule_id` onto a
+ *    events name it, and the triggers (0048, 0049) copy `crawls.schedule_id` onto a
  *    fired crawl's lifecycle events and its jobs'. References `schedules` ON
  *    DELETE SET NULL (0047, Ruling P2): a deleted schedule's fired crawls keep
  *    their history; `deleteSchedule` (src/schedule/store.ts) deletes the

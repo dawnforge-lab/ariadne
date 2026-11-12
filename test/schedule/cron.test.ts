@@ -73,9 +73,21 @@ describe("parseCron: the timezone", () => {
     expect(parseCron("30 1 * * *", "", NOW)).toMatchObject({ ok: false, field: "timezone" });
   });
 
-  it("accepts UTC and an IANA zone", () => {
+  it("accepts UTC and an IANA zone, under its current name too", () => {
     expect(parseCron("0 0 * * *", "UTC", NOW)).toEqual({ ok: true });
+    expect(parseCron("0 0 * * *", "Europe/London", NOW)).toEqual({ ok: true });
+    // ICU lists these as Asia/Calcutta and Europe/Kiev.
     expect(parseCron("0 0 * * *", "Asia/Kolkata", NOW)).toEqual({ ok: true });
+    expect(parseCron("0 0 * * *", "Europe/Kyiv", NOW)).toEqual({ ok: true });
+  });
+
+  it("refuses an offset and an abbreviation, which Intl.DateTimeFormat alone accepts, naming timezone", () => {
+    for (const zone of ["+05:00", "-0300", "EST", "CET", "EST5EDT"]) {
+      expect(() => new Intl.DateTimeFormat(undefined, { timeZone: zone }), zone).not.toThrow();
+      const answer = parseCron("0 0 * * *", zone, NOW);
+      expect(answer, zone).toMatchObject({ ok: false, field: "timezone" });
+      expect(() => nextSlot("0 0 * * *", zone, NOW), zone).toThrow(/timezone/);
+    }
   });
 });
 

@@ -11,8 +11,10 @@
  * every parse — the slot computed at create would not be the slot computed at
  * fire.
  *
- * THE TIMEZONE is an IANA name, checked with `Intl.DateTimeFormat`, the same
- * zone database `cron-parser` (through luxon) computes in.
+ * THE TIMEZONE is an IANA name: one `Intl.supportedValuesOf("timeZone")`
+ * lists, or `UTC`, or an `Area/Location` name the runtime resolves to one it
+ * lists — the same zone database `cron-parser` (through luxon) computes in.
+ * An offset (`+05:00`) or an abbreviation (`EST`) is refused.
  *
  * THE HORIZON. An expression with no slot in the next 366 days is refused
  * (Review Focus 1: February 30th never matches, and a scheduler must not loop
@@ -78,16 +80,34 @@ function fieldsOf(cron: string): { ok: true; normalised: string } | { ok: false;
   return { ok: true, normalised: fields.join(" ") };
 }
 
-/** Whether `timezone` names an IANA zone this runtime knows. */
+/**
+ * The IANA zones this runtime's ICU names (`Intl.supportedValuesOf`), plus
+ * `UTC`, which the list leaves out. `Intl.DateTimeFormat` alone accepts more
+ * than names — an offset (`+05:00`) and legacy abbreviations (`EST`) — so it
+ * is not the check by itself.
+ */
+const IANA_ZONES: ReadonlySet<string> = new Set([...Intl.supportedValuesOf("timeZone"), "UTC"]);
+/** An `Area/Location` name (`Asia/Kolkata`, `America/Argentina/Buenos_Aires`). */
+const AREA_LOCATION = /^[A-Za-z_]+(?:\/[A-Za-z0-9_+-]+)+$/;
+
+/**
+ * Whether `timezone` is an IANA zone name: one the list holds, or an
+ * `Area/Location` name the runtime resolves to one it holds. The second arm is
+ * for current names ICU lists under their older spelling: it lists
+ * `Asia/Calcutta` and `Europe/Kiev`, and resolves `Asia/Kolkata` and
+ * `Europe/Kyiv` to them. An offset or an abbreviation is neither.
+ */
 function zoneKnown(timezone: string): boolean {
-  if (timezone.trim() === "") return false;
+  if (IANA_ZONES.has(timezone)) return true;
+  if (!AREA_LOCATION.test(timezone)) return false;
+  let resolved: string;
   try {
-    new Intl.DateTimeFormat(undefined, { timeZone: timezone });
-    return true;
+    resolved = new Intl.DateTimeFormat(undefined, { timeZone: timezone }).resolvedOptions().timeZone;
   } catch (error) {
     if (error instanceof RangeError) return false;
     throw error;
   }
+  return IANA_ZONES.has(resolved);
 }
 
 const ZONE_MESSAGE = "timezone must be an IANA zone name, such as Europe/London or UTC";
