@@ -86,8 +86,9 @@
  *
  * ## `onlyInstances` — TEST ONLY (Ruling R11)
  *
- * Confines steps 1, 2 and 4 to those instances: dead jobs they claimed, crawls
- * whose latest crawl job one of them claimed, their own instance rows. The
+ * Confines steps 1, 2 and 4 to those instances: dead jobs they claimed, queued
+ * chain links pinned to them, crawls whose latest crawl job one of them
+ * claimed, their own instance rows. The
  * test suite's files share one database and test the reaper on a 300 ms clock;
  * an unconfined tick would pause, requeue and delete other suites' rows.
  * Production never passes it. (Step 3 is the sweep's own: it reads no
