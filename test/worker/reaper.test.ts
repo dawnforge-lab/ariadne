@@ -489,6 +489,73 @@ describe("held means held by a live instance", () => {
     }
   });
 
+  it("crawl_cancel's row lock holds off a render job inserted after its first busy check, and then refuses", async () => {
+    // PR #30 review: the cancel's row lock must conflict with the key-share lock
+    // a job insert takes through its foreign key (FOR UPDATE; FOR NO KEY UPDATE
+    // does not), or a render pass starts over a crawl the cancel then cancels.
+    const service = newService();
+    const crawlId = await seedCrawl({ status: "paused", pauseReason: "request" }, `${site}/`);
+    const liveId = await service.instanceId();
+    const jobId = `job_${randomUUID()}`;
+    let commit!: () => void;
+    const gate = new Promise<void>((resolve) => (commit = resolve));
+    let inserted!: () => void;
+    const insertedSignal = new Promise<void>((resolve) => (inserted = resolve));
+    // The render job's insert, held open: its key-share lock on the crawl row is
+    // taken, and the cancel's first (unlocked) busy check cannot see the row.
+    const insert = db.transaction(async (tx) => {
+      await tx.insert(jobs).values({
+        id: jobId,
+        tenantId: LOCAL_TENANT,
+        crawlId,
+        kind: "render",
+        status: "running",
+        pinnedTo: liveId,
+        claimedBy: liveId,
+        claimedAt: new Date(),
+        heartbeatAt: new Date(),
+        rulesetVersion: RULESET_VERSION,
+        extractionVersion: EXTRACTION_VERSION,
+      });
+      inserted();
+      await gate;
+    });
+    try {
+      await insertedSignal;
+      const cancel = service.cancelCrawl(LOCAL_TENANT, crawlId);
+      const outcome = cancel.then(
+        (answer) => ({ answer }),
+        (error: unknown) => ({ error }),
+      );
+      // The cancel reaches its row lock and waits there behind the insert.
+      await until(
+        "the cancel waiting on the crawl row lock",
+        async () => {
+          const rows = await db.execute<{ n: number }>(
+            sql`select count(*)::int as n from pg_stat_activity
+                where wait_event_type = 'Lock' and query ilike '%from "crawls"%for update%'`,
+          );
+          return rows.rows[0]?.n ?? 0;
+        },
+        (n) => n > 0,
+        10_000,
+      ).catch(async (error: unknown) => {
+        // Not waiting: report what the cancel did instead.
+        commit();
+        throw new Error(`cancel did not wait on the row lock: ${JSON.stringify(await outcome)} (${String(error)})`);
+      });
+      commit();
+      await insert;
+      const settled = await outcome;
+      expect("error" in settled ? String(settled.error) : "resolved").toMatch(/a render pass is running/);
+      expect((await crawlRow(crawlId)).status).toBe("paused");
+    } finally {
+      commit();
+      await insert.catch(() => undefined);
+      await db.update(jobs).set({ status: "abandoned" }).where(eq(jobs.id, jobId));
+    }
+  });
+
   it("a rules job of a dead instance does not refuse a new crawl_rules: the new run adopts the crawl", async () => {
     const crawlId = await seedCrawl({ status: "finished" });
     const d = await dead();

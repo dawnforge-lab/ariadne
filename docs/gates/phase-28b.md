@@ -309,6 +309,14 @@ what it costs if wrong.
 
 The final whole-branch review was run on Sonnet, because Opus was capped by a usage limit until 2026-11-14. It found 0 Critical issues and 1 Important one (R19), plus 7 minors. The fix wave is `98d41ed` (167 files / 4,519 tests, compose smoke PASS), and its re-review is clean.
 
+The PR #30 `/code-review` ran with Opus bug reviewers. Both found the same issue independently, and a separate Opus validator confirmed it:
+
+- **Bug:** `crawl_cancel` locked the crawl row `FOR NO KEY UPDATE`. That lock does not conflict with the `FOR KEY SHARE` a job insert takes through its foreign key.
+- **Consequence:** a render or rules job inserted between the cancel's busy re-check and its commit went through. A render pass then ran over a crawl that was cancelled under it, and could write its credentials back onto the cancelled crawl.
+- **Fix:** `lockCrawlRow` now uses `FOR UPDATE`, as `deleteCrawl` and `setCrawlConfig` already did. The regression test, in `test/worker/reaper.test.ts`, holds a render job's insert open and asserts that the cancel waits on the row lock and then refuses. It failed before the fix.
+- **CLAUDE.md compliance:** both checks were clean.
+- **Tests:** after the fix, `npm test` on the dev database passes: 167 files / 4,520 tests (508 s). On `ariadne_gate28b`, which holds the 50k gate crawl, the run takes about 1,100 s, and the database-wide rules tests time out at 60 s there. That is the database's size, not this change.
+
 ## Accepted behaviours
 
 - A resumed walk with a transiently failed or time-limited sitemap document sweeps that document's

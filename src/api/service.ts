@@ -3883,9 +3883,10 @@ export class ApiService {
       case "paused": {
         const now = new Date();
         await this.db.transaction(async (tx) => {
-          // Again, under the row lock: a render pass or a rules run that took
-          // the crawl since the check above is seen here, and one that comes
-          // after waits for this transaction (its job's key lock on the row).
+          // Again, under the row lock (FOR UPDATE): a render pass or a rules
+          // run that took the crawl since the check above is seen here, and one
+          // that comes after waits for this transaction (its job's key-share
+          // lock on the row conflicts with FOR UPDATE only).
           await lockCrawlRow(tx, crawlId);
           await this.refuseWhileBusy(tx, crawlId, "crawl_cancel");
           const moved = await tx
@@ -4697,7 +4698,8 @@ export class ApiService {
       // for its urls, its status or a lease must not replace the stored copy (a
       // mistyped password would overwrite the right one). Never for a
       // cancelled crawl, whose credentials a cancel released: they served this
-      // pass only. A cancel cannot land meanwhile — `refuseWhileBusy` holds it.
+      // pass only. A cancel cannot land meanwhile — its FOR UPDATE row lock and
+      // `refuseWhileBusy` hold it off while this pass's job is live.
       // The pass changes no crawl row a write could share a transaction with,
       // so the write has its own (28b).
       if (sent !== undefined && credentials !== undefined && row.status !== "cancelled") {
@@ -9046,12 +9048,15 @@ function rulesWhileLive(crawlId: string, status: string): ServiceError {
 
 /**
  * Lock the crawl row for the rest of the caller's transaction. A job inserted
- * for the crawl takes a key-share lock on the row (its foreign key), which
- * waits behind this one: so a busy check read after it holds until the
- * commit — no render pass or rules run can take the crawl in between.
+ * for the crawl takes a key-share lock on the row (its foreign key), and only
+ * FOR UPDATE conflicts with key share — FOR NO KEY UPDATE lets the insert
+ * through (PR #30 review). Under FOR UPDATE that insert waits for this
+ * transaction, and an insert already in flight is waited for here: so a busy
+ * check read after it holds until the commit — no render pass or rules run can
+ * take the crawl in between. As `deleteCrawl` and `setCrawlConfig` lock.
  */
 async function lockCrawlRow(tx: Writer, crawlId: string): Promise<void> {
-  await tx.select({ id: crawls.id }).from(crawls).where(eq(crawls.id, crawlId)).for("no key update");
+  await tx.select({ id: crawls.id }).from(crawls).where(eq(crawls.id, crawlId)).for("update");
 }
 
 /** The lifecycle refusals of `deleteCrawl`: a live crawl, or one with a request pending. */
