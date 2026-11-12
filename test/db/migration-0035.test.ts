@@ -12,7 +12,7 @@ import { eq, inArray, sql } from "drizzle-orm";
 import { closeDb, createDb, type Db } from "../../src/db/client.js";
 import { runMigrations } from "../../src/db/migrate.js";
 import { crawls } from "../../src/db/schema.js";
-import { LOCAL_TENANT } from "../../src/api/tenant.js";
+import { LOCAL_TENANT } from "../../src/tenant.js";
 
 function databaseUrl(): string {
   const url = process.env.DATABASE_URL;
@@ -50,6 +50,7 @@ describe("0035 — cancelled becomes paused/shutdown", () => {
           id,
           tenantId: LOCAL_TENANT,
           siteUrl: "https://m35.example",
+          hostKey: "m35.example",
           config: { maxPages: 10 },
           rulesetVersion: "test",
           status,

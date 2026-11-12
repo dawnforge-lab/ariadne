@@ -530,7 +530,9 @@ describe("check universe", () => {
     // changed, no verdict moved; registry.ts carries the grounds.
     // 0.24.0: Phase 27c — list mode: needsSpider / needsSitemaps and the
     // crawl.list-mode marker; a spider crawl's findings do not move.
-    expect(RULESET_VERSION).toBe("0.25.0"); // Phase 27d: timeLimited is a cut-short sitemap
+    // 0.25.1: Phase 28b — sitemap.invalid judges a kept earlier walk's failures beside an
+    // unreachable robots.txt (docsFetched > 0), where it was silent; no copy or other rule moved.
+    expect(RULESET_VERSION).toBe("0.25.1");
   });
   it("every listed check id is a well-formed CHECK-NN and unique", () => {
     expect(new Set(CRAWL_CHECK_IDS).size).toBe(CRAWL_CHECK_IDS.length);

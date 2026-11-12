@@ -32,7 +32,10 @@ import { createApiServer, type ApiServer } from "../../src/api/http.js";
 import { createMcpServer, TOOL_NAMES, type AriadneMcpServer } from "../../src/api/mcp.js";
 import { mkDiscovery } from "../rules/mk-discovery.js";
 import { mkPage } from "../rules/mk-page.js";
-import { LOCAL_TENANT, type TenantId } from "../../src/api/tenant.js";
+import { LOCAL_TENANT, type TenantId } from "../../src/tenant.js";
+import { TEST_CREDENTIAL_KEYS } from "../helpers/credential-keys.js";
+import { claimNextJob, enqueueJob, type ClaimedJob } from "../../src/worker/jobs.js";
+import { hostKeyOf } from "../../src/crawl/host-key.js";
 
 /** Test-controlled holds on a rules run and on a render pass (module header). */
 const gates = vi.hoisted(() => ({
@@ -211,7 +214,7 @@ async function seedRow(
   await db.insert(crawls).values({
     tenantId: LOCAL_TENANT,
     id,
-    siteUrl: `${site}/`,
+    siteUrl: `${site}/`, hostKey: hostKeyOf(`${site}/`),
     config: {
       siteUrl: `${site}/`,
       maxPages: 3,
@@ -286,7 +289,7 @@ beforeAll(async () => {
 
   api = await newApi();
 
-  mcp = createMcpServer({ db, config: { tenant: LOCAL_TENANT, allowedDomains: [], exportDir, renderDir, log: () => {} } });
+  mcp = createMcpServer({ db, config: { credentialKeys: TEST_CREDENTIAL_KEYS, tenant: LOCAL_TENANT, allowedDomains: [], exportDir, renderDir, log: () => {} } });
   const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
   client = new Client({ name: "ariadne-test-lifecycle", version: "0.0.1" });
   await mcp.connect(serverSide);
@@ -297,6 +300,7 @@ async function newApi(): Promise<ApiServer> {
   const server = createApiServer({
     db,
     config: {
+      credentialKeys: TEST_CREDENTIAL_KEYS,
       token: TOKEN,
       allowedDomains: ["127.0.0.1"],
       crawlDefaults: { allowPrivate: true, probeHosts: false, perHostDelayMs: 0 },
@@ -373,11 +377,18 @@ describe("the control table: queued", () => {
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ crawlId: id, status: "paused", controlRequested: null, immediate: true });
 
-    // The runner's own path, as if this server had held the crawl all along.
+    // The runner's own path, as if this server had held the crawl all along:
+    // since 28b it runs a claimed crawl job, so the test claims one for the
+    // row under a pin of its own (no other runner can take it) and hands it to
+    // the service's runner path.
+    const pinnedTo = `test-pin-${randomUUID()}`;
+    await enqueueJob(db, { tenant: LOCAL_TENANT, crawlId: id, kind: "crawl", pinnedTo });
+    const job = await claimNextJob(db, { instanceId: pinnedTo, kinds: ["crawl"], pinnedTo });
+    if (job === null) throw new Error("the test's own crawl job was not claimable");
     const runner = api.service as unknown as {
-      runQueued(entry: { crawlId: string; resuming: boolean }, signal: AbortSignal): Promise<void>;
+      runQueued(job: ClaimedJob, signal: AbortSignal): Promise<void>;
     };
-    await runner.runQueued({ crawlId: id, resuming: false }, new AbortController().signal);
+    await runner.runQueued(job, new AbortController().signal);
     expect(serverLog).toContain(`api: crawl ${id} left the queue state ('paused') before it ran; not started`);
     expect(await stored(id)).toMatchObject({ status: "paused", pauseReason: "request", failureReason: null });
     expect(await frontierRows(id)).toBe(0);

@@ -267,6 +267,55 @@
       "when": 1794392505020,
       "tag": "0037_crawls_tenant_id",
       "breakpoints": true
+    },
+    {
+      "idx": 38,
+      "version": "7",
+      "when": 1794414211361,
+      "tag": "0038_clean_landau",
+      "breakpoints": true
+    },
+    {
+      "idx": 39,
+      "version": "7",
+      "when": 1794415862176,
+      "tag": "0039_gifted_slipstream",
+      "breakpoints": true
+    },
+    {
+      "idx": 40,
+      "version": "7",
+      "when": 1794419063280,
+      "tag": "0040_jobs_instances",
+      "breakpoints": true
+    },
+    {
+      "idx": 41,
+      "version": "7",
+      "when": 1794422176264,
+      "tag": "0041_jobs_crawl_index",
+      "breakpoints": true
+    },
+    {
+      "idx": 42,
+      "version": "7",
+      "when": 1794424816604,
+      "tag": "0042_host_key_port",
+      "breakpoints": true
+    },
+    {
+      "idx": 43,
+      "version": "7",
+      "when": 1794429112748,
+      "tag": "0043_reaper_requeue_index",
+      "breakpoints": true
+    },
+    {
+      "idx": 44,
+      "version": "7",
+      "when": 1794430979516,
+      "tag": "0044_requeue_index_r17",
+      "breakpoints": true
     }
   ]
 }

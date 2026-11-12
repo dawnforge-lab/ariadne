@@ -21,7 +21,9 @@
  *                                      apex/www family, any scheme, any port
  *                                      (`listCrawls`) — which is the project
  *                                      history a date picker is built on
- *   GET  /crawls/:id                   one crawl: status, counts, frontier, timings
+ *   GET  /crawls/:id                   one crawl: status, counts, frontier, timings,
+ *                                      and `job` — the work item behind the
+ *                                      status (`{kind, status, claimedBy?}`, 28b)
  *   POST /crawls/:id/fail              close a crawl nobody is working
  *   POST /crawls/:id/resume            continue a crawl that stopped with work
  *                                      still owed — the same crawl, the same id,
@@ -30,9 +32,9 @@
  *                                      A paused crawl resumes; a cancelled one
  *                                      is final and 409s. Optional body: the
  *                                      crawl's `requestHeaders` / `httpAuth` /
- *                                      `cookies`, which a crawl that needed
- *                                      them must be sent again after a restart
- *                                      (409 `CREDENTIALS_REQUIRED` until then)
+ *                                      `cookies`, which replace the stored
+ *                                      copy; one that cannot be read is 409
+ *                                      `CREDENTIALS_REQUIRED` until they are
  *   POST /crawls/:id/pause             pause a crawl. Queued: paused now -> 200.
  *                                      Running: requested of its loop -> 202.
  *                                      `{crawlId, status, controlRequested,
@@ -173,7 +175,8 @@ import { randomUUID } from "node:crypto";
 import type { Db } from "../db/client.js";
 import type { ApiServerConfig } from "./config.js";
 import { checkBearer } from "./auth.js";
-import { parseTenant, type TenantId } from "./tenant.js";
+import { serveOps } from "../ops/serve.js";
+import { parseTenant, type TenantId } from "../tenant.js";
 import { unknownQueryParameterMessage } from "./errors.js";
 import {
   ApiService,
@@ -203,7 +206,7 @@ const MAX_BODY_BYTES = 64 * 1024;
  * `PATCH /crawls/:id/config` (27c T9 fix 1): a maximal set (20 headers and 50
  * cookies of up to 1 KiB each, plus Basic auth) is about 74 KB, past
  * `MAX_BODY_BYTES`, and a crawl started with one must be resumable over HTTP
- * after a restart. A route opts in with `Route.maxBodyBytes`; every other
+ * when its stored copy cannot be read. A route opts in with `Route.maxBodyBytes`; every other
  * route keeps `MAX_BODY_BYTES`.
  */
 export const LARGE_BODY_BYTES = 1024 * 1024;
@@ -229,6 +232,9 @@ const STATUS_FOR: Record<ServiceErrorCode, number> = {
   // A conflict with the crawl's state like any other 409; the body's `code`
   // is what tells the two apart (27c Deviation 10).
   CREDENTIALS_REQUIRED: 409,
+  // 28b: another crawl or render pass holds the crawl's host — a conflict
+  // with the world's state, and `code` says which one.
+  HOST_BUSY: 409,
   // 28a: no tenant named, or a tenant that is not a valid key — both 400.
   TENANT_REQUIRED: 400,
   INVALID_TENANT: 400,
@@ -302,13 +308,27 @@ interface Route {
 /** Every listing takes these; each route names its own filters alongside. */
 const PAGINATION_PARAMS = ["limit", "cursor"] as const;
 
+/**
+ * The routes served BEFORE the bearer and tenant checks (28b T6): an
+ * orchestrator's probe and a metrics scraper hold neither the API token nor a
+ * tenant. This list is the sentinel's global set for them
+ * (test/api/tenant-isolation.test.ts `GLOBAL_ROUTES`), not an ad-hoc bypass;
+ * `routeSignatures()` includes them. `/metrics` has its own bearer
+ * (`ARIADNE_METRICS_TOKEN`), checked in src/ops/serve.ts.
+ */
+export const PRE_AUTH_ROUTES: ReadonlyArray<{ method: "GET"; path: "/healthz" | "/readyz" | "/metrics" }> = [
+  { method: "GET", path: "/healthz" },
+  { method: "GET", path: "/readyz" },
+  { method: "GET", path: "/metrics" },
+];
+
 export function createApiServer({ db, config }: CreateApiServerOpts): ApiServer {
   const service = new ApiService(db, config);
   const log = config.log ?? ((line: string) => console.error(line));
   const routes = buildRoutes();
 
   const server = createServer((req, res) => {
-    handle(req, res, service, config, routes, log).catch((error: unknown) => {
+    handle(req, res, service, config, routes, log, db).catch((error: unknown) => {
       // The handler's own catch covers everything a request can do; reaching
       // here means the response machinery itself failed. Say so loudly rather
       // than leaving the socket open.
@@ -357,10 +377,13 @@ export function createApiServer({ db, config }: CreateApiServerOpts): ApiServer 
  * `buildRoutes` without a tenancy case there fails CI.
  */
 export function routeSignatures(): ReadonlyArray<{ method: string; path: string }> {
-  return buildRoutes().map((route) => ({
-    method: route.method,
-    path: `/${route.pattern.map((seg) => (typeof seg === "string" ? seg : `:${seg.param}`)).join("/")}`,
-  }));
+  return [
+    ...PRE_AUTH_ROUTES.map((route) => ({ method: route.method as string, path: route.path as string })),
+    ...buildRoutes().map((route) => ({
+      method: route.method,
+      path: `/${route.pattern.map((seg) => (typeof seg === "string" ? seg : `:${seg.param}`)).join("/")}`,
+    })),
+  ];
 }
 
 function buildRoutes(): Route[] {
@@ -441,7 +464,7 @@ function buildRoutes(): Route[] {
       maxBodyBytes: LARGE_BODY_BYTES,
       // 202, not 200, and for `POST /crawls`'s reason: the crawl is ACCEPTED
       // here and runs later. A 200 would say the work is done. The body is
-      // optional: the crawl's credentials, re-supplied after a restart (27c);
+      // optional: the crawl's credentials, re-supplied when its stored copy cannot be read (27c, 28b);
       // `parseResumeCrawlInput` refuses any other field rather than ignoring it.
       handler: async (service, ctx) => ({
         status: 202,
@@ -753,8 +776,14 @@ async function handle(
   config: ApiServerConfig,
   routes: Route[],
   log: (line: string) => void,
+  db: Db,
 ): Promise<void> {
-  // AUTH FIRST, before routing and before the body is read. An unauthenticated
+  // THE PRE-AUTH ROUTES FIRST (`PRE_AUTH_ROUTES`): health and metrics answer
+  // with no API token and no tenant. Only an exact GET of one of the three;
+  // everything else, a POST to /healthz included, takes the checks below.
+  if (await serveOps(req, res, { db, metricsToken: config.metricsToken, log })) return;
+
+  // AUTH SECOND, before routing and before the body is read. An unauthenticated
   // caller must not be able to learn which routes exist (a 404 would say so),
   // nor to make the server read 64KB off the wire.
   const auth = checkBearer(req.headers.authorization, config.token);

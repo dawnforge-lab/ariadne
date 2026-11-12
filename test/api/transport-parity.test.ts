@@ -22,7 +22,7 @@
  * `crawl_cancel`, Task 4), and the queue never reaches it.
  */
 import { randomUUID } from "node:crypto";
-import { createServer, type Server } from "node:http";
+import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -40,7 +40,9 @@ import { closeFetchAgents } from "../../src/crawl/http.js";
 import { createApiServer, type ApiServer } from "../../src/api/http.js";
 import { createMcpServer, type AriadneMcpServer } from "../../src/api/mcp.js";
 import type { ServiceConfig } from "../../src/api/config.js";
-import { LOCAL_TENANT } from "../../src/api/tenant.js";
+import { LOCAL_TENANT } from "../../src/tenant.js";
+import { TEST_CREDENTIAL_KEYS } from "../helpers/credential-keys.js";
+import { hostKeyOf } from "../../src/crawl/host-key.js";
 
 const TOKEN = "test-token-transport-parity-0123456789";
 const PAGE_DELAY_MS = 100;
@@ -59,6 +61,7 @@ let db: Db;
 let exportDir: string;
 let renderDir: string;
 let siteServer: Server;
+let mcpBlockerServer: Server;
 let site: string;
 let api: ApiServer;
 let base: string;
@@ -277,7 +280,7 @@ beforeAll(async () => {
 
   // An endless slow tree, so each server's blocker crawl is running for as long
   // as the test needs it to be.
-  siteServer = createServer((req, res) => {
+  const slowTree = (req: IncomingMessage, res: ServerResponse): void => {
     const path = (req.url ?? "/").split("?")[0] ?? "/";
     if (path === "/robots.txt") {
       res.writeHead(200, { "content-type": "text/plain" });
@@ -297,16 +300,26 @@ beforeAll(async () => {
       res.end(`<!doctype html><html lang="en"><head><title>Slow ${n}</title></head><body>${links}</body></html>`);
     }, PAGE_DELAY_MS);
     res.on("close", () => clearTimeout(timer));
-  });
-  await new Promise<void>((r) => siteServer.listen(0, "127.0.0.1", () => r()));
-  const address = siteServer.address();
-  if (address === null || typeof address === "string") throw new Error("site server bound oddly");
-  site = `http://127.0.0.1:${address.port}`;
+  };
+  // Two servers of the same tree: one host per blocker. One site is crawled by
+  // one crawl at a time (28b T4a, hard rule 9), so two blockers of ONE site
+  // would never both be running.
+  siteServer = createServer(slowTree);
+  mcpBlockerServer = createServer(slowTree);
+  const listen = async (server: Server): Promise<string> => {
+    await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
+    const address = server.address();
+    if (address === null || typeof address === "string") throw new Error("site server bound oddly");
+    return `http://127.0.0.1:${address.port}`;
+  };
+  site = await listen(siteServer);
+  const mcpBlockerSite = await listen(mcpBlockerServer);
 
   // `169.254.169.254` is allowlisted so the URL policy, not the allowlist, is
   // what refuses a sitemap there: the metadata address is refused even under
   // the test-only `allowPrivate`.
   const config: ServiceConfig = {
+    credentialKeys: TEST_CREDENTIAL_KEYS,
     allowedDomains: ["127.0.0.1", "localhost", "169.254.169.254"],
     crawlDefaults: { allowPrivate: true, probeHosts: false, perHostDelayMs: 0 },
     exportDir,
@@ -325,7 +338,7 @@ beforeAll(async () => {
   const viaHttp = await call("POST", "/crawls", blocker);
   if (viaHttp.status !== 202) throw new Error(`blocker: ${viaHttp.status} ${JSON.stringify(viaHttp.body)}`);
   blockers.http = String(viaHttp.body["crawlId"]);
-  const viaMcp = await tool("crawl_start", blocker);
+  const viaMcp = await tool("crawl_start", { ...blocker, siteUrl: `${mcpBlockerSite}/` });
   if (viaMcp.isError) throw new Error(`blocker: ${viaMcp.text}`);
   blockers.mcp = String(viaMcp.body?.["crawlId"]);
   createdCrawls.push(blockers.http, blockers.mcp);
@@ -344,6 +357,7 @@ afterAll(async () => {
   await api.close();
   await closeFetchAgents();
   await new Promise<void>((r) => siteServer.close(() => r()));
+  await new Promise<void>((r) => mcpBlockerServer.close(() => r()));
   if (createdCrawls.length > 0) await db.delete(crawls).where(inArray(crawls.id, createdCrawls));
   await closeDb(db);
   await rm(exportDir, { recursive: true, force: true });
@@ -516,7 +530,7 @@ describe("the issues overview over both transports (27d)", () => {
     await db.insert(crawls).values({
       tenantId: LOCAL_TENANT,
       id,
-      siteUrl: "https://parity-overview.example/",
+      siteUrl: "https://parity-overview.example/", hostKey: hostKeyOf("https://parity-overview.example/"),
       config: { siteUrl: "https://parity-overview.example/", maxPages: 10, userAgent: "AriadneBot-test" },
       discovery: mkDiscovery(),
       rulesetVersion: "test",

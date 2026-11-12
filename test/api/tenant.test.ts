@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { ServiceError } from "../../src/api/errors.js";
-import { LOCAL_TENANT, parseTenant } from "../../src/api/tenant.js";
+import { LOCAL_TENANT, parseTenant } from "../../src/tenant.js";
 
 function refusal(raw: string | undefined): ServiceError {
   try {

@@ -235,12 +235,16 @@ refusal never quotes a name that is not an HTTP token (it names its position): a
 value pasted into a name is not echoed back. They go only to the site's own hosts, never to a
 CDN, another host or a redirect that leaves the site, and an https site never sends
 them over http. They cannot change the user agent, the delay floor or robots.txt.
-**The engine never stores them**: they live in the server's memory, `crawl_config_get`
-shows the names with every value `"[redacted]"`, and a cancel or delete drops them.
-**The restart rule:** after the server restarts it no longer holds them, so
-`crawl_resume` and `crawl_render` refuse with code `CREDENTIALS_REQUIRED` (409) until
-you send the same kinds and names again on that call. Keep the values where you got
-them for as long as the crawl may be resumed or rendered. A gated page fetched without
+**The engine stores them encrypted** (AES-256-GCM under `ARIADNE_CREDENTIALS_KEY`, a key
+the database never holds; the local MCP server needs that variable at boot beside
+`ARIADNE_TENANT`): `crawl_config_get` shows the names with every value `"[redacted]"`, a
+cancel or delete removes them, and so does retention 30 days after the crawl settles.
+**The unreadable-copy rule:** a restart no longer loses them, but if the stored copy
+cannot be read (the key was rotated past it, retention removed it) `crawl_resume` and
+`crawl_render` refuse with code `CREDENTIALS_REQUIRED` (409) until you send the same
+kinds and names again on that call, and a queued crawl in that state pauses with
+pause reason credentials unreadable (`pauseReason` says which). Keep the values where you got them for as long
+as the crawl may be resumed or rendered. A gated page fetched without
 its credential is a `blocked` row (401 or 403), never a silent gap. Credentials cannot
 be added on a resume or a render to a crawl that started without any: set them with
 `crawl_config_set` while the crawl is paused.
@@ -311,7 +315,7 @@ target is not something this skill can crawl.
  renderPassCount, rulesetVersion, controlRequested, pauseReason, cancelledAt,
  neverFetched, failureReason, legacyHosts, sitemapUrls, findingCap,
  frontier: {pending, leased, done, failed, renderPending},
- queuePosition, liveLeases, blockedPages, hostSpacingMs, throttle,
+ queuePosition, job, liveLeases, blockedPages, hostSpacingMs, throttle,
  platform, platformProfile,
  robotsBlocked: {recorded, dropped}, excludedDropped,
  rulesRunAt, judgementStale, findingsCount, pagesScanned, fetchResources,
@@ -359,11 +363,17 @@ What the fields mean when you are waiting:
   is not stuck. **`frontier.done` is the live number**; watch that one.
 - **`liveLeases`** — unexpired worker leases. A live crawl BETWEEN BATCHES
   momentarily holds none, which is exactly the window an impatient caller looks in.
-- **`queuePosition`** — a number only while THIS server holds the crawl, null
-  otherwise. `status: "queued"` with `queuePosition: null` is the one genuinely broken
-  state: the server that accepted the crawl is gone and nobody will run it. Hand it to
-  `crawl_resume`, which picks up the same crawl, or retire it with
+- **`queuePosition`** — a number only while the crawl is `queued` with a job waiting
+  to run it (0 = starting now; otherwise its place among YOUR queued crawls, and it
+  waits while another crawl of the same site runs, whatever the number), null
+  otherwise. `status: "queued"` with
+  `queuePosition: null` is the one genuinely broken state: no job will run it. Hand it
+  to `crawl_resume`, which picks up the same crawl, or retire it with
   `crawl_mark_failed`.
+- **`job`** — the engine's work item behind the status: the crawl's latest crawl run,
+  render pass or rules run, with its own status and the engine process that took it,
+  or null when none ever ran. `status` stays the crawl's truth; `job` says who is (or
+  was last) working on it.
 - **`rulesetVersion`** — stamped when the crawl was ACCEPTED. It does not tell you
   whether the rules have run.
 - **`renderPassCount`** — despite the name, it is **how many pages the last render

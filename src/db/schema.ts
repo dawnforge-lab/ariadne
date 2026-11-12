@@ -1,7 +1,7 @@
 import { sql } from "drizzle-orm";
 import {
   pgTable, text, integer, smallint, bigint, boolean, jsonb, timestamp, real,
-  primaryKey, index, uniqueIndex,
+  primaryKey, index, uniqueIndex, customType,
 } from "drizzle-orm/pg-core";
 import type { StoredHostSpacing } from "../crawl/politeness.js";
 import type { StoredPlatformProfile } from "../crawl/platform.js";
@@ -17,6 +17,23 @@ export const crawls = pgTable("crawls", {
   // The tenant that owns the crawl (28a). NOT NULL with no default: every writer
   // says whose crawl it is. Migration 0037 backfilled pre-28a rows to `local`.
   tenantId: text("tenant_id").notNull(),
+  // THE CRAWL'S HOST FOOTPRINT (migration 0040, Phase 28b): the seed's host,
+  // lower-cased, without a leading `www.`, plus `:port` when the seed names a
+  // non-default one (Ruling R8, migration 0042) — `hostKeyOf`,
+  // src/crawl/host-key.ts. The frontier admits only that host and its www
+  // twin, so two crawls with one host key are two crawls of one site. Claim
+  // eligibility reads it (28b T4a: no two running crawl or render jobs per
+  // host), and so does `crawl_render`'s HOST_BUSY. Written by every insert with
+  // the site URL; 0040 backfilled older rows from `site_url` in SQL and 0042
+  // appended their ports. Not surface: no reader answers it, though a HOST_BUSY
+  // refusal names the caller's own crawl's.
+  hostKey: text("host_key").notNull(),
+  // How many times in a row the reaper has re-queued this crawl after a
+  // `worker_lost` pause without an agent asking (migration 0040, Phase 28b).
+  // Capped at 3 so a crawl that kills its worker every time stops; a
+  // `shutdown` pause (a deploy) is requeued without counting (Ruling R17).
+  // `crawl_resume` resets it. Not surface.
+  autoResumeCount: integer("auto_resume_count").notNull().default(0),
   config: jsonb("config_jsonb").notNull(),
   rulesetVersion: text("ruleset_version").notNull(),
   // queued|running|paused|finished|failed|cancelled. `running`, `paused` and
@@ -40,7 +57,10 @@ export const crawls = pgTable("crawls", {
   // check constraints):
   //  - control_request: "pause" | "cancel", non-null only while status='running'
   //    (a request the loop has not yet acted on);
-  //  - pause_reason: "request" | "shutdown", non-null exactly when status='paused';
+  //  - pause_reason: "request" | "shutdown" | "credentials_unreadable" |
+  //    "worker_lost" | "not_allowed" (the last three 28b; `PAUSE_REASONS`,
+  //    src/crawl/control.ts),
+  //    non-null exactly when status='paused';
   //  - cancelled_at: set only when status='cancelled'.
   controlRequest: text("control_request"),
   pauseReason: text("pause_reason"),
@@ -383,9 +403,29 @@ export const crawls = pgTable("crawls", {
   // no render pass was ever started, or the crawl predates 0025. Read it beside
   // the render pass columns, never alone.
   renderLaunchError: text("render_launch_error"),
+  // HOW MANY TIMES THIS CRAWL'S CREDENTIALS HAVE BEEN WRITTEN (migration 0039,
+  // Phase 28b). `CredentialVault.write` bumps it in the same transaction as the
+  // `crawl_credentials` row it writes, and the row is encrypted with
+  // `${crawl_id}:${credential_generation}` as its associated data, so a
+  // ciphertext replayed from an earlier write fails authentication. It lives on
+  // the crawl rather than on the credentials row because that row is deleted
+  // when the credentials are removed: a counter on it would restart and let a
+  // removed generation's ciphertext authenticate again. 0 means never written.
+  credentialGeneration: integer("credential_generation").notNull().default(0),
 }, (t) => [
   // The order `listCrawls` pages by, scoped to a tenant (28a).
   index("crawls_tenant_started").on(t.tenantId, t.startedAt.desc(), t.id.desc()),
+  // Claim eligibility joins running jobs to their crawls by host (28b Task 4).
+  index("crawls_host_key").on(t.hostKey),
+  // The reaper's requeue scan (28b T4b; migration 0043, re-cut by 0044 for
+  // Ruling R17): crawls paused `shutdown` (always requeued) or `worker_lost`
+  // still under the auto-resume cap (src/worker/reaper.ts,
+  // `SYSTEM_PAUSED_SQL`) — a handful at any moment, out of every crawl ever run.
+  index("crawls_requeuable")
+    .on(t.finishedAt, t.id)
+    .where(
+      sql`${t.status} = 'paused' and (${t.pauseReason} = 'shutdown' or (${t.pauseReason} = 'worker_lost' and ${t.autoResumeCount} < 3))`,
+    ),
 ]);
 
 export const pages = pgTable("pages", {
@@ -1298,6 +1338,12 @@ export const sitemapUrls = pgTable("sitemap_urls", {
   sitemapSource: text("sitemap_source").notNull(),
   lastmod: text("lastmod"),
   pageId: text("page_id"),
+  // When the walk that last listed this URL began (Phase 28b). A resumed walk
+  // re-stamps every entry it lists; the rows left with an older stamp after its
+  // last batch are URLs the site no longer lists, and are removed. Migration
+  // 0038 backfilled existing rows to their crawl's `started_at`. No default:
+  // every writer says which walk it is.
+  seenAt: timestamp("seen_at", { withTimezone: true }).notNull(),
 }, (t) => [
   primaryKey({ columns: [t.crawlId, t.url] }),
   // The join column of five rules (the four sitemap ⋈ pages rules and
@@ -1404,3 +1450,128 @@ export const listUrls = pgTable("list_urls", {
 }, (t) => [
   primaryKey({ columns: [t.crawlId, t.position] }),
 ]);
+
+/** Postgres `bytea`, read and written as a Node `Buffer` (node-postgres's own mapping). */
+const bytea = customType<{ data: Buffer; driverData: Buffer }>({
+  dataType() {
+    return "bytea";
+  },
+});
+
+/**
+ * A crawl's credential VALUES, encrypted (migration 0039, Phase 28b item 10),
+ * so a crawl can be resumed, rendered or run by another process without Talos
+ * sending them again. Written and read only through `CredentialVault`
+ * (src/crawl/credential-vault.ts); no other code reads `ciphertext`.
+ *
+ * AES-256-GCM: `nonce` is a fresh random 12 bytes per write, `ciphertext` is
+ * the encrypted JSON of `CrawlCredentials` with the 16-byte tag appended, and
+ * the associated data is `${crawl_id}:${crawls.credential_generation}`. `key_id`
+ * names the key it was written under (`ARIADNE_CREDENTIALS_KEY`'s id); the key
+ * itself is never in the database. `generation` repeats the crawl's counter at
+ * the write, and a row whose generation is not the crawl's is not read.
+ *
+ * One row per crawl at most. Deleted on `crawl_cancel` and `crawl_delete`, when
+ * `crawl_config_set` removes the last credential, and by the retention sweep
+ * (`sweepExpired`) once the crawl has been settled for the retention period.
+ */
+export const crawlCredentials = pgTable("crawl_credentials", {
+  crawlId: text("crawl_id").primaryKey().references(() => crawls.id, { onDelete: "cascade" }),
+  tenantId: text("tenant_id").notNull(),
+  generation: integer("generation").notNull(),
+  keyId: text("key_id").notNull(),
+  nonce: bytea("nonce").notNull(),
+  ciphertext: bytea("ciphertext").notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+/**
+ * The engine's work queue (migration 0040, Phase 28b item 6): one row per piece
+ * of work on a crawl — a crawl run, a render pass, a rules run — replacing the
+ * in-process queue and busy sets the API service held before 28b. Written and
+ * claimed only through src/worker/jobs.ts.
+ *
+ *  - `kind`: crawl | render | rules. `status`: queued | running | done |
+ *    failed | abandoned. Free text, the closed sets live in jobs.ts (the
+ *    `crawls.status` precedent).
+ *  - `pinned_to`: the instance that must run it, or null for any runner. A
+ *    synchronous render or rules call pins its job to the API process that
+ *    received it; an in-process service pins the crawl jobs it accepted.
+ *  - `claimed_by` / `claimed_at`: the instance that took it, and when.
+ *    `heartbeat_at`: its runner's last sign of life for it.
+ *  - `ruleset_version` / `extraction_version`: the code that enqueued it. A
+ *    runner claims only jobs whose versions equal its own, so a rolling deploy
+ *    never judges with a stale ruleset.
+ *  - `error`: one line saying why a `failed` job failed. Never a credential
+ *    value, never a stack.
+ *
+ * AT MOST ONE `queued|running` JOB PER CRAWL (`jobs_one_live_per_crawl`): the
+ * busy guard is this index, a database fact rather than process memory.
+ */
+export const jobs = pgTable("jobs", {
+  id: text("id").primaryKey(),
+  tenantId: text("tenant_id").notNull(),
+  crawlId: text("crawl_id").notNull().references(() => crawls.id, { onDelete: "cascade" }),
+  kind: text("kind").notNull(),
+  status: text("status").notNull(),
+  pinnedTo: text("pinned_to"),
+  claimedBy: text("claimed_by"),
+  claimedAt: timestamp("claimed_at", { withTimezone: true }),
+  heartbeatAt: timestamp("heartbeat_at", { withTimezone: true }),
+  queuedAt: timestamp("queued_at", { withTimezone: true }).notNull().defaultNow(),
+  finishedAt: timestamp("finished_at", { withTimezone: true }),
+  error: text("error"),
+  rulesetVersion: text("ruleset_version").notNull(),
+  extractionVersion: integer("extraction_version").notNull(),
+}, (t) => [
+  uniqueIndex("jobs_one_live_per_crawl")
+    .on(t.crawlId)
+    .where(sql`${t.status} in ('queued', 'running')`),
+  // The claim's scan: queued jobs in claim order.
+  index("jobs_claim_order")
+    .on(t.queuedAt, t.id)
+    .where(sql`${t.status} = 'queued'`),
+  // The reaper's scan (Task 4) and a runner's own heartbeat: running jobs by
+  // the instance that holds them.
+  index("jobs_running_by_instance")
+    .on(t.claimedBy)
+    .where(sql`${t.status} = 'running'`),
+  // A crawl's jobs, newest last: `crawl_status.job` (the latest), the live-job
+  // guards, and `crawl_delete`'s cascade, without scanning every crawl's
+  // settled history (migration 0041).
+  index("jobs_crawl_queued").on(t.crawlId, t.queuedAt),
+  // Claim eligibility (28b T4a, migration 0042): the running jobs — a set as
+  // small as the engine's total concurrency — by kind, for the busy hosts
+  // (running crawl and render jobs, joined to their crawls) and the per-tenant
+  // count of running crawl jobs; also `crawl_render`'s HOST_BUSY check.
+  index("jobs_running_kind_tenant")
+    .on(t.kind, t.tenantId)
+    .where(sql`${t.status} = 'running'`),
+  // `queuePosition` (R12): a tenant's queued jobs in claim order, so the
+  // count of the caller's crawls ahead reads that tenant's queue only.
+  index("jobs_queued_tenant")
+    .on(t.tenantId, t.queuedAt, t.id)
+    .where(sql`${t.status} = 'queued'`),
+]);
+
+/**
+ * One row per engine process (migration 0040, Phase 28b item 8): an API
+ * server, a worker, or a local all-in-one MCP server. `id` is generated at
+ * boot; `version` is `engineVersion()` (package version + `ARIADNE_GIT_SHA`).
+ * `heartbeat_at` is the process's last sign of life — the reaper (Task 4)
+ * reads it to tell a dead instance's jobs from a live one's. `stopped_at`
+ * (migration 0041) is set by a graceful shutdown: a stopped instance is not
+ * live from that moment, whatever its last heartbeat. LIVE = not stopped and
+ * a heartbeat within `timing.deadAfter` (`liveHolderSql`, src/worker/jobs.ts);
+ * only a live instance's jobs count as held.
+ */
+export const instances = pgTable("instances", {
+  id: text("id").primaryKey(),
+  role: text("role").notNull(),
+  hostname: text("hostname").notNull(),
+  pid: integer("pid").notNull(),
+  version: text("version").notNull(),
+  startedAt: timestamp("started_at", { withTimezone: true }).notNull().defaultNow(),
+  heartbeatAt: timestamp("heartbeat_at", { withTimezone: true }).notNull().defaultNow(),
+  stoppedAt: timestamp("stopped_at", { withTimezone: true }),
+});

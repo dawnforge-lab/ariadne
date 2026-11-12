@@ -12,7 +12,8 @@ import {
   leaseBatch,
   releaseLeases,
 } from "../../src/crawl/frontier.js";
-import { LOCAL_TENANT } from "../../src/api/tenant.js";
+import { LOCAL_TENANT } from "../../src/tenant.js";
+import { hostKeyOf } from "../../src/crawl/host-key.js";
 
 function databaseUrl(): string {
   const url = process.env.DATABASE_URL;
@@ -36,7 +37,7 @@ describe("frontier", () => {
     await db.insert(crawls).values({
       tenantId: LOCAL_TENANT,
       id,
-      siteUrl: SITE,
+      siteUrl: SITE, hostKey: hostKeyOf(SITE),
       config: {},
       rulesetVersion: "test",
     });
@@ -277,7 +278,7 @@ describe("frontier redirect hops (27c T1)", () => {
 
   it("leases an item enqueued with redirectHops 3 at 3, and one enqueued without it at 0", async () => {
     const id = `crawl_${randomUUID()}`;
-    await db.insert(crawls).values({ tenantId: LOCAL_TENANT, id, siteUrl: SITE, config: {}, rulesetVersion: "test" });
+    await db.insert(crawls).values({ tenantId: LOCAL_TENANT, id, siteUrl: SITE, hostKey: hostKeyOf(SITE), config: {}, rulesetVersion: "test" });
     created.push(id);
     await enqueueUrls(db, id, [
       { url: `${SITE}/hopped`, depth: 0, discoveredVia: "redirect", redirectHops: 3 },

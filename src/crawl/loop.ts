@@ -50,9 +50,9 @@
  * done and the row was still in a buffer (build plan §7).
  */
 import { randomUUID } from "node:crypto";
-import { and, asc, eq, gt, isNotNull, ne, sql } from "drizzle-orm";
+import { and, asc, eq, gt, isNotNull, lt, ne, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
-import { crawls, frontier, listUrls, sitemapHreflang, sitemapMemberships, sitemapUrls } from "../db/schema.js";
+import { crawls, frontier, jobs, listUrls, sitemapHreflang, sitemapMemberships, sitemapUrls } from "../db/schema.js";
 // Ruleset provenance for the `crawls` row: the registry owns the number, the
 // loop only stamps it.
 import { RULESET_VERSION } from "../rules/registry/registry.js";
@@ -135,6 +135,7 @@ import {
   type CrawlScope,
 } from "./url-scope.js";
 import { engineVersion, redactRequestHeaders } from "./versions.js";
+import { pagesFetched } from "../ops/metrics.js";
 import {
   credentialError,
   credentialHeadersFor,
@@ -147,7 +148,8 @@ import {
   type CredentialTarget,
 } from "./credentials.js";
 import { storableCap, storableDeep } from "./storable-text.js";
-import type { TenantId } from "../api/tenant.js";
+import type { TenantId } from "../tenant.js";
+import { hostKeyOf } from "./host-key.js";
 
 /**
  * `RenderSelectionConfig` is extended rather than restated: the render pass's
@@ -404,11 +406,13 @@ export interface CrawlConfig extends RenderSelectionConfig {
    * pages, the recheck, the known-404 probe and same-family resources — and
    * never to any other host.
    *
-   * NEVER STORED, on `allowPrivate`'s precedent: `storableConfig` strips it,
-   * and `parseStoredConfig`'s closed field set never reads it back. A secret
-   * value must not reach a column, a log line, an error or a response. A
-   * resume re-supplies it through `ResumeOpts.config`, and a resume that does
-   * not is refused (`credentialShape`).
+   * NEVER STORED WITH THE CONFIG, on `allowPrivate`'s precedent:
+   * `storableConfig` strips it, and `parseStoredConfig`'s closed field set
+   * never reads it back. A secret value must not reach a column in clear, a
+   * log line, an error or a response; the API keeps it encrypted in
+   * `crawl_credentials` (28b, `CredentialVault`). A resume re-supplies it
+   * through `ResumeOpts.config`, and a resume that does not is refused
+   * (`credentialShape`).
    */
   credentials?: CrawlCredentials;
   /**
@@ -801,7 +805,57 @@ export interface ResumeOpts {
   reclaimLeases?: boolean;
   /** TEST ONLY — see `LoopTestHooks`. */
   testHooks?: LoopTestHooks;
+  /**
+   * Awaited inside the transaction of the run's closing write — every close:
+   * finished, paused, cancelled, failed — with what that write recorded. A
+   * throw rolls the close back (and the run fails loudly, as any close that
+   * cannot be written does). The job runner settles the crawl's job here
+   * (src/worker/crawl-job.ts), so the crawl reading closed and its job still
+   * holding it are never both true at once.
+   */
+  onClose?: CloseHook;
+  /**
+   * The job this run is the work of (28b T4b): the runner's claimed `crawl`
+   * job and the instance that claimed it. With it the run writes the crawl
+   * only while it OWNS it:
+   *
+   *  - the claim (`queued → running`) also requires the job to be still
+   *    `running` and claimed by `instanceId`. A job abandoned between the
+   *    runner's claim and this one (a reaper that read the runner as dead,
+   *    `crawl_resume` adopting it) loses the claim with `JobLostError`, and
+   *    the crawl never starts under an abandoned job;
+   *  - every close (finished, stopped, failed) first checks the same. A job
+   *    that is no longer this run's closes the crawl only if nobody else holds
+   *    it — the crawl still `running` and no other live job for it — and
+   *    otherwise writes nothing and throws `JobLostError`: whoever took the
+   *    crawl (the reaper's `worker_lost` pause, a resume's fresh job and its
+   *    runner) has the row, and a late close from here would overwrite it.
+   *
+   * Locks are taken crawl row first, then job row, as every other writer of
+   * the pair takes them (the reaper, `crawl_resume`, `crawl_mark_failed`,
+   * the close's own `onClose`).
+   */
+  owner?: RunOwner;
 }
+
+/** See `ResumeOpts.owner`. */
+export interface RunOwner {
+  jobId: string;
+  instanceId: string;
+}
+
+/** What a run's close wrote, as `ResumeOpts.onClose` is told it. */
+export interface ClosedRecord {
+  status: CrawlSummary["status"];
+  pauseReason: PauseReason | null;
+  /** The sentence a `failed` close wrote; null on every other close. */
+  failureReason: string | null;
+}
+
+type CloseTx = Parameters<Parameters<Db["transaction"]>[0]>[0];
+
+/** See `ResumeOpts.onClose`. */
+export type CloseHook = (tx: CloseTx, closed: ClosedRecord) => Promise<void>;
 
 /**
  * A resume's claim found the row in another status than the one it expected
@@ -819,6 +873,33 @@ export class ClaimLostError extends Error {
     this.name = "ClaimLostError";
     this.crawlId = crawlId;
     this.status = status;
+  }
+}
+
+/**
+ * The run's job is no longer its own (`ResumeOpts.owner`): it was abandoned by
+ * a reaper or adopted by `crawl_resume` — at the claim (`stage: "start"`, the
+ * crawl was never started) or at a close (`"close"`, the crawl has another
+ * holder, and this run's close was not written). A `ClaimLostError`, so a
+ * runner that already treats a lost claim as "nothing to write" treats this
+ * the same.
+ */
+export class JobLostError extends ClaimLostError {
+  readonly jobId: string;
+  readonly stage: "start" | "close";
+  constructor(crawlId: string, status: string, jobId: string, stage: "start" | "close") {
+    super(crawlId, status, "queued");
+    this.message =
+      stage === "start"
+        ? `resumeCrawl: crawl ${crawlId}'s job ${jobId} is no longer this runner's (a reaper ` +
+          "abandoned it, or crawl_resume adopted the crawl) — the crawl was not started, and " +
+          "nothing was changed"
+        : `crawl ${crawlId}'s job ${jobId} was taken from this run (a reaper abandoned it, or ` +
+          `crawl_resume adopted the crawl), and the crawl ('${status}') has been taken since: ` +
+          "this run's close was not written";
+    this.name = "JobLostError";
+    this.jobId = jobId;
+    this.stage = stage;
   }
 }
 
@@ -858,12 +939,13 @@ export async function runCrawl(
     id: crawlId,
     tenantId: tenant,
     siteUrl: config.siteUrl,
+    hostKey: hostKeyOf(config.siteUrl),
     config: storableConfig(config),
     rulesetVersion: RULESET_VERSION,
     status: "running",
   });
 
-  return execute(db, crawlId, config, signal, testHooks);
+  return execute(db, crawlId, config, signal, testHooks, undefined);
 }
 
 /**
@@ -967,26 +1049,43 @@ export async function resumeCrawl(
   // so the only claim that can meet one is a resume of a crawl whose process
   // died with a request pending (`reclaimLeases`); that resume honours the
   // request at its first poll, which is intended — the agent asked for it.
-  const claimed = await db
-    .update(crawls)
-    .set({
-      status: "running",
-      finishedAt: null,
-      // The earlier run's sentence goes with the status it belonged to: the
-      // column's contract is `failure_reason IS NOT NULL` ⟹ `status = 'failed'`
-      // (migration 0017), and a `running` row still carrying why it once failed
-      // breaks it and tells a reader a live crawl has already died.
-      failureReason: null,
-      // And the pause's reason goes with the pause: non-null exactly when
-      // `status = 'paused'` (27b column contract).
-      pauseReason: null,
-    })
-    .where(
-      opts.expectStatus === undefined
-        ? and(eq(crawls.id, crawlId), ne(crawls.status, "cancelled"))
-        : and(eq(crawls.id, crawlId), eq(crawls.status, opts.expectStatus)),
-    )
-    .returning({ id: crawls.id });
+  //
+  // WITH AN OWNER (28b T4b) the claim is also conditioned on the run's job
+  // being still its own, read under the crawl row's lock and then the job
+  // row's (`ResumeOpts.owner`): a job abandoned between the runner's claim and
+  // this one never starts the crawl. A transaction, not a sub-select in the
+  // WHERE: a sub-select would read the job as of the statement's snapshot even
+  // after waiting out a writer that changed it.
+  const claim = (writer: Db | CloseTx) =>
+    writer
+      .update(crawls)
+      .set({
+        status: "running",
+        finishedAt: null,
+        // The earlier run's sentence goes with the status it belonged to: the
+        // column's contract is `failure_reason IS NOT NULL` ⟹ `status = 'failed'`
+        // (migration 0017), and a `running` row still carrying why it once failed
+        // breaks it and tells a reader a live crawl has already died.
+        failureReason: null,
+        // And the pause's reason goes with the pause: non-null exactly when
+        // `status = 'paused'` (27b column contract).
+        pauseReason: null,
+      })
+      .where(
+        opts.expectStatus === undefined
+          ? and(eq(crawls.id, crawlId), ne(crawls.status, "cancelled"))
+          : and(eq(crawls.id, crawlId), eq(crawls.status, opts.expectStatus)),
+      )
+      .returning({ id: crawls.id });
+  const owner = opts.owner;
+  const claimed =
+    owner === undefined
+      ? await claim(db)
+      : await db.transaction(async (tx) => {
+          const status = await lockCrawlStatus(tx, crawlId);
+          if (!(await ownsJob(tx, owner))) throw new JobLostError(crawlId, status, owner.jobId, "start");
+          return claim(tx);
+        });
   if (claimed.length === 0) {
     const [now] = await db
       .select({ status: crawls.status })
@@ -1006,7 +1105,7 @@ export async function resumeCrawl(
     await releaseLeases(db, crawlId, null);
   }
 
-  return execute(db, crawlId, config, opts.signal, opts.testHooks);
+  return execute(db, crawlId, config, opts.signal, opts.testHooks, { onClose: opts.onClose, owner: opts.owner });
 }
 
 /**
@@ -1458,6 +1557,7 @@ async function execute(
   config: CrawlConfig,
   signal: AbortSignal | undefined,
   testHooks: LoopTestHooks | undefined,
+  closer: RunCloser | undefined,
 ): Promise<CrawlSummary> {
   // THE ONE SIGNAL THE RUN STOPS ON (Phase 27b). It fires on an agent's pause
   // or cancel (polled off `crawls.control_request`), on the process's own
@@ -1490,8 +1590,15 @@ async function execute(
         engineVersion: engineVersion(),
       })
       .where(eq(crawls.id, crawlId));
-    return await runToCompletion(db, crawlId, config, watcher, testHooks);
+    return await runToCompletion(db, crawlId, config, watcher, testHooks, closer);
   } catch (caught) {
+    // A close refused because the run's job was taken (`ResumeOpts.owner`):
+    // the crawl has another holder, and a `failed` close would be the same
+    // overwrite the refused one was. Up as it is, nothing written.
+    if (caught instanceof JobLostError) {
+      await watcher.stop();
+      throw caught;
+    }
     // A control poll that failed on the way down is surfaced beside whatever
     // ended the run, never lost to it (rule 7). The run's own paths already
     // raise it when it is the cause; this covers an error that got there first.
@@ -1514,6 +1621,8 @@ async function execute(
         crawledRows(await frontierCounts(db, crawlId)),
         null,
         failureReasonOf(error),
+        null,
+        closer,
       );
     } catch (closeError) {
       throw new AggregateError(
@@ -1641,6 +1750,7 @@ async function runToCompletion(
   config: CrawlConfig,
   watcher: ControlWatcher,
   testHooks: LoopTestHooks | undefined,
+  closer: RunCloser | undefined,
 ): Promise<CrawlSummary> {
   const allowPrivate = config.allowPrivate === true;
   const listMode = config.mode === "list";
@@ -1720,7 +1830,7 @@ async function runToCompletion(
       });
     } catch (error) {
       if (error instanceof FetchAbortedError && signal.aborted) {
-        return closeStoppedBeforePages(db, crawlId, watcher);
+        return closeStoppedBeforePages(db, crawlId, watcher, closer);
       }
       throw error;
     }
@@ -1760,6 +1870,10 @@ async function runToCompletion(
   // evidence with a partial staging. A fresh crawl has no evidence yet, and
   // the mark matches no row.
   let discovery: DiscoveryResult;
+  // When this run's walk began: the stamp every entry it persists carries
+  // (`sitemap_urls.seen_at`), so the sweep after the last batch can tell the
+  // rows this walk listed from the ones an earlier walk left behind.
+  const walkStartedAt = new Date();
   const onSitemapFlush = testHooks?.onSitemapFlush;
   const sitemapSink = new SitemapRowSink(
     db,
@@ -1786,7 +1900,7 @@ async function runToCompletion(
     });
   } catch (error) {
     if (error instanceof DiscoveryAbortedError && signal.aborted) {
-      return closeStoppedBeforePages(db, crawlId, watcher);
+      return closeStoppedBeforePages(db, crawlId, watcher, closer);
     }
     throw error;
   }
@@ -1811,7 +1925,7 @@ async function runToCompletion(
   // the robots refusal keeps its note beside it (27b M7), and the page loop
   // stops on the signal and raises it before any close.
   if (signal.aborted && watcher.failure() === null) {
-    return closeStoppedBeforePages(db, crawlId, watcher);
+    return closeStoppedBeforePages(db, crawlId, watcher, closer);
   }
 
   // THE SITEMAP'S ENTRIES, ON RECORD BEFORE THE EVIDENCE THAT COUNTS THEM
@@ -1820,8 +1934,8 @@ async function runToCompletion(
   // `sitemap_urls`, so no reader is shown evidence counting entries the table
   // does not hold. A resume writes them again (the rows are keyed). A failed
   // poll stops it too; the close then raises it and the row closes failed.
-  if (!(await persistSitemap(db, crawlId, discovery, signal, testHooks?.onSeedingBatch))) {
-    return closeStoppedBeforePages(db, crawlId, watcher);
+  if (!(await persistSitemap(db, crawlId, discovery, signal, testHooks?.onSeedingBatch, walkStartedAt))) {
+    return closeStoppedBeforePages(db, crawlId, watcher, closer);
   }
 
   // INSERTION 2 — discovery's own findings, written before anything branches on
@@ -1869,7 +1983,7 @@ async function runToCompletion(
         `crawl ${crawlId} failed: ${note}; and its control poll failed too`,
       );
     }
-    const closed = await closeCrawl(db, crawlId, "failed", crawled, null, note);
+    const closed = await closeCrawl(db, crawlId, "failed", crawled, null, note, null, closer);
     return summarise(
       db,
       crawlId,
@@ -2566,6 +2680,7 @@ async function runToCompletion(
         analysis,
         { complete: !RETRYABLE.has(result.fetchClass) },
       );
+      pagesFetched.inc({ fetch_class: result.fetchClass });
 
       // List mode records a page's links (the writer above) and follows none.
       if (analysis !== null && !listMode && item.depth < config.maxDepth) {
@@ -3051,6 +3166,7 @@ async function runToCompletion(
     { delta: writer.stats().resourceRefsCappedPages, resumed },
     null,
     outcome === "stopped" ? watcher.stopReason() : null,
+    closer,
   );
   return summarise(
     db,
@@ -3158,11 +3274,12 @@ async function closeStoppedBeforePages(
   db: Db,
   crawlId: string,
   watcher: ControlWatcher,
+  closer: RunCloser | undefined,
 ): Promise<CrawlSummary> {
   await settleControl(watcher);
   await writeNotFoundProbe(db, crawlId, { skipped: STOPPED_BEFORE_404_PROBE });
   const crawled = crawledRows(await frontierCounts(db, crawlId));
-  const closed = await closeCrawl(db, crawlId, "stopped", crawled, null, null, watcher.stopReason());
+  const closed = await closeCrawl(db, crawlId, "stopped", crawled, null, null, watcher.stopReason(), closer);
   return summarise(
     db,
     crawlId,
@@ -3504,6 +3621,10 @@ async function persistSitemap(
   // every entry was written, false when a stop came first.
   signal: AbortSignal,
   onBatch: LoopTestHooks["onSeedingBatch"],
+  // When this run's walk began. Each entry is stamped with it, and the rows an
+  // earlier walk wrote that this one did not list (`seen_at` older) are removed
+  // after the last batch (Phase 28b: a site that dropped a URL no longer lists it).
+  walkStartedAt: Date,
 ): Promise<boolean> {
   const entries = discovery.sitemapEntries;
   for (let i = 0; i < entries.length; i += SITEMAP_BATCH) {
@@ -3519,13 +3640,31 @@ async function persistSitemap(
         urlNormalised: normalised,
         sitemapSource: entry.source,
         lastmod: entry.lastmod,
+        seenAt: walkStartedAt,
       };
     });
     // discover() dedupes by URL, so a conflict here means a resume re-reading
-    // the same sitemap. The first read's row stands. `lastmod` is the sitemap's
-    // own text, so the batch passes the storability boundary (ruling R10).
-    await db.insert(sitemapUrls).values(storableDeep(batch)).onConflictDoNothing();
+    // the same sitemap: the first read's row stands and is re-stamped with this
+    // walk's start, which keeps the sweep below from removing it. `lastmod` is
+    // the sitemap's own text, so the batch passes the storability boundary
+    // (ruling R10).
+    await db
+      .insert(sitemapUrls)
+      .values(storableDeep(batch))
+      .onConflictDoUpdate({
+        target: [sitemapUrls.crawlId, sitemapUrls.url],
+        set: { seenAt: walkStartedAt },
+      });
     await onBatch?.("sitemap_urls", signal);
+  }
+  // Only a persist that wrote every batch gets here (a stop returned above), and
+  // only a walk that read something: robots.txt unreachable walks nothing, so its
+  // empty entry list says nothing about what the site lists and the earlier
+  // walk's rows stand beside its kept evidence.
+  if (discovery.robots.outcome !== "unreachable") {
+    await db
+      .delete(sitemapUrls)
+      .where(and(eq(sitemapUrls.crawlId, crawlId), lt(sitemapUrls.seenAt, walkStartedAt)));
   }
   return true;
 }
@@ -4037,6 +4176,119 @@ async function closeCrawl(
   refsCapped: { delta: number; resumed: boolean } | null = null,
   failureReason: string | null = null,
   stop: StopReason | null = null,
+  closer: RunCloser | undefined = undefined,
+): Promise<ClosedAs> {
+  if (closer === undefined || (closer.onClose === undefined && closer.owner === undefined)) {
+    return closeCrawlOn(db, crawlId, outcome, pagesCrawled, refsCapped, failureReason, stop);
+  }
+  const { onClose, owner } = closer;
+  // The close and whatever the caller records with it (the job runner's
+  // settle, `ResumeOpts.onClose`) commit together or not at all — and, with
+  // an owner, only while the run still owns the crawl (`ResumeOpts.owner`),
+  // checked under the crawl row's lock and then the job row's.
+  return db.transaction(async (tx) => {
+    if (owner !== undefined) await requireCloseOwnership(tx, crawlId, owner);
+    const closed = await closeCrawlOn(tx, crawlId, outcome, pagesCrawled, refsCapped, failureReason, stop);
+    if (onClose !== undefined) {
+      await onClose(tx, {
+        status: closed.status,
+        pauseReason: closed.pauseReason,
+        failureReason: failureReason === null ? null : storableCap(failureReason),
+      });
+    }
+    return closed;
+  });
+}
+
+/** What a run's closes do beside their write: `ResumeOpts.onClose` and `ResumeOpts.owner`. */
+interface RunCloser {
+  onClose?: CloseHook;
+  owner?: RunOwner;
+}
+
+/**
+ * The crawl row's status, locked `FOR NO KEY UPDATE` — the first lock of the
+ * crawl → job order (`ResumeOpts.owner`).
+ *
+ * NOT `FOR UPDATE` (28b T4b fix round 1): inserting a job takes `FOR KEY
+ * SHARE` on its crawl row (the foreign key), and `FOR UPDATE` conflicts with
+ * it while `FOR NO KEY UPDATE` does not. A synchronous render that adopts a
+ * dead render job locks that job row, then inserts its own (key share on the
+ * crawl); a writer holding the crawl `FOR UPDATE` and waiting for the job row
+ * would close a cycle (40P01). `FOR NO KEY UPDATE` still excludes every other
+ * writer of the crawl row — each `UPDATE crawls` takes it, and the reaper, the
+ * claim and the closes all lock with it.
+ */
+async function lockCrawlStatus(tx: CloseTx, crawlId: string): Promise<string> {
+  const [row] = await tx
+    .select({ status: crawls.status })
+    .from(crawls)
+    .where(eq(crawls.id, crawlId))
+    .for("no key update");
+  if (row === undefined) throw new Error(`resumeCrawl: no crawl ${crawlId}`);
+  return row.status;
+}
+
+/**
+ * Whether a run still owns its crawl, read as the start claim reads it: the
+ * crawl row locked (`lockCrawlStatus`), then the job row (`ownsJob`). For a
+ * runner's own writes outside the loop (src/worker/crawl-job.ts: the
+ * `credentials_unreadable` pause, a close of a run that threw before the
+ * loop), in the transaction that makes them. `status` is null for a crawl
+ * that no longer exists.
+ */
+export async function lockRunOwnership(
+  tx: CloseTx,
+  crawlId: string,
+  owner: RunOwner,
+): Promise<{ status: string | null; owned: boolean }> {
+  const [row] = await tx
+    .select({ status: crawls.status })
+    .from(crawls)
+    .where(eq(crawls.id, crawlId))
+    .for("no key update");
+  if (row === undefined) return { status: null, owned: false };
+  return { status: row.status, owned: await ownsJob(tx, owner) };
+}
+
+/** Whether the run's job is still `running` under its instance, the job row locked. */
+async function ownsJob(tx: CloseTx, owner: RunOwner): Promise<boolean> {
+  const [job] = await tx
+    .select({ status: jobs.status, claimedBy: jobs.claimedBy })
+    .from(jobs)
+    .where(eq(jobs.id, owner.jobId))
+    .for("update");
+  return job !== undefined && job.status === "running" && job.claimedBy === owner.instanceId;
+}
+
+/**
+ * A close of a run with an owner (`ResumeOpts.owner`): written when the job is
+ * still the run's, or — taken from it — when nobody else has the crawl (still
+ * `running`, no other live job): the run that is actually working it closes
+ * it, and its `onClose` then settles nothing, the job being settled already.
+ * Otherwise `JobLostError`, and nothing is written.
+ */
+async function requireCloseOwnership(tx: CloseTx, crawlId: string, owner: RunOwner): Promise<void> {
+  const status = await lockCrawlStatus(tx, crawlId);
+  if (await ownsJob(tx, owner)) return;
+  const others = await tx
+    .select({ id: jobs.id })
+    .from(jobs)
+    .where(and(eq(jobs.crawlId, crawlId), ne(jobs.id, owner.jobId), sql`${jobs.status} in ('queued', 'running')`))
+    .limit(1);
+  if (status === "running" && others.length === 0) return;
+  throw new JobLostError(crawlId, status, owner.jobId, "close");
+}
+
+/** `closeCrawl`'s write, on the pool or inside the transaction it shares with `onClose`. */
+async function closeCrawlOn(
+  db: Db | CloseTx,
+  crawlId: string,
+  outcome: "finished" | "stopped" | "failed",
+  pagesCrawled: number,
+  refsCapped: { delta: number; resumed: boolean } | null,
+  failureReason: string | null,
+  stop: StopReason | null,
 ): Promise<ClosedAs> {
   if (outcome === "failed" && failureReason === null) {
     throw new Error(

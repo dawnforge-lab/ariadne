@@ -29,7 +29,8 @@ import { URL_FINDING_CAP } from "../../src/rules/query/crawl-evidence.js";
 import { DEEP_DEPTH, linkGraphRules } from "../../src/rules/query/link-graph.js";
 import type { Finding, QueryRule } from "../../src/rules/registry/types.js";
 import { normalised, writerIndexable, type IndexabilitySpec } from "./mk-page.js";
-import { LOCAL_TENANT } from "../../src/api/tenant.js";
+import { LOCAL_TENANT } from "../../src/tenant.js";
+import { hostKeyOf } from "../../src/crawl/host-key.js";
 
 function databaseUrl(): string {
   const url = process.env.DATABASE_URL;
@@ -122,7 +123,7 @@ describe("the link-graph rules against the database", () => {
     await db.insert(crawls).values({
       tenantId: LOCAL_TENANT,
       id,
-      siteUrl: SITE,
+      siteUrl: SITE, hostKey: hostKeyOf(SITE),
       config: { maxPages: MAX_PAGES },
       rulesetVersion: "test",
       status: "finished",
@@ -250,6 +251,7 @@ describe("the link-graph rules against the database", () => {
         url: url("/from-sitemap"),
         urlNormalised: normalised(url("/from-sitemap")),
         sitemapSource: `${SITE}/sitemap.xml`,
+        seenAt: new Date(),
         lastmod: null,
       });
 
@@ -274,6 +276,7 @@ describe("the link-graph rules against the database", () => {
         url: url("/from-sitemap"),
         urlNormalised: normalised(url("/from-sitemap")),
         sitemapSource: `${SITE}/sitemap.xml`,
+        seenAt: new Date(),
         lastmod: null,
       });
       await addLink(crawlId, ids.get("/from-sitemap")!, "/from-sitemap");
@@ -294,6 +297,7 @@ describe("the link-graph rules against the database", () => {
         crawlId,
         url: url("/from-sitemap"),
         sitemapSource: `${SITE}/sitemap.xml`,
+        seenAt: new Date(),
         lastmod: null,
       });
 
@@ -659,6 +663,7 @@ describe("the link-graph rules against the database", () => {
         url: url("/island"),
         urlNormalised: normalised(url("/island")),
         sitemapSource: `${SITE}/sitemap.xml`,
+        seenAt: new Date(),
         lastmod: null,
       });
       await deriveClickDepth(db, crawlId);

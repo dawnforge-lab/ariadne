@@ -1,14 +1,17 @@
 /**
- * Phase 27c T9: credentials across the API lifecycle — a restart empties the
- * process's map, so `crawl_resume` and `crawl_render` refuse
- * `CREDENTIALS_REQUIRED` until the values are sent again; `crawl_config_set`
- * takes them while the crawl is paused, into memory only; and a cancel or a
- * delete drops them (Deviation 9).
+ * Phase 27c T9, as Phase 28b T2 changed it: credentials across the API
+ * lifecycle. The values are stored encrypted (`crawl_credentials`), so a
+ * restart KEEPS them: `crawl_resume` and `crawl_render` on a fresh server run
+ * with the stored copy. A server holding another key cannot read it and
+ * answers `CREDENTIALS_REQUIRED` until the values are sent again;
+ * `crawl_config_set` takes them while the crawl is paused, into the vault;
+ * and a cancel or a delete removes them (Deviation 9).
  *
  * Over the wire, against a real `node:http` site whose `/auth/` area answers
- * 401 without HTTP Basic credentials. A RESTART is the real thing: the API
- * server is closed and a new one is built on the same database, so its map is
- * empty exactly as a new process's would be.
+ * 401 without HTTP Basic credentials and whose `/hdr/` area answers 401
+ * without the fixture header. A RESTART is the real thing: the API server is
+ * closed and a new one is built on the same database, holding nothing in
+ * memory a new process would not.
  */
 import { randomUUID } from "node:crypto";
 import { createServer, type Server } from "node:http";
@@ -22,13 +25,16 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 
 import { closeDb, createDb, type Db } from "../../src/db/client.js";
 import { runMigrations } from "../../src/db/migrate.js";
-import { crawls, frontier, pages } from "../../src/db/schema.js";
+import { crawlCredentials, crawls, frontier, pages } from "../../src/db/schema.js";
 import { closeFetchAgents } from "../../src/crawl/http.js";
 import { createApiServer, type ApiServer } from "../../src/api/http.js";
 import { createMcpServer, type AriadneMcpServer } from "../../src/api/mcp.js";
 import type { ServiceConfig } from "../../src/api/config.js";
+import { CredentialVault, type CredentialKeys } from "../../src/crawl/credential-vault.js";
 import { mkDiscovery } from "../rules/mk-discovery.js";
-import { LOCAL_TENANT } from "../../src/api/tenant.js";
+import { LOCAL_TENANT } from "../../src/tenant.js";
+import { otherKey, TEST_CREDENTIAL_KEYS } from "../helpers/credential-keys.js";
+import { hostKeyOf } from "../../src/crawl/host-key.js";
 
 const TOKEN = "test-token-credentials-restart-0123456789";
 const PAGE_DELAY_MS = 60;
@@ -61,6 +67,8 @@ let exportDir: string;
 let renderDir: string;
 let siteServer: Server;
 let site: string;
+/** The fixture header's value on every `/hdr/` request the site saw. */
+const headerSeen: (string | undefined)[] = [];
 let api: ApiServer;
 let base: string;
 let mcp: AriadneMcpServer;
@@ -99,13 +107,21 @@ async function tool(name: string, args: Record<string, unknown>): Promise<{ isEr
   return { isError: result.isError === true, text, body };
 }
 
-/** This server's in-memory credentials, the one place a value lives. */
-function held(): { has(id: string): boolean; get(id: string): unknown } {
-  return ((s) => ({ has: (id: string) => s.has(id), get: (id: string) => s.current(id) }))((api.service as unknown as { credentials: import("../../src/api/credential-store.js").CredentialStore }).credentials);
+/** The crawl's stored credentials, decrypted with the test key (28b: the one place a value lives). */
+async function storedValues(id: string): Promise<unknown> {
+  const read = await new CredentialVault(db, TEST_CREDENTIAL_KEYS).read(id);
+  if (read.kind !== "ok") throw new Error(`crawl ${id}: no readable stored credentials (${read.kind})`);
+  return read.credentials;
 }
 
-async function newApi(): Promise<ApiServer> {
-  const server = createApiServer({ db, config: { ...serviceConfig(), token: TOKEN } });
+/** Whether the crawl has a `crawl_credentials` row. */
+async function stored(id: string): Promise<boolean> {
+  const rows = await db.select({ id: crawlCredentials.crawlId }).from(crawlCredentials).where(eq(crawlCredentials.crawlId, id));
+  return rows.length > 0;
+}
+
+async function newApi(keys: CredentialKeys = TEST_CREDENTIAL_KEYS): Promise<ApiServer> {
+  const server = createApiServer({ db, config: { ...serviceConfig(), credentialKeys: keys, token: TOKEN } });
   base = `http://127.0.0.1:${(await server.listen(0)).port}`;
   return server;
 }
@@ -114,16 +130,20 @@ function serviceConfig(): ServiceConfig {
   return {
     allowedDomains: ["127.0.0.1"],
     crawlDefaults: { allowPrivate: true, probeHosts: false, perHostDelayMs: 0 },
+    credentialKeys: TEST_CREDENTIAL_KEYS,
     exportDir,
     renderDir,
     log: (line) => serverLog.push(line),
   };
 }
 
-/** The restart: this process's server goes, a new one comes up on the same database. */
-async function restart(): Promise<void> {
+/**
+ * The restart: this process's server goes, a new one comes up on the same
+ * database — with the same keys unless the test hands it others.
+ */
+async function restart(keys: CredentialKeys = TEST_CREDENTIAL_KEYS): Promise<void> {
   await api.close();
-  api = await newApi();
+  api = await newApi(keys);
 }
 
 async function detail(id: string): Promise<Record<string, unknown>> {
@@ -178,7 +198,7 @@ async function seedPaused(
   await db.insert(crawls).values({
     tenantId: LOCAL_TENANT,
     id,
-    siteUrl: `${site}/auth/`,
+    siteUrl: `${site}/auth/`, hostKey: hostKeyOf(`${site}/auth/`),
     config: {
       siteUrl: `${site}/auth/`,
       maxPages: 30,
@@ -243,6 +263,25 @@ beforeAll(async () => {
       res.on("close", () => clearTimeout(timer));
       return;
     }
+    // THE HEADER-GATED AREA: the same tree, gated on a custom request header.
+    const hdr = /^\/hdr\/(\d*)$/.exec(path);
+    if (hdr !== null) {
+      const value = req.headers["x-fixture-key"];
+      headerSeen.push(Array.isArray(value) ? value.join(",") : value);
+      if (value !== HEADER_VALUE) {
+        res.writeHead(401, { "content-type": "text/plain" });
+        res.end("credentials required");
+        return;
+      }
+      const n = hdr[1] === "" ? 0 : Number(hdr[1]);
+      const links = Array.from({ length: 3 }, (_, i) => `<a href="/hdr/${n * 3 + i + 1}">h</a>`).join("");
+      const timer = setTimeout(() => {
+        res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+        res.end(`<!doctype html><html lang="en"><head><title>Header ${n}</title></head><body>${links}</body></html>`);
+      }, PAGE_DELAY_MS);
+      res.on("close", () => clearTimeout(timer));
+      return;
+    }
     // An open endless slow tree: a blocker that holds the queue.
     const slow = /^\/slow\/(\d*)$/.exec(path);
     if (slow !== null) {
@@ -283,15 +322,35 @@ afterAll(async () => {
   await rm(renderDir, { recursive: true, force: true });
 }, 60_000);
 
-describe("after a restart, a crawl that needed credentials is refused until they are sent again", () => {
-  it("crawl_resume and crawl_render refuse CREDENTIALS_REQUIRED and write nothing; a resume with them finishes with no 401 row", async () => {
-    const id = await start({ siteUrl: `${site}/auth/`, maxPages: 30, httpAuth: AUTH });
+describe("a restart keeps a crawl's credentials; a server with another key cannot read them", () => {
+  it("a crawl started with requestHeaders on server A is resumed on a fresh server B with none sent, and the site sees the header", async () => {
+    const id = await start({ siteUrl: `${site}/hdr/`, maxPages: 30, requestHeaders: { "X-Fixture-Key": HEADER_VALUE } });
     await until("running with pages", id, (b) => b["status"] === "running" && (b["frontier"] as { done: number }).done >= 1);
     expect((await call("POST", `/crawls/${id}/pause`)).status).toBe(202);
     await until("paused", id, (b) => b["status"] === "paused");
 
     await restart();
-    expect(held().has(id)).toBe(false);
+    headerSeen.length = 0;
+    const resumed = await call("POST", `/crawls/${id}/resume`);
+    expect(resumed.status, resumed.text).toBe(202);
+    const final = await until("finished", id, settled);
+    expect(final["status"]).toBe("finished");
+    expect(final["pagesCrawled"]).toBe(30);
+    expect(headerSeen.length).toBeGreaterThan(0);
+    expect(headerSeen.every((value) => value === HEADER_VALUE)).toBe(true);
+    expect(await refusedRows(id)).toBe(0);
+    expectNoSecret(resumed.text, "the resume answer");
+    expectNoSecret(JSON.stringify(await storedConfig(id)), "config_jsonb");
+    expectNoSecret(serverLog.join("\n"), "the server log");
+  }, 120_000);
+
+  it("server B with a different key answers crawl_resume and crawl_render 409 CREDENTIALS_REQUIRED and writes nothing; resumed with them, it finishes", async () => {
+    const id = await start({ siteUrl: `${site}/auth/`, maxPages: 30, httpAuth: AUTH });
+    await until("running with pages", id, (b) => b["status"] === "running" && (b["frontier"] as { done: number }).done >= 1);
+    expect((await call("POST", `/crawls/${id}/pause`)).status).toBe(202);
+    await until("paused", id, (b) => b["status"] === "paused");
+
+    await restart({ current: otherKey("another-key", 0x42) });
     const restartedAt = serverLog.length;
     const before = await written(id);
 
@@ -305,14 +364,6 @@ describe("after a restart, a crawl that needed credentials is refused until they
     expect(rendered.status, rendered.text).toBe(409);
     expect(rendered.body["code"]).toBe("CREDENTIALS_REQUIRED");
     expect(String(rendered.body["error"])).toContain("httpAuth");
-
-    // The MCP server is another process's service with an empty map: the same refusal.
-    const viaTool = await tool("crawl_resume", { crawlId: id });
-    expect(viaTool.isError).toBe(true);
-    expect(viaTool.body["code"]).toBe("CREDENTIALS_REQUIRED");
-    const renderTool = await tool("crawl_render", { crawlId: id });
-    expect(renderTool.isError).toBe(true);
-    expect(renderTool.body["code"]).toBe("CREDENTIALS_REQUIRED");
 
     // Credentials of another shape are a bad request, naming the names only.
     const wrongShape = await call("POST", `/crawls/${id}/resume`, { cookies: [{ name: "sid", value: COOKIE_VALUE }] });
@@ -332,45 +383,62 @@ describe("after a restart, a crawl that needed credentials is refused until they
     await sleep(300);
     expect((await detail(id))["status"]).toBe("paused");
     expect(await written(id)).toEqual(before);
-    expect(held().has(id)).toBe(false);
-    expect(serverLog.slice(restartedAt).filter((line) => line.includes(id))).toEqual([]);
+    // The unreadable copy is logged by reason, never by value.
+    const logged = serverLog.slice(restartedAt).filter((line) => line.includes(id));
+    expect(logged.length).toBeGreaterThan(0);
+    expect(logged.every((line) => line.includes("unknown-key"))).toBe(true);
+    // Still the row the first key wrote: a refusal stores nothing.
+    expect((await db.select({ k: crawlCredentials.keyId }).from(crawlCredentials).where(eq(crawlCredentials.crawlId, id)))[0]?.k).toBe("test-k1");
 
     const ok = await call("POST", `/crawls/${id}/resume`, { httpAuth: AUTH });
     expect(ok.status, ok.text).toBe(202);
     const final = await until("finished", id, settled);
     expect(final["status"]).toBe("finished");
     expect(final["pagesCrawled"]).toBe(30);
-    const refused = await db
-      .select({ n: sql<number>`count(*)::int` })
-      .from(pages)
-      .where(and(eq(pages.crawlId, id), sql`(${pages.fetchClass} = 'client_error' or ${pages.statusCode} = 401)`));
-    expect(refused[0]?.n).toBe(0);
+    expect(await refusedRows(id)).toBe(0);
+    // Re-supplied, the values were re-encrypted under the server's key.
+    expect((await db.select({ k: crawlCredentials.keyId }).from(crawlCredentials).where(eq(crawlCredentials.crawlId, id)))[0]?.k).toBe("another-key");
 
-    for (const text of [resumed.text, rendered.text, viaTool.text, renderTool.text, wrongShape.text, marker.text, ok.text]) {
+    for (const text of [resumed.text, rendered.text, wrongShape.text, marker.text, ok.text]) {
       expectNoSecret(text, "a resume/render answer");
     }
     expectNoSecret(JSON.stringify(await storedConfig(id)), "config_jsonb");
     expectNoSecret(serverLog.join("\n"), "the server log");
+    await restart();
   }, 120_000);
 
-  it("crawl_render on a finished crawl after a restart: refused without them, renders the gated page with them", async () => {
+  it("crawl_render on a finished crawl after a restart renders the gated page with the stored copy, and stores what it is sent", async () => {
     const id = await start({ siteUrl: `${site}/auth/`, maxPages: 4, httpAuth: AUTH });
     expect((await until("finished", id, settled))["status"]).toBe("finished");
     await restart();
 
-    const refused = await call("POST", `/crawls/${id}/render`, { urls: [`${site}/auth/`] });
-    expect(refused.status, refused.text).toBe(409);
-    expect(refused.body["code"]).toBe("CREDENTIALS_REQUIRED");
+    const kept = await call("POST", `/crawls/${id}/render`, { urls: [`${site}/auth/`] });
+    expect(kept.status, kept.text).toBe(200);
+    expect(kept.body["rendered"]).toBe(1);
+    expect(kept.body["failures"]).toBe(0);
 
+    const [before] = await db.select({ g: crawls.credentialGeneration }).from(crawls).where(eq(crawls.id, id));
     const res = await call("POST", `/crawls/${id}/render`, { urls: [`${site}/auth/`], httpAuth: AUTH });
     expect(res.status, res.text).toBe(200);
     expect(res.body["rendered"]).toBe(1);
-    expect(res.body["failures"]).toBe(0);
-    // Kept for the next pass (Deviation 9: until delete or cancel).
-    expect(held().has(id)).toBe(true);
+    // Stored for the next pass (Deviation 9: until delete or cancel), as a new generation.
+    const [after] = await db.select({ g: crawls.credentialGeneration }).from(crawls).where(eq(crawls.id, id));
+    expect(after?.g).toBe((before?.g ?? 0) + 1);
+    expect(await storedValues(id)).toEqual({ httpAuth: AUTH });
     expect((await call("POST", `/crawls/${id}/render`, { urls: [`${site}/auth/`] })).status).toBe(200);
-    expectNoSecret(res.text, "the render answer");
+    expectNoSecret(kept.text + res.text, "the render answers");
     expectNoSecret(serverLog.join("\n"), "the server log");
+  }, 120_000);
+
+  it("the MCP server, another service on the same database and key, resumes with the stored copy too", async () => {
+    const id = await start({ siteUrl: `${site}/auth/`, maxPages: 30, httpAuth: AUTH });
+    await until("running with pages", id, (b) => b["status"] === "running" && (b["frontier"] as { done: number }).done >= 1);
+    expect((await call("POST", `/crawls/${id}/pause`)).status).toBe(202);
+    await until("paused", id, (b) => b["status"] === "paused");
+    const viaTool = await tool("crawl_resume", { crawlId: id });
+    expect(viaTool.isError, viaTool.text).toBe(false);
+    expect((await until("finished", id, settled))["status"]).toBe("finished");
+    expect(await refusedRows(id)).toBe(0);
   }, 120_000);
 
   it("crawl_resume and crawl_render publish the three credential fields as secrets over MCP", async () => {
@@ -393,14 +461,14 @@ describe("after a restart, a crawl that needed credentials is refused until they
   });
 });
 
-describe("crawl_config_set takes credentials while the crawl is paused, into memory only", () => {
+describe("crawl_config_set takes credentials while the crawl is paused, into the vault", () => {
   const shape = (headers: string[], httpAuth: boolean, cookies: string[]) => ({
     requestHeaderNames: headers,
     httpAuth,
     cookieNames: cookies,
   });
 
-  it("replaces the held values and the stored shape; the row holds names, never a value", async () => {
+  it("replaces the stored values and the stored shape; the row holds names, never a value", async () => {
     const id = await seedPaused(shape([], true, []));
     const res = await call("PATCH", `/crawls/${id}/config`, {
       crawl: { httpAuth: AUTH, cookies: [{ name: "sid", value: COOKIE_VALUE }], requestHeaders: { "X-Tenant": HEADER_VALUE } },
@@ -414,17 +482,17 @@ describe("crawl_config_set takes credentials while the crawl is paused, into mem
     expect(crawl).not.toHaveProperty("credentialShape");
     expect((await storedConfig(id))["credentialShape"]).toEqual(shape(["x-tenant"], true, ["sid"]));
     expectNoSecret(JSON.stringify(await storedConfig(id)), "config_jsonb");
-    expect(held().get(id)).toEqual({
+    expect(await storedValues(id)).toEqual({
       httpAuth: AUTH,
       cookies: [{ name: "sid", value: COOKIE_VALUE }],
       requestHeaders: { "X-Tenant": HEADER_VALUE },
     });
 
-    // An empty list drops that kind; the others are kept from memory.
+    // An empty list drops that kind; the others are kept from the stored copy.
     const dropped = await call("PATCH", `/crawls/${id}/config`, { crawl: { cookies: [], requestHeaders: {} } });
     expect(dropped.status, dropped.text).toBe(200);
     expect((await storedConfig(id))["credentialShape"]).toEqual(shape([], true, []));
-    expect(held().get(id)).toEqual({ httpAuth: AUTH });
+    expect(await storedValues(id)).toEqual({ httpAuth: AUTH });
     const view = dropped.body["crawl"] as Record<string, unknown>;
     expect(view).not.toHaveProperty("cookies");
     expect(view).not.toHaveProperty("requestHeaders");
@@ -435,7 +503,7 @@ describe("crawl_config_set takes credentials while the crawl is paused, into mem
     const id = await seedPaused(shape([], true, ["sid"]));
     const before = await storedConfig(id);
 
-    // Nothing held (as after a restart) and the patch leaves the cookie out.
+    // No stored copy (a row from before 28b, or one swept) and the patch leaves the cookie out.
     const incomplete = await call("PATCH", `/crawls/${id}/config`, { crawl: { httpAuth: AUTH } });
     expect(incomplete.status, incomplete.text).toBe(409);
     expect(incomplete.body["code"]).toBe("CREDENTIALS_REQUIRED");
@@ -463,11 +531,11 @@ describe("crawl_config_set takes credentials while the crawl is paused, into mem
     const busy = await call("PATCH", `/crawls/${running}/config`, { crawl: { httpAuth: AUTH } });
     expect(busy.status, busy.text).toBe(409);
     expect(String(busy.body["error"])).toContain("whenPaused");
-    expect(held().has(running)).toBe(false);
+    expect(await stored(running)).toBe(false);
 
     for (const r of [incomplete, echoed, partial, invalid, busy]) expectNoSecret(r.text, "a refusal");
     expect(await storedConfig(id)).toEqual(before);
-    expect(held().has(id)).toBe(false);
+    expect(await stored(id)).toBe(false);
     expect((await db.select({ at: crawls.scopeChangedAt }).from(crawls).where(eq(crawls.id, id)))[0]?.at).toBeNull();
   });
 
@@ -494,43 +562,51 @@ describe("crawl_config_set takes credentials while the crawl is paused, into mem
   });
 });
 
-describe("a cancel or a delete drops the credentials (Deviation 9)", () => {
+describe("a cancel or a delete removes the stored credentials (Deviation 9)", () => {
   it("cancelling a queued crawl, cancelling a paused one, deleting one, and a running crawl that ends cancelled", async () => {
     const blocker = await start({ siteUrl: `${site}/slow/`, maxPages: 100_000 });
     await until("the blocker runs", blocker, (b) => b["status"] === "running");
 
     const queued = await start({ siteUrl: `${site}/auth/`, maxPages: 5, httpAuth: AUTH });
     expect((await detail(queued))["status"]).toBe("queued");
-    expect(held().has(queued)).toBe(true);
+    expect(await stored(queued)).toBe(true);
     expect((await call("POST", `/crawls/${queued}/cancel`)).status).toBe(200);
-    expect(held().has(queued)).toBe(false);
+    expect(await stored(queued)).toBe(false);
 
     const paused = await start({ siteUrl: `${site}/auth/`, maxPages: 5, httpAuth: AUTH });
     expect((await call("POST", `/crawls/${paused}/pause`)).status).toBe(200);
-    expect(held().has(paused)).toBe(true);
+    expect(await stored(paused)).toBe(true);
     expect((await call("POST", `/crawls/${paused}/cancel`)).status).toBe(200);
-    expect(held().has(paused)).toBe(false);
+    expect(await stored(paused)).toBe(false);
+    // While the blocker crawls the same site, a render is refused for the host
+    // first (28b T4a: a busy refusal comes before the request's own checks).
+    const busy = await call("POST", `/crawls/${paused}/render`);
+    expect(busy.status, busy.text).toBe(409);
+    expect(busy.body["code"]).toBe("HOST_BUSY");
+
+    const deleted = await start({ siteUrl: `${site}/auth/`, maxPages: 5, httpAuth: AUTH });
+    expect((await call("POST", `/crawls/${deleted}/pause`)).status).toBe(200);
+    expect(await stored(deleted)).toBe(true);
+    const gone = await call("DELETE", `/crawls/${deleted}?confirm=${deleted}`);
+    expect(gone.status, gone.text).toBe(200);
+    expect((gone.body["rows"] as Record<string, number>)["crawl_credentials"]).toBe(1);
+    expect(await stored(deleted)).toBe(false);
+
+    expect([200, 202]).toContain((await call("POST", `/crawls/${blocker}/cancel`)).status);
+    await until("the blocker closes", blocker, settled);
+    // The host free, the cancelled crawl's render meets its removed credentials.
     const render = await call("POST", `/crawls/${paused}/render`);
     expect(render.status, render.text).toBe(409);
     expect(render.body["code"]).toBe("CREDENTIALS_REQUIRED");
 
-    const deleted = await start({ siteUrl: `${site}/auth/`, maxPages: 5, httpAuth: AUTH });
-    expect((await call("POST", `/crawls/${deleted}/pause`)).status).toBe(200);
-    expect(held().has(deleted)).toBe(true);
-    expect((await call("DELETE", `/crawls/${deleted}?confirm=${deleted}`)).status).toBe(200);
-    expect(held().has(deleted)).toBe(false);
-
-    expect([200, 202]).toContain((await call("POST", `/crawls/${blocker}/cancel`)).status);
-    await until("the blocker closes", blocker, settled);
-
     const running = await start({ siteUrl: `${site}/auth/`, maxPages: 1000, httpAuth: AUTH });
     await until("running", running, (b) => b["status"] === "running");
-    expect(held().has(running)).toBe(true);
+    expect(await stored(running)).toBe(true);
     expect((await call("POST", `/crawls/${running}/cancel`)).status).toBe(202);
     expect((await until("cancelled", running, settled))["status"]).toBe("cancelled");
-    // The runner drops the entry once the loop has returned, just after the row closes.
-    for (let i = 0; i < 100 && held().has(running); i += 1) await sleep(20);
-    expect(held().has(running)).toBe(false);
+    // The runner removes the row once the loop has returned, just after the row closes.
+    for (let i = 0; i < 100 && (await stored(running)); i += 1) await sleep(20);
+    expect(await stored(running)).toBe(false);
   }, 120_000);
 });
 
@@ -569,10 +645,10 @@ describe("27c T9 fix 1", () => {
     await until("paused", id, (b) => b["status"] === "paused");
     await restart();
 
-    // PATCH /config takes the whole set too (replacing what is held, i.e. nothing).
+    // PATCH /config takes the whole set too (replacing the stored copy).
     const patched = await call("PATCH", `/crawls/${id}/config`, { crawl: maximal });
     expect(patched.status, patched.text.slice(0, 300)).toBe(200);
-    expect(held().get(id)).toEqual(maximal);
+    expect(await storedValues(id)).toEqual(maximal);
     await restart();
 
     const resumed = await call("POST", `/crawls/${id}/resume`, maximal);
@@ -588,7 +664,7 @@ describe("27c T9 fix 1", () => {
     expectNoSecret(serverLog.join("\n"), "the server log");
   }, 120_000);
 
-  it("a refused render leaves the held credentials as they were: a later resume without them still gets through", async () => {
+  it("a refused render leaves the stored credentials as they were: a later resume without them still gets through", async () => {
     const id = await start({ siteUrl: `${site}/auth/`, maxPages: 30, httpAuth: AUTH });
     await until("running with pages", id, (b) => b["status"] === "running" && (b["frontier"] as { done: number }).done >= 1);
     expect((await call("POST", `/crawls/${id}/pause`)).status).toBe(202);
@@ -598,7 +674,7 @@ describe("27c T9 fix 1", () => {
     const refused = await call("POST", `/crawls/${id}/render`, { urls: [`${site}/auth/never-crawled`], httpAuth: wrong });
     expect(refused.status, refused.text).toBe(400);
     expectNoSecret(refused.text, "the render refusal");
-    expect(held().get(id)).toEqual({ httpAuth: AUTH });
+    expect(await storedValues(id)).toEqual({ httpAuth: AUTH });
 
     const resumed = await call("POST", `/crawls/${id}/resume`);
     expect(resumed.status, resumed.text).toBe(202);
@@ -607,7 +683,7 @@ describe("27c T9 fix 1", () => {
     expect(await okRows(id)).toBe(30);
   }, 120_000);
 
-  it("httpAuth null removes Basic auth from the held values and the stored shape", async () => {
+  it("httpAuth null removes Basic auth from the stored values and the stored shape", async () => {
     const id = await seedPaused({ requestHeaderNames: [], httpAuth: true, cookieNames: ["sid"] });
     const filled = await call("PATCH", `/crawls/${id}/config`, {
       crawl: { httpAuth: AUTH, cookies: [{ name: "sid", value: COOKIE_VALUE }] },
@@ -617,7 +693,7 @@ describe("27c T9 fix 1", () => {
     const removed = await call("PATCH", `/crawls/${id}/config`, { crawl: { httpAuth: null } });
     expect(removed.status, removed.text).toBe(200);
     expect((await storedConfig(id))["credentialShape"]).toEqual({ requestHeaderNames: [], httpAuth: false, cookieNames: ["sid"] });
-    expect(held().get(id)).toEqual({ cookies: [{ name: "sid", value: COOKIE_VALUE }] });
+    expect(await storedValues(id)).toEqual({ cookies: [{ name: "sid", value: COOKIE_VALUE }] });
     expect(removed.body["crawl"]).not.toHaveProperty("httpAuth");
     expect((removed.body["crawl"] as Record<string, unknown>)["cookies"]).toEqual([{ name: "sid", value: "[redacted]" }]);
 
@@ -627,10 +703,10 @@ describe("27c T9 fix 1", () => {
     expect(nulled.status).toBe(400);
     expect(String(nulled.body["error"])).toContain("no unset");
 
-    // The last kind gone, the shape goes with it, and nothing is held.
+    // The last kind gone, the shape goes with it, and so does the stored copy.
     expect((await call("PATCH", `/crawls/${id}/config`, { crawl: { cookies: [] } })).status).toBe(200);
     expect(await storedConfig(id)).not.toHaveProperty("credentialShape");
-    expect(held().has(id)).toBe(false);
+    expect(await stored(id)).toBe(false);
 
     // On a running crawl a removal is a change, refused while it runs.
     const running = await seedPaused({ requestHeaderNames: [], httpAuth: true, cookieNames: [] }, "running");

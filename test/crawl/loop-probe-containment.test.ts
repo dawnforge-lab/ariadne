@@ -25,7 +25,7 @@ import { runMigrations } from "../../src/db/migrate.js";
 import { crawls } from "../../src/db/schema.js";
 import { closeFetchAgents } from "../../src/crawl/http.js";
 import { runCrawl, type CrawlConfig } from "../../src/crawl/loop.js";
-import { LOCAL_TENANT } from "../../src/api/tenant.js";
+import { LOCAL_TENANT } from "../../src/tenant.js";
 
 /** The message the mocked analyzer throws for the probe URL, and only for it. */
 const POISON = "poisoned analyzer: the probe body blew up";

@@ -26,7 +26,9 @@ import { closeFetchAgents } from "../../src/crawl/http.js";
 import { createApiServer, type ApiServer } from "../../src/api/http.js";
 import { createMcpServer, type AriadneMcpServer } from "../../src/api/mcp.js";
 import { loadMcpConfig } from "../../src/api/config.js";
-import { parseTenant, type TenantId } from "../../src/api/tenant.js";
+import { parseTenant, type TenantId } from "../../src/tenant.js";
+import { TEST_CREDENTIAL_KEYS } from "../helpers/credential-keys.js";
+import { hostKeyOf } from "../../src/crawl/host-key.js";
 
 const TOKEN = "test-token-tenancy-0123456789abcdef";
 const RUN = randomUUID().slice(0, 8);
@@ -172,6 +174,7 @@ beforeAll(async () => {
   site = `http://127.0.0.1:${typeof address === "object" && address !== null ? address.port : 0}`;
 
   const service = {
+    credentialKeys: TEST_CREDENTIAL_KEYS,
     allowedDomains: ["127.0.0.1"],
     crawlDefaults: { allowPrivate: true, probeHosts: false, perHostDelayMs: 0 },
     exportDir,
@@ -303,7 +306,7 @@ describe("a crawl outside the caller's tenant", () => {
     await db.insert(crawls).values({
       id: betaCrawl,
       tenantId: BETA,
-      siteUrl: "http://beta-only.example/",
+      siteUrl: "http://beta-only.example/", hostKey: hostKeyOf("http://beta-only.example/"),
       config: { siteUrl: "http://beta-only.example/" },
       rulesetVersion: "0.0.0-test",
       status: "finished",

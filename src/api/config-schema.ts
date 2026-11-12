@@ -180,9 +180,9 @@ export interface CrawlField {
   /** The engine's value when the field is absent. Published, never applied. */
   default?: unknown;
   /**
-   * A credential (27c): its value is held only in the API process's memory —
-   * never stored, logged, quoted in a refusal or answered — and the published
-   * schema marks it `x-ariadne-secret: true`.
+   * A credential (27c): its value is stored only encrypted (28b,
+   * `CredentialVault`) — never in clear, logged, quoted in a refusal or
+   * answered — and the published schema marks it `x-ariadne-secret: true`.
    */
   secret?: true;
   /**
@@ -288,11 +288,13 @@ function credentialSchema<T>(field: keyof CrawlCredentials): z.ZodType<T> {
 }
 
 const SECRET_NOTE =
-  "SECRET: held only in this server's memory for the crawl — never stored, logged or " +
-  "answered; crawl_config_get shows which were supplied and the names, never a value. " +
-  "Sent only to the site's own hosts (its www/apex and http→https spellings), including " +
-  "robots.txt and sitemaps, never to another host. After a server restart they must be " +
-  "supplied again (CREDENTIALS_REQUIRED).";
+  "SECRET: stored only encrypted, for this crawl's resumes and renders, and deleted on " +
+  "cancel, on delete, or a retention period (30 days by default) after the crawl " +
+  "finishes — never logged or answered; " +
+  "crawl_config_get shows which were supplied and the names, never a value. Sent only " +
+  "to the site's own hosts (its www/apex and http→https spellings), including robots.txt " +
+  "and sitemaps, never to another host. When the stored copy cannot be read, resume and " +
+  "render answer CREDENTIALS_REQUIRED until they are supplied again.";
 
 /**
  * The wire's whole crawl vocabulary, in the order an unknown-field refusal

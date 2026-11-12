@@ -78,7 +78,9 @@ import {
   metricTableSummary,
   SITE_SCOPE_VALUE,
 } from "../../src/rules/registry/registry.js";
-import { LOCAL_TENANT } from "../../src/api/tenant.js";
+import { LOCAL_TENANT } from "../../src/tenant.js";
+import { TEST_CREDENTIAL_KEYS } from "../helpers/credential-keys.js";
+import { hostKeyOf } from "../../src/crawl/host-key.js";
 
 let db: Db;
 
@@ -181,6 +183,7 @@ beforeAll(async () => {
   site = `http://127.0.0.1:${typeof addr === "object" && addr !== null ? addr.port : 0}`;
 
   demo = createDemoServer({
+    credentialKeys: TEST_CREDENTIAL_KEYS,
     db,
     // PROCESS TRUST, not wire trust: the fixture is on loopback and the wire
     // cannot ask for that at any value. The `npm run demo` entrypoint passes
@@ -191,7 +194,7 @@ beforeAll(async () => {
   const bound = await demo.listen(0, "127.0.0.1");
   base = `http://127.0.0.1:${bound.port}`;
 
-  strict = createDemoServer({ db });
+  strict = createDemoServer({ db, credentialKeys: TEST_CREDENTIAL_KEYS });
   const strictBound = await strict.listen(0, "127.0.0.1");
   strictBase = `http://127.0.0.1:${strictBound.port}`;
 }, 60_000);
@@ -911,7 +914,7 @@ describe("a client that leaves mid-export", () => {
     await db.insert(crawls).values({
       tenantId: LOCAL_TENANT,
       id,
-      siteUrl: "http://seeded.example/",
+      siteUrl: "http://seeded.example/", hostKey: hostKeyOf("http://seeded.example/"),
       config: {
         siteUrl: "http://seeded.example/",
         maxPages: 10,
@@ -972,7 +975,7 @@ describe("a client that leaves mid-export", () => {
     const id = await seedFindings();
     // Its own server: the assertion is about close(), and the shared one has to
     // survive the rest of the file.
-    const own = createDemoServer({ db });
+    const own = createDemoServer({ db, credentialKeys: TEST_CREDENTIAL_KEYS });
     const bound = await own.listen(0, "127.0.0.1");
     await abortAfterFirstBytes(bound.port, `/api/crawls/${id}/export?format=csv&view=issues`);
 

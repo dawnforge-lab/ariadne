@@ -40,7 +40,8 @@ import { deriveSitemapHreflang } from "../../src/rules/derive/sitemap-hreflang.j
 import { hreflangIntegrityRules } from "../../src/rules/query/hreflang-integrity.js";
 import { hreflangRules } from "../../src/rules/query/hreflang.js";
 import type { Finding } from "../../src/rules/registry/types.js";
-import { LOCAL_TENANT } from "../../src/api/tenant.js";
+import { LOCAL_TENANT } from "../../src/tenant.js";
+import { TEST_CREDENTIAL_KEYS } from "../helpers/credential-keys.js";
 
 /** The spec's stop target: one poll interval, plus one second for the close. */
 const STOP_TARGET_MS = CONTROL_POLL_MS + 1_000;
@@ -488,7 +489,7 @@ describe("a stop during the host probe", () => {
  * never ran.
  */
 async function expectNeverRan(id: string): Promise<void> {
-  const service = new ApiService(db, { allowedDomains: ["127.0.0.1"], log: () => {} });
+  const service = new ApiService(db, { credentialKeys: TEST_CREDENTIAL_KEYS, allowedDomains: ["127.0.0.1"], log: () => {} });
   const detail = await service.getCrawl(LOCAL_TENANT, id);
   expect(detail.status).toBe("cancelled");
   expect(detail.neverFetched).toBeNull();
@@ -1078,6 +1079,7 @@ describe("a stop during the render pass", () => {
     expect(first.status).toBe("finished");
 
     const service = new ApiService(db, {
+      credentialKeys: TEST_CREDENTIAL_KEYS,
       allowedDomains: ["127.0.0.1"],
       crawlDefaults: { allowPrivate: true, probeHosts: false, perHostDelayMs: 0 },
       renderDir,

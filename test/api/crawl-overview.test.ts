@@ -22,7 +22,9 @@ import { crawls, frontier, issues, pages, resources, sitemapUrls } from "../../s
 import type { PageRecord } from "../../src/rules/registry/types.js";
 import { mkDiscovery } from "../rules/mk-discovery.js";
 import { mkPage } from "../rules/mk-page.js";
-import { LOCAL_TENANT } from "../../src/api/tenant.js";
+import { LOCAL_TENANT } from "../../src/tenant.js";
+import { TEST_CREDENTIAL_KEYS } from "../helpers/credential-keys.js";
+import { hostKeyOf } from "../../src/crawl/host-key.js";
 
 function databaseUrl(): string {
   const url = process.env.DATABASE_URL;
@@ -55,7 +57,7 @@ async function seedCrawl(
   await db.insert(crawls).values({
     tenantId: LOCAL_TENANT,
     id,
-    siteUrl: `${SITE}/`,
+    siteUrl: `${SITE}/`, hostKey: hostKeyOf(`${SITE}/`),
     config: { siteUrl: `${SITE}/`, maxPages: 100, userAgent: "AriadneBot-test" },
     discovery: mkDiscovery(),
     rulesetVersion: "test",
@@ -146,7 +148,7 @@ beforeAll(async () => {
   db = createDb(databaseUrl());
   await runMigrations(db);
   exportDir = await mkdtemp(join(tmpdir(), "ariadne-crawl-overview-"));
-  service = new ApiService(db, { allowedDomains: [], exportDir, log: () => {} });
+  service = new ApiService(db, { credentialKeys: TEST_CREDENTIAL_KEYS, allowedDomains: [], exportDir, log: () => {} });
 
   // The judged, unrendered fixture: six response-time edges, a PDF, a 404 and a
   // robots-blocked row (never requested, so no response time).
@@ -195,6 +197,7 @@ beforeAll(async () => {
     url: `${SITE}/a`,
     urlNormalised: `${SITE}/a`,
     sitemapSource: `${SITE}/sitemap.xml`,
+    seenAt: new Date(),
   });
   await db.insert(resources).values([
     { crawlId, url: `${SITE}/i1.png`, kind: "image" },
@@ -470,7 +473,7 @@ describe("crawl_overview on other crawls", () => {
   it("serves the same answer at GET /crawls/:id/overview/crawl", async () => {
     const api = createApiServer({
       db,
-      config: { token: "t", allowedDomains: [], exportDir, log: () => {} },
+      config: { credentialKeys: TEST_CREDENTIAL_KEYS, token: "t", allowedDomains: [], exportDir, log: () => {} },
     });
     const { port } = await api.listen(0);
     try {
@@ -532,7 +535,7 @@ describe("the overviews read the judgement inside their snapshot", () => {
         };
       },
     }) as Db;
-    raced = new ApiService(rigged, { allowedDomains: [], exportDir, log: () => {} });
+    raced = new ApiService(rigged, { credentialKeys: TEST_CREDENTIAL_KEYS, allowedDomains: [], exportDir, log: () => {} });
   });
 
   afterAll(async () => {

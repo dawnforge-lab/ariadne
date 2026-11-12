@@ -21,7 +21,7 @@ import { and, eq, getTableName, inArray, sql } from "drizzle-orm";
 
 import { closeDb, createDb, type Db } from "../../src/db/client.js";
 import { runMigrations } from "../../src/db/migrate.js";
-import { crawls, issues, pages } from "../../src/db/schema.js";
+import { crawlCredentials, crawls, issues, pages } from "../../src/db/schema.js";
 import { closeFetchAgents } from "../../src/crawl/http.js";
 import { normalizeUrl } from "../../src/crawl/parse/url-utils.js";
 import { createApiServer, type ApiServer } from "../../src/api/http.js";
@@ -31,6 +31,7 @@ import { allFixtures } from "./fixture.js";
 import { CHAIN_LENGTH, startFixtureApp, type FixtureApp } from "./app.js";
 import { startAssetHost, type AssetHost } from "./assets.js";
 import { startOffsiteHost, type OffsiteHost } from "./pages/render-p5.js";
+import { TEST_CREDENTIAL_KEYS } from "../helpers/credential-keys.js";
 
 const TOKEN = "test-token-scope-and-requests-0123456789";
 
@@ -148,6 +149,7 @@ beforeAll(async () => {
   api = createApiServer({
     db,
     config: {
+      credentialKeys: TEST_CREDENTIAL_KEYS,
       token: TOKEN,
       allowedDomains: ["127.0.0.1"],
       // `recheckMinGapMs`: the site serves a 5xx, whose recheck would otherwise
@@ -376,6 +378,19 @@ describe("the secret scan", () => {
             and ${sql.identifier(column_name)}::text like ${`%${secret}%`}
         `);
         expect((hit.rows[0] as { n: number }).n, `${table_name}.${column_name} holds '${secret}'`).toBe(0);
+      }
+    }
+
+    // The one column that holds the values (28b): encrypted, so its bytes carry
+    // none of them as UTF-8. Only this suite's own crawls: the table is shared, and a 3-byte secret would collide with other suites' ciphertext by chance.
+    const vaultRows = await db
+      .select({ crawlId: crawlCredentials.crawlId, ciphertext: crawlCredentials.ciphertext })
+      .from(crawlCredentials)
+      .where(inArray(crawlCredentials.crawlId, createdCrawls));
+    expect(vaultRows.map((r) => r.crawlId)).toContain(id);
+    for (const { crawlId, ciphertext } of vaultRows) {
+      for (const secret of SCAN_SECRETS) {
+        expect(ciphertext.includes(Buffer.from(secret, "utf8")), `crawl_credentials.ciphertext of ${crawlId} holds '${secret}'`).toBe(false);
       }
     }
 

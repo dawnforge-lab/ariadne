@@ -26,7 +26,9 @@ import { crawls } from "../../src/db/schema.js";
 import { closeFetchAgents } from "../../src/crawl/http.js";
 import { createApiServer, type ApiServer } from "../../src/api/http.js";
 import { loadApiConfig } from "../../src/api/config.js";
-import { LOCAL_TENANT } from "../../src/api/tenant.js";
+import { LOCAL_TENANT } from "../../src/tenant.js";
+import { TEST_CREDENTIAL_KEYS } from "../helpers/credential-keys.js";
+import { hostKeyOf } from "../../src/crawl/host-key.js";
 
 const TOKEN = "test-token-0123456789abcdef";
 
@@ -120,7 +122,7 @@ async function seedFailedCrawl(siteUrl: string): Promise<string> {
   await db.insert(crawls).values({
     tenantId: LOCAL_TENANT,
     id,
-    siteUrl,
+    siteUrl, hostKey: hostKeyOf(siteUrl),
     config: {
       siteUrl,
       maxPages: 10,
@@ -181,6 +183,7 @@ beforeAll(async () => {
   openApi = createApiServer({
     db,
     config: {
+      credentialKeys: TEST_CREDENTIAL_KEYS,
       token: TOKEN,
       allowedDomains: [],
       allowAnyPublicHost: true,
@@ -197,6 +200,7 @@ beforeAll(async () => {
   openNoPrivateApi = createApiServer({
     db,
     config: {
+      credentialKeys: TEST_CREDENTIAL_KEYS,
       token: TOKEN,
       allowedDomains: [],
       allowAnyPublicHost: true,
@@ -208,7 +212,7 @@ beforeAll(async () => {
 
   controlApi = createApiServer({
     db,
-    config: { token: TOKEN, allowedDomains: [], log: (line) => serverLog.push(line) },
+    config: { credentialKeys: TEST_CREDENTIAL_KEYS, token: TOKEN, allowedDomains: [], log: (line) => serverLog.push(line) },
   });
   const controlBound = await controlApi.listen(0);
   controlBase = `http://127.0.0.1:${controlBound.port}`;

@@ -25,7 +25,8 @@ import type { QueryRule } from "../../src/rules/registry/types.js";
 import { runRules } from "../../src/rules/run.js";
 import { mkDiscovery, mkHostProbe } from "./mk-discovery.js";
 import { mkPage } from "./mk-page.js";
-import { LOCAL_TENANT } from "../../src/api/tenant.js";
+import { LOCAL_TENANT } from "../../src/tenant.js";
+import { hostKeyOf } from "../../src/crawl/host-key.js";
 
 function databaseUrl(): string {
   const url = process.env.DATABASE_URL;
@@ -174,7 +175,7 @@ describe("runRules on a list crawl", () => {
     await db.insert(crawls).values({
       tenantId: LOCAL_TENANT,
       id,
-      siteUrl: SITE,
+      siteUrl: SITE, hostKey: hostKeyOf(SITE),
       config: {
         maxPages: 10_000,
         userAgent: "AriadneBot-test",

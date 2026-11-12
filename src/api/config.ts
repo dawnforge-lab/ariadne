@@ -17,10 +17,12 @@
  */
 import { domainToASCII } from "node:url";
 
+import type { CredentialKeys } from "../crawl/credential-vault.js";
 import type { CrawlConfig } from "../crawl/loop.js";
 import type { AddressResolver } from "../crawl/url-policy.js";
+import type { Timing } from "../worker/timing.js";
 import { ServiceError } from "./errors.js";
-import { parseTenant, type TenantId } from "./tenant.js";
+import { parseTenant, type TenantId } from "../tenant.js";
 
 /**
  * What one engine instance may do, whoever is asking: POLICY, not identity.
@@ -82,14 +84,41 @@ export interface ServiceConfig {
   resolveAddress?: AddressResolver;
   /**
    * TEST ONLY, like `resolveAddress` and `RenderTestFaults`: awaited inside
-   * `crawl_config_set` at two points, `"written"` (the row is updated, the
-   * transaction not yet committed; a throw rolls it back) and `"committed"`
-   * (the transaction has committed, the credential store has not yet settled).
-   * A suite holds the second to dequeue a crawl inside that window (27c M9).
+   * `crawl_config_set` once the row and its credentials are written and the
+   * transaction has not yet committed (`"written"`); a throw rolls both back.
+   * `test/api/credential-vault.test.ts` throws from it to prove a refused
+   * change leaves the stored credentials as they were. (The `"committed"`
+   * phase went with the in-memory credential store in 28b: the values commit
+   * with the row, so there is no window after the commit to hold open.)
    * `loadApiConfig` does not read it, the entrypoints never set it, and no
    * request field may ever map to it.
    */
-  afterConfigWrite?: (phase: "written" | "committed") => Promise<void>;
+  afterConfigWrite?: (phase: "written") => Promise<void>;
+  /**
+   * TEST ONLY, like `afterConfigWrite`: awaited by `crawl_resume` and
+   * `crawl_mark_failed` after their reads have called the crawl's job an
+   * orphan and before the transaction that settles it begins — the window a
+   * live runner can claim that job in (28b T4a fix round 1). A test claims the
+   * job here to prove the call refuses rather than abandon running work.
+   * `loadApiConfig` does not read it, the entrypoints never set it, and no
+   * request field may ever map to it.
+   */
+  beforeOrphanSettle?: (operation: "crawl_resume" | "crawl_mark_failed", crawlId: string) => Promise<void>;
+  /**
+   * The keys crawl credentials are encrypted with (Phase 28b item 10;
+   * `src/crawl/credential-vault.ts`). Required: every process that accepts or
+   * runs crawls holds them, and the entrypoints read them from
+   * `ARIADNE_CREDENTIALS_KEY` (and `ARIADNE_CREDENTIALS_KEY_PREVIOUS`) with
+   * `parseCredentialKeys`, which refuses to boot without a well-formed key.
+   */
+  credentialKeys: CredentialKeys;
+  /**
+   * How many days a settled crawl keeps its stored credentials before the
+   * retention sweep deletes them (`CredentialVault.sweepExpired`). A positive
+   * whole number; 30 when absent. The entrypoints read it from
+   * `ARIADNE_CREDENTIALS_RETENTION_DAYS` (`parseCredentialRetentionDays`).
+   */
+  credentialRetentionDays?: number;
   /**
    * Where `GET /crawls/:id/export` (and the MCP `export_crawl` tool) writes its
    * files. Defaults to `exports/` under the process's working directory, and the
@@ -129,6 +158,28 @@ export interface ServiceConfig {
    */
   renderDir?: string;
   /**
+   * Who runs the crawls this service accepts (Phase 28b):
+   *
+   *  - `"in-process"` (the default): the service owns a `JobRunner` and runs
+   *    them itself, one at a time — the crawl jobs it accepts are pinned to its
+   *    own instance and it runs only those. Today's behaviour, the local MCP
+   *    server's, and every test's.
+   *  - `"workers"`: crawl jobs are left unpinned for the worker processes
+   *    (`worker:serve`, Task 5) and this service runs none. `api:serve` sets it.
+   *
+   * Either way `crawl_render` and `crawl_rules` run synchronously here, under a
+   * job pinned to this process.
+   */
+  crawlRunner?: "in-process" | "workers";
+  /**
+   * The worker clock this service runs on (src/worker/timing.ts): how often it
+   * heartbeats its instance, and how long a silent instance stays live for the
+   * "held" questions (`queuePosition`, `crawl_mark_failed`, `crawl_resume`).
+   * Code-only, like `crawlDefaults`: the entrypoints never set it from the
+   * environment; a test injects a short clock.
+   */
+  timing?: Partial<Timing>;
+  /**
    * Where the server writes its own diagnostics — a queue pick-up, a crawl that
    * threw, the stack behind a 500. Never the response body (a stack trace in a
    * tenant-visible response is obligation 6's failure). Defaults to
@@ -150,6 +201,11 @@ export interface ServiceConfig {
 export interface ApiServerConfig extends ServiceConfig {
   /** Required. Compared constant-time against `Authorization: Bearer <token>`. */
   token: string;
+  /**
+   * `ARIADNE_METRICS_TOKEN`: the bearer `GET /metrics` takes, separate from
+   * `token`. Null or absent: `/metrics` answers 404 and is never open.
+   */
+  metricsToken?: string | null;
 }
 
 /**

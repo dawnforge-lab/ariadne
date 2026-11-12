@@ -17,7 +17,7 @@ import { eq, inArray, sql } from "drizzle-orm";
 import { closeDb, createDb, type Db } from "../../src/db/client.js";
 import { runMigrations } from "../../src/db/migrate.js";
 import { crawls } from "../../src/db/schema.js";
-import { LOCAL_TENANT } from "../../src/api/tenant.js";
+import { LOCAL_TENANT } from "../../src/tenant.js";
 import { DEFAULT_THRESHOLDS, readStamp } from "../../src/rules/judgement.js";
 
 function databaseUrl(): string {
@@ -61,6 +61,7 @@ describe("0033 — a stamp holds the effective thresholds", () => {
           id,
           tenantId: LOCAL_TENANT,
           siteUrl: "https://m33.example",
+          hostKey: "m33.example",
           config: { maxPages: 10 },
           rulesetVersion: "test",
           rulesRunAt,

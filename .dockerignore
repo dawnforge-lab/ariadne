@@ -1,0 +1,13 @@
+.git
+.github
+.claude
+.superpowers
+node_modules
+renders
+exports
+docs
+test
+*.log
+.env
+.env.*
+!.env.compose.example

@@ -9,7 +9,8 @@ import { eq, sql } from "drizzle-orm";
 import { closeDb, createDb, type Db } from "../../src/db/client.js";
 import { runMigrations } from "../../src/db/migrate.js";
 import { crawls, listUrls } from "../../src/db/schema.js";
-import { LOCAL_TENANT } from "../../src/api/tenant.js";
+import { LOCAL_TENANT } from "../../src/tenant.js";
+import { hostKeyOf } from "../../src/crawl/host-key.js";
 
 function databaseUrl(): string {
   const url = process.env.DATABASE_URL;
@@ -22,7 +23,7 @@ const created: string[] = [];
 
 async function newCrawl(): Promise<string> {
   const id = `crawl_${randomUUID()}`;
-  await db.insert(crawls).values({ tenantId: LOCAL_TENANT, id, siteUrl: "https://s.example", config: {}, rulesetVersion: "test" });
+  await db.insert(crawls).values({ tenantId: LOCAL_TENANT, id, siteUrl: "https://s.example", hostKey: hostKeyOf("https://s.example"), config: {}, rulesetVersion: "test" });
   created.push(id);
   return id;
 }

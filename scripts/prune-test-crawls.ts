@@ -42,7 +42,8 @@ import { and, eq, gt, inArray, notExists, sql } from "drizzle-orm";
 import { closeDb, createDb, type Db } from "../src/db/client.js";
 import { crawls, frontier } from "../src/db/schema.js";
 import { ApiService } from "../src/api/service.js";
-import { parseTenant } from "../src/api/tenant.js";
+import { parseCredentialKeys } from "../src/crawl/credential-vault.js";
+import { parseTenant } from "../src/tenant.js";
 
 const RESERVED_LABELS = ["localhost", "test", "example", "invalid"] as const;
 
@@ -238,8 +239,11 @@ async function main(): Promise<void> {
   const args = process.argv.slice(2);
   const unknown = args.filter((a) => a !== "--confirm");
   if (unknown.length > 0) throw new Error(`unknown argument '${unknown[0]}'; the only flag is --confirm`);
+  // The service requires the credential keys (28b); a delete never decrypts,
+  // but the key is read as every entrypoint reads it, with no stand-in.
+  const credentialKeys = parseCredentialKeys(process.env);
   const db = createPruneDb(url);
-  const service = new ApiService(db, { allowedDomains: [], log: () => {} });
+  const service = new ApiService(db, { allowedDomains: [], credentialKeys, log: () => {} });
   try {
     await pruneTestCrawls(db, service, { confirm: args.includes("--confirm") }, (l) => console.log(l));
   } finally {

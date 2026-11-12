@@ -195,6 +195,7 @@ describe("excluded rows and fenced-off URLs", () => {
           url: url(path),
           urlNormalised: url(path),
           sitemapSource: url("/sitemap.xml"),
+          seenAt: new Date(),
           lastmod: null,
         });
       }
@@ -255,6 +256,7 @@ describe("excluded rows and fenced-off URLs", () => {
           url: u,
           urlNormalised: u,
           sitemapSource: url("/sitemap.xml"),
+          seenAt: new Date(),
           lastmod: null,
         })),
       );

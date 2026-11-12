@@ -34,6 +34,7 @@
  */
 
 import type { FetchClass } from "./fetch-page.js";
+import { hostEscalations } from "../ops/metrics.js";
 
 /** What one settled fetch tells the governor. */
 export interface BatchOutcome {
@@ -954,6 +955,7 @@ export class HostGate {
         escalated = true;
         state.escalations += 1;
         state.escalationsTotal += 1;
+        hostEscalations.inc();
         // Strike two: this host has already recovered at least once.
         if (state.recoveries > 0) state.recoveryLocked = true;
         this.spacingGen += 1;

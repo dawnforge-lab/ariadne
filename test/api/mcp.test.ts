@@ -57,7 +57,9 @@ import { RENDER_PASS_EVIDENCE } from "../../src/rules/metric/render-metrics.js";
 import { buildRegistry } from "../../src/rules/index.js";
 import { DEFAULT_THRESHOLDS } from "../../src/rules/judgement.js";
 import { RULESET_VERSION } from "../../src/rules/registry/registry.js";
-import { LOCAL_TENANT } from "../../src/api/tenant.js";
+import { LOCAL_TENANT } from "../../src/tenant.js";
+import { TEST_CREDENTIAL_KEY_ENV, TEST_CREDENTIAL_KEYS } from "../helpers/credential-keys.js";
+import { hostKeyOf } from "../../src/crawl/host-key.js";
 
 /** `crawl_status.recheck.noResponse` on a crawl with no no-response pages. */
 const NO_RESPONSE_ZERO = { pages: 0, confirmed: 0, answered: 0, inconclusive: 0, pending: 0 };
@@ -237,7 +239,7 @@ async function seedCrawl(row: {
   await db.insert(crawls).values({
     tenantId: LOCAL_TENANT,
     id: row.id,
-    siteUrl: row.siteUrl ?? `${SEEDED_SITE}/`,
+    siteUrl: row.siteUrl ?? `${SEEDED_SITE}/`, hostKey: hostKeyOf(row.siteUrl ?? `${SEEDED_SITE}/`),
     config: row.config ?? { siteUrl: `${SEEDED_SITE}/` },
     rulesetVersion: "0.0.0-test",
     status: row.status,
@@ -347,7 +349,7 @@ async function riggedServer(broken: Record<string, () => never>): Promise<{
 
   const server = createMcpServer({
     db: rigged,
-    config: { tenant: LOCAL_TENANT, allowedDomains: ["127.0.0.1"], renderDir, log: (line) => log.push(line) },
+    config: { credentialKeys: TEST_CREDENTIAL_KEYS, tenant: LOCAL_TENANT, allowedDomains: ["127.0.0.1"], renderDir, log: (line) => log.push(line) },
   });
   const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
   const riggedClient = new Client({ name: "ariadne-test-rigged", version: "0.0.1" });
@@ -440,6 +442,7 @@ beforeAll(async () => {
   mcp = createMcpServer({
     db,
     config: {
+      credentialKeys: TEST_CREDENTIAL_KEYS,
       tenant: LOCAL_TENANT, allowedDomains: ["127.0.0.1"],
       // PROCESS TRUST, NOT WIRE TRUST. See the module header.
       crawlDefaults: { allowPrivate: true, probeHosts: false, perHostDelayMs: 0 },
@@ -456,7 +459,7 @@ beforeAll(async () => {
 
   closedMcp = createMcpServer({
     db,
-    config: { tenant: LOCAL_TENANT, allowedDomains: [], exportDir, renderDir, log: (line) => serverLog.push(line) },
+    config: { credentialKeys: TEST_CREDENTIAL_KEYS, tenant: LOCAL_TENANT, allowedDomains: [], exportDir, renderDir, log: (line) => serverLog.push(line) },
   });
   const [closedClientSide, closedServerSide] = InMemoryTransport.createLinkedPair();
   closedClient = new Client({ name: "ariadne-test-closed", version: "0.0.1" });
@@ -1539,6 +1542,7 @@ describe("crawl_resume", () => {
     const server = createMcpServer({
       db,
       config: {
+        credentialKeys: TEST_CREDENTIAL_KEYS,
         tenant: LOCAL_TENANT, allowedDomains: ["127.0.0.1"],
         crawlDefaults: { allowPrivate: true, probeHosts: false, perHostDelayMs: 0 },
         exportDir,
@@ -1568,7 +1572,7 @@ describe("crawl_resume", () => {
     await db.insert(crawls).values({
       tenantId: LOCAL_TENANT,
       id,
-      siteUrl: `${resumeSite}/`,
+      siteUrl: `${resumeSite}/`, hostKey: hostKeyOf(`${resumeSite}/`),
       config: {
         siteUrl: `${resumeSite}/`,
         maxPages: 10,
@@ -2598,6 +2602,7 @@ describe("the two transports answer with one shape", () => {
     http = createApiServer({
       db,
       config: {
+        credentialKeys: TEST_CREDENTIAL_KEYS,
         token: TOKEN,
         allowedDomains: ["127.0.0.1"],
         exportDir,
@@ -2922,7 +2927,13 @@ describe("the stdio entrypoint", () => {
     // real, the crawl is not.
     const child = spawn(process.execPath, ["node_modules/.bin/tsx", "src/api/mcp-serve.ts"], {
       cwd: new URL("../../", import.meta.url).pathname,
-      env: { ...process.env, DATABASE_URL: databaseUrl(), ARIADNE_TENANT: "local", ARIADNE_ALLOWED_DOMAINS: "127.0.0.1" },
+      env: {
+        ...process.env,
+        DATABASE_URL: databaseUrl(),
+        ARIADNE_TENANT: "local",
+        ARIADNE_ALLOWED_DOMAINS: "127.0.0.1",
+        ARIADNE_CREDENTIALS_KEY: TEST_CREDENTIAL_KEY_ENV,
+      },
       stdio: ["pipe", "pipe", "pipe"],
     });
     try {
@@ -2951,6 +2962,50 @@ describe("the stdio entrypoint", () => {
       if (child.exitCode === null) child.kill("SIGKILL");
     }
   }, 60_000);
+});
+
+describe("the stdio entrypoint without a credential key", () => {
+  it("refuses to boot, naming ARIADNE_CREDENTIALS_KEY and quoting nothing of a malformed one (28b)", async () => {
+    const run = async (key: string | undefined): Promise<{ code: number | null; stderr: string }> => {
+      const env: NodeJS.ProcessEnv = {
+        ...process.env,
+        DATABASE_URL: databaseUrl(),
+        ARIADNE_TENANT: "local",
+        ARIADNE_ALLOWED_DOMAINS: "127.0.0.1",
+      };
+      delete env["ARIADNE_CREDENTIALS_KEY"];
+      if (key !== undefined) env["ARIADNE_CREDENTIALS_KEY"] = key;
+      const child = spawn(process.execPath, ["node_modules/.bin/tsx", "src/api/mcp-serve.ts"], {
+        cwd: new URL("../../", import.meta.url).pathname,
+        env,
+        stdio: ["pipe", "pipe", "pipe"],
+      });
+      let stderr = "";
+      child.stderr.on("data", (chunk: Buffer) => {
+        stderr += chunk.toString("utf8");
+      });
+      const code = await new Promise<number | null>((resolve, reject) => {
+        const timer = setTimeout(() => {
+          child.kill("SIGKILL");
+          reject(new Error(`mcp:serve did not exit — ${stderr}`));
+        }, 30_000);
+        child.once("exit", (c) => {
+          clearTimeout(timer);
+          resolve(c);
+        });
+      });
+      return { code, stderr };
+    };
+    const unset = await run(undefined);
+    expect(unset.code).not.toBe(0);
+    expect(unset.stderr).toContain("ARIADNE_CREDENTIALS_KEY must be set");
+    expect(unset.stderr).not.toContain("serving on stdio");
+    const short = `k1:${Buffer.alloc(31, 7).toString("base64")}`;
+    const malformed = await run(short);
+    expect(malformed.code).not.toBe(0);
+    expect(malformed.stderr).toContain("ARIADNE_CREDENTIALS_KEY");
+    expect(malformed.stderr).not.toContain(short.slice(3));
+  }, 90_000);
 });
 
 describe("boot configuration", () => {
@@ -3116,7 +3171,7 @@ describe("crawl_status — why a failed crawl failed", () => {
     await db.insert(crawls).values({
       tenantId: LOCAL_TENANT,
       id,
-      siteUrl: `${resumeSite}/`,
+      siteUrl: `${resumeSite}/`, hostKey: hostKeyOf(`${resumeSite}/`),
       config: {
         siteUrl: `${resumeSite}/`,
         maxPages: 10,
@@ -3291,7 +3346,9 @@ describe("crawl tool descriptions — list mode, scope and credentials (27c)", (
       "excludedDropped",
       "CREDENTIALS",
       "CREDENTIALS_REQUIRED",
-      "never stored, logged or answered",
+      // 28b: stored encrypted for reruns, never in clear.
+      "stored only encrypted",
+      "never logged or answered",
     ]) {
       expect(text, `crawl_start's description does not say '${claim}'`).toContain(claim);
     }

@@ -28,6 +28,7 @@ import { request as httpRequest } from "node:http";
 import { closeDb, createDb, type Db } from "../../src/db/client.js";
 import { runMigrations } from "../../src/db/migrate.js";
 import { createDemoServer, type DemoServer } from "../../src/demo/server.js";
+import { TEST_CREDENTIAL_KEYS } from "../helpers/credential-keys.js";
 
 let db: Db;
 let demo: DemoServer;
@@ -40,7 +41,7 @@ beforeAll(async () => {
   if (!url) throw new Error("DATABASE_URL must be set for db tests (no fallback)");
   db = createDb(url);
   await runMigrations(db);
-  demo = createDemoServer({ db });
+  demo = createDemoServer({ db, credentialKeys: TEST_CREDENTIAL_KEYS });
   const bound = await demo.listen(0, "127.0.0.1");
   base = `http://127.0.0.1:${bound.port}`;
   port = bound.port;
@@ -246,7 +247,7 @@ describe("a client that leaves", () => {
   it("leaves nothing wedged: the demo still answers, and still closes", async () => {
     // Its own server, because the assertion is about close() and the shared one
     // has to survive the rest of the file.
-    const own = createDemoServer({ db });
+    const own = createDemoServer({ db, credentialKeys: TEST_CREDENTIAL_KEYS });
     const bound = await own.listen(0, "127.0.0.1");
     await abortMidResponse(bound.port, "/api/rules");
 
@@ -265,7 +266,7 @@ describe("a client that leaves", () => {
   });
 
   it("close() is safe to call twice", async () => {
-    const own = createDemoServer({ db });
+    const own = createDemoServer({ db, credentialKeys: TEST_CREDENTIAL_KEYS });
     await own.listen(0, "127.0.0.1");
     await own.close();
     await own.close();

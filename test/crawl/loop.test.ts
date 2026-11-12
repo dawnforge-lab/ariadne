@@ -20,7 +20,7 @@ import { closeFetchAgents } from "../../src/crawl/http.js";
 import { robotsRules } from "../../src/rules/query/robots.js";
 import { linkGraphRules } from "../../src/rules/query/link-graph.js";
 import type { HostSpacingEntry, StoredHostSpacing } from "../../src/crawl/politeness.js";
-import { LOCAL_TENANT } from "../../src/api/tenant.js";
+import { LOCAL_TENANT } from "../../src/tenant.js";
 
 /**
  * One host's 24a entry in `crawls.host_spacing_jsonb`. Every write a run makes

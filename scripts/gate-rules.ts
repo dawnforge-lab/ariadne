@@ -92,7 +92,7 @@ import type { JudgementContext, RuleCaps } from "../src/rules/registry/types.js"
 import { runRules } from "../src/rules/run.js";
 import { scopeRefusesSql, scopeVerdict, type CrawlScope } from "../src/crawl/url-scope.js";
 import { siteFixture, startSiteServer } from "../test/gate/site-server.js";
-import { LOCAL_TENANT } from "../src/api/tenant.js";
+import { LOCAL_TENANT } from "../src/tenant.js";
 
 /** The gate's three numbers. All are the build plan's, not this script's. */
 const GATE_PAGES = 50_000;

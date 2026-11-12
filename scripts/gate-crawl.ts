@@ -24,7 +24,7 @@ import { sql } from "drizzle-orm";
 import { closeDb, createDb, type Db } from "../src/db/client.js";
 import { CRAWL_DEFAULTS, runCrawl } from "../src/crawl/loop.js";
 import { startSiteServer } from "../test/gate/site-server.js";
-import { LOCAL_TENANT } from "../src/api/tenant.js";
+import { LOCAL_TENANT } from "../src/tenant.js";
 
 /** The gate's two numbers. Both are the build plan's, not this script's. */
 const GATE_PAGES = 50_000;

@@ -32,7 +32,7 @@ import { crawls } from "../src/db/schema.js";
 import { frontierCounts } from "../src/crawl/frontier.js";
 import { CRAWL_DEFAULTS, resumeCrawl, runCrawl, type CrawlConfig } from "../src/crawl/loop.js";
 import { startSiteServer } from "../test/gate/site-server.js";
-import { LOCAL_TENANT } from "../src/api/tenant.js";
+import { LOCAL_TENANT } from "../src/tenant.js";
 
 const GATE_PAGES = 50_000;
 

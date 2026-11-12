@@ -19,7 +19,8 @@ import { crawls } from "../../src/db/schema.js";
 import { hostRules } from "../../src/rules/query/host.js";
 import type { Finding, QueryRule } from "../../src/rules/registry/types.js";
 import { mkDiscovery } from "./mk-discovery.js";
-import { LOCAL_TENANT } from "../../src/api/tenant.js";
+import { LOCAL_TENANT } from "../../src/tenant.js";
+import { hostKeyOf } from "../../src/crawl/host-key.js";
 
 function databaseUrl(): string {
   const url = process.env.DATABASE_URL;
@@ -132,7 +133,7 @@ describe("the host rules against the database", () => {
     await db.insert(crawls).values({
       tenantId: LOCAL_TENANT,
       id,
-      siteUrl,
+      siteUrl, hostKey: hostKeyOf(siteUrl),
       config: { userAgent: "AriadneBot-test", maxPages: 500, legacyHosts },
       rulesetVersion: "test",
       status: "finished",
@@ -386,7 +387,7 @@ describe("the host rules against the database", () => {
       await db.insert(crawls).values({
         tenantId: LOCAL_TENANT,
         id,
-        siteUrl: SITE,
+        siteUrl: SITE, hostKey: hostKeyOf(SITE),
         config: { userAgent: "AriadneBot-test" },
         rulesetVersion: "test",
         status: "finished",

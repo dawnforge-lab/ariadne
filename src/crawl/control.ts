@@ -14,7 +14,22 @@ import { crawls } from "../db/schema.js";
 export const CONTROL_REQUESTS = ["pause", "cancel"] as const;
 export type ControlRequest = (typeof CONTROL_REQUESTS)[number];
 
-export const PAUSE_REASONS = ["request", "shutdown"] as const;
+/**
+ * Why a crawl is `paused`: an agent asked (`request`), the process running it
+ * shut down (`shutdown`), or its stored credentials could not be read when a
+ * runner picked it up (`credentials_unreadable`, Phase 28b: the key was rotated
+ * past them, they failed authentication, or the retention sweep deleted them;
+ * `crawl_resume` with the values continues it), or the process running it died
+ * and the reaper settled its work (`worker_lost`, Phase 28b: src/worker/
+ * reaper.ts). `shutdown` and `worker_lost` are SYSTEM pauses: a worker-pool
+ * crawl paused by one is requeued by the reaper — after `shutdown` always (a
+ * deploy), after `worker_lost` at most three times in a row (Ruling R17).
+ * `not_allowed` (Phase 28b) is the runner's refusal: the process that claimed
+ * the crawl's job does not allow its site, a legacy host or a sitemap host
+ * (its own `ARIADNE_ALLOWED_DOMAINS`), so nothing was fetched. It is NOT a
+ * system pause and nothing requeues it; `crawl_resume` re-checks at the API.
+ */
+export const PAUSE_REASONS = ["request", "shutdown", "credentials_unreadable", "worker_lost", "not_allowed"] as const;
 export type PauseReason = (typeof PAUSE_REASONS)[number];
 
 function readOf<T extends string>(

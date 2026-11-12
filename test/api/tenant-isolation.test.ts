@@ -22,11 +22,15 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 
 import { closeDb, createDb, type Db } from "../../src/db/client.js";
 import { runMigrations } from "../../src/db/migrate.js";
-import { crawls, issues, links, metrics, pages } from "../../src/db/schema.js";
+import { crawls, issues, jobs, links, metrics, pages } from "../../src/db/schema.js";
+import { EXTRACTION_VERSION } from "../../src/crawl/versions.js";
+import { RULESET_VERSION } from "../../src/rules/registry/registry.js";
 import { closeFetchAgents } from "../../src/crawl/http.js";
-import { createApiServer, routeSignatures, type ApiServer } from "../../src/api/http.js";
+import { createApiServer, PRE_AUTH_ROUTES, routeSignatures, type ApiServer } from "../../src/api/http.js";
 import { createMcpServer, TOOL_NAMES, type AriadneMcpServer } from "../../src/api/mcp.js";
-import { parseTenant, type TenantId } from "../../src/api/tenant.js";
+import { parseTenant, type TenantId } from "../../src/tenant.js";
+import { TEST_CREDENTIAL_KEYS } from "../helpers/credential-keys.js";
+import { hostKeyOf } from "../../src/crawl/host-key.js";
 
 const TOKEN = "test-token-isolation-0123456789abcdef";
 const RUN = randomUUID().slice(0, 8);
@@ -51,6 +55,11 @@ const GLOBAL_ROUTES: ReadonlySet<string> = new Set([
   "POST /config/validate", // dry run of a body; reads no crawl
   "POST /crawls", // creates a crawl FOR the caller
   "GET /crawls", // the caller's own listing, asserted separately below
+  // Served BEFORE the bearer and tenant checks (28b T6), for an orchestrator's probe and a scraper:
+  // they read no crawl and name no tenant. Asserted separately below.
+  "GET /healthz", // liveness
+  "GET /readyz", // database + migration count
+  "GET /metrics", // its own bearer (ARIADNE_METRICS_TOKEN); labels carry no tenant
 ]);
 const GLOBAL_TOOLS: ReadonlySet<string> = new Set(["config_schema", "config_validate", "crawl_start", "crawl_list"]);
 
@@ -236,6 +245,7 @@ beforeAll(async () => {
   site = `http://127.0.0.1:${typeof address === "object" && address !== null ? address.port : 0}`;
 
   const service = {
+    credentialKeys: TEST_CREDENTIAL_KEYS,
     allowedDomains: ["127.0.0.1"],
     crawlDefaults: { allowPrivate: true, probeHosts: false, perHostDelayMs: 0 },
     exportDir,
@@ -264,7 +274,7 @@ beforeAll(async () => {
   await db.insert(crawls).values({
     id: betaCrawl,
     tenantId: BETA,
-    siteUrl: `http://${BETA_ONLY_HOST}/`,
+    siteUrl: `http://${BETA_ONLY_HOST}/`, hostKey: hostKeyOf(`http://${BETA_ONLY_HOST}/`),
     config: { siteUrl: `http://${BETA_ONLY_HOST}/` },
     rulesetVersion: "0.0.0-test",
     status: "finished",
@@ -314,9 +324,55 @@ describe("coverage: every route and tool is scoped or explicitly global", () => 
 
   it("keeps the global lists to exactly the ruled set", () => {
     expect([...GLOBAL_ROUTES].sort()).toEqual(
-      ["GET /config/schema", "GET /crawls", "POST /config/validate", "POST /crawls"].sort(),
+      [
+        "GET /config/schema",
+        "GET /crawls",
+        "GET /healthz",
+        "GET /metrics",
+        "GET /readyz",
+        "POST /config/validate",
+        "POST /crawls",
+      ].sort(),
     );
     expect([...GLOBAL_TOOLS].sort()).toEqual(["config_schema", "config_validate", "crawl_list", "crawl_start"]);
+  });
+});
+
+describe("the pre-auth routes are the sentinel's global list, not an ad-hoc bypass", () => {
+  const PRE_AUTH = ["GET /healthz", "GET /readyz", "GET /metrics"];
+
+  it("PRE_AUTH_ROUTES is exactly the three routes GLOBAL_ROUTES names for this purpose", () => {
+    expect(PRE_AUTH_ROUTES.map((r) => `${r.method} ${r.path}`).sort()).toEqual([...PRE_AUTH].sort());
+    for (const signature of PRE_AUTH) expect(GLOBAL_ROUTES.has(signature)).toBe(true);
+    const signatures = routeSignatures().map((r) => `${r.method} ${r.path}`);
+    for (const signature of PRE_AUTH) expect(signatures).toContain(signature);
+  });
+
+  it("/healthz answers 200 with neither a token nor a tenant", async () => {
+    expect((await fetch(`${base}/healthz`)).status).toBe(200);
+  });
+
+  it("/readyz answers with neither a token nor a tenant (200, or 503 if the shared dev database's migrations differ from this branch's; never 401 or 400)", async () => {
+    // The readiness verdict itself is test/ops/health.test.ts's, on a scratch database.
+    expect([200, 503]).toContain((await fetch(`${base}/readyz`)).status);
+  });
+
+  it("/metrics answers on its own token alone (no API token, no tenant), and 404 or 401 never 400", async () => {
+    const res = await fetch(`${base}/metrics`);
+    expect(res.status).toBe(404); // this server has no metrics token configured
+  });
+
+  it.each(
+    routeSignatures()
+      .map((r) => `${r.method} ${r.path}`)
+      .filter((s) => !["GET /healthz", "GET /readyz", "GET /metrics"].includes(s)),
+  )("every other route, %s, still answers 401 without a token and 400 without a tenant", async (signature) => {
+    const [method, path] = signature.split(" ") as [string, string];
+    const concrete = path.replace(/:\w+/g, "x");
+    const bare = await fetch(`${base}${concrete}`, { method });
+    expect(bare.status).toBe(401);
+    const noTenant = await fetch(`${base}${concrete}`, { method, headers: { authorization: `Bearer ${TOKEN}` } });
+    expect(noTenant.status).toBe(400);
   });
 });
 
@@ -414,12 +470,27 @@ describe("compare, three ways", () => {
   });
 });
 
-describe("ownership precedes the in-process busy refusals", () => {
-  // The service's holds are private sets with no public seam; holding a crawl
-  // busy without racing a real run means reaching in. This is the one place a
-  // test does, and it only adds and removes acme's crawl id.
-  const holds = (): { judging: Set<string>; rendering: Set<string> } =>
-    api.service as unknown as { judging: Set<string>; rendering: Set<string> };
+describe("ownership precedes the busy refusals", () => {
+  // The holds are `running` rules and render jobs since 28b (they were
+  // private in-process sets). Holding a crawl busy without racing a real run
+  // means writing one: acme's own job, pinned to the server's instance as
+  // `withPinnedJob` writes it, and removed after.
+  async function hold(kind: "rules" | "render"): Promise<string> {
+    const id = `job_${randomUUID()}`;
+    const instanceId = await api.service.instanceId();
+    await db.insert(jobs).values({
+      id,
+      tenantId: ACME,
+      crawlId: acmeCrawl,
+      kind,
+      status: "running",
+      pinnedTo: instanceId,
+      claimedBy: instanceId,
+      rulesetVersion: RULESET_VERSION,
+      extractionVersion: EXTRACTION_VERSION,
+    });
+    return id;
+  }
 
   const busyCases: [string, (id: string) => HttpCase][] = [
     ["POST /crawls/:id/rules", (id) => ({ method: "POST", path: `/crawls/${id}/rules` })],
@@ -437,11 +508,10 @@ describe("ownership precedes the in-process busy refusals", () => {
     ["DELETE /crawls/:id", (id) => ({ method: "DELETE", path: `/crawls/${id}?confirm=${id}` })],
   ];
 
-  it.each(["judging", "rendering"] as const)(
-    "while acme's crawl is held in `%s`, beta still gets the missing answer",
-    async (hold) => {
-      const set = holds()[hold];
-      set.add(acmeCrawl);
+  it.each(["rules", "render"] as const)(
+    "while acme's crawl is held by a running `%s` job, beta still gets the missing answer",
+    async (kind) => {
+      const held = await hold(kind);
       try {
         // Sanity: the hold is real. Acme itself is refused 409 by it.
         const own = await http(ACME, { method: "POST", path: `/crawls/${acmeCrawl}/cancel` });
@@ -457,7 +527,7 @@ describe("ownership precedes the in-process busy refusals", () => {
         }
         expect(await snapshot(acmeCrawl)).toEqual(before);
       } finally {
-        set.delete(acmeCrawl);
+        await db.delete(jobs).where(eq(jobs.id, held));
       }
     },
   );

@@ -1,6 +1,7 @@
 /**
  * Credentials on the wire (Phase 27c): custom request headers, HTTP Basic auth
- * and cookies, sent ONLY to the crawl's own site family and NEVER stored.
+ * and cookies, sent ONLY to the crawl's own site family and NEVER stored in
+ * clear (Phase 28b: the vault keeps them encrypted, src/crawl/credential-vault.ts).
  *
  * THE THREE RULES THIS MODULE EXISTS TO HOLD:
  *
@@ -11,7 +12,7 @@
  *    manual redirect hop included, so a hop that leaves the family drops them
  *    for that hop. An https site's credentials never ride a plain-http request:
  *    `isSameOrigin` refuses the downgrade.
- *  - **A value is never stored, logged or quoted.** What a crawl row carries is
+ *  - **A value is never stored in clear, logged or quoted.** What a crawl row carries is
  *    the `CredentialShape` — which fields were supplied and the header and
  *    cookie NAMES — never a value. `credentialError`'s messages name the field
  *    and the header or cookie NAME, never a value — and a name that is not an

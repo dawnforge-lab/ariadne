@@ -17,7 +17,8 @@ import { eq, sql } from "drizzle-orm";
 import { closeDb, createDb, type Db } from "../../src/db/client.js";
 import { runMigrations } from "../../src/db/migrate.js";
 import { crawls, pages } from "../../src/db/schema.js";
-import { LOCAL_TENANT } from "../../src/api/tenant.js";
+import { LOCAL_TENANT } from "../../src/tenant.js";
+import { hostKeyOf } from "../../src/crawl/host-key.js";
 
 function databaseUrl(): string {
   const url = process.env.DATABASE_URL;
@@ -67,7 +68,7 @@ describe("0027 — the Phase 26b count columns are integer", () => {
     const crawlId = `crawl_0027_${randomUUID()}`;
     await db.insert(crawls).values({
       tenantId: LOCAL_TENANT,
-      id: crawlId, siteUrl: "https://m27.example", config: {}, rulesetVersion: "test",
+      id: crawlId, siteUrl: "https://m27.example", hostKey: hostKeyOf("https://m27.example"), config: {}, rulesetVersion: "test",
     });
     created.push(crawlId);
     await db.insert(pages).values({

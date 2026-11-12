@@ -38,7 +38,8 @@ import { runRenderPass } from "../../src/crawl/render/run-render.js";
 import { closeDb, createDb, type Db } from "../../src/db/client.js";
 import { runMigrations } from "../../src/db/migrate.js";
 import { crawls, pages } from "../../src/db/schema.js";
-import { LOCAL_TENANT } from "../../src/api/tenant.js";
+import { LOCAL_TENANT } from "../../src/tenant.js";
+import { hostKeyOf } from "../../src/crawl/host-key.js";
 
 function databaseUrl(): string {
   const url = process.env.DATABASE_URL;
@@ -215,7 +216,7 @@ describe("0012 — crawls.template_inference_jsonb", () => {
     await db.insert(crawls).values({
       tenantId: LOCAL_TENANT,
       id,
-      siteUrl: "https://example.com",
+      siteUrl: "https://example.com", hostKey: hostKeyOf("https://example.com"),
       config: { maxPages: 1000 },
       rulesetVersion: "test",
       status: "finished",

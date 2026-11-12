@@ -24,7 +24,8 @@ import type { FetchResult } from "../../src/crawl/fetch-page.js";
 import { analyzePage, type PageAnalysis, type PageLink } from "../../src/crawl/parse/page-analyzer.js";
 import { HEAD_SNIPPET_MAX } from "../../src/crawl/parse/page-facts.js";
 import { fitsIndex, INDEXED_URL_MAX } from "../../src/crawl/parse/url-utils.js";
-import { LOCAL_TENANT } from "../../src/api/tenant.js";
+import { LOCAL_TENANT } from "../../src/tenant.js";
+import { hostKeyOf } from "../../src/crawl/host-key.js";
 
 function databaseUrl(): string {
   const url = process.env.DATABASE_URL;
@@ -188,7 +189,7 @@ describe("PageWriter", () => {
     await db.insert(crawls).values({
       tenantId: LOCAL_TENANT,
       id,
-      siteUrl: SITE,
+      siteUrl: SITE, hostKey: hostKeyOf(SITE),
       config: {},
       rulesetVersion: "test",
     });
@@ -2017,7 +2018,7 @@ describe("PageWriter", () => {
       await db.insert(crawls).values({
         tenantId: LOCAL_TENANT,
         id,
-        siteUrl: SITE,
+        siteUrl: SITE, hostKey: hostKeyOf(SITE),
         config: {},
         rulesetVersion: "test",
       });

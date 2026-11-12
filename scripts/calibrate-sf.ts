@@ -81,7 +81,7 @@ import {
   calibrationFixtures,
 } from "../test/fixtures/pages/calibration-p26.js";
 import { startOffsiteHost } from "../test/fixtures/pages/render-p5.js";
-import { LOCAL_TENANT } from "../src/api/tenant.js";
+import { LOCAL_TENANT } from "../src/tenant.js";
 
 const REPO = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const DEFAULT_OUT = join(

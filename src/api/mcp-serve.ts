@@ -22,16 +22,23 @@
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 
 import { closeDb, createDb } from "../db/client.js";
+import { parseCredentialKeys, parseCredentialRetentionDays } from "../crawl/credential-vault.js";
 import { loadMcpConfig } from "./config.js";
 import { createMcpServer } from "./mcp.js";
 
 const config = loadMcpConfig();
+// Before anything is constructed: a missing or malformed key is a boot error
+// naming the variable, never a server that cannot store credentials (28b).
+const credentialKeys = parseCredentialKeys(process.env);
+const credentialRetentionDays = parseCredentialRetentionDays(process.env);
 const db = createDb(config.databaseUrl);
 const mcp = createMcpServer({
   db,
   config: {
     tenant: config.tenant,
     allowedDomains: config.allowedDomains,
+    credentialKeys,
+    credentialRetentionDays,
     // Undefined means each field's own default — `exports/` and `renders/`; see
     // `ServiceConfig`.
     ...(config.exportDir === undefined ? {} : { exportDir: config.exportDir }),

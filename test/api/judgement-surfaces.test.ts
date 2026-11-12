@@ -35,7 +35,9 @@ import { crawls, pages } from "../../src/db/schema.js";
 import { buildRegistry } from "../../src/rules/index.js";
 import { mkDiscovery } from "../rules/mk-discovery.js";
 import { mkPage } from "../rules/mk-page.js";
-import { LOCAL_TENANT } from "../../src/api/tenant.js";
+import { LOCAL_TENANT } from "../../src/tenant.js";
+import { TEST_CREDENTIAL_KEYS } from "../helpers/credential-keys.js";
+import { hostKeyOf } from "../../src/crawl/host-key.js";
 
 function databaseUrl(): string {
   const url = process.env.DATABASE_URL;
@@ -82,12 +84,12 @@ beforeAll(async () => {
   db = createDb(databaseUrl());
   await runMigrations(db);
   exportDir = await mkdtemp(join(tmpdir(), "ariadne-judgement-surfaces-"));
-  service = new ApiService(db, { allowedDomains: [], exportDir, log: () => {} });
+  service = new ApiService(db, { credentialKeys: TEST_CREDENTIAL_KEYS, allowedDomains: [], exportDir, log: () => {} });
 
   await db.insert(crawls).values({
     tenantId: LOCAL_TENANT,
     id: crawlId,
-    siteUrl: `${SITE}/`,
+    siteUrl: `${SITE}/`, hostKey: hostKeyOf(`${SITE}/`),
     config: { siteUrl: `${SITE}/`, maxPages: 100, userAgent: "AriadneBot-test" },
     discovery: mkDiscovery(),
     rulesetVersion: "test",
@@ -371,7 +373,7 @@ describe("an unjudged crawl", () => {
     await db.insert(crawls).values({
       tenantId: LOCAL_TENANT,
       id,
-      siteUrl: `${SITE}/`,
+      siteUrl: `${SITE}/`, hostKey: hostKeyOf(`${SITE}/`),
       config: { siteUrl: `${SITE}/` },
       judgement: { thresholds: { TITLE_MAX: 55 }, rules: { "title.too-long": { disabled: true } } },
       rulesetVersion: "test",
@@ -399,7 +401,7 @@ describe("an unjudged crawl", () => {
     await db.insert(crawls).values({
       tenantId: LOCAL_TENANT,
       id,
-      siteUrl: `${SITE}/`,
+      siteUrl: `${SITE}/`, hostKey: hostKeyOf(`${SITE}/`),
       config: { siteUrl: `${SITE}/` },
       rulesetVersion: "test",
       status: "finished",

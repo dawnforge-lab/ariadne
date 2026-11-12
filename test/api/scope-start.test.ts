@@ -12,7 +12,7 @@
  * one list crawl of credential-gated pages end to end, which is how the test
  * knows the credentials reach the crawl loop (`runQueued`) and not only the map.
  */
-import { createServer, type IncomingHttpHeaders, type Server } from "node:http";
+import { createServer, type IncomingHttpHeaders, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -29,7 +29,8 @@ import { createApiServer, type ApiServer } from "../../src/api/http.js";
 import { createMcpServer, type AriadneMcpServer } from "../../src/api/mcp.js";
 import { LIST_MAX_URLS } from "../../src/api/config-schema.js";
 import type { ServiceConfig } from "../../src/api/config.js";
-import { LOCAL_TENANT } from "../../src/api/tenant.js";
+import { LOCAL_TENANT } from "../../src/tenant.js";
+import { TEST_CREDENTIAL_KEYS } from "../helpers/credential-keys.js";
 
 const TOKEN = "test-token-scope-start-0123456789";
 const PAGE_DELAY_MS = 100;
@@ -66,6 +67,9 @@ let db: Db;
 let exportDir: string;
 let renderDir: string;
 let siteServer: Server;
+/** The same site on a second port: the blocker's host, so `site` stays free for server B (28b T4a). */
+let blockerServer: Server;
+let blockerSite: string;
 let site: string;
 let apiA: ApiServer;
 let baseA: string;
@@ -149,7 +153,7 @@ beforeAll(async () => {
   exportDir = await mkdtemp(join(tmpdir(), "ariadne-scope-start-export-"));
   renderDir = await mkdtemp(join(tmpdir(), "ariadne-scope-start-render-"));
 
-  siteServer = createServer((req, res) => {
+  const handler = (req: IncomingMessage, res: ServerResponse): void => {
     const path = (req.url ?? "/").split("?")[0] ?? "/";
     if (path === "/robots.txt") {
       res.writeHead(200, { "content-type": "text/plain" });
@@ -180,13 +184,23 @@ beforeAll(async () => {
     }
     res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
     res.end(`<!doctype html><html lang="en"><head><title>Page ${path}</title></head><body>p</body></html>`);
-  });
-  await new Promise<void>((r) => siteServer.listen(0, "127.0.0.1", () => r()));
-  const address = siteServer.address();
-  if (address === null || typeof address === "string") throw new Error("site server bound oddly");
-  site = `http://127.0.0.1:${address.port}`;
+  };
+  // One site is crawled by one crawl at a time (28b T4a, hard rule 9): server
+  // A's blocker crawls a host of its own, or server B's crawls of `site` would
+  // wait behind it for the whole file.
+  siteServer = createServer(handler);
+  blockerServer = createServer(handler);
+  const listen = async (server: Server): Promise<string> => {
+    await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
+    const address = server.address();
+    if (address === null || typeof address === "string") throw new Error("site server bound oddly");
+    return `http://127.0.0.1:${address.port}`;
+  };
+  site = await listen(siteServer);
+  blockerSite = await listen(blockerServer);
 
   const config: ServiceConfig = {
+    credentialKeys: TEST_CREDENTIAL_KEYS,
     allowedDomains: ["127.0.0.1"],
     crawlDefaults: { allowPrivate: true, probeHosts: false, perHostDelayMs: 0 },
     exportDir,
@@ -203,7 +217,7 @@ beforeAll(async () => {
   await mcp.connect(serverSide);
   await client.connect(clientSide);
 
-  const started = await a("POST", "/crawls", { siteUrl: `${site}/slow/`, maxPages: 100_000, maxConcurrency: 1 });
+  const started = await a("POST", "/crawls", { siteUrl: `${blockerSite}/slow/`, maxPages: 100_000, maxConcurrency: 1 });
   if (started.status !== 202) throw new Error(`blocker: ${started.status} ${started.text}`);
   blocker = String(started.body["crawlId"]);
   createdCrawls.push(blocker);
@@ -221,6 +235,7 @@ afterAll(async () => {
   await apiB.close();
   await closeFetchAgents();
   await new Promise<void>((r) => siteServer.close(() => r()));
+  await new Promise<void>((r) => blockerServer.close(() => r()));
   if (createdCrawls.length > 0) await db.delete(crawls).where(inArray(crawls.id, createdCrawls));
   await closeDb(db);
   await rm(exportDir, { recursive: true, force: true });

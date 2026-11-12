@@ -408,6 +408,7 @@ describe("the crawl metrics against the database", () => {
           url: url(e.path),
           urlNormalised: normalised(url(e.path)),
           sitemapSource: e.source,
+          seenAt: new Date(),
           lastmod: null,
         })),
       );
@@ -485,12 +486,12 @@ describe("the crawl metrics against the database", () => {
       const over = SITEMAP_URL_CAP + 1;
       // Generated in one statement rather than fifty thousand inserts.
       await db.execute(sql`
-        insert into sitemap_urls (crawl_id, url, url_normalised, sitemap_source, lastmod)
+        insert into sitemap_urls (crawl_id, url, url_normalised, sitemap_source, lastmod, seen_at)
         select ${crawlId},
                ${`${SITE}/big/`} || g || '/',
                ${`${SITE}/big/`} || g || '/',
                ${big},
-               null
+               null, now()
         from generate_series(1, ${over}) g`);
       await addEntries(crawlId, [{ path: "/x1", source: small }]);
 

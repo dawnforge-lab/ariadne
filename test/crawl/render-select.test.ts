@@ -40,7 +40,8 @@ import {
   SUSPICION,
   type RenderSelection,
 } from "../../src/crawl/render/select.js";
-import { LOCAL_TENANT } from "../../src/api/tenant.js";
+import { LOCAL_TENANT } from "../../src/tenant.js";
+import { hostKeyOf } from "../../src/crawl/host-key.js";
 
 function databaseUrl(): string {
   const url = process.env.DATABASE_URL;
@@ -88,7 +89,7 @@ describe("selectRenderSet", () => {
     await db.insert(crawls).values({
       tenantId: LOCAL_TENANT,
       id,
-      siteUrl: SITE,
+      siteUrl: SITE, hostKey: hostKeyOf(SITE),
       config: {},
       rulesetVersion: "test",
       status: "finished",
@@ -862,7 +863,7 @@ describe("the render pass's frontier state", () => {
     await db.insert(crawls).values({
       tenantId: LOCAL_TENANT,
       id,
-      siteUrl: SITE,
+      siteUrl: SITE, hostKey: hostKeyOf(SITE),
       config: {},
       rulesetVersion: "test",
       status: "finished",

@@ -302,9 +302,10 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "crawl_config_set.\n\n" +
         "CREDENTIALS. requestHeaders, httpAuth (Basic) and cookies reach only the site's " +
         "own hosts (never a CDN or another host, never https credentials over http), " +
-        "are held in this server's memory only — never stored, logged or answered — and " +
-        "after a server restart must be sent again on crawl_resume / crawl_render " +
-        "(refused with code CREDENTIALS_REQUIRED until they are). They cannot change the " +
+        "are stored only encrypted (for the crawl's resumes and renders, across server " +
+        "restarts) — never logged or answered — and are deleted on cancel and delete. If " +
+        "the stored copy cannot be read, crawl_resume / crawl_render refuse with code " +
+        "CREDENTIALS_REQUIRED until they are sent again there. They cannot change the " +
         "user agent, the pacing floor or robots.txt.",
       // The crawl-start body schema itself: one declaration for both
       // transports, so an argument this refuses is a body POST /crawls refuses.
@@ -320,7 +321,7 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
       description:
         "One crawl in full: status, siteUrl, timings, pagesCrawled, the frontier " +
         "counts (queued/leased/done/failed), the ruleset version it was judged " +
-        "with, failureReason, queuePosition, liveLeases, blockedPages, robotsBlocked, " +
+        "with, failureReason, queuePosition, job, liveLeases, blockedPages, robotsBlocked, " +
         "hostSpacingMs, throttle, platform, platformProfile, " +
         "legacyHosts, sitemapUrls, findingCap, rulesRunAt, judgementStale, " +
         "findingsCount, pagesScanned, fetchResources, resources and recheck.\n\n" +
@@ -473,18 +474,33 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "This is the polling tool. status is one of queued, running, paused, " +
         "finished, cancelled, failed. finished, cancelled and failed are terminal; " +
         "paused is a stop that crawl_resume continues, with pauseReason 'request' " +
-        "(crawl_pause) or 'shutdown' (the server stopped mid-run). cancelled is " +
+        "(crawl_pause), 'shutdown' (the server stopped mid-run) or " +
+        "'credentials_unreadable' (its stored credentials could not be read when it was " +
+        "picked up, so nothing was fetched: crawl_resume with them continues it), " +
+        "'not_allowed' (the worker that picked it up does not allow its site, a legacy host " +
+        "or a sitemap host, so nothing was fetched: crawl_resume re-checks it) or " +
+        "'worker_lost' (the process running it died). A worker-pool crawl paused 'shutdown' " +
+        "is queued again by the engine itself, and one paused 'worker_lost' up to three times " +
+        "in a row; " +
+        "'request', 'credentials_unreadable' and 'not_allowed' wait for crawl_resume. cancelled is " +
         "final — crawl_resume refuses it; cancelledAt says when, and neverFetched " +
         "counts the URLs it never asked for (null on a crawl cancelled before it ran: " +
         "nothing was seen, which is not zero). controlRequested is a pause or cancel " +
-        "asked of a running crawl and not yet acted on (null otherwise). Two fields answer the " +
-        "question 'is anybody actually working on this': queuePosition is a " +
-        "number only while THIS server holds the crawl (null otherwise), and " +
-        "liveLeases counts unexpired worker leases. A 'queued' crawl with " +
-        "queuePosition null was accepted by a server process that is now gone — " +
-        "nobody will run it; hand it to crawl_resume, which continues the same " +
-        "crawl, or retire it with crawl_mark_failed. The same pair answers a " +
-        "'running' row with liveLeases 0 long after its server died. A paused or " +
+        "asked of a running crawl and not yet acted on (null otherwise). Three fields answer the " +
+        "question 'is anybody actually working on this'. job is the engine's work item " +
+        "behind the status: {kind: crawl|render|rules, status: queued|running|done|failed|" +
+        "abandoned, claimedBy?} for the crawl's latest job (claimedBy names the engine " +
+        "process that took it), or null when no job ever ran it. queuePosition is a number " +
+        "only while the crawl is 'queued' with a crawl job that a live engine process holds, " +
+        "waiting or starting (0 = starting now, n = n-1 of YOUR crawls ahead of it; other " +
+        "tenants' crawls are not counted, and a crawl whose site another crawl is fetching " +
+        "waits for it whatever its position), and null otherwise; liveLeases counts " +
+        "unexpired worker leases. A 'queued' crawl with " +
+        "queuePosition null has no live process to run it — the one that accepted it stopped " +
+        "or died, or it was queued by another engine version than the one running now, and " +
+        "nobody will; hand it to crawl_resume, which adopts and continues the same " +
+        "crawl, or retire it with crawl_mark_failed. queuePosition null with liveLeases 0 also answers a " +
+        "'running' row long after its process died. A paused or " +
         "failed crawl that stopped with work owed is finished by crawl_resume, or " +
         "ended for good by crawl_cancel (paused) — never by crawl_mark_failed, " +
         "which closes only an orphaned queued or running row.\n\n" +
@@ -632,12 +648,14 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "resource pass — and a paused crawl may owe that work with no row " +
         "counting it, so the resume runs to find out.\n\n" +
         "CREDENTIALS. A crawl started with requestHeaders, httpAuth or cookies keeps " +
-        "them only in the server's memory. After a server restart they are gone, and " +
-        "this tool refuses with code CREDENTIALS_REQUIRED (409), naming the fields and " +
-        "header/cookie names it needs, until you send them again here — exactly those " +
+        "them stored encrypted, and a resume uses them without your sending them, after " +
+        "a server restart too. When the stored copy cannot be read (the server's key " +
+        "changed, or it was deleted after the crawl finished), a queued crawl is " +
+        "paused 'credentials_unreadable' when a runner picks it up; this tool refuses with " +
+        "code CREDENTIALS_REQUIRED (409) until you re-send the credentials, naming the fields and header/cookie names it needs — send exactly those " +
         "kinds and names (crawl_config_get shows them, values [redacted]); another " +
         "shape is a VALIDATION refusal. A crawl that needed them never runs without " +
-        "them. Values sent are never stored, logged or answered. A crawl started " +
+        "them. Values sent replace the stored copy and are never logged or answered. A crawl started " +
         "without credentials cannot be given them here: set them with " +
         "crawl_config_set while it is paused.\n\n" +
         "SCOPE. Before its first fetch the resumed run re-applies the crawl's current " +
@@ -769,7 +787,10 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "the rules to judge rendered evidence. It is refused on a crawl that is " +
         "still queued or running, on one another worker is rendering, and on one " +
         "with no discovery evidence (there would be no robots crawl-delay to " +
-        "honour). It is also refused before any page is rendered when the browser " +
+        "honour). It is refused with code HOST_BUSY (409) while another crawl or " +
+        "render pass is fetching the same site (the same host and port): two at " +
+        "once would together break its politeness limits; ask again when that ends. " +
+        "It is also refused before any page is rendered when the browser " +
         "cannot be pointed at the site: the error starts 'the render pass could not " +
         "start:' and ends with (CRAWL_TARGET_BLOCKED) — the crawl's own name " +
         "resolves to a private or internal address — or (DNS_RESOLUTION_FAILED) — " +
@@ -800,8 +821,8 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "spelling come back as 'policy refusal' render errors. '<host> has no A or " +
         "AAAA record' for www. is normal on a site with no www record.\n\n" +
         "CREDENTIALS. A crawl started with requestHeaders, httpAuth or cookies renders " +
-        "with them, sent only to the site's own hosts. After a server restart (or a " +
-        "cancel) the server no longer holds them: this tool refuses with code " +
+        "with them, sent only to the site's own hosts, from the stored copy. After a " +
+        "cancel, or when the stored copy cannot be read, this tool refuses with code " +
         "CREDENTIALS_REQUIRED (409) until you send them here, of exactly the shape " +
         "crawl_config_get shows. A crawl started without credentials cannot be " +
         "rendered with them: set them with crawl_config_set while it is paused, or " +
@@ -931,10 +952,10 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "with one field edited. A changed exclude or include stamps scopeChangedAt, " +
         "and the resumed run files the pending URLs the new lists refuse as " +
         "excluded rows; pages already fetched stay. Credentials sent here replace " +
-        "the ones this server holds (each field whole; an empty requestHeaders or " +
-        "cookies, or httpAuth null — the one null accepted here — drops that kind) " +
-        "and are never stored, logged or answered; after a " +
-        "server restart a change must send every credential the crawl needs, or it " +
+        "the stored ones (each field whole; an empty requestHeaders or " +
+        "cookies, or httpAuth null — the one null accepted here — drops that kind), " +
+        "stored only encrypted and never logged or answered; when the stored copy " +
+        "cannot be read, a change must send every credential the crawl needs, or it " +
         "is refused CREDENTIALS_REQUIRED (409). A queued " +
         "crawl this server is already starting is refused 409 (pause it first). " +
         "maxPages cannot go below the pages " +

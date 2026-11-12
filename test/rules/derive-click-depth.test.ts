@@ -25,7 +25,8 @@ import {
   ROOT_REDIRECT_HOPS,
 } from "../../src/rules/derive/click-depth.js";
 import { mkDiscovery } from "./mk-discovery.js";
-import { LOCAL_TENANT } from "../../src/api/tenant.js";
+import { LOCAL_TENANT } from "../../src/tenant.js";
+import { hostKeyOf } from "../../src/crawl/host-key.js";
 
 function databaseUrl(): string {
   const url = process.env.DATABASE_URL;
@@ -47,12 +48,14 @@ describe("deriveClickDepth against the database", () => {
   let db: Db;
   const createdCrawls: string[] = [];
 
-  async function newCrawl(siteUrl = SITE): Promise<string> {
+  // `hostKey` is passed for a site URL with no host (a row no writer of ours
+  // makes), which `hostKeyOf` rightly refuses.
+  async function newCrawl(siteUrl = SITE, hostKey = hostKeyOf(siteUrl)): Promise<string> {
     const id = `crawl_${randomUUID()}`;
     await db.insert(crawls).values({
       tenantId: LOCAL_TENANT,
       id,
-      siteUrl,
+      siteUrl, hostKey,
       config: { userAgent: "AriadneBot-test", maxPages: 500 },
       rulesetVersion: "test",
       status: "finished",
@@ -395,7 +398,7 @@ describe("deriveClickDepth against the database", () => {
     const missing = `crawl_${randomUUID()}`;
     await expect(deriveClickDepth(db, missing)).rejects.toThrow(/no such crawl/);
 
-    const crawlId = await newCrawl("mailto:someone@example.com");
+    const crawlId = await newCrawl("mailto:someone@example.com", "mailto-row.invalid");
     await expect(deriveClickDepth(db, crawlId)).rejects.toThrow(/could have used as a seed/);
   });
 });

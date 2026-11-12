@@ -8,7 +8,7 @@
  */
 import { dirname, resolve as resolvePath } from "node:path";
 
-import { ServiceError } from "./errors.js";
+import { ServiceError } from "./api/errors.js";
 
 export type TenantId = string & { readonly __tenant: unique symbol };
 

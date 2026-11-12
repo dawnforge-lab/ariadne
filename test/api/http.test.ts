@@ -35,7 +35,9 @@ import { UrlPolicyError, type AddressResolver } from "../../src/crawl/url-policy
 import { DEFAULT_THRESHOLDS } from "../../src/rules/judgement.js";
 import { URL_FINDING_CAP } from "../../src/rules/query/crawl-evidence.js";
 import { RENDER_PASS_EVIDENCE } from "../../src/rules/metric/render-metrics.js";
-import { LOCAL_TENANT } from "../../src/api/tenant.js";
+import { LOCAL_TENANT } from "../../src/tenant.js";
+import { TEST_CREDENTIAL_KEYS } from "../helpers/credential-keys.js";
+import { hostKeyOf } from "../../src/crawl/host-key.js";
 
 const TOKEN = "test-token-0123456789abcdef";
 
@@ -182,9 +184,26 @@ async function riggedServer(
 ): Promise<Rig> {
   const log: string[] = [];
   const calls = new Map<string, number>();
+  // A BROKEN method is broken inside a transaction too: a database that
+  // refuses an update refuses it whichever handle asks (28b T4b — the crawl's
+  // claim moved into a transaction that checks its job, and a rig that broke
+  // only the pool's `update` would let that claim through).
+  const brokenIn = <T extends object>(handle: T): T =>
+    new Proxy(handle, {
+      get(target, prop) {
+        if (typeof prop === "string" && prop in broken) return broken[prop];
+        const value = Reflect.get(target, prop) as unknown;
+        if (prop === "transaction" && typeof value === "function") {
+          return (run: (tx: object) => unknown, ...rest: unknown[]) =>
+            (value as (...args: unknown[]) => unknown).call(target, (tx: object) => run(brokenIn(tx)), ...rest);
+        }
+        return typeof value === "function" ? (value as (...args: unknown[]) => unknown).bind(target) : value;
+      },
+    });
   const rigged = new Proxy(db, {
     get(target, prop) {
       if (typeof prop === "string" && prop in broken) return broken[prop];
+      if (prop === "transaction" && Object.keys(broken).length > 0) return brokenIn(target).transaction;
       const value = Reflect.get(target, prop) as unknown;
       const bound =
         typeof value === "function"
@@ -204,6 +223,7 @@ async function riggedServer(
   const api = createApiServer({
     db: rigged,
     config: {
+      credentialKeys: TEST_CREDENTIAL_KEYS,
       token: TOKEN,
       allowedDomains: ["127.0.0.1"],
       crawlDefaults: { allowPrivate: true, probeHosts: false, perHostDelayMs: 0 },
@@ -249,7 +269,7 @@ async function seedCrawl(row: {
   await db.insert(crawls).values({
     tenantId: LOCAL_TENANT,
     id,
-    siteUrl: row.siteUrl ?? "http://seeded.example/",
+    siteUrl: row.siteUrl ?? "http://seeded.example/", hostKey: hostKeyOf(row.siteUrl ?? "http://seeded.example/"),
     config: {
       siteUrl: row.siteUrl ?? "http://seeded.example/",
       maxPages: 10,
@@ -400,6 +420,7 @@ beforeAll(async () => {
   api = createApiServer({
     db,
     config: {
+      credentialKeys: TEST_CREDENTIAL_KEYS,
       token: TOKEN,
       allowedDomains: ["127.0.0.1", "*.localhost"],
       // PROCESS TRUST, NOT WIRE TRUST. See the module header.
@@ -420,7 +441,7 @@ beforeAll(async () => {
 
   closedApi = createApiServer({
     db,
-    config: { token: TOKEN, allowedDomains: [], log: (line) => serverLog.push(line) },
+    config: { credentialKeys: TEST_CREDENTIAL_KEYS, token: TOKEN, allowedDomains: [], log: (line) => serverLog.push(line) },
   });
   const closedBound = await closedApi.listen(0);
   closedBase = `http://127.0.0.1:${closedBound.port}`;
@@ -1031,6 +1052,7 @@ describe("POST /crawls/:id/resume", () => {
     const spare = createApiServer({
       db,
       config: {
+        credentialKeys: TEST_CREDENTIAL_KEYS,
         token: TOKEN,
         allowedDomains: ["127.0.0.1"],
         crawlDefaults: { allowPrivate: true, probeHosts: false, perHostDelayMs: 0 },
@@ -1075,6 +1097,7 @@ describe("POST /crawls/:id/resume", () => {
     const spare = createApiServer({
       db: rigged,
       config: {
+        credentialKeys: TEST_CREDENTIAL_KEYS,
         token: TOKEN,
         allowedDomains: ["127.0.0.1"],
         crawlDefaults: { allowPrivate: true, probeHosts: false, perHostDelayMs: 0 },
@@ -1104,7 +1127,7 @@ describe("POST /crawls/:id/resume", () => {
     await db.insert(crawls).values({
       tenantId: LOCAL_TENANT,
       id,
-      siteUrl: `${resumeSite}/`,
+      siteUrl: `${resumeSite}/`, hostKey: hostKeyOf(`${resumeSite}/`),
       config: {
         siteUrl: `${resumeSite}/`,
         maxPages: 10,
@@ -1923,10 +1946,10 @@ describe("GET /crawls", () => {
     const later = `crawl_micro_late_${Date.now()}`;
     const earlier = `crawl_micro_early_${Date.now()}`;
     await db.execute(sql`
-      insert into crawls (id, tenant_id, site_url, config_jsonb, ruleset_version, status, started_at)
-      values (${later}, ${LOCAL_TENANT}, 'http://micro.example/', '{}'::jsonb, '0.0.0-test', 'failed',
+      insert into crawls (id, tenant_id, site_url, host_key, config_jsonb, ruleset_version, status, started_at)
+      values (${later}, ${LOCAL_TENANT}, 'http://micro.example/', 'micro.example', '{}'::jsonb, '0.0.0-test', 'failed',
               '2099-01-01T00:00:00.123999Z'),
-             (${earlier}, ${LOCAL_TENANT}, 'http://micro.example/', '{}'::jsonb, '0.0.0-test', 'failed',
+             (${earlier}, ${LOCAL_TENANT}, 'http://micro.example/', 'micro.example', '{}'::jsonb, '0.0.0-test', 'failed',
               '2099-01-01T00:00:00.123111Z')`);
     createdCrawls.push(later, earlier);
 
