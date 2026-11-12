@@ -1,6 +1,6 @@
 import { sql } from "drizzle-orm";
 import {
-  pgTable, text, integer, smallint, bigint, boolean, jsonb, timestamp, real,
+  pgTable, text, integer, smallint, bigint, bigserial, boolean, jsonb, timestamp, real,
   primaryKey, index, uniqueIndex, customType,
 } from "drizzle-orm/pg-core";
 import type { StoredHostSpacing } from "../crawl/politeness.js";
@@ -1575,3 +1575,44 @@ export const instances = pgTable("instances", {
   heartbeatAt: timestamp("heartbeat_at", { withTimezone: true }).notNull().defaultNow(),
   stoppedAt: timestamp("stopped_at", { withTimezone: true }),
 });
+
+/**
+ * A crawl's history (migration 0045, Phase 28c): one row per lifecycle event —
+ * O(lifecycle), never O(URLs). Read by `crawl_history` (src/events/events.ts).
+ *
+ * WHO WRITES IT (call C1). The lifecycle kinds — queued, claimed, started,
+ * paused, resumed, cancelled, finished, failed, worker_lost and the render and
+ * rules kinds — are written by two triggers (migration 0046):
+ * `ariadne_crawl_event()` after an insert into `crawls` or an update of its
+ * `status`, and `ariadne_job_event()` likewise on `jobs`. The crawl status
+ * alone has about ten writers; a trigger misses none of them. The application
+ * writes only the schedule kinds, through `recordEvent`, which refuses the
+ * rest. The kind list and each kind's detail keys are `EVENT_KINDS` and
+ * `EVENT_DETAIL_KEYS`; a test pins the triggers' kinds to the list.
+ *
+ *  - `id`: the order. Keyset pages walk it, oldest first.
+ *  - `tenant_id`: the crawl's (or the schedule's) tenant, copied, so a read is
+ *    scoped without a join.
+ *  - `crawl_id`: null only for a schedule's own events (`schedule_fired` and
+ *    `schedule_skipped` name their crawl in `detail`, C9). Deleted with the
+ *    crawl.
+ *  - `schedule_id`: the schedule behind the event, or null. A plain column in
+ *    this migration — `schedules` does not exist until Task 3, which adds the
+ *    foreign key (ON DELETE SET NULL) and fills it in the triggers.
+ *  - `detail`: only `EVENT_DETAIL_KEYS[kind]`, built from named columns. Never a
+ *    credential name or value, never a key a client sent.
+ */
+export const crawlEvents = pgTable("crawl_events", {
+  id: bigserial("id", { mode: "number" }).primaryKey(),
+  tenantId: text("tenant_id").notNull(),
+  crawlId: text("crawl_id").references(() => crawls.id, { onDelete: "cascade" }),
+  scheduleId: text("schedule_id"),
+  at: timestamp("at", { withTimezone: true }).notNull().defaultNow(),
+  kind: text("kind").notNull(),
+  detail: jsonb("detail").$type<Record<string, unknown>>().notNull().default({}),
+}, (t) => [
+  // `crawl_history`: a crawl's events in id order.
+  index("crawl_events_crawl").on(t.crawlId, t.id).where(sql`${t.crawlId} is not null`),
+  // A schedule's events in id order (listEvents by schedule).
+  index("crawl_events_schedule").on(t.scheduleId, t.id).where(sql`${t.scheduleId} is not null`),
+]);

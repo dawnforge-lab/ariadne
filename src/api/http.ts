@@ -532,6 +532,19 @@ function buildRoutes(): Route[] {
       },
     },
     {
+      // A crawl's lifecycle events, oldest first (28c): `{items, nextCursor}`.
+      method: "GET",
+      pattern: ["crawls", id, "history"],
+      query: PAGINATION_PARAMS,
+      handler: async (service, ctx) => ({
+        status: 200,
+        body: await service.crawlHistory(ctx.tenant, param(ctx, "id"), {
+          ...optionalNumber(ctx.query, "limit"),
+          ...optionalString(ctx.query, "cursor"),
+        }),
+      }),
+    },
+    {
       method: "GET",
       pattern: ["crawls", id, "config"],
       query: [],

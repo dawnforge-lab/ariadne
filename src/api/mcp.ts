@@ -1,5 +1,5 @@
 /**
- * The MCP transport: twenty-seven tools over the same service layer the HTTP
+ * The MCP transport: twenty-eight tools over the same service layer the HTTP
  * routes use. Nine of them change something (`crawl_start`, `crawl_resume`,
  * `crawl_pause`, `crawl_cancel`, `crawl_delete`, `crawl_render`, `crawl_rules`,
  * `crawl_mark_failed`, `crawl_config_set`); every other one only reads.
@@ -119,6 +119,7 @@ export const TOOL_NAMES = [
   "crawl_rules",
   "crawl_config_get",
   "crawl_config_set",
+  "crawl_history",
   "config_schema",
   "config_validate",
   "robots_get",
@@ -888,6 +889,30 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
       inputSchema: strictInput({ crawlId: crawlIdField() }),
     },
     async ({ crawlId }) => run("crawl_mark_failed", () => service.markCrawlFailed(tenant, crawlId)),
+  );
+
+  server.registerTool(
+    named("crawl_history"),
+    {
+      title: "What happened to a crawl, in order",
+      description:
+        "A crawl's lifecycle events, oldest first: {id, at, kind, scheduleId, crawlId, " +
+        "detail}. Use it to explain a crawl's status — why it is paused, who resumed it, " +
+        "how many times a worker was lost — rather than guessing from crawl_status.\n\n" +
+        "kind and its detail: queued (accepted); claimed {instanceId, role} (a runner took " +
+        "it); started (the crawl loop began a run); paused {reason: request | shutdown | " +
+        "credentials_unreadable | not_allowed}; worker_lost (the process running it died; " +
+        "the engine paused it); resumed {auto} (back in the queue — auto true when the " +
+        "engine requeued it after a lost worker or a shutdown, false when crawl_resume " +
+        "did); cancelled; finished {pagesCrawled}; failed {reason}; render_queued, " +
+        "render_started, render_finished {outcome: done | failed | abandoned}, and the " +
+        "same three for rules_*. A crawl that ran in one go reads queued, claimed, " +
+        "started, finished.\n\n" +
+        `Paginated: {items, nextCursor}; limit defaults to ${PAGE_SIZE_DEFAULT}, ` +
+        `maximum ${PAGE_SIZE_MAX}. Pass nextCursor back as cursor to continue.`,
+      inputSchema: strictInput({ crawlId: crawlIdField(), limit: limitField(), cursor: cursorField() }),
+    },
+    async ({ crawlId, ...page }) => run("crawl_history", () => service.crawlHistory(tenant, crawlId, defined(page))),
   );
 
   server.registerTool(

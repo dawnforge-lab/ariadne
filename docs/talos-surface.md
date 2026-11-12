@@ -1295,7 +1295,7 @@ webhooks**: polling `crawl_status` is the contract until Talos asks otherwise.
 | `export_crawl` | `GET /crawls/:id/export` | `format` (`jsonl.gz` \| `csv`), `dataset` (jsonl.gz only), `view` + `ruleId` \| `metricId` (csv only) |
 
 Pinned: the tool list and every schema — `test/api/mcp.test.ts:673`
-("advertises exactly the twenty-seven tools of the agent surface"),
+("advertises exactly the twenty-eight tools of the agent surface"),
 `test/api/mcp.test.ts:700` ("closes every input schema and describes every
 field"), `test/api/mcp.test.ts:732` ("names every member of the closed
 vocabulary each field enumerates"). `crawl_start`'s field set is not a second

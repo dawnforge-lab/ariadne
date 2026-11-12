@@ -528,6 +528,21 @@ async function insertLive(
  * host and its tenant only while its holder is live (`liveHolderSql`, 28b
  * T4b) — module header, "Fair claims".
  *
+ * THE CRAWL ROW'S KEY-SHARE LOCK, TAKEN HERE AND SKIPPED WHEN HELD (28c). The
+ * claim's lifecycle event (`claimed`, or `render_started` / `rules_started`) is
+ * written by the jobs trigger (migration 0046) into `crawl_events`, whose
+ * foreign key takes `FOR KEY SHARE` on the crawl row — while this statement
+ * holds the job row. `crawl_cancel`, `crawl_delete` and `crawl_config_set` hold
+ * the crawl row `FOR UPDATE` (which conflicts with key share), and a cancel
+ * (its queued job's settle) and a delete (the cascade) then write its jobs: a
+ * claim that waited for that lock would close a cycle (40P01). So
+ * the claim takes the crawl's key-share lock in its own row selection, `SKIP
+ * LOCKED`: a crawl held `FOR UPDATE` is skipped like a job another claim
+ * holds, and its holder settles the job (a cancel abandons it). It never
+ * waits, so it is in no cycle; and `FOR NO KEY UPDATE` — the lock every other
+ * crawl-row writer takes — does not conflict with it, so nothing else is
+ * skipped.
+ *
  * A `crawl` job then does the loop's own compare-and-swap on `crawls.status`
  * (`queued → running`); a crawl paused or cancelled between this claim and
  * that one is a `ClaimLostError`, and the runner abandons the job having
@@ -587,6 +602,7 @@ export async function claimNextJob(
           ${underCap}
         order by q.queued_at, q.id
         for update of q skip locked
+        for key share of qc skip locked
         limit 1)
        and status = 'queued'
     returning id, tenant_id, crawl_id, kind, pinned_to, claimed_by, claimed_at, queued_at`;

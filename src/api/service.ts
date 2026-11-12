@@ -255,6 +255,8 @@ import {
   type ExportFormat,
 } from "./csv.js";
 import { ServiceError, clip, unknownKeysMessage } from "./errors.js";
+import { decodeCursor, encodeCursor, parseLimit } from "./paging.js";
+import { listEvents, type CrawlEvent } from "../events/events.js";
 import { tenantExportDir, type TenantId } from "../tenant.js";
 import {
   buildCrawlOverview,
@@ -282,6 +284,9 @@ import {
 } from "./judgement-view.js";
 
 export { ServiceError, type ServiceErrorCode } from "./errors.js";
+// The pagination helpers live in ./paging.js (shared with the crawl events); the page sizes are
+// re-exported here, where every transport and test has always imported them from.
+export { PAGE_SIZE_DEFAULT, PAGE_SIZE_MAX } from "./paging.js";
 
 // The request's defaults and bounds live with the schema that enforces them;
 // re-exported because the transports, the demo and the suite read them here.
@@ -296,10 +301,6 @@ function platformFields(
   const { platform, profile } = readStoredPlatform(platformColumn, profileColumn, crawlId);
   return { platform, platformProfile: profile };
 }
-
-/** Rows per page when the caller does not say, and the ceiling when they do. */
-export const PAGE_SIZE_DEFAULT = 50;
-export const PAGE_SIZE_MAX = 200;
 
 /**
  * The crawl-start body, after validation (`parseStartBody`,
@@ -4859,6 +4860,21 @@ export class ApiService {
   }
 
   /**
+   * A crawl's history (Phase 28c) — `crawl_history` and `GET
+   * /crawls/:id/history`: its lifecycle events, oldest first (src/events/
+   * events.ts). Another tenant's crawl is a crawl that does not exist (404),
+   * as every crawl route answers.
+   */
+  async crawlHistory(
+    tenant: TenantId,
+    crawlId: string,
+    opts: { limit?: number; cursor?: string } = {},
+  ): Promise<Page<CrawlEvent>> {
+    await this.assertCrawl(tenant, crawlId);
+    return listEvents(this.db, { tenant, crawlId }, opts);
+  }
+
+  /**
    * A crawl's judgement: its current block (with `findingCap` folded in from
    * the config, where its bytes live), every overridable threshold as that
    * block leaves it, the stamp of the last rules run and whether the block has
@@ -9093,51 +9109,6 @@ function push(index: Map<string, string[]>, key: string, value: string): void {
   else existing.push(value);
 }
 
-/**
- * A listing cursor: the sort key of the last row returned, base64url-encoded so
- * it is opaque to the caller and one token rather than three query parameters.
- *
- * Opaque, not encrypted — it carries values the caller was just given. What it
- * must not be is *guessable in the wrong shape*: a cursor that does not decode
- * is a 400, never an empty page, because an agent that paginated into silence
- * would conclude the listing had ended.
- *
- * JSON-encoded rather than delimiter-joined, because the parts are no longer
- * timestamps and ids: a URL may contain the delimiter, and so may a dedupe key
- * built from one. A cursor that split in the wrong place would page from a
- * position nobody asked for — silently, and only for the sites whose URLs
- * happen to contain the character.
- */
-function encodeCursor(...parts: string[]): string {
-  return Buffer.from(JSON.stringify(parts), "utf8").toString("base64url");
-}
-
-// Overloaded by arity so a caller destructures a TUPLE rather than an array of
-// possibly-undefined parts: the arity check below is what makes that safe, and
-// the type says so instead of every call site restating it.
-function decodeCursor(cursor: string, arity: 1): [string];
-function decodeCursor(cursor: string, arity: 2): [string, string];
-function decodeCursor(cursor: string, arity: 3): [string, string, string];
-function decodeCursor(cursor: string, arity: number): string[] {
-  const bad = (): never => {
-    throw new ServiceError("VALIDATION", "cursor is not a cursor this server issued");
-  };
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(Buffer.from(cursor, "base64url").toString("utf8"));
-  } catch {
-    return bad();
-  }
-  if (
-    !Array.isArray(parsed) ||
-    parsed.length !== arity ||
-    parsed.some((part) => typeof part !== "string")
-  ) {
-    return bad();
-  }
-  return parsed as string[];
-}
-
 /** The crawls listing's cursor: an exact timestamp and an id. */
 function decodeCrawlCursor(cursor: string): { startedAt: string; id: string } {
   const [startedAt, id] = decodeCursor(cursor, 2);
@@ -9155,17 +9126,6 @@ function decodeIssueCursor(cursor: string): { rank: number; ruleId: string } {
     throw new ServiceError("VALIDATION", "cursor is not a cursor this server issued");
   }
   return { rank: parsed, ruleId };
-}
-
-function parseLimit(limit: number | undefined): number {
-  if (limit === undefined) return PAGE_SIZE_DEFAULT;
-  if (!Number.isInteger(limit) || limit < 1 || limit > PAGE_SIZE_MAX) {
-    throw new ServiceError(
-      "VALIDATION",
-      `limit must be an integer between 1 and ${PAGE_SIZE_MAX}, got ${clip(String(limit))}`,
-    );
-  }
-  return limit;
 }
 
 /** A refusal a check answered, thrown as the `ServiceError` its code maps to. */

@@ -22,7 +22,7 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 
 import { closeDb, createDb, type Db } from "../../src/db/client.js";
 import { runMigrations } from "../../src/db/migrate.js";
-import { crawls, issues, jobs, links, metrics, pages } from "../../src/db/schema.js";
+import { crawlEvents, crawls, issues, jobs, links, metrics, pages } from "../../src/db/schema.js";
 import { EXTRACTION_VERSION } from "../../src/crawl/versions.js";
 import { RULESET_VERSION } from "../../src/rules/registry/registry.js";
 import { closeFetchAgents } from "../../src/crawl/http.js";
@@ -77,6 +77,7 @@ const SCOPED_ROUTES: Record<string, HttpBuilder> = {
   "POST /crawls/:id/render": crawlRoute("POST", "/render"),
   "POST /crawls/:id/rules": crawlRoute("POST", "/rules"),
   "GET /crawls/:id/config": crawlRoute("GET", "/config"),
+  "GET /crawls/:id/history": crawlRoute("GET", "/history"),
   "PATCH /crawls/:id/config": crawlRoute("PATCH", "/config", { judgement: { rules: null } }),
   "GET /crawls/:id/issues": crawlRoute("GET", "/issues"),
   "GET /crawls/:id/issues/:ruleId/urls": crawlRoute("GET", "/issues/title.missing/urls"),
@@ -108,6 +109,7 @@ const SCOPED_TOOLS: Record<string, ToolBuilder> = {
   crawl_render: only,
   crawl_rules: only,
   crawl_config_get: only,
+  crawl_history: only,
   crawl_config_set: (c) => ({ crawlId: c, judgement: { rules: null } }),
   robots_get: only,
   issues_list: only,
@@ -206,7 +208,9 @@ async function startAs(tenant: TenantId): Promise<string> {
 
 /** Everything about a crawl a refused command could have touched. */
 async function snapshot(crawlId: string): Promise<unknown> {
-  const count = async (table: typeof pages | typeof issues | typeof metrics | typeof links): Promise<number> => {
+  const count = async (
+    table: typeof pages | typeof issues | typeof metrics | typeof links | typeof crawlEvents,
+  ): Promise<number> => {
     const [row] = await db.select({ n: sql<number>`count(*)::int` }).from(table).where(eq(table.crawlId, crawlId));
     return row?.n ?? -1;
   };
@@ -217,6 +221,8 @@ async function snapshot(crawlId: string): Promise<unknown> {
     issues: await count(issues),
     metrics: await count(metrics),
     links: await count(links),
+    // A refused command writes no lifecycle event either (28c).
+    events: await count(crawlEvents),
   };
 }
 

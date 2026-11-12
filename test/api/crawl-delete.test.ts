@@ -285,7 +285,7 @@ describe("CRAWL_CHILD_TABLES", () => {
       "frontier",
       "list_urls",
       "crawl_credentials",
-      "jobs",
+      "jobs", "crawl_events",
     ]);
   });
 });
@@ -429,7 +429,9 @@ describe("crawl_delete refusals", () => {
     } finally {
       await db.delete(jobs).where(eq(jobs.id, held));
     }
-    expect(await rowCounts(id)).toEqual(before);
+    // The two holds' own `rules_started` and `render_started` events (28c) stay
+    // behind them; the refusals themselves wrote nothing.
+    expect(await rowCounts(id)).toEqual({ ...before, crawl_events: (before["crawl_events"] ?? 0) + 2 });
   });
 
   it("refuses while a worker holds a live lease, naming the count", async () => {

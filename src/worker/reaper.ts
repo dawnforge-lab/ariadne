@@ -30,7 +30,9 @@
  *     state change as `crawl_resume`, made by the engine. Never `request` (an
  *     agent's pause is never undone), never `credentials_unreadable` (only new
  *     values continue it), never a pinned (in-process) crawl, whose process is
- *     the only runner of its pin (R10).
+ *     the only runner of its pin (R10). Its `resumed` event (28c) is `auto:
+ *     true` — a shutdown requeue's too, though it raises no count — because
+ *     this transaction marks itself the reaper's (`ariadne.event_source`).
  *  3. **Expired credentials are swept** (`CredentialVault.sweepExpired`,
  *     retention `retentionDays`).
  *  4. **Dead instance rows are deleted** once older than
@@ -353,6 +355,11 @@ async function requeueOne(
       picked = found.rows[0];
       if (picked === undefined) return null;
       const crawlId = picked.id;
+      // The requeue's `resumed` event says `auto: true` (28c): the crawl
+      // trigger reads this setting (migration 0046). Transaction-local (`true`),
+      // so it ends with this transaction and no later write on the connection
+      // is mistaken for the reaper's.
+      await tx.execute(sql`select set_config('ariadne.event_source', 'reaper', true)`);
       const moved = await tx
         .update(crawls)
         .set({

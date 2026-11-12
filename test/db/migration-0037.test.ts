@@ -48,7 +48,9 @@ describe("0037 — crawls carry a tenant", () => {
 
     const outcome = await db
       .transaction(async (tx) => {
-        // The state at 0036: no tenant column.
+        // The state at 0036: no tenant column — and no crawl-events trigger
+        // (0046), which reads it. Both come back with the rollback.
+        await tx.execute(sql`alter table crawls disable trigger crawls_lifecycle_event`);
         await tx.execute(sql`alter table crawls drop column tenant_id`);
         for (const id of ids) {
           await tx.execute(sql`

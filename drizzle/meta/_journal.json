@@ -316,6 +316,20 @@
       "when": 1794430979516,
       "tag": "0044_requeue_index_r17",
       "breakpoints": true
+    },
+    {
+      "idx": 45,
+      "version": "7",
+      "when": 1794485846921,
+      "tag": "0045_crawl_events",
+      "breakpoints": true
+    },
+    {
+      "idx": 46,
+      "version": "7",
+      "when": 1794485851146,
+      "tag": "0046_crawl_events_triggers",
+      "breakpoints": true
     }
   ]
 }
