@@ -564,6 +564,13 @@ describe("worker:serve boot", () => {
     expect(source).toMatch(/processTrust:\s*\{\s*allowPrivate:\s*true/);
     expect(source).not.toMatch(/env\[\s*"[A-Z_]*(PRIVATE|RECHECK)[A-Z_]*"\s*\]/);
   });
+
+  it("the trusted child takes its scheduler from the command line, never from the environment (28c)", () => {
+    const source = readFileSync(join(ROOT, "scripts/run-worker-trusted.ts"), "utf8");
+    expect(source).toMatch(/scheduler:\s*args\.scheduler/);
+    expect(source).toMatch(/process\.argv\.slice\(2\)/);
+    expect(source).not.toMatch(/env\[\s*"[A-Z_]*SCHEDUL[A-Z_]*"\s*\]/);
+  });
 });
 
 // ------------------------------------------------------------------ allowlist at claim
