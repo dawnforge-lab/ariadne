@@ -114,21 +114,30 @@ Absorbs the old Phase 25's priority axis.
   markup. Long-term crawl comparison runs on the extracted facts, which are kept with
   the crawl. On-demand screenshots of named key pages stay undecided.
 
-### Phase 29 — Integrations
+**Reordered 2026-11-12 (owner).** Integrations move last: "the main tool Parallax or Talos
+will provide these integrations so we will see at the end how we connect them". Checks wave 2
+becomes Phase 29. The owner also dropped two items from it:
+- the mobile render: "main tool provides a rendering service that agent can call to sample";
+- external link checking: "External links don't matter in this context or have very little
+  value". Only a per-page external-link count stays.
 
-Needs Phase 28's tenancy.
+Design: `docs/superpowers/specs/2026-11-12-phase-29-checks-wave-2-design.md`.
+
+### Phase 29 — Checks wave 2
+
+- Structured-data validation, JS errors and blocked resources, images larger than
+  displayed, the chosen accessibility subset.
+- Field-level crawl diff (over extracted facts), link score, anchor aggregation and per-page
+  link counts.
+
+### Phase 30 — Integrations (last)
+
+Needs Phase 28's tenancy. Designed once it is clear how the main tool provides them.
 
 - Credential provider (Talos endpoint / environment token).
 - GSC performance and URL Inspection, GA4, Bing Webmaster, PSI sampled per template.
 - Rules that join integration data to crawled URLs (e.g. orphan pages with traffic,
   indexable pages not indexed, user canonical not selected).
-
-### Phase 30 — Checks wave 2
-
-- Structured-data validation, JS errors and blocked resources, images larger than
-  displayed, mobile render, the chosen accessibility subset.
-- Field-level crawl diff (over extracted facts), external link checking (budgeted, off by default), link score
-  and anchor aggregation.
 
 ## Not on this roadmap
 
