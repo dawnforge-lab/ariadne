@@ -4540,7 +4540,7 @@ export class ApiService {
         this.db,
         { tenant, crawlId, kind: "render", instanceId, deadAfterMs: this.timing.deadAfter, held: this.pinnedJobs },
         () =>
-          runRenderLink(this.db, this.vault, crawlId, {
+          runRenderLink(this.db, this.vault, tenant, crawlId, {
             ...(input.urls === undefined ? {} : { urls: input.urls }),
             ...(sent === undefined ? {} : { sent }),
             // A SERVER property (`ServiceConfig.renderDir`), absolutised at
@@ -4667,7 +4667,7 @@ export class ApiService {
       return await withPinnedJob(
         this.db,
         { tenant, crawlId, kind: "rules", instanceId, deadAfterMs: this.timing.deadAfter, held: this.pinnedJobs },
-        () => runRulesLink(this.db, crawlId, this.registry),
+        () => runRulesLink(this.db, tenant, crawlId, this.registry),
       );
     } catch (error) {
       // The crawl's own crawl job holds it: the crawl is queued or running,

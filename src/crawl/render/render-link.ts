@@ -28,7 +28,7 @@ import {
 } from "../credentials.js";
 import { hostProbeStarts, normalizeUrl } from "../parse/url-utils.js";
 import { isUrlAllowed, UrlPolicyError, type AddressResolver } from "../url-policy.js";
-import { parseTenant } from "../../tenant.js";
+import type { TenantId } from "../../tenant.js";
 import { storedCredentialsOf } from "../../worker/crawl-job.js";
 import { RenderPassRefusal, runRenderPass, type RenderPassSummary } from "./run-render.js";
 import { resolveRenderConfig } from "./select.js";
@@ -76,10 +76,15 @@ export interface RenderLinkOptions {
 export async function runRenderLink(
   db: Db,
   vault: CredentialVault,
+  tenant: TenantId,
   crawlId: string,
   opts: RenderLinkOptions,
 ): Promise<RenderPassSummary> {
-  const [row] = await db.select().from(crawls).where(eq(crawls.id, crawlId)).limit(1);
+  const [row] = await db
+    .select()
+    .from(crawls)
+    .where(and(eq(crawls.id, crawlId), eq(crawls.tenantId, tenant)))
+    .limit(1);
   if (row === undefined) {
     throw new ServiceError("NOT_FOUND", `no such crawl '${clip(crawlId)}'`);
   }
@@ -135,7 +140,7 @@ export async function runRenderLink(
   // so the write has its own (28b).
   if (opts.sent !== undefined && credentials !== undefined && row.status !== "cancelled") {
     await db.transaction(async (tx) => {
-      await vault.write(tx, parseTenant(row.tenantId), crawlId, credentials);
+      await vault.write(tx, tenant, crawlId, credentials);
     });
   }
   return summary;

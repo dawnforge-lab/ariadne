@@ -21,6 +21,10 @@ import { runRenderLink } from "../../src/crawl/render/render-link.js";
 import { closeDb, createDb, type Db } from "../../src/db/client.js";
 import { runMigrations } from "../../src/db/migrate.js";
 import { crawls, pages } from "../../src/db/schema.js";
+import { LOCAL_TENANT, parseTenant } from "../../src/tenant.js";
+import { runRulesLink } from "../../src/rules/rules-link.js";
+import { buildRegistry } from "../../src/rules/index.js";
+import { ServiceError } from "../../src/api/errors.js";
 import { TEST_CREDENTIAL_KEYS } from "../helpers/credential-keys.js";
 
 const TOKEN = "test-token-render-link-0123456789";
@@ -140,7 +144,7 @@ describe("a render with no documents directory", () => {
     const id = await crawlSite();
     expect((await call("GET", `/crawls/${id}`)).body["renderDocuments"]).toBe("not kept");
 
-    const summary = await runRenderLink(db, new CredentialVault(db, TEST_CREDENTIAL_KEYS), id, {
+    const summary = await runRenderLink(db, new CredentialVault(db, TEST_CREDENTIAL_KEYS), LOCAL_TENANT, id, {
       renderHtmlDir: null,
       allowPrivate: true,
       hostAllowed: () => true,
@@ -170,4 +174,29 @@ describe("a render with no documents directory", () => {
     expect(existsSync(join(renderDir, id))).toBe(true);
     expect((await call("GET", `/crawls/${id}`)).body["renderDocuments"]).toBe("kept");
   }, 90_000);
+});
+
+describe("the links are tenant-scoped", () => {
+  it("a tenant that does not own the crawl is answered NOT_FOUND by both links, and nothing changes", async () => {
+    const id = await crawlSite();
+    const other = parseTenant("someone-else");
+    const before = await db.select().from(crawls).where(eq(crawls.id, id));
+    const pagesBefore = await db.select().from(pages).where(eq(pages.crawlId, id));
+
+    const render = runRenderLink(db, new CredentialVault(db, TEST_CREDENTIAL_KEYS), other, id, {
+      renderHtmlDir: null,
+      allowPrivate: true,
+      hostAllowed: () => true,
+      log: () => {},
+      where: "chain",
+    });
+    await expect(render).rejects.toMatchObject({ code: "NOT_FOUND", message: `no such crawl '${id}'` });
+    await expect(render).rejects.toBeInstanceOf(ServiceError);
+
+    const rules = runRulesLink(db, other, id, buildRegistry());
+    await expect(rules).rejects.toMatchObject({ code: "NOT_FOUND", message: `no such crawl '${id}'` });
+
+    expect(await db.select().from(crawls).where(eq(crawls.id, id))).toEqual(before);
+    expect(await db.select().from(pages).where(eq(pages.crawlId, id))).toEqual(pagesBefore);
+  }, 60_000);
 });

@@ -3,12 +3,13 @@
  * `crawl_rules` and a schedule's chain. The caller owns the claim (a `rules`
  * job pinned to its process); nothing here claims anything.
  */
-import { eq, sql } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 
 import { ServiceError, clip } from "../api/errors.js";
 import { readJudgementBlock } from "../api/judgement-view.js";
 import type { Db } from "../db/client.js";
 import { crawls, pages } from "../db/schema.js";
+import type { TenantId } from "../tenant.js";
 import type { Registry } from "./registry/registry.js";
 import { runRules, type RunSummary } from "./run.js";
 
@@ -22,9 +23,21 @@ export function rulesWhileLive(crawlId: string, status: string): ServiceError {
 }
 
 /** `runRulesForCrawl`'s work, under its `rules` job: the body of `ApiService.judgeUnderJob`, moved here unchanged. */
-export async function runRulesLink(db: Db, crawlId: string, registry: Registry): Promise<RunSummary> {
+export async function runRulesLink(
+  db: Db,
+  tenant: TenantId,
+  crawlId: string,
+  registry: Registry,
+  /** TEST SEAM: awaited before the crawl read, so a test can stop at the read itself. */
+  beforeRead?: () => Promise<void>,
+): Promise<RunSummary> {
   try {
-    const [row] = await db.select().from(crawls).where(eq(crawls.id, crawlId)).limit(1);
+    if (beforeRead !== undefined) await beforeRead();
+    const [row] = await db
+      .select()
+      .from(crawls)
+      .where(and(eq(crawls.id, crawlId), eq(crawls.tenantId, tenant)))
+      .limit(1);
     if (row === undefined) {
       throw new ServiceError("NOT_FOUND", `no such crawl '${clip(crawlId)}'`);
     }
