@@ -223,6 +223,38 @@ describe("chains run by an in-process service", () => {
     }
   }, 240_000);
 
+  it("schedule_history answers the schedule's own events only; the fired crawl's lifecycle stays in crawl_history", async () => {
+    const t = tenant();
+    const service = inProcessService(t);
+    try {
+      const pin = await service.instanceId();
+      const { scheduleId, nextRunAt } = await createSchedule(service, t, null);
+      const crawlId = await fire(t, scheduleId, pin, after(nextRunAt));
+      await chainEnd(crawlId);
+
+      // The fired crawl's lifecycle carries the schedule's id (Ruling P3)…
+      const lifecycle = (await service.crawlHistory(t, crawlId)).items;
+      expect(lifecycle.map((e) => e.kind)).toEqual([
+        "queued",
+        "claimed",
+        "started",
+        "finished",
+        "rules_queued",
+        "rules_started",
+        "rules_finished",
+      ]);
+      expect(lifecycle.every((e) => e.scheduleId === scheduleId)).toBe(true);
+      // …and is not the schedule's own history (spec item 16: "one schedule's fires and skips").
+      const own = await service.scheduleHistory(t, scheduleId);
+      expect(own.items.map((e) => [e.kind, e.crawlId, e.detail])).toEqual([
+        ["schedule_fired", null, { crawlId }],
+      ]);
+      expect(own.nextCursor).toBeNull();
+    } finally {
+      await service.close();
+    }
+  }, 240_000);
+
   it("(b) render: {} runs crawl → render → rules, the events in that order", async () => {
     const t = tenant();
     const service = inProcessService(t);
@@ -299,6 +331,12 @@ describe("chains run by an in-process service", () => {
       const kinds = events.map((e) => e.kind);
       expect(kinds.indexOf("render_finished")).toBeLessThan(kinds.indexOf("schedule_chain_failed"));
       expect(events.find((e) => e.kind === "render_finished")?.detail).toEqual({ outcome: "failed" });
+      // The chain failure is the schedule's own record too: its history holds the fire and it, nothing else.
+      const own = await service.scheduleHistory(t, scheduleId);
+      expect(own.items.map((e) => [e.kind, e.crawlId])).toEqual([
+        ["schedule_fired", null],
+        ["schedule_chain_failed", crawlId],
+      ]);
     } finally {
       spy.mockRestore();
       await service.close();

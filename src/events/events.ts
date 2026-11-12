@@ -21,7 +21,7 @@
  * the key (27d spec §4: a key may be a value pasted into the wrong place). No
  * detail ever carries a credential name or value, or a key a client sent.
  */
-import { and, asc, eq, gt, sql, type SQL } from "drizzle-orm";
+import { and, asc, eq, gt, inArray, sql, type SQL } from "drizzle-orm";
 
 import { crawlEvents } from "../db/schema.js";
 import { ServiceError } from "../api/errors.js";
@@ -158,6 +158,13 @@ export async function recordEvent(
  * `id`, with the surface's `limit` and opaque cursor (src/api/paging.ts). The
  * tenant is always a predicate. A missing or foreign crawl or schedule is the
  * caller's to refuse first: this answers an empty page for one.
+ *
+ * A SCHEDULE'S events are its own kinds only (`APP_EVENT_KINDS`: its fires,
+ * its skips and its chain failures; spec item 16). A fired crawl's lifecycle
+ * events carry the schedule's id too (the triggers fill it, Ruling P3), and
+ * they are that crawl's history, read by crawl id — not the schedule's. The
+ * `crawl_events_schedule` index (`schedule_id, id`) still drives the read; the
+ * kind is a filter on the rows it walks.
  */
 export async function listEvents(
   db: Writer,
@@ -166,10 +173,14 @@ export async function listEvents(
 ): Promise<Page<CrawlEvent>> {
   const limit = parseLimit(page.limit);
   const after = page.cursor === undefined ? null : decodeEventCursor(page.cursor);
-  const predicates: SQL[] = [
-    eq(crawlEvents.tenantId, where.tenant),
-    "crawlId" in where ? eq(crawlEvents.crawlId, where.crawlId) : eq(crawlEvents.scheduleId, where.scheduleId),
-  ];
+  const predicates: SQL[] =
+    "crawlId" in where
+      ? [eq(crawlEvents.tenantId, where.tenant), eq(crawlEvents.crawlId, where.crawlId)]
+      : [
+          eq(crawlEvents.tenantId, where.tenant),
+          eq(crawlEvents.scheduleId, where.scheduleId),
+          inArray(crawlEvents.kind, [...APP_EVENT_KINDS]),
+        ];
   if (after !== null) predicates.push(gt(crawlEvents.id, sql`${after}::bigint`));
   const rows = await db
     .select({
