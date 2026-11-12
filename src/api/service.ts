@@ -93,7 +93,6 @@ import {
   describeShape,
   redactedCredentials,
   redactionMarkerError,
-  sameShape,
   shapeOf,
   type CrawlCredentials,
   type CredentialShape,
@@ -102,7 +101,6 @@ import {
   assertRetentionDays,
   CredentialVault,
   DEFAULT_CREDENTIAL_RETENTION_DAYS,
-  type CredentialRead,
 } from "../crawl/credential-vault.js";
 import {
   matchesPattern,
@@ -129,10 +127,6 @@ import {
   RESOURCE_ROBOTS_DENIED_CLASS,
   RESOURCE_ROBOTS_UNREACHABLE_CLASS,
 } from "../crawl/resources/fetch-resources.js";
-// The robots vocabulary from the module that WRITES it, never a copy: a fourth
-// outcome added there must not turn every new crawl's stored evidence into a
-// validation refusal here. See `ROBOTS_OUTCOMES` in discovery.ts.
-import { ROBOTS_OUTCOMES } from "../crawl/discovery.js";
 // The recheck vocabulary, imported from the two modules that WRITE it rather
 // than spelled out here: the cap reason the pass stamps on a row it never got
 // to (`RESOURCE_CAP_REASON`'s twin), and the set of second-observation classes
@@ -149,8 +143,6 @@ import { NO_RESPONSE, NO_RESPONSE_ANSWERED, RECHECK_CLEARED } from "../rules/pag
 import {
   refuseLiveCrawl,
   RENDER_HTML_DIR,
-  RenderPassRefusal,
-  runRenderPass,
   type RenderPassSummary,
 } from "../crawl/render/run-render.js";
 import { hostKeyOf } from "../crawl/host-key.js";
@@ -173,14 +165,15 @@ import { heartbeat, registerInstance, stopInstance } from "../worker/instance.js
 import { timingWith, type Timing } from "../worker/timing.js";
 import { JobRunner } from "../worker/runner.js";
 import { crawlJobExecutor, storedCredentialsOf } from "../worker/crawl-job.js";
-import { resolveRenderConfig } from "../crawl/render/select.js";
+import { credentialsFor, mapRenderPassError, parseRobots, runRenderLink } from "../crawl/render/render-link.js";
+import { rulesWhileLive, runRulesLink } from "../rules/rules-link.js";
 import {
   hostProbeStarts,
   hostnameSpellings,
   isSameOrigin,
   normalizeUrl,
 } from "../crawl/parse/url-utils.js";
-import { isUrlAllowed, UrlPolicyError } from "../crawl/url-policy.js";
+import { isUrlAllowed } from "../crawl/url-policy.js";
 import { buildRegistry } from "../rules/index.js";
 import { RULESET_VERSION, type Registry } from "../rules/registry/registry.js";
 import {
@@ -220,7 +213,7 @@ import {
 } from "../rules/helpers.js";
 import { UNTYPED } from "../rules/metric/cohort.js";
 import { resolveRuleCaps, storedFindingCap } from "../rules/query/crawl-evidence.js";
-import { runRules, type RunSummary } from "../rules/run.js";
+import type { RunSummary } from "../rules/run.js";
 import { isHostAllowed, type ServiceConfig } from "./config.js";
 import {
   API_CRAWL_DEFAULTS,
@@ -274,7 +267,6 @@ import {
   loadJudgementView,
   mergePatch,
   notDisabled,
-  readJudgementBlock,
   refuseIfDisabled,
   refuseIfNotMeasured,
   storableBlock,
@@ -447,16 +439,6 @@ export function parseResumeCrawlInput(raw: unknown): CrawlCredentials {
 }
 
 /**
- * How many unrenderable URLs a refusal spells out before it says "…".
- *
- * A caller who pasted a whole listing can be wrong about all of it, and a 400
- * carrying four hundred URLs is a body nobody reads. Enough to see the PATTERN
- * of the mistake — a stale host, a missing trailing slash — and the count above
- * it is exact either way.
- */
-const MISSING_URLS_NAMED = 5;
-
-/**
  * Validate a render body. Same discipline as `parseStartBody`: an unknown
  * field is a refusal naming it, never an ignored instruction. A caller who sent
  * `{"pages": [...]}` and got a 200 would believe the engine rendered what they
@@ -563,6 +545,12 @@ export interface CrawlListItem {
 
 /** One crawl, in full. */
 export interface CrawlDetail extends CrawlListItem {
+  /**
+   * Whether the crawl's rendered documents are on disk: "kept" when any page has
+   * one, "not kept" otherwise — a crawl never rendered, or rendered by a worker's
+   * chain, which writes none (28c). Derived from `pages.rendered_html_path`.
+   */
+  renderDocuments: "kept" | "not kept";
   rulesetVersion: string;
   /** A pause or cancel asked of this running crawl that its loop has not yet acted on; else null. */
   controlRequested: ControlRequest | null;
@@ -3307,11 +3295,22 @@ export class ApiService {
       // (28b) — read beside the rest, so on a snapshot they describe its moment.
       () => latestJobOf(db, crawlId),
       () => (row.status === "queued" ? queuePositionOf(db, crawlId, this.timing.deadAfter) : Promise.resolve(null)),
+      () => this.renderDocumentsState(crawlId, db),
     ] as const;
-    const [counts, liveLeases, blockedPages, robotsBlockedRows, resourceCounts, recheckCounts, job, queuePosition] =
+    const [
+      counts,
+      liveLeases,
+      blockedPages,
+      robotsBlockedRows,
+      resourceCounts,
+      recheckCounts,
+      job,
+      queuePosition,
+      renderDocuments,
+    ] =
       db === this.db
         ? await Promise.all([
-            reads[0](), reads[1](), reads[2](), reads[3](), reads[4](), reads[5](), reads[6](), reads[7](),
+            reads[0](), reads[1](), reads[2](), reads[3](), reads[4](), reads[5](), reads[6](), reads[7](), reads[8](),
           ])
         : ([
             await reads[0](),
@@ -3322,6 +3321,7 @@ export class ApiService {
             await reads[5](),
             await reads[6](),
             await reads[7](),
+            await reads[8](),
           ] as const);
     return {
       crawlId: row.id,
@@ -3332,6 +3332,7 @@ export class ApiService {
       pagesCrawled: row.pagesCrawled,
       pagesTotal: row.pagesTotal,
       renderPassCount: row.renderPassCount,
+      renderDocuments,
       rulesetVersion: row.rulesetVersion,
       // Validated: a value this engine never writes is a defect of ours — a 500
       // naming the crawl, not a null.
@@ -3623,7 +3624,7 @@ export class ApiService {
    */
   async getRobots(tenant: TenantId, crawlId: string): Promise<RobotsEvidence> {
     const row = await this.crawlRow(tenant, crawlId);
-    const robots = this.parseRobots(row.discovery, crawlId);
+    const robots = parseRobots(row.discovery, crawlId);
 
     let robotsUrl: string;
     try {
@@ -4252,7 +4253,7 @@ export class ApiService {
     // hard rule 7). Decided here rather than left to the runner, which would
     // pause the row after accepting it. What a stored copy decrypts to is not
     // kept: the runner reads it again at dequeue, beside the config it claims.
-    await this.credentialsFor(crawlId, "crawl_resume", stored.credentialShape, sent);
+    await credentialsFor(this.vault, this.log, crawlId, "crawl_resume", stored.credentialShape, sent);
 
     // Hard rule 5 over the hosts the RESUME will fetch, not the ones the first
     // run did: discovery and the host probe both run again.
@@ -4422,66 +4423,6 @@ export class ApiService {
   }
 
   /**
-   * The credentials a resume or a render pass of this crawl runs with (27c),
-   * given the shape its row stores (`required`) and what the request sent:
-   *
-   *  - sent: they must be of exactly the stored shape — the same kinds, the
-   *    same header and cookie names — else VALIDATION naming both (names
-   *    only). A crawl started without credentials gains them through
-   *    `crawl_config_set` while paused, never through a resume or a render;
-   *  - not sent, and the row needs none: none;
-   *  - not sent: the stored copy, decrypted (28b; a restart keeps it), or
-   *    `CREDENTIALS_REQUIRED` naming the fields when there is none (cancelled,
-   *    swept by retention, or never written) or this server cannot decrypt it
-   *    (`unreadable`, logged with its reason) — a refusal until they are
-   *    supplied again, never a run without them.
-   */
-  private async credentialsFor(
-    crawlId: string,
-    operation: "crawl_resume" | "crawl_render",
-    stored: CredentialShape | undefined,
-    sent: CrawlCredentials | undefined,
-  ): Promise<CrawlCredentials | undefined> {
-    const required = stored ?? null;
-    if (sent !== undefined) {
-      const supplied = shapeOf(sent);
-      if (!sameShape(required, supplied)) {
-        throw new ServiceError(
-          "VALIDATION",
-          required === null
-            ? `crawl ${crawlId} was started without credentials, and ${operation} was sent ` +
-                `${supplied === null ? "none" : describeShape(supplied)}: credentials are added ` +
-                "to a crawl with crawl_config_set while it is paused"
-            : `crawl ${crawlId} needs ${describeShape(required)}, and ${operation} was sent ` +
-                `${supplied === null ? "none" : describeShape(supplied)}: send exactly the kinds ` +
-                "and names crawl_config_get shows, with their values",
-        );
-      }
-      return supplied === null ? undefined : sent;
-    }
-    if (required === null) return undefined;
-    const held = this.storedCredentials(crawlId, required, await this.vault.read(crawlId));
-    if (held.kind === "missing") {
-      throw new ServiceError(
-        "CREDENTIALS_REQUIRED",
-        `crawl ${crawlId} needs ${describeShape(required)}, and ${held.why}: send them again ` +
-          `with ${operation} (requestHeaders, httpAuth, cookies). A crawl that needed them is ` +
-          "never run without them",
-      );
-    }
-    return held.credentials;
-  }
-
-  /** `storedCredentialsOf` (src/worker/crawl-job.ts), logged to this server's log. */
-  private storedCredentials(
-    crawlId: string,
-    required: CredentialShape,
-    read: CredentialRead,
-  ): { kind: "ok"; credentials: CrawlCredentials } | { kind: "missing"; why: string } {
-    return storedCredentialsOf(crawlId, required, read, this.log);
-  }
-
-  /**
    * What a resume of this crawl would actually have to do, counted in one
    * statement so the four numbers describe one instant.
    *
@@ -4598,7 +4539,21 @@ export class ApiService {
       summary = await withPinnedJob(
         this.db,
         { tenant, crawlId, kind: "render", instanceId, deadAfterMs: this.timing.deadAfter, held: this.pinnedJobs },
-        () => this.renderUnderJob(tenant, crawlId, input, sent),
+        () =>
+          runRenderLink(this.db, this.vault, crawlId, {
+            ...(input.urls === undefined ? {} : { urls: input.urls }),
+            ...(sent === undefined ? {} : { sent }),
+            // A SERVER property (`ServiceConfig.renderDir`), absolutised at
+            // construction; no request may name it.
+            renderHtmlDir: this.renderDir,
+            allowPrivate: this.config.crawlDefaults?.allowPrivate === true,
+            hostAllowed: (host) => this.crawlHostAllowed(host),
+            ...(this.config.resolveAddress === undefined
+              ? {}
+              : { resolveAddress: this.config.resolveAddress }),
+            log: this.log,
+            where: "crawl_render",
+          }),
       );
     } catch (error) {
       // The crawl's own crawl job holds it: it is queued or running, and the
@@ -4644,74 +4599,6 @@ export class ApiService {
         truncated: summary.selection.truncated,
       },
     };
-  }
-
-  /** `renderCrawl`'s work, under its `render` job. */
-  private async renderUnderJob(
-    tenant: TenantId,
-    crawlId: string,
-    input: RenderCrawlInput,
-    sent: CrawlCredentials | undefined,
-  ): Promise<RenderPassSummary> {
-    let summary: RenderPassSummary;
-    {
-      const row = await this.crawlRow(tenant, crawlId);
-
-      let config: CrawlConfig;
-      try {
-        config = parseStoredConfig(row.config, crawlId);
-      } catch (error) {
-        throw new ServiceError("CONFLICT", messageOf(error));
-      }
-      // Before the driver, which would throw `CredentialsMissingError` and
-      // answer 500: a crawl that needed credentials is refused with the code an
-      // agent acts on (27c). Validated here, as `runRenderPass` does not.
-      const credentials = await this.credentialsFor(crawlId, "crawl_render", config.credentialShape, sent);
-      const robotsCrawlDelaySec = this.robotsCrawlDelay(row.discovery, crawlId);
-      const renderUrls =
-        input.urls === undefined
-          ? undefined
-          : await this.checkRenderUrls(crawlId, input.urls, config);
-
-      try {
-        summary = await runRenderPass(this.db, crawlId, {
-          ...config,
-          ...(credentials === undefined ? {} : { credentials }),
-          robotsCrawlDelaySec,
-          ...(renderUrls === undefined ? {} : { renderUrls }),
-          // NOT left to the pass's own cwd-relative default. The render pass
-          // writes a file per rendered page, and a server that never said where
-          // put them wherever it happened to be started — which is how this
-          // repository's own suite left twelve crawl directories in the working
-          // tree. The directory is a SERVER property (`ServiceConfig.renderDir`),
-          // absolutised at construction, and no request may name it.
-          renderHtmlDir: this.renderDir,
-          allowPrivate: this.config.crawlDefaults?.allowPrivate === true,
-          ...(this.config.resolveAddress === undefined
-            ? {}
-            : { resolveAddress: this.config.resolveAddress }),
-        });
-      } catch (error) {
-        throw mapRenderPassError(error, crawlId, this.log);
-      }
-      // Stored for the next pass (Deviation 9) only once the pass was ACCEPTED
-      // and ran, as a resume stores them only on acceptance: a render refused
-      // for its urls, its status or a lease must not replace the stored copy (a
-      // mistyped password would overwrite the right one). Never for a
-      // cancelled crawl, whose credentials a cancel released: they served this
-      // pass only. A cancel cannot land meanwhile — its FOR UPDATE row lock and
-      // `refuseWhileBusy` hold it off while this pass's job is live.
-      // The pass changes no crawl row a write could share a transaction with,
-      // so the write has its own (28b).
-      if (sent !== undefined && credentials !== undefined && row.status !== "cancelled") {
-        await this.db.transaction(async (tx) => {
-          await this.vault.write(tx, tenant, crawlId, credentials);
-        });
-      }
-    }
-    // The job is settled by `withPinnedJob` on every path — a refused read, a
-    // refused list, a failed pass — for `runRulesForCrawl`'s reason.
-    return summary;
   }
 
   /**
@@ -4780,7 +4667,7 @@ export class ApiService {
       return await withPinnedJob(
         this.db,
         { tenant, crawlId, kind: "rules", instanceId, deadAfterMs: this.timing.deadAfter, held: this.pinnedJobs },
-        () => this.judgeUnderJob(tenant, crawlId),
+        () => runRulesLink(this.db, crawlId, this.registry),
       );
     } catch (error) {
       // The crawl's own crawl job holds it: the crawl is queued or running,
@@ -4796,67 +4683,6 @@ export class ApiService {
       }
       throw error;
     }
-  }
-
-  /** `runRulesForCrawl`'s work, under its `rules` job. */
-  private async judgeUnderJob(tenant: TenantId, crawlId: string): Promise<RunSummary> {
-    try {
-      const row = await this.crawlRow(tenant, crawlId);
-      if (row.status === "queued" || row.status === "running") {
-        throw rulesWhileLive(crawlId, row.status);
-      }
-      // Ruling 11: a crawl with no discovery evidence and no pages never ran —
-      // it was paused or cancelled while still queued — so there is nothing to
-      // judge. Refused here, as the render driver refuses a crawl that "never
-      // completed discovery", rather than letting the first rule that reads
-      // the robots evidence throw and the transport answer 500. A legacy row
-      // (written before the discovery column existed) can hold pages yet a
-      // null `discovery`: it DID run, so the sentence must not say it did not
-      // (27c T11); it names the missing evidence and stops there.
-      if (row.discovery === null) {
-        const [{ n: pageCount } = { n: 0 }] = await this.db
-          .select({ n: sql<number>`count(*)::int` })
-          .from(pages)
-          .where(eq(pages.crawlId, crawlId));
-        if (pageCount > 0) {
-          throw new ServiceError(
-            "CONFLICT",
-            `crawl ${crawlId} is '${row.status}' and has ${pageCount} page(s) but no discovery ` +
-              `evidence (it predates the discovery record), so the rules cannot judge it`,
-          );
-        }
-        throw new ServiceError(
-          "CONFLICT",
-          `crawl ${crawlId} is '${row.status}' and has no discovery evidence: it never ran ` +
-            (row.status === "paused" || row.status === "cancelled"
-              ? `(it was ${row.status} before discovery)`
-              : `(it ended before discovery completed)`) +
-            `, so there is nothing to judge`,
-        );
-      }
-      // The stored judgement block, validated before a row is touched: an
-      // override of a rule this ruleset lacks (a later ruleset removed it) is
-      // the CONFLICT the read surfaces answer, naming the crawl and the rule
-      // and pointing at crawl_config_set — not the bare `JudgementError`
-      // `runRules` would throw, which a transport answers 500.
-      // `crawl_config_set` validates against this registry and is refused
-      // while the crawl is held (above), so a block that passes here cannot
-      // gain an unknown rule before `runRules` reads it.
-      readJudgementBlock(row.judgement, crawlId, this.registry);
-      return await runRules(this.db, crawlId, this.registry);
-    } catch (error) {
-      // The one refusal `runRules` owns: an id nothing knows. It is raced with
-      // the read above (a crawl deleted in between), so it is mapped rather
-      // than assumed impossible.
-      if (error instanceof Error && error.message.startsWith("no such crawl")) {
-        throw new ServiceError("NOT_FOUND", `no such crawl '${crawlId}'`);
-      }
-      throw error;
-    }
-    // The job is released on the failure path too (`withPinnedJob` settles it
-    // `failed`): a run that threw is a run that is no longer writing, and a
-    // crawl no one could ever judge again because one run died would be a
-    // worse failure than the one being guarded against.
   }
 
   /**
@@ -5284,7 +5110,7 @@ export class ApiService {
     }
     let held: CrawlCredentials | undefined;
     if (required !== null) {
-      const stored = this.storedCredentials(crawlId, required, await this.vault.read(crawlId, tx));
+      const stored = storedCredentialsOf(crawlId, required, await this.vault.read(crawlId, tx), this.log);
       if (stored.kind === "ok") {
         held = stored.credentials;
       } else {
@@ -7394,152 +7220,6 @@ export class ApiService {
   }
 
   /**
-   * The pages a caller named for the render pass, checked and resolved to this
-   * crawl's own spellings — or a refusal saying which entry stopped it.
-   *
-   * ## THE ORDER, and why it is this one
-   *
-   * Every step is a refusal, so the order decides which sentence a caller with
-   * two problems is told about first. It runs cheapest-and-most-fundamental to
-   * costliest:
-   *
-   *  1. **Non-empty.** An empty list is not "render nothing" — a pass meant to
-   *     be off is a pass that is not run, the same reading `renderBudgetPct: 0`
-   *     already gets.
-   *  2. **Readable as a URL** (`normalizeUrl`), which also rejects every scheme
-   *     the crawler does not speak. This is the spelling `pages.url` is stored
-   *     in, so it is normalisation and parse in one step.
-   *  3. **Deduplicated**, on that normalised spelling, first occurrence winning.
-   *     Before the cap, so a list that repeats a URL is not refused for a
-   *     ceiling it does not actually reach.
-   *  4. **The cap.** More than `renderMaxPages` distinct pages is a 400 naming
-   *     the cap, NOT a silent slice. The automatic budget cuts and says
-   *     `truncated: true`, because it built the candidate list itself; a list a
-   *     caller wrote is a deliberate statement about which pages matter, and
-   *     rendering the first N of it while answering 200 would be this engine
-   *     deciding which of somebody's templates to drop.
-   *  5. **The URL policy** — hard rule 5, on every URL this engine is about to
-   *     fetch, whoever supplied it. A render IS a fetch.
-   *  6. **The allowlist posture**, exactly as `checkLegacyHosts` applies it: a
-   *     host in the site's own family (apex/www × http/https) is authorised by
-   *     the crawl itself; anything else must be in this server's allowlist in
-   *     its own right. Reachable through `legacyHosts`, whose pages are in this
-   *     crawl and are a different site by every definition the engine has.
-   *  7. **It is a page of THIS crawl that fetched OK with a 200.** Last,
-   *     because it is the only step that needs the database — and it is what
-   *     makes this list a re-visit rather than a way to point the renderer at a
-   *     URL nobody crawled. A URL that misses is a 400 naming it; it is never
-   *     fetched.
-   *
-   * Steps 5 and 6 are belt-and-braces on a page the crawler already fetched
-   * under both rules, and they are here anyway: the request is a fetch
-   * instruction from a client, and hard rule 5 admits no "it was checked
-   * earlier" exemption.
-   */
-  private async checkRenderUrls(
-    crawlId: string,
-    urls: readonly string[],
-    config: CrawlConfig,
-  ): Promise<string[]> {
-    if (urls.length === 0) {
-      throw new ServiceError(
-        "VALIDATION",
-        "urls was given as an empty list: a render pass with no pages is a pass not " +
-          "run. Omit urls to let the engine select, or name at least one page",
-      );
-    }
-
-    const normalised: string[] = [];
-    const seen = new Set<string>();
-    for (const entry of urls) {
-      const url = normalizeUrl(entry);
-      if (url === null) {
-        throw new ServiceError(
-          "VALIDATION",
-          `urls entry '${clip(entry)}' is not an http(s) URL this engine can render`,
-        );
-      }
-      if (seen.has(url)) continue;
-      seen.add(url);
-      normalised.push(url);
-    }
-
-    const { renderMaxPages } = resolveRenderConfig(config);
-    if (normalised.length > renderMaxPages) {
-      throw new ServiceError(
-        "VALIDATION",
-        `urls names ${normalised.length} distinct pages, above this crawl's ` +
-          `renderMaxPages of ${renderMaxPages}. The list is not silently trimmed — ` +
-          `a named list is a statement about which pages matter, so shorten it to ` +
-          `${renderMaxPages} or fewer. A crawl's renderMaxPages is fixed at ` +
-          `crawl_start and cannot be changed afterwards: a bigger budget means a ` +
-          `new crawl started with a higher renderMaxPages`,
-      );
-    }
-
-    const allowPrivate = this.config.crawlDefaults?.allowPrivate === true;
-    // The site's own spellings, from the crawl's stored `siteUrl`. It reaches
-    // `hostProbeStarts` unvalidated as a URL — `parseStoredConfig` checks it is
-    // a string — so a row nothing this engine wrote could produce a throw here.
-    // That is the crawl's config being unreadable, not the caller's list being
-    // wrong, and it gets the 409 `parseStoredConfig`'s own failure gets.
-    let own: Set<string>;
-    try {
-      own = new Set(hostProbeStarts(config.siteUrl).map((start) => new URL(start).hostname));
-    } catch (error) {
-      throw new ServiceError("CONFLICT", messageOf(error));
-    }
-    for (const url of normalised) {
-      const verdict = await isUrlAllowed(url, { allowPrivate });
-      if (!verdict.allowed) {
-        throw new ServiceError(
-          "FORBIDDEN",
-          `urls entry '${clip(url)}' refused by the URL policy: ` +
-            `${verdict.reason ?? "no reason given"}`,
-        );
-      }
-      const host = new URL(url).hostname;
-      if (!own.has(host) && !this.crawlHostAllowed(host)) {
-        throw new ServiceError(
-          "FORBIDDEN",
-          `urls entry '${clip(url)}' is on '${host}', which is neither a spelling of ` +
-            `this crawl's own site nor in this server's crawl allowlist`,
-        );
-      }
-    }
-
-    // One statement for the whole list. `= any(...)` rather than a round trip
-    // per URL, and the answer is the SET that resolved — the missing ones are
-    // computed here so the refusal can name them rather than say "one of these".
-    const found = await this.db
-      .select({ url: pages.url })
-      .from(pages)
-      .where(
-        and(
-          eq(pages.crawlId, crawlId),
-          eq(pages.fetchClass, "ok"),
-          eq(pages.statusCode, 200),
-          sql`${pages.url} = any(${sql.param(normalised)}::text[])`,
-        ),
-      );
-    const renderable = new Set(found.map((r) => r.url));
-    const missing = normalised.filter((url) => !renderable.has(url));
-    if (missing.length > 0) {
-      throw new ServiceError(
-        "VALIDATION",
-        `urls names ${missing.length} page(s) this crawl cannot render — ` +
-          `${missing.slice(0, MISSING_URLS_NAMED).map((u) => `'${clip(u)}'`).join(", ")}` +
-          `${missing.length > MISSING_URLS_NAMED ? ", …" : ""}. The render pass re-visits ` +
-          `pages this crawl already fetched, so a URL must be one of them and must have ` +
-          `answered 200; it is never fetched for the first time here. Check the spelling ` +
-          `with pages_query, or re-crawl if the page is genuinely missing`,
-      );
-    }
-
-    return normalised;
-  }
-
-  /**
    * A judgement block from a request (`crawl_start`, `crawl_config_set`),
    * parsed against this server's ruleset. Every refusal — an unknown rule id
    * included, which on a REQUEST is the caller's mistake rather than a stored
@@ -8004,6 +7684,23 @@ export class ApiService {
   }
 
   /**
+   * `CrawlDetail.renderDocuments` (28c C7), derived from the pages: "kept" when
+   * any page of the crawl has a rendered document on disk, "not kept" otherwise
+   * (a crawl never rendered, or rendered by a worker's chain, which keeps none).
+   */
+  private async renderDocumentsState(crawlId: string, db: SnapshotReader = this.db): Promise<"kept" | "not kept"> {
+    const rows = await db.execute<{ kept: boolean }>(sql`
+      select exists (
+        select 1 from pages p where p.crawl_id = ${crawlId} and p.rendered_html_path is not null
+      ) as kept`);
+    const kept = rows.rows[0]?.kept;
+    if (typeof kept !== "boolean") {
+      throw new Error(`renderDocumentsState: exists came back as ${typeof kept}, not a boolean`);
+    }
+    return kept ? "kept" : "not kept";
+  }
+
+  /**
    * The robots-blocked page rows (`CrawlDetail.robotsBlocked.recorded`): the
    * class AND the robots reason (`ROBOTS_BLOCKED`), so a url-policy refusal is
    * not counted as a robots.txt block.
@@ -8019,118 +7716,6 @@ export class ApiService {
     return n;
   }
 
-  /**
-   * The robots half of a crawl's stored discovery evidence, VALIDATED FIELD BY
-   * FIELD rather than cast.
-   *
-   * Two callers, and both of them act on what it says: the render pass paces
-   * itself by `crawlDelaySec` (rule 9 — a pass that ignored it would be a
-   * second, ruder visit), and `getRobots` publishes the text an auditor will
-   * quote to a site owner. `discovery_jsonb` is a jsonb column, so by read time
-   * it is whatever is in the row; a `truncated` that is not a boolean reads as
-   * falsy and turns "this text is a 500KB prefix" into silence, which is the
-   * exact untruth the flag exists to prevent. This is the discipline
-   * `parseDiscovery` applies for the rules (src/rules/query/crawl-evidence.ts),
-   * raising the API's own refusal instead of a bare Error.
-   *
-   * A crawl with no discovery blob is a CONFLICT rather than an empty answer:
-   * `discovery_jsonb` is written by `runCrawl` before the frontier is seeded,
-   * so a row without one belongs to a crawl that never got that far. Rendering
-   * it would mean visiting a site at a pace we have no evidence it permits, and
-   * publishing it would mean reporting "no robots.txt" about a file nobody
-   * asked for (hard rule 7).
-   */
-  private parseRobots(
-    discovery: unknown,
-    crawlId: string,
-  ): {
-    outcome: string;
-    raw: string | null;
-    truncated: boolean;
-    crawlDelaySec: number | null;
-    note: string | null;
-    sitemapSources: string[];
-    suppliedSitemaps: string[];
-  } {
-    if (discovery === null || discovery === undefined) {
-      throw new ServiceError(
-        "CONFLICT",
-        `crawl ${crawlId} has no discovery evidence: it never completed discovery, so ` +
-          `there is nothing to render and no robots crawl-delay to honour`,
-      );
-    }
-    if (!isRecord(discovery)) {
-      throw new ServiceError(
-        "CONFLICT",
-        `crawl ${crawlId} discovery evidence is not an object`,
-      );
-    }
-    const robots = discovery["robots"];
-    if (robots === null || typeof robots !== "object") {
-      throw new ServiceError(
-        "CONFLICT",
-        `crawl ${crawlId} discovery evidence has no robots object`,
-      );
-    }
-    const bad = (why: string): never => {
-      throw new ServiceError("CONFLICT", `crawl ${crawlId} discovery evidence has ${why}`);
-    };
-    const record = robots as Record<string, unknown>;
-
-    const outcome = record["outcome"];
-    if (typeof outcome !== "string" || !(ROBOTS_OUTCOMES as readonly string[]).includes(outcome)) {
-      bad(`an unknown robots.outcome (one of: ${ROBOTS_OUTCOMES.join(", ")})`);
-    }
-    const raw = record["raw"];
-    if (raw !== null && raw !== undefined && typeof raw !== "string") {
-      bad("a non-string robots.raw");
-    }
-    const truncated = record["truncated"];
-    if (typeof truncated !== "boolean") bad("a non-boolean robots.truncated");
-    const note = record["note"];
-    if (note !== null && note !== undefined && typeof note !== "string") {
-      bad("a non-string robots.note");
-    }
-    const delay = record["crawlDelaySec"];
-    if (delay !== null && delay !== undefined && typeof delay !== "number") {
-      bad("a non-numeric robots.crawlDelaySec");
-    }
-    // The declared sitemaps live one level up, on the discovery blob itself —
-    // every one of them came off a `Sitemap:` line in this file
-    // (`discoveryEvidence`, src/crawl/loop.ts).
-    const sources = discovery["sitemapSources"];
-    if (!Array.isArray(sources) || sources.some((s) => typeof s !== "string")) {
-      bad("no sitemapSources array of strings");
-    }
-    // Its sibling: the documents the CLIENT supplied, which the walk read too.
-    // Absent is empty — the field arrived with the ability to supply a sitemap,
-    // so a crawl written before it had none — and the wrong shape is a refusal,
-    // because "no sitemap was supplied" is a claim about how this crawl was run
-    // and must not be invented (the `parseDiscovery` ruling, hard rule 7).
-    const supplied = discovery["suppliedSitemaps"];
-    if (
-      supplied !== undefined &&
-      supplied !== null &&
-      (!Array.isArray(supplied) || supplied.some((s) => typeof s !== "string"))
-    ) {
-      bad("a suppliedSitemaps that is not an array of strings");
-    }
-
-    return {
-      outcome: outcome as string,
-      raw: (raw as string | null | undefined) ?? null,
-      truncated: truncated as boolean,
-      crawlDelaySec: (delay as number | null | undefined) ?? null,
-      note: (note as string | null | undefined) ?? null,
-      sitemapSources: sources as string[],
-      suppliedSitemaps: (supplied as string[] | null | undefined) ?? [],
-    };
-  }
-
-  /** The crawl-delay the render pass has to honour, off the same evidence. */
-  private robotsCrawlDelay(discovery: unknown, crawlId: string): number | null {
-    return this.parseRobots(discovery, crawlId).crawlDelaySec;
-  }
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -8669,62 +8254,6 @@ function capCaveat(base: CompareSide, head: CompareSide, caveats: CompareCaveat[
 }
 
 /**
- * Map a `runRenderPass` throw onto a service refusal.
- *
- * The driver's deliberate refusals are `RenderPassRefusal`s and carry the
- * answer they need (`live` → 409, `missing` → 404); everything else it throws
- * is a defect and is returned untouched, to become a 500 with a correlation id.
- *
- * This used to match on the message prefix, and that was wrong in a way worth
- * recording: `runRenderPass`'s `RangeError` for a bad `renderConcurrency` also
- * begins `runRenderPass: `, so our own bug was being handed to the caller as
- * "the crawl is busy, try later". The type is carried by the throw now, and the
- * guards' wording is free to change without changing this function.
- */
-function mapRenderPassError(
-  error: unknown,
-  crawlId: string,
-  log: (line: string) => void,
-): unknown {
-  // The render browser could not be launched against this crawl's site:
-  // url-policy refused the address the site's name resolves to, or could not
-  // resolve it (Phase 24a's DNS pin). A fact about the site and the network,
-  // not our defect, so a 409 naming the reason — never a 500 "internal error"
-  // the caller can do nothing with. Nothing was rendered; the rows the
-  // selection put in `render_pending` stay there, exactly as any launch
-  // failure leaves them, and a later pass re-selects.
-  //
-  // WHAT THE REASON MAY SAY is bounded where it is written
-  // (`resolveApprovedAddress`, "What the thrown message may say"): a refused
-  // address keeps the host, the answer and the range, because that is public
-  // DNS data about the caller's own site and the sentence the crawl's blocked
-  // fetches already carry. A resolver failure says only that the name could
-  // not be resolved; the resolver's own message rides on `cause` and goes
-  // where a 500's stack goes — the log, under a correlation id the caller is
-  // handed so an operator can find the line (obligation 6, same seam as
-  // `http.ts`'s 500).
-  if (error instanceof UrlPolicyError) {
-    let reason = error.message;
-    if (error.cause !== undefined) {
-      const correlationId = randomUUID();
-      log(
-        `api: render launch ${correlationId} crawl ${crawlId} — ${error.message}: ` +
-          messageOf(error.cause),
-      );
-      reason = `${reason}; detail logged under ${correlationId}`;
-    }
-    return new ServiceError("CONFLICT", `the render pass could not start: ${reason} (${error.code})`);
-  }
-  if (!(error instanceof RenderPassRefusal)) return error;
-  // The `runRenderPass: ` prefix is the driver naming itself to a log reader.
-  // A caller of the API already knows which endpoint they called.
-  const message = error.message.startsWith("runRenderPass: ")
-    ? error.message.slice("runRenderPass: ".length)
-    : error.message;
-  return new ServiceError(error.reason === "missing" ? "NOT_FOUND" : "CONFLICT", message);
-}
-
-/**
  * The `pages` field allowlist — ONE definition, three readers.
  *
  * The listing and the export both project through this object, so a column
@@ -9051,15 +8580,6 @@ function parseDataset(value: string | undefined): ExportDataset {
 export function slug(value: string): string {
   const cleaned = value.replace(/[^A-Za-z0-9_.-]/g, "_").replace(/^\.+/, "_");
   return cleaned.length > 80 ? cleaned.slice(0, 80) : cleaned;
-}
-
-/** `crawl_rules` on a crawl that has not stopped — the same sentence from the claim and from the run. */
-function rulesWhileLive(crawlId: string, status: string): ServiceError {
-  return new ServiceError(
-    "CONFLICT",
-    `crawl ${crawlId} is '${status}': the rules may only run over a crawl that ` +
-      `has stopped, or they would judge a site that is still being fetched`,
-  );
 }
 
 /**

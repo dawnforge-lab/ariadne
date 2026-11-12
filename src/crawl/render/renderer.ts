@@ -251,9 +251,11 @@ export interface RendererOptions {
    * REQUIRED, and deliberately not optional-with-a-default. An optional
    * directory is an invitation to render a whole site and keep none of the
    * documents the findings were computed from, which is the silent half of a
-   * fallback (rule 7). A caller that means "somewhere temporary" says so.
+   * fallback (rule 7). A caller that means "somewhere temporary" says so, and a
+   * caller that means "keep none" says `null` (28c): nothing is written and
+   * `htmlPath` stays null.
    */
-  htmlDir: string;
+  htmlDir: string | null;
   /** The crawl's branded UA, so a site sees one client, not two (rule 9). */
   userAgent: string;
   /** Minimum spacing between two requests to one host: the configured base. */
@@ -1949,7 +1951,10 @@ export class PageRenderer {
           { cause: error },
         );
       }
-      const htmlPath = await writeSerialisedDom(this.opts.htmlDir, url, serialised);
+      const htmlPath =
+        this.opts.htmlDir === null
+          ? null
+          : await writeSerialisedDom(this.opts.htmlDir, url, serialised);
       if (traffic.failure !== null) throw traffic.failure;
 
       return {

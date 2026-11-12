@@ -312,7 +312,7 @@ target is not something this skill can crawl.
 
 ```
 {crawlId, siteUrl, status, startedAt, finishedAt, pagesCrawled, pagesTotal,
- renderPassCount, rulesetVersion, controlRequested, pauseReason, cancelledAt,
+ renderPassCount, renderDocuments, rulesetVersion, controlRequested, pauseReason, cancelledAt,
  neverFetched, failureReason, legacyHosts, sitemapUrls, findingCap,
  frontier: {pending, leased, done, failed, renderPending},
  queuePosition, job, liveLeases, blockedPages, hostSpacingMs, throttle,

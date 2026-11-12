@@ -308,8 +308,12 @@ export interface RenderPassConfig extends RenderSelectionConfig {
    * `RENDER_HTML_DIR`. The pass creates `<root>/<crawlId>/` itself, before the
    * browser launches, so a permission or disk problem is one error at the top
    * of the pass rather than seventy identical ones inside it.
+   *
+   * `null` keeps NO documents (28c): no directory is made, no file written,
+   * and every rendered page's `rendered_html_path` stays null. A worker's chain
+   * render passes it; absent is still the default root, so null is always said.
    */
-  renderHtmlDir?: string;
+  renderHtmlDir?: string | null;
   /**
    * The pages a caller NAMED, in place of the automatic selection.
    *
@@ -609,7 +613,8 @@ export async function runRenderPass(
   // nothing records. Absolutising here means the default `renders/` is still
   // "under wherever the server runs" and the STORED value still says where that
   // was.
-  const htmlDir = resolve(cfg.renderHtmlDir ?? RENDER_HTML_DIR, crawlId);
+  const htmlDir =
+    cfg.renderHtmlDir === null ? null : resolve(cfg.renderHtmlDir ?? RENDER_HTML_DIR, crawlId);
   // A pass that cannot launch is RECORDED on the crawl (Phase 25 §5): the
   // selected rows stay `render_pending` so a later pass retries them, and
   // `crawls.render_launch_error` carries a classified, tenant-safe reason that
@@ -619,7 +624,7 @@ export async function runRenderPass(
   let renderer: PageRenderer;
   let launchStage: "mkdir" | "launch" = "mkdir";
   try {
-    await mkdir(htmlDir, { recursive: true });
+    if (htmlDir !== null) await mkdir(htmlDir, { recursive: true });
     launchStage = "launch";
     renderer = await PageRenderer.launch({
       origin,

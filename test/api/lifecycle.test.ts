@@ -917,25 +917,18 @@ describe("crawl_rules on a crawl that never ran (Ruling 11)", () => {
 describe("the rules guard claims before it reads (in-process TOCTOU)", () => {
   it("a crawl_resume issued while crawl_rules is between its read and its run is refused 409", async () => {
     const id = await seedPausedJudgeable();
-    const svc = api.service as unknown as { crawlRow: (tenant: TenantId, crawlId: string) => Promise<unknown> };
-    const realRow = svc.crawlRow.bind(svc);
+    // The hold sits at the entry of `runRules` (the module's gate): the status
+    // read is behind it, the run still ahead. Since 28c the read lives in the
+    // rules link, no longer in a service method a test could spy on.
     let releaseRead!: () => void;
-    const readHeld = new Promise<void>((r) => {
+    gates.rules.hold = new Promise<void>((r) => {
       releaseRead = r;
     });
     let enteredRead!: () => void;
     const reading = new Promise<void>((r) => {
       enteredRead = r;
     });
-    let held = false;
-    const spy = vi.spyOn(svc, "crawlRow").mockImplementation(async (tenant: TenantId, crawlId: string) => {
-      if (crawlId === id && !held) {
-        held = true;
-        enteredRead();
-        await readHeld;
-      }
-      return await realRow(tenant, crawlId);
-    });
+    gates.rules.entered = enteredRead;
     const run = call("POST", `/crawls/${id}/rules`);
     try {
       await reading;
@@ -945,7 +938,8 @@ describe("the rules guard claims before it reads (in-process TOCTOU)", () => {
       expect((await stored(id)).status).toBe("paused");
     } finally {
       releaseRead();
-      spy.mockRestore();
+      gates.rules.hold = null;
+      gates.rules.entered = null;
     }
     expect((await run).status).toBe(200);
   }, 60_000);
