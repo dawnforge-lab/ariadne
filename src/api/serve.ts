@@ -18,6 +18,10 @@
  * pool for `npm run worker:serve`. It does run a REAPER (R10), so it settles
  * its own dead render and rules jobs and sweeps expired credentials whether or
  * not a worker is up. Render and rules calls still run here, synchronously.
+ *
+ * IT IS A SCHEDULER CANDIDATE (28c, `scheduler: true`): if it holds the leader
+ * lock it fires due schedules into the worker pool; the service stops it first
+ * when it closes.
  */
 import { closeDb, createDb } from "../db/client.js";
 import { CredentialVault, parseCredentialKeys, parseCredentialRetentionDays } from "../crawl/credential-vault.js";
@@ -46,6 +50,9 @@ const api = createApiServer({
     credentialKeys,
     credentialRetentionDays,
     crawlRunner: "workers",
+    // A scheduler candidate (28c): it starts with the instance, below, and
+    // fires into the worker pool.
+    scheduler: true,
     // Undefined means each field's own default — `exports/` and `renders/`; see
     // `ServiceConfig`. Unlike `crawlDefaults` these ARE environment knobs, and
     // safely so: they name where the server keeps its own output, not what it

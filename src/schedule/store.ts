@@ -186,12 +186,29 @@ export async function updateSchedule(
  */
 export async function deleteSchedule(db: Writer, tenant: TenantId, id: string): Promise<boolean> {
   return await db.transaction(async (tx) => {
-    // THE LOCK ORDER IS CRAWL, THEN SCHEDULE. A fired crawl's status writer
-    // holds its crawl row and then, through the event trigger's foreign key,
-    // takes a key-share lock on the schedule; the delete's ON DELETE SET NULL
-    // updates those same crawl rows. Taking them first — `FOR NO KEY UPDATE`,
-    // as every crawl-row lock (src/worker/reaper.ts) — and the schedule after
-    // keeps the two from waiting on each other, and a status write that waits
+    // FIRST, THE SCHEDULE `FOR NO KEY UPDATE` — the scheduler's claim
+    // (src/schedule/fire.ts) and `schedule_update` take it the same way. It
+    // waits for a fire in flight, and from here no fire can start (its claim
+    // skips a locked row), so the crawls locked next are ALL this schedule's
+    // crawls, a crawl fired a moment ago included. Without it, a crawl fired
+    // while the delete was between its crawl lock and its schedule lock was
+    // left unlocked, and a runner's status write on it (crawl row, then the
+    // schedule by the event's foreign key) deadlocked against the delete
+    // (schedule, then that crawl row by ON DELETE SET NULL). NO KEY UPDATE
+    // does not conflict with the KEY SHARE a status writer's event takes, so
+    // the order below is unchanged for them.
+    await tx
+      .select({ id: schedules.id })
+      .from(schedules)
+      .where(and(eq(schedules.id, id), eq(schedules.tenantId, tenant)))
+      .for("no key update");
+    // THEN THE LOCK ORDER IS CRAWL, THEN SCHEDULE `FOR UPDATE`. A fired
+    // crawl's status writer holds its crawl row and then, through the event
+    // trigger's foreign key, takes a key-share lock on the schedule; the
+    // delete's ON DELETE SET NULL updates those same crawl rows. Taking them
+    // first — `FOR NO KEY UPDATE`, as every crawl-row lock
+    // (src/worker/reaper.ts) — and the schedule's `FOR UPDATE` after keeps
+    // the two from waiting on each other, and a status write that waits
     // here runs after the delete on a row whose `schedule_id` is null. A JOB
     // write does not take the crawl row; its trigger reads the schedule
     // `FOR KEY SHARE` instead (migration 0049), so it waits for this delete

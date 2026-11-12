@@ -116,6 +116,8 @@ try {
     httpPort: config.httpPort,
     metricsToken: config.metricsToken,
     allowedDomains: config.allowedDomains,
+    // A scheduler candidate (28c), firing into the pool.
+    scheduler: true,
   });
 } catch (error) {
   console.error(`ariadne worker: cannot start — ${error instanceof Error ? error.message : String(error)}`);

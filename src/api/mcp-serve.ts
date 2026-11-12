@@ -39,6 +39,9 @@ const mcp = createMcpServer({
     allowedDomains: config.allowedDomains,
     credentialKeys,
     credentialRetentionDays,
+    // A scheduler candidate (28c): it fires crawls pinned to this process,
+    // which runs them (C4).
+    scheduler: true,
     // Undefined means each field's own default — `exports/` and `renders/`; see
     // `ServiceConfig`.
     ...(config.exportDir === undefined ? {} : { exportDir: config.exportDir }),
@@ -46,7 +49,12 @@ const mcp = createMcpServer({
   },
 });
 
+// Register this process's instance now, which starts its scheduler candidate
+// (and its heartbeat): a failed registration is a boot error, not a scheduler
+// that silently never runs.
+const instanceId = await mcp.service.instanceId();
 await mcp.connect(new StdioServerTransport());
+console.error(`ariadne mcp: instance ${instanceId}; a scheduler candidate`);
 console.error(
   `ariadne mcp: serving on stdio for tenant ${config.tenant} — ` +
     `${config.allowedDomains.length} allowed domain(s)`,

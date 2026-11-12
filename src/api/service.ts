@@ -252,6 +252,7 @@ import { decodeCursor, encodeCursor, parseLimit } from "./paging.js";
 import { listEvents, type CrawlEvent } from "../events/events.js";
 import { parseScheduleBody } from "../schedule/body.js";
 import { NoCronSlotError, nextSlot, parseCron } from "../schedule/cron.js";
+import { Scheduler, connectionStringOf } from "../schedule/scheduler.js";
 import {
   deleteSchedule,
   getSchedule,
@@ -2534,6 +2535,13 @@ export class ApiService {
   private sweepTimer: NodeJS.Timeout | null = null;
   /** The sweep in flight, if any: sweeps never overlap, and `close()` waits for one. */
   private sweeping: Promise<void> | null = null;
+  /**
+   * This process's scheduler candidate (`ServiceConfig.scheduler`), built when
+   * the instance registers; null when the config leaves it off.
+   */
+  private scheduler: Scheduler | null = null;
+  /** The database URL the scheduler's own session connects with; null when it is off. */
+  private readonly schedulerUrl: string | null = null;
   private closed = false;
 
   constructor(
@@ -2588,7 +2596,33 @@ export class ApiService {
         `ServiceConfig.crawlRunner must be "in-process" or "workers", got ${JSON.stringify(this.crawlRunner)}`,
       );
     }
+    const scheduler = config.scheduler;
+    if (scheduler !== undefined && typeof scheduler !== "boolean" && (typeof scheduler !== "object" || scheduler === null)) {
+      throw new Error("ServiceConfig.scheduler must be a boolean or a SchedulerTestSeam object");
+    }
+    // Everything the scheduler is built from, checked here, where the
+    // operator reads a refusal — not inside the registration it starts with.
+    if (scheduler !== undefined && scheduler !== false) {
+      this.schedulerUrl = connectionStringOf(db);
+      const key = scheduler === true ? undefined : scheduler.lockKey;
+      if (key !== undefined && !Number.isSafeInteger(key)) {
+        throw new Error(`ServiceConfig.scheduler.lockKey must be a whole number, got ${String(key)}`);
+      }
+    }
     if (this.crawlRunner === "in-process") this.startCredentialSweep();
+    if (scheduler !== undefined && scheduler !== false) {
+      // The scheduler starts with the instance (`startScheduler`). An entry
+      // point awaits `instanceId()` at boot, so a failed registration is its
+      // boot error; this start is for a library caller who sets the flag and
+      // asks nothing else, and a failure here is said, and tried again by the
+      // next `instanceId()`.
+      this.instanceId().catch((error: unknown) => {
+        this.log(
+          `api: the scheduler is not running: registering this instance failed — ${messageOf(error)}; ` +
+            "it starts when a later call registers it",
+        );
+      });
+    }
   }
 
   /**
@@ -2629,6 +2663,7 @@ export class ApiService {
       const registering = registerInstance(this.db, this.crawlRunner === "in-process" ? "all" : "api").then(
         (id) => {
           this.startHeartbeat(id);
+          this.startScheduler(id);
           return id;
         },
       );
@@ -2664,6 +2699,36 @@ export class ApiService {
       });
     }, this.timing.heartbeat);
     this.beat.unref();
+  }
+
+  /**
+   * Start this process's scheduler candidate (`ServiceConfig.scheduler`), once,
+   * when the instance registers — never after `close()` has begun. It fires
+   * with this service's crawl pin (C4) and allowlist gate. In-process, the
+   * runner is started with it: a fired crawl is pinned to this instance, and
+   * nothing else would start the runner that claims it.
+   */
+  private startScheduler(instanceId: string): void {
+    const seam = this.config.scheduler;
+    if (seam === undefined || seam === false || this.schedulerUrl === null) return;
+    if (this.closed || this.scheduler !== null) return;
+    const scheduler = new Scheduler(this.schedulerUrl, this.db, {
+      vault: this.vault,
+      hostAllowed: (host) => this.crawlHostAllowed(host),
+      pin: this.crawlRunner === "in-process" ? instanceId : null,
+      log: this.log,
+      instanceId,
+      timing: this.timing,
+      ...(seam === true ? {} : seam),
+    });
+    scheduler.start();
+    this.scheduler = scheduler;
+    this.crawlJobRunner()?.catch((error: unknown) => {
+      this.log(
+        `api: the in-process runner did not start beside the scheduler — ${messageOf(error)}; crawls the ` +
+          "scheduler fires stay queued for this instance until a later start or resume builds it",
+      );
+    });
   }
 
   /**
@@ -7141,6 +7206,16 @@ export class ApiService {
    */
   async close(): Promise<void> {
     this.closed = true;
+    // The scheduler first: nothing is fired into a service that is closing.
+    if (this.scheduler !== null) {
+      try {
+        await this.scheduler.stop();
+      } catch (error) {
+        // Said, not thrown: its client is ended either way, and the session's
+        // end releases the lock it held.
+        this.log(`api: the scheduler did not stop cleanly — ${messageOf(error)}`);
+      }
+    }
     if (this.sweepTimer !== null) clearInterval(this.sweepTimer);
     this.sweepTimer = null;
     if (this.sweeping !== null) await this.sweeping;

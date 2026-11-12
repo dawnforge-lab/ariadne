@@ -23,7 +23,12 @@
  *    is a 404. `/metrics` takes `metricsToken`; absent, it is a 404 and one
  *    boot line says so.
  *
- * `stop()` (graceful shutdown, SIGTERM): stop claiming; abort every running
+ * THE SCHEDULER (Phase 28c, `scheduler`): off unless asked for; `worker:serve`
+ * turns it on. A worker's scheduler fires crawls into the unpinned pool (C4)
+ * and applies this worker's allowlist.
+ *
+ * `stop()` (graceful shutdown, SIGTERM): stop the scheduler first; stop
+ * claiming; abort every running
  * crawl, which its loop closes `paused` (`shutdown`) with its job `abandoned`
  * in the same transaction; leave queued jobs queued; mark the instance
  * stopped, so it is not live and nothing it held is read as held; close the
@@ -42,6 +47,7 @@ import {
 } from "../crawl/credential-vault.js";
 import type { CrawlConfig } from "../crawl/loop.js";
 import { isHostAllowed } from "../api/config.js";
+import { Scheduler, connectionStringOf, type SchedulerTestSeam } from "../schedule/scheduler.js";
 import { serveOps } from "../ops/serve.js";
 import { crawlJobExecutor } from "./crawl-job.js";
 import { registerInstance, stopInstance } from "./instance.js";
@@ -80,6 +86,12 @@ export interface StartWorkerOptions {
    * is confined to, given its own id. Production never passes it.
    */
   reaperOnlyInstances?: (instanceId: string) => readonly string[];
+  /**
+   * Whether this worker is a scheduler candidate (src/schedule/scheduler.ts);
+   * off when absent. `worker:serve` passes `true`. The object form is TEST
+   * ONLY (`SchedulerTestSeam`: a lock key and the tenants it fires), code-only.
+   */
+  scheduler?: boolean | SchedulerTestSeam;
 }
 
 export interface RunningWorker {
@@ -107,6 +119,8 @@ export async function startWorker(opts: StartWorkerOptions): Promise<RunningWork
   const vault = new CredentialVault(opts.db, opts.credentialKeys);
   const allowedDomains = [...opts.allowedDomains];
   const processTrust = opts.processTrust ?? { allowPrivate: false };
+  const schedulerSeam = opts.scheduler ?? false;
+  const schedulerUrl = schedulerSeam === false ? null : connectionStringOf(opts.db);
 
   if (opts.metricsToken === null) {
     log("ariadne worker: ARIADNE_METRICS_TOKEN is unset, so /metrics answers 404 (set it to expose metrics)");
@@ -116,10 +130,24 @@ export async function startWorker(opts: StartWorkerOptions): Promise<RunningWork
 
   let instanceId: string | null = null;
   let runner: JobRunner;
+  let scheduler: Scheduler | null = null;
   try {
     instanceId = await registerInstance(opts.db, "worker");
     const id = instanceId;
     const only = opts.reaperOnlyInstances;
+    // Built (and so checked) before the runner starts; started after it.
+    if (schedulerUrl !== null && schedulerSeam !== false) {
+      scheduler = new Scheduler(schedulerUrl, opts.db, {
+        vault,
+        hostAllowed: (host) => isHostAllowed(host, allowedDomains),
+        // A worker fires into the pool (C4).
+        pin: null,
+        log,
+        instanceId: id,
+        timing,
+        ...(schedulerSeam === true ? {} : schedulerSeam),
+      });
+    }
     runner = new JobRunner(opts.db, {
       instanceId: id,
       kinds: ["crawl"],
@@ -143,6 +171,7 @@ export async function startWorker(opts: StartWorkerOptions): Promise<RunningWork
       },
     });
     runner.start();
+    scheduler?.start();
   } catch (error) {
     // Nothing is left half-started: the socket closed, the instance (if it
     // registered) stopped, and the error is the caller's.
@@ -170,6 +199,9 @@ export async function startWorker(opts: StartWorkerOptions): Promise<RunningWork
           errors.push(error);
         }
       };
+      // The scheduler first: nothing is fired by a worker that is closing.
+      const firing = scheduler;
+      if (firing !== null) await step(() => firing.stop());
       await step(() => runner.stop());
       clearInterval(beat);
       await step(() => closeServer(server));

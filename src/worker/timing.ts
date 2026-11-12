@@ -11,6 +11,9 @@
  *    is also woken at once when its own process enqueues and when one of its
  *    jobs ends, so this bounds only how long work enqueued by ANOTHER process
  *    waits for an idle runner.
+ *  - `scheduleEvery` (28c): how often a scheduler candidate tries the leader
+ *    lock, and how often the leader fires the due schedules
+ *    (src/schedule/scheduler.ts).
  */
 export interface Timing {
   heartbeat: number;
@@ -18,6 +21,7 @@ export interface Timing {
   reapEvery: number;
   instanceRetention: number;
   claimPoll: number;
+  scheduleEvery: number;
 }
 
 export const DEFAULT_TIMING: Readonly<Timing> = Object.freeze({
@@ -26,6 +30,7 @@ export const DEFAULT_TIMING: Readonly<Timing> = Object.freeze({
   reapEvery: 30_000,
   instanceRetention: 24 * 60 * 60 * 1000,
   claimPoll: 1_000,
+  scheduleEvery: 30_000,
 });
 
 /**
