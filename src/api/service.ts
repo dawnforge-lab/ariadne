@@ -165,6 +165,7 @@ import { heartbeat, registerInstance, stopInstance } from "../worker/instance.js
 import { timingWith, type Timing } from "../worker/timing.js";
 import { JobRunner } from "../worker/runner.js";
 import { crawlJobExecutor, storedCredentialsOf } from "../worker/crawl-job.js";
+import { chainJobExecutor } from "../worker/chain-job.js";
 import { credentialsFor, mapRenderPassError, parseRobots, runRenderLink } from "../crawl/render/render-link.js";
 import { rulesWhileLive, runRulesLink } from "../rules/rules-link.js";
 import {
@@ -2761,10 +2762,13 @@ export class ApiService {
       const building = this.instanceId().then((instanceId) => {
         const runner = new JobRunner(this.db, {
           instanceId,
-          kinds: ["crawl"],
+          // Its crawls, and the chain links of the crawls it fired (28c): every
+          // one pinned to this instance (C4).
+          kinds: ["crawl", "render", "rules"],
           pinnedTo: instanceId,
           concurrency: 1,
-          execute: (job, signal) => this.runQueued(job, signal),
+          execute: (job, signal) =>
+            job.kind === "crawl" ? this.runQueued(job, signal) : this.runChainLink(job, signal),
           log: this.log,
           timing: this.timing,
           // This service beats the instance itself (`startHeartbeat`).
@@ -7272,6 +7276,22 @@ export class ApiService {
           `will not run them, and crawl_resume from any server adopts them`,
       );
     }
+    // A fired crawl's chain link (28c) queued for this instance: no other
+    // process runs it, and its schedule skips its slots as `overlap` while it
+    // stands. Said, by crawl, so an operator can find it.
+    const links = await this.db
+      .select({ crawlId: jobs.crawlId, kind: jobs.kind })
+      .from(jobs)
+      .where(and(eq(jobs.pinnedTo, instanceId), inArray(jobs.kind, ["render", "rules"]), eq(jobs.status, "queued")))
+      .orderBy(asc(jobs.queuedAt), asc(jobs.id));
+    if (links.length > 0) {
+      this.log(
+        `api: ${links.length} schedule chain link(s) left queued and unstarted ` +
+          `(${links.map((l) => `${l.kind} of ${l.crawlId}`).join(", ")}), pinned to this instance ` +
+          `(${instanceId}), which is now stopped: no other process runs them, and each one's schedule ` +
+          "skips its slots as overlap while the link stands",
+      );
+    }
   }
 
   // ---------------------------------------------------------------- internals
@@ -7288,6 +7308,26 @@ export class ApiService {
       // The same gate that accepted the crawl, asked again where it runs.
       hostAllowed: (host) => this.crawlHostAllowed(host),
       processTrust: this.processTrustConfig(),
+      log: this.log,
+      logPrefix: "api",
+    })(job, signal);
+  }
+
+  /**
+   * Run one claimed chain link (28c): the in-process runner's `execute` for
+   * `render` and `rules` jobs (`chainJobExecutor`, src/worker/chain-job.ts),
+   * with this service's registry, allowlist gate and process trust. A render
+   * keeps its documents under this server's `renderDir`, as `crawl_render`'s do.
+   */
+  private runChainLink(job: ClaimedJob, signal: AbortSignal): Promise<void> {
+    return chainJobExecutor({
+      db: this.db,
+      vault: this.vault,
+      registry: this.registry,
+      renderHtmlDir: this.renderDir,
+      allowPrivate: this.config.crawlDefaults?.allowPrivate === true,
+      hostAllowed: (host) => this.crawlHostAllowed(host),
+      ...(this.config.resolveAddress === undefined ? {} : { resolveAddress: this.config.resolveAddress }),
       log: this.log,
       logPrefix: "api",
     })(job, signal);

@@ -4,7 +4,9 @@
  * `src/worker/serve.ts` reads the environment and calls it; the trusted test
  * child (`scripts/run-worker-trusted.ts`) calls it with its process trust in
  * code. A worker registers an instance with role `worker`, runs a `JobRunner`
- * over `crawl` jobs of the unpinned pool, and serves a liveness endpoint.
+ * over the unpinned pool's `crawl` jobs and its chain links (`render` and
+ * `rules`, 28c: src/worker/chain-job.ts — a render keeps no documents here),
+ * and serves a liveness endpoint.
  *
  *  - FAIR CLAIMS: `maxRunningPerTenant` is the pool's per-tenant cap (R9);
  *    host exclusivity is the claim's own (28b T4a).
@@ -30,7 +32,8 @@
  * `stop()` (graceful shutdown, SIGTERM): stop the scheduler first; stop
  * claiming; abort every running
  * crawl, which its loop closes `paused` (`shutdown`) with its job `abandoned`
- * in the same transaction; leave queued jobs queued; mark the instance
+ * in the same transaction, and wait out a running chain link, which cannot be
+ * interrupted and settles as it ends; leave queued jobs queued; mark the instance
  * stopped, so it is not live and nothing it held is read as held; close the
  * HTTP server. The instance keeps heartbeating until its crawls have closed:
  * a crawl that takes longer to close than `deadAfter` must not be read as a
@@ -49,6 +52,8 @@ import type { CrawlConfig } from "../crawl/loop.js";
 import { isHostAllowed } from "../api/config.js";
 import { Scheduler, connectionStringOf, type SchedulerTestSeam } from "../schedule/scheduler.js";
 import { serveOps } from "../ops/serve.js";
+import { buildRegistry } from "../rules/index.js";
+import { chainJobExecutor } from "./chain-job.js";
 import { crawlJobExecutor } from "./crawl-job.js";
 import { registerInstance, stopInstance } from "./instance.js";
 import { assertTenantCap } from "./jobs.js";
@@ -148,22 +153,36 @@ export async function startWorker(opts: StartWorkerOptions): Promise<RunningWork
         ...(schedulerSeam === true ? {} : schedulerSeam),
       });
     }
+    const hostAllowed = (host: string): boolean => isHostAllowed(host, allowedDomains);
+    const runCrawlJob = crawlJobExecutor({
+      db: opts.db,
+      vault,
+      hostAllowed,
+      processTrust,
+      log,
+      logPrefix: "worker",
+    });
+    // A fired crawl's chain links (28c): the pool's render and rules jobs. A
+    // worker keeps no rendered documents (`renderHtmlDir: null`).
+    const runChainLink = chainJobExecutor({
+      db: opts.db,
+      vault,
+      registry: buildRegistry(),
+      renderHtmlDir: null,
+      allowPrivate: processTrust.allowPrivate === true,
+      hostAllowed,
+      log,
+      logPrefix: "worker",
+    });
     runner = new JobRunner(opts.db, {
       instanceId: id,
-      kinds: ["crawl"],
+      kinds: ["crawl", "render", "rules"],
       pinnedTo: null,
       maxRunningPerTenant: opts.maxRunningPerTenant,
       concurrency: opts.concurrency,
       timing: opts.timing ?? {},
       log,
-      execute: crawlJobExecutor({
-        db: opts.db,
-        vault,
-        hostAllowed: (host) => isHostAllowed(host, allowedDomains),
-        processTrust,
-        log,
-        logPrefix: "worker",
-      }),
+      execute: (job, signal) => (job.kind === "crawl" ? runCrawlJob(job, signal) : runChainLink(job, signal)),
       reaper: {
         vault,
         retentionDays,

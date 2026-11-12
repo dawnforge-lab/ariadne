@@ -44,6 +44,35 @@ export interface ScheduleChain {
   render: ChainRender | null;
 }
 
+/**
+ * A stored `crawls.schedule_chain`, read back as exactly the shape a fire
+ * writes: `{render: null}` or `{render: {urls?}}`, `urls` a non-empty list of
+ * strings. Anything else is a row this engine never wrote, and throws naming
+ * the crawl — a chain is never run on a guess at what was meant.
+ */
+export function readScheduleChain(value: unknown, crawlId: string): ScheduleChain {
+  const bad = (why: string): never => {
+    throw new Error(
+      `crawl ${crawlId}: its schedule_chain ${why}; a fire never writes one so, and this is a defect`,
+    );
+  };
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return bad("is not an object");
+  const record = value as Record<string, unknown>;
+  const keys = Object.keys(record);
+  if (keys.length !== 1 || keys[0] !== "render") return bad("has keys other than exactly 'render'");
+  const render = record["render"];
+  if (render === null) return { render: null };
+  if (typeof render !== "object" || Array.isArray(render)) return bad("has a render that is neither null nor an object");
+  const block = render as Record<string, unknown>;
+  if (Object.keys(block).some((key) => key !== "urls")) return bad("has a render with keys other than 'urls'");
+  const urls = block["urls"];
+  if (urls === undefined) return { render: {} };
+  if (!Array.isArray(urls) || urls.length === 0 || urls.some((url) => typeof url !== "string")) {
+    return bad("has a render.urls that is not a non-empty list of strings");
+  }
+  return { render: { urls: [...(urls as string[])] } };
+}
+
 type Tx = Parameters<Parameters<Db["transaction"]>[0]>[0];
 
 /** `list_urls` rows per INSERT: three parameters a row, well under Postgres' 65,535. */
