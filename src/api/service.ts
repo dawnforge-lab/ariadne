@@ -77,7 +77,7 @@ import { createGzip } from "node:zlib";
 import { and, asc, desc, eq, getTableColumns, gt, inArray, isNotNull, isNull, sql, type SQL } from "drizzle-orm";
 
 import type { Db } from "../db/client.js";
-import { crawls, frontier, issues, jobs, listUrls, pages } from "../db/schema.js";
+import { crawls, frontier, issues, jobs, pages } from "../db/schema.js";
 import { deleteCrawlFiles, deleteCrawlRows } from "./crawl-delete.js";
 import {
   CRAWL_DEFAULTS,
@@ -145,7 +145,7 @@ import {
   RENDER_HTML_DIR,
   type RenderPassSummary,
 } from "../crawl/render/run-render.js";
-import { hostKeyOf } from "../crawl/host-key.js";
+import { insertCrawl, type StoredConfig } from "../crawl/insert-crawl.js";
 import {
   busySentences,
   enqueueJob,
@@ -338,14 +338,6 @@ export interface StartCrawlInput {
   judgement?: JudgementBlock;
 }
 
-/**
- * What a started crawl stores in `config_jsonb`: its effective config, less
- * the test-only fields and the credentials (`storableConfig`), plus — on a
- * list crawl — how many listed URLs were collapsed as duplicates (27c
- * Deviation 3), which the loop never reads.
- */
-export type StoredConfig = ReturnType<typeof storableConfig> & { listDuplicates?: number };
-
 /** `config_validate`'s answer, and what `startCrawl` acts on. */
 export interface StartBodyCheck {
   valid: boolean;
@@ -368,9 +360,6 @@ interface StartPlan {
   listed: { urls: string[]; duplicates: number } | null;
   credentials: CrawlCredentials | undefined;
 }
-
-/** `list_urls` rows per INSERT: three parameters a row, well under Postgres' 65,535. */
-const LIST_INSERT_CHUNK = 1000;
 
 /** `CrawlConfig` keys only a crawl's request sets; refused in `crawlDefaults`. */
 const REQUEST_ONLY_CRAWL_KEYS = ["mode", "listUrlCount", "credentials", "credentialShape"] as const;
@@ -3054,38 +3043,16 @@ export class ApiService {
 
     const crawlId = `crawl_${randomUUID()}`;
     const pinnedTo = await this.crawlJobPin();
+    // The row, its credentials, its listed URLs and its crawl job, in one
+    // transaction — the insert a schedule's fire shares (src/crawl/insert-crawl.ts).
     await this.db.transaction(async (tx) => {
-      await tx.insert(crawls).values({
-        id: crawlId,
-        tenantId: tenant,
-        siteUrl: config.siteUrl,
-        hostKey: hostKeyOf(config.siteUrl),
-        config,
-        // Null when the request named no judgement — "no overrides", the state
-        // every crawl before 27a is in.
-        judgement: judgement === null ? null : storableBlock(judgement),
-        rulesetVersion: RULESET_VERSION,
-        status: "queued",
-      });
-      // The values, encrypted, in the transaction that creates the row whose
-      // `credentialShape` names them: a reader sees both or neither (28b).
-      if (credentials !== undefined) await this.vault.write(tx, tenant, crawlId, credentials);
-      // The distinct listed URLs, `position` from 0 in list order (Deviation 2).
-      if (listed !== null) {
-        for (let start = 0; start < listed.urls.length; start += LIST_INSERT_CHUNK) {
-          await tx.insert(listUrls).values(
-            listed.urls
-              .slice(start, start + LIST_INSERT_CHUNK)
-              .map((url, offset) => ({ crawlId, position: start + offset, url })),
-          );
-        }
-      }
-      // The run, as a job in the same transaction: an accepted crawl always
-      // has the work that will run it (28b).
-      await enqueueJob(tx, {
+      await insertCrawl(tx, this.vault, {
         tenant,
         crawlId,
-        kind: "crawl",
+        config,
+        judgement: judgement === null ? null : storableBlock(judgement),
+        ...(credentials === undefined ? {} : { credentials }),
+        listed: listed === null ? null : listed.urls,
         ...(pinnedTo === undefined ? {} : { pinnedTo }),
       });
     });

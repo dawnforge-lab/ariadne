@@ -17,7 +17,9 @@ import { eq, inArray, sql } from "drizzle-orm";
 
 import { closeDb, createDb, type Db } from "../../src/db/client.js";
 import { runMigrations } from "../../src/db/migrate.js";
-import { crawlCredentials, crawls, pages } from "../../src/db/schema.js";
+import { crawlCredentials, crawls, pages, scheduleCredentials, schedules } from "../../src/db/schema.js";
+import { storableConfig } from "../../src/crawl/loop.js";
+import { insertSchedule, newScheduleId } from "../../src/schedule/store.js";
 import { closeFetchAgents } from "../../src/crawl/http.js";
 import { createApiServer, type ApiServer } from "../../src/api/http.js";
 import {
@@ -323,6 +325,142 @@ describe("CredentialVault.sweepExpired", () => {
     expect(await rowOf(recent)).toBeDefined();
     expect(await rowOf(paused)).toBeDefined();
     await expect(vault.sweepExpired(now, 0)).rejects.toThrow(/retentionDays must be a positive whole number/);
+  });
+});
+
+// ------------------------------------------------------------------ schedules (28c T3)
+
+const createdSchedules: string[] = [];
+
+/** A schedule row with nothing but what the vault reads. */
+async function seedSchedule(tenant = LOCAL_TENANT): Promise<string> {
+  const id = newScheduleId();
+  const siteUrl = "https://vault-schedule.test/";
+  await db.transaction(async (tx) =>
+    insertSchedule(tx, {
+      id,
+      tenant,
+      siteUrl,
+      crawl: {
+        config: storableConfig({
+          siteUrl,
+          maxPages: 10,
+          maxDepth: 3,
+          userAgent: "AriadneBot-vault-test",
+          perHostDelayMs: 0,
+          maxConcurrency: 1,
+        }),
+        judgement: null,
+        listed: null,
+      },
+      render: null,
+      cron: "0 3 * * *",
+      timezone: "UTC",
+      enabled: false,
+      nextRunAt: null,
+    }),
+  );
+  createdSchedules.push(id);
+  return id;
+}
+
+async function writeScheduleVia(vault: CredentialVault, scheduleId: string, creds: CrawlCredentials = VALUES): Promise<number> {
+  return await db.transaction(async (tx) => await vault.writeSchedule(tx, LOCAL_TENANT, scheduleId, creds));
+}
+
+async function scheduleRowOf(scheduleId: string) {
+  const [row] = await db.select().from(scheduleCredentials).where(eq(scheduleCredentials.scheduleId, scheduleId));
+  return row;
+}
+
+describe("CredentialVault: a schedule's credentials", () => {
+  afterAll(async () => {
+    if (createdSchedules.length > 0) await db.delete(schedules).where(inArray(schedules.id, createdSchedules));
+  });
+
+  it("round trip: write then read gives the same values, bumping the schedule's generation, nothing in clear", async () => {
+    const vault = new CredentialVault(db, TEST_CREDENTIAL_KEYS);
+    const id = await seedSchedule();
+    expect(await vault.readSchedule(id)).toEqual({ kind: "none" });
+    expect(await writeScheduleVia(vault, id)).toBe(1);
+    expect(await vault.readSchedule(id)).toEqual({ kind: "ok", credentials: VALUES, generation: 1 });
+    // Inside a transaction too.
+    expect(await db.transaction(async (tx) => vault.readSchedule(id, tx))).toEqual({
+      kind: "ok",
+      credentials: VALUES,
+      generation: 1,
+    });
+    expect(await writeScheduleVia(vault, id)).toBe(2);
+    const [schedule] = await db.select({ g: schedules.credentialGeneration }).from(schedules).where(eq(schedules.id, id));
+    expect(schedule?.g).toBe(2);
+
+    const row = await scheduleRowOf(id);
+    expect(row?.keyId).toBe(TEST_CREDENTIAL_KEY.id);
+    expect(row?.tenantId).toBe(LOCAL_TENANT);
+    expect(row?.generation).toBe(2);
+    for (const secret of [OLD_VALUE, "user-S3CRET", "pw-S3CRET", "cookie-S3CRET", "S3CRET"]) {
+      expect(row?.ciphertext.includes(Buffer.from(secret, "utf8")), secret).toBe(false);
+    }
+
+    await vault.removeSchedule(db, id);
+    expect(await vault.readSchedule(id)).toEqual({ kind: "none" });
+    // A removed generation is never reused.
+    expect(await writeScheduleVia(vault, id)).toBe(3);
+  });
+
+  it("refuses to write for a schedule of another tenant, naming no value", async () => {
+    const vault = new CredentialVault(db, TEST_CREDENTIAL_KEYS);
+    const id = await seedSchedule(parseTenant("someone-else"));
+    await expect(writeScheduleVia(vault, id)).rejects.toThrow(/no schedule .* of this tenant/);
+    expect(await scheduleRowOf(id)).toBeUndefined();
+  });
+
+  it("a schedule's ciphertext copied onto a crawl's row does not authenticate, nor the reverse", async () => {
+    const vault = new CredentialVault(db, TEST_CREDENTIAL_KEYS);
+    const scheduleId = await seedSchedule();
+    const crawlId = await seedCrawl();
+    // Generation 1 on both: only the associated data's subject differs.
+    await writeScheduleVia(vault, scheduleId);
+    await writeVia(vault, crawlId);
+    const scheduleRow = await scheduleRowOf(scheduleId);
+    const crawlRow = await rowOf(crawlId);
+    expect(scheduleRow?.generation).toBe(1);
+    expect(crawlRow?.generation).toBe(1);
+
+    await db
+      .update(crawlCredentials)
+      .set({ nonce: scheduleRow!.nonce, ciphertext: scheduleRow!.ciphertext })
+      .where(eq(crawlCredentials.crawlId, crawlId));
+    expect(await vault.read(crawlId)).toEqual({ kind: "unreadable", reason: "auth-failed" });
+
+    await db
+      .update(scheduleCredentials)
+      .set({ nonce: crawlRow!.nonce, ciphertext: crawlRow!.ciphertext })
+      .where(eq(scheduleCredentials.scheduleId, scheduleId));
+    expect(await vault.readSchedule(scheduleId)).toEqual({ kind: "unreadable", reason: "auth-failed" });
+  });
+
+  it("a schedule row written under a key the vault does not hold is unknown-key", async () => {
+    const id = await seedSchedule();
+    await writeScheduleVia(new CredentialVault(db, { current: otherKey("k-sched", 0x33) }), id);
+    expect(await new CredentialVault(db, TEST_CREDENTIAL_KEYS).readSchedule(id)).toEqual({
+      kind: "unreadable",
+      reason: "unknown-key",
+    });
+  });
+
+  it("sweepExpired never touches a schedule's row", async () => {
+    const vault = new CredentialVault(db, TEST_CREDENTIAL_KEYS);
+    const id = await seedSchedule();
+    await writeScheduleVia(vault, id);
+    // Backdate the row as far as a sweep could ever look.
+    await db
+      .update(scheduleCredentials)
+      .set({ updatedAt: new Date("2000-01-01T00:00:00Z") })
+      .where(eq(scheduleCredentials.scheduleId, id));
+    await vault.sweepExpired(new Date(), 30);
+    expect(await scheduleRowOf(id)).toBeDefined();
+    expect((await vault.readSchedule(id)).kind).toBe("ok");
   });
 });
 

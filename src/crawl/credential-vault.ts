@@ -12,6 +12,14 @@
  * same transaction. So a ciphertext copied onto another crawl's row, or an
  * earlier write's ciphertext replayed onto this one, fails authentication.
  *
+ * SCHEDULES (Phase 28c). A schedule keeps its own copy in
+ * `schedule_credentials`, by the same cipher and keys, with
+ * `schedule:${scheduleId}:${generation}` as the associated data and
+ * `schedules.credential_generation` as the counter (`writeSchedule`,
+ * `readSchedule`, `removeSchedule`). A fire reads it and writes it again as
+ * the fired crawl's. The retention sweep never touches it: a schedule's
+ * credentials live as long as the schedule.
+ *
  * THE KEYS. `ARIADNE_CREDENTIALS_KEY` is `<id>:<base64 of 32 bytes>`, required
  * by every process that runs or accepts crawls; a missing or malformed key is a
  * boot error (`parseCredentialKeys`), never a mode that refuses credentials.
@@ -34,7 +42,7 @@ import { createCipheriv, createDecipheriv, randomBytes } from "node:crypto";
 import { and, eq, inArray, lt, notInArray, sql } from "drizzle-orm";
 
 import type { Db } from "../db/client.js";
-import { crawlCredentials, crawls } from "../db/schema.js";
+import { crawlCredentials, crawls, scheduleCredentials, schedules } from "../db/schema.js";
 import type { TenantId } from "../tenant.js";
 import { credentialError, shapeOf, type CrawlCredentials } from "./credentials.js";
 
@@ -158,8 +166,46 @@ function assertKey(key: CredentialKey, field: string): void {
   }
 }
 
-function associatedData(crawlId: string, generation: number): Buffer {
-  return Buffer.from(`${crawlId}:${generation}`, "utf8");
+/**
+ * Whose credentials a row holds. A crawl's row is bound to `${crawlId}:${generation}`
+ * (28b, unchanged) and a schedule's to `schedule:${scheduleId}:${generation}`
+ * (28c): the prefix keeps the two apart, so neither's ciphertext authenticates
+ * as the other's. A crawl id is `crawl_<uuid>`, never `schedule:…`.
+ */
+type Subject = { kind: "crawl"; id: string } | { kind: "schedule"; id: string };
+
+function associatedData(subject: Subject, generation: number): Buffer {
+  return Buffer.from(
+    subject.kind === "crawl" ? `${subject.id}:${generation}` : `schedule:${subject.id}:${generation}`,
+    "utf8",
+  );
+}
+
+/**
+ * The canonical values `subject`'s write encrypts, or a throw naming the
+ * subject and the field — never a value — for credentials that are empty or
+ * malformed: the callers validate what a request sends, so either is our defect.
+ */
+function writable(subject: Subject, creds: CrawlCredentials): CrawlCredentials {
+  const values = canonical(creds);
+  if (shapeOf(values) === null) {
+    throw new Error(`credential vault: ${subject.kind} ${subject.id}: there are no credentials to write`);
+  }
+  const invalid = credentialError(values, "credentials");
+  if (invalid !== null) {
+    throw new Error(
+      `credential vault: ${subject.kind} ${subject.id}: refusing to write invalid credentials: ${invalid}`,
+    );
+  }
+  return values;
+}
+
+/** A stored row's encrypted columns, whichever table it is in. */
+interface SealedRow {
+  generation: number;
+  keyId: string;
+  nonce: Buffer;
+  ciphertext: Buffer;
 }
 
 /**
@@ -207,14 +253,8 @@ export class CredentialVault {
    * either is our defect, named by field and never by value.
    */
   async write(tx: Tx, tenant: TenantId, crawlId: string, creds: CrawlCredentials): Promise<number> {
-    const values = canonical(creds);
-    if (shapeOf(values) === null) {
-      throw new Error(`credential vault: crawl ${crawlId}: there are no credentials to write`);
-    }
-    const invalid = credentialError(values, "credentials");
-    if (invalid !== null) {
-      throw new Error(`credential vault: crawl ${crawlId}: refusing to write invalid credentials: ${invalid}`);
-    }
+    const subject: Subject = { kind: "crawl", id: crawlId };
+    const values = writable(subject, creds);
     const bumped = await tx
       .update(crawls)
       .set({ credentialGeneration: sql`${crawls.credentialGeneration} + 1` })
@@ -224,15 +264,7 @@ export class CredentialVault {
     if (generation === undefined) {
       throw new Error(`credential vault: no crawl ${crawlId} of this tenant to write credentials for`);
     }
-    const { id: keyId, key } = this.keys.current;
-    const nonce = randomBytes(NONCE_BYTES);
-    const cipher = createCipheriv(CIPHER, key, nonce, { authTagLength: TAG_BYTES });
-    cipher.setAAD(associatedData(crawlId, generation));
-    const ciphertext = Buffer.concat([
-      cipher.update(JSON.stringify(values), "utf8"),
-      cipher.final(),
-      cipher.getAuthTag(),
-    ]);
+    const { keyId, nonce, ciphertext } = this.seal(subject, generation, values);
     const now = new Date();
     await tx
       .insert(crawlCredentials)
@@ -269,54 +301,7 @@ export class CredentialVault {
       .where(eq(crawlCredentials.crawlId, crawlId));
     const row = rows[0];
     if (row === undefined) return { kind: "none" };
-
-    const key =
-      row.keyId === this.keys.current.id
-        ? this.keys.current.key
-        : row.keyId === this.keys.previous?.id
-          ? this.keys.previous.key
-          : null;
-    if (key === null) return { kind: "unreadable", reason: "unknown-key" };
-
-    // A row from another generation than the crawl's is a replay: the write
-    // that bumped the crawl's counter wrote its own row beside it.
-    if (row.generation !== row.crawlGeneration) return { kind: "unreadable", reason: "auth-failed" };
-    if (row.nonce.length !== NONCE_BYTES || row.ciphertext.length < TAG_BYTES) {
-      return { kind: "unreadable", reason: "auth-failed" };
-    }
-    const body = row.ciphertext.subarray(0, row.ciphertext.length - TAG_BYTES);
-    const tag = row.ciphertext.subarray(row.ciphertext.length - TAG_BYTES);
-    let plaintext: string;
-    try {
-      const decipher = createDecipheriv(CIPHER, key, row.nonce, { authTagLength: TAG_BYTES });
-      decipher.setAAD(associatedData(crawlId, row.crawlGeneration));
-      decipher.setAuthTag(tag);
-      plaintext = Buffer.concat([decipher.update(body), decipher.final()]).toString("utf8");
-    } catch {
-      // The nonce and the tag are of the lengths GCM takes and the key is 32
-      // bytes, all checked above, so what `final` refuses here is the tag:
-      // the row was not written by this key for this crawl and generation.
-      return { kind: "unreadable", reason: "auth-failed" };
-    }
-
-    // Authenticated, so written by us: a body that does not parse as the
-    // credentials we encrypted is our defect, and loud. The messages carry no
-    // value — `credentialError` names fields and positions only.
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(plaintext);
-    } catch {
-      throw new Error(`credential vault: crawl ${crawlId}'s decrypted credentials are not JSON`);
-    }
-    const invalid = credentialError(parsed, "credentials");
-    if (invalid !== null) {
-      throw new Error(`credential vault: crawl ${crawlId}'s decrypted credentials are invalid: ${invalid}`);
-    }
-    const credentials = parsed as CrawlCredentials;
-    if (shapeOf(credentials) === null) {
-      throw new Error(`credential vault: crawl ${crawlId}'s stored credentials are empty`);
-    }
-    return { kind: "ok", credentials, generation: row.crawlGeneration };
+    return this.open({ kind: "crawl", id: crawlId }, row, row.crawlGeneration);
   }
 
   /** Delete the crawl's row, if it has one, on the database or inside the caller's transaction. */
@@ -325,11 +310,148 @@ export class CredentialVault {
   }
 
   /**
+   * `write` for a schedule (28c): encrypt `creds` as the schedule's row in
+   * `schedule_credentials`, inside `tx`, bumping `schedules.credential_generation`
+   * first (which also locks the schedule row), and answer the new generation.
+   * The associated data is `schedule:${scheduleId}:${generation}`.
+   *
+   * Throws when no schedule `scheduleId` belongs to `tenant`, and on empty or
+   * malformed credentials, named by field and never by value.
+   */
+  async writeSchedule(tx: Tx, tenant: TenantId, scheduleId: string, creds: CrawlCredentials): Promise<number> {
+    const subject: Subject = { kind: "schedule", id: scheduleId };
+    const values = writable(subject, creds);
+    const bumped = await tx
+      .update(schedules)
+      .set({ credentialGeneration: sql`${schedules.credentialGeneration} + 1` })
+      .where(and(eq(schedules.id, scheduleId), eq(schedules.tenantId, tenant)))
+      .returning({ generation: schedules.credentialGeneration });
+    const generation = bumped[0]?.generation;
+    if (generation === undefined) {
+      throw new Error(`credential vault: no schedule ${scheduleId} of this tenant to write credentials for`);
+    }
+    const { keyId, nonce, ciphertext } = this.seal(subject, generation, values);
+    const now = new Date();
+    await tx
+      .insert(scheduleCredentials)
+      .values({ scheduleId, tenantId: tenant, generation, keyId, nonce, ciphertext, updatedAt: now })
+      .onConflictDoUpdate({
+        target: scheduleCredentials.scheduleId,
+        set: { tenantId: tenant, generation, keyId, nonce, ciphertext, updatedAt: now },
+      });
+    return generation;
+  }
+
+  /**
+   * `read` for a schedule: `none`, `ok` or `unreadable` with the reason, the
+   * associated data's generation being the SCHEDULE's
+   * (`schedules.credential_generation`). A fire that gets `unreadable` skips
+   * the slot `credentials_unreadable` (call C5).
+   */
+  async readSchedule(scheduleId: string, executor: Executor = this.db): Promise<CredentialRead> {
+    const rows = await executor
+      .select({
+        generation: scheduleCredentials.generation,
+        keyId: scheduleCredentials.keyId,
+        nonce: scheduleCredentials.nonce,
+        ciphertext: scheduleCredentials.ciphertext,
+        scheduleGeneration: schedules.credentialGeneration,
+      })
+      .from(scheduleCredentials)
+      .innerJoin(schedules, eq(schedules.id, scheduleCredentials.scheduleId))
+      .where(eq(scheduleCredentials.scheduleId, scheduleId));
+    const row = rows[0];
+    if (row === undefined) return { kind: "none" };
+    return this.open({ kind: "schedule", id: scheduleId }, row, row.scheduleGeneration);
+  }
+
+  /** Delete the schedule's row, if it has one, on the database or inside the caller's transaction. */
+  async removeSchedule(executor: Executor, scheduleId: string): Promise<void> {
+    await executor.delete(scheduleCredentials).where(eq(scheduleCredentials.scheduleId, scheduleId));
+  }
+
+  /** Encrypt `values` under the current key, bound to `subject` at `generation`. */
+  private seal(
+    subject: Subject,
+    generation: number,
+    values: CrawlCredentials,
+  ): { keyId: string; nonce: Buffer; ciphertext: Buffer } {
+    const { id: keyId, key } = this.keys.current;
+    const nonce = randomBytes(NONCE_BYTES);
+    const cipher = createCipheriv(CIPHER, key, nonce, { authTagLength: TAG_BYTES });
+    cipher.setAAD(associatedData(subject, generation));
+    const ciphertext = Buffer.concat([
+      cipher.update(JSON.stringify(values), "utf8"),
+      cipher.final(),
+      cipher.getAuthTag(),
+    ]);
+    return { keyId, nonce, ciphertext };
+  }
+
+  /**
+   * Decrypt `row`, `subject`'s, against the subject's own generation counter
+   * (`subjectGeneration`): `unreadable` for a key it does not hold, a row of
+   * another generation (a replay) or a tag that does not authenticate; a body
+   * that authenticates and does not parse as credentials throws (our defect).
+   */
+  private open(subject: Subject, row: SealedRow, subjectGeneration: number): CredentialRead {
+    const key =
+      row.keyId === this.keys.current.id
+        ? this.keys.current.key
+        : row.keyId === this.keys.previous?.id
+          ? this.keys.previous.key
+          : null;
+    if (key === null) return { kind: "unreadable", reason: "unknown-key" };
+
+    // A row from another generation than its subject's is a replay: the write
+    // that bumped the subject's counter wrote its own row beside it.
+    if (row.generation !== subjectGeneration) return { kind: "unreadable", reason: "auth-failed" };
+    if (row.nonce.length !== NONCE_BYTES || row.ciphertext.length < TAG_BYTES) {
+      return { kind: "unreadable", reason: "auth-failed" };
+    }
+    const body = row.ciphertext.subarray(0, row.ciphertext.length - TAG_BYTES);
+    const tag = row.ciphertext.subarray(row.ciphertext.length - TAG_BYTES);
+    let plaintext: string;
+    try {
+      const decipher = createDecipheriv(CIPHER, key, row.nonce, { authTagLength: TAG_BYTES });
+      decipher.setAAD(associatedData(subject, subjectGeneration));
+      decipher.setAuthTag(tag);
+      plaintext = Buffer.concat([decipher.update(body), decipher.final()]).toString("utf8");
+    } catch {
+      // The nonce and the tag are of the lengths GCM takes and the key is 32
+      // bytes, all checked above, so what `final` refuses here is the tag:
+      // the row was not written by this key for this subject and generation.
+      return { kind: "unreadable", reason: "auth-failed" };
+    }
+
+    // Authenticated, so written by us: a body that does not parse as the
+    // credentials we encrypted is our defect, and loud. The messages carry no
+    // value — `credentialError` names fields and positions only.
+    const who = `${subject.kind} ${subject.id}`;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(plaintext);
+    } catch {
+      throw new Error(`credential vault: ${who}'s decrypted credentials are not JSON`);
+    }
+    const invalid = credentialError(parsed, "credentials");
+    if (invalid !== null) {
+      throw new Error(`credential vault: ${who}'s decrypted credentials are invalid: ${invalid}`);
+    }
+    const credentials = parsed as CrawlCredentials;
+    if (shapeOf(credentials) === null) {
+      throw new Error(`credential vault: ${who}'s stored credentials are empty`);
+    }
+    return { kind: "ok", credentials, generation: subjectGeneration };
+  }
+
+  /**
    * Delete the credentials of every crawl that settled — any status but
    * `queued`, `running` and `paused` — more than `retentionDays` before `now`,
    * by its `finished_at`, and answer how many rows went. A paused crawl keeps
    * them however long it waits: it is resumable, and a resume needs them.
-   * Talos can send them again after the sweep.
+   * Talos can send them again after the sweep. Only `crawl_credentials` is
+   * swept: a schedule's row is never expired (it goes with its schedule).
    */
   async sweepExpired(now: Date, retentionDays: number): Promise<number> {
     assertRetentionDays(retentionDays, "retentionDays");

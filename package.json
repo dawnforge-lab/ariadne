@@ -18,6 +18,7 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.0",
+    "cron-parser": "^5.10.4",
     "drizzle-orm": "^0.45.2",
     "htmlparser2": "^10.0.0",
     "pg": "^8.13.0",

@@ -1,8 +1,10 @@
 import { sql } from "drizzle-orm";
 import {
   pgTable, text, integer, smallint, bigint, bigserial, boolean, jsonb, timestamp, real,
-  primaryKey, index, uniqueIndex, customType,
+  primaryKey, index, uniqueIndex, customType, check, type AnyPgColumn,
 } from "drizzle-orm/pg-core";
+import type { ChainRender, ScheduleChain } from "../crawl/insert-crawl.js";
+import type { ScheduleCrawl } from "../schedule/store.js";
 import type { StoredHostSpacing } from "../crawl/politeness.js";
 import type { StoredPlatformProfile } from "../crawl/platform.js";
 import type { RenderConsole } from "../crawl/render/console-capture.js";
@@ -412,7 +414,25 @@ export const crawls = pgTable("crawls", {
   // when the credentials are removed: a counter on it would restart and let a
   // removed generation's ciphertext authenticate again. 0 means never written.
   credentialGeneration: integer("credential_generation").notNull().default(0),
+  // THE SCHEDULE THAT FIRED THIS CRAWL (migration 0047, Phase 28c), and the
+  // chain it runs after the crawl settles. Both null on a crawl an agent
+  // started. A fire writes both (`insertCrawl`, src/crawl/insert-crawl.ts),
+  // and `schedule_chain` is `{render: {urls?} | null}` — the schedule's
+  // render block as it was at the fire.
+  //
+  // Deleting the schedule nulls `schedule_id` and keeps `schedule_chain`, so
+  // a fired crawl's chain runs to its end (Review Focus 4): `schedule_chain`
+  // non-null is "a schedule fired this crawl", `schedule_id` is "and it still
+  // exists". The check below holds the one direction that is always true.
+  // The event triggers (0048) copy `schedule_id` onto every event of the
+  // crawl and of its jobs.
+  scheduleId: text("schedule_id").references((): AnyPgColumn => schedules.id, { onDelete: "set null" }),
+  scheduleChain: jsonb("schedule_chain").$type<ScheduleChain>(),
 }, (t) => [
+  check("crawls_schedule_has_chain", sql`${t.scheduleId} is null or ${t.scheduleChain} is not null`),
+  // A schedule's fired crawls: the scheduler's overlap check, and the
+  // foreign key's ON DELETE SET NULL when a schedule is deleted.
+  index("crawls_schedule").on(t.scheduleId).where(sql`${t.scheduleId} is not null`),
   // The order `listCrawls` pages by, scoped to a tenant (28a).
   index("crawls_tenant_started").on(t.tenantId, t.startedAt.desc(), t.id.desc()),
   // Claim eligibility joins running jobs to their crawls by host (28b Task 4).
@@ -1596,9 +1616,12 @@ export const instances = pgTable("instances", {
  *  - `crawl_id`: null only for a schedule's own events (`schedule_fired` and
  *    `schedule_skipped` name their crawl in `detail`, C9). Deleted with the
  *    crawl.
- *  - `schedule_id`: the schedule behind the event, or null. A plain column in
- *    this migration — `schedules` does not exist until Task 3, which adds the
- *    foreign key (ON DELETE SET NULL) and fills it in the triggers.
+ *  - `schedule_id`: the schedule behind the event, or null: a schedule's own
+ *    events name it, and the triggers (0048) copy `crawls.schedule_id` onto a
+ *    fired crawl's lifecycle events and its jobs'. References `schedules` ON
+ *    DELETE SET NULL (0047, Ruling P2): a deleted schedule's fired crawls keep
+ *    their history; `deleteSchedule` (src/schedule/store.ts) deletes the
+ *    schedule's own fire and skip events (`crawl_id` null) itself.
  *  - `detail`: only `EVENT_DETAIL_KEYS[kind]`, built from named columns. Never a
  *    credential name or value, never a key a client sent.
  */
@@ -1606,7 +1629,7 @@ export const crawlEvents = pgTable("crawl_events", {
   id: bigserial("id", { mode: "number" }).primaryKey(),
   tenantId: text("tenant_id").notNull(),
   crawlId: text("crawl_id").references(() => crawls.id, { onDelete: "cascade" }),
-  scheduleId: text("schedule_id"),
+  scheduleId: text("schedule_id").references((): AnyPgColumn => schedules.id, { onDelete: "set null" }),
   at: timestamp("at", { withTimezone: true }).notNull().defaultNow(),
   kind: text("kind").notNull(),
   detail: jsonb("detail").$type<Record<string, unknown>>().notNull().default({}),
@@ -1616,3 +1639,70 @@ export const crawlEvents = pgTable("crawl_events", {
   // A schedule's events in id order (listEvents by schedule).
   index("crawl_events_schedule").on(t.scheduleId, t.id).where(sql`${t.scheduleId} is not null`),
 ]);
+
+/**
+ * A schedule (migration 0047, Phase 28c): a crawl that fires unattended, on a
+ * cron in a timezone. Written only through src/schedule/store.ts.
+ *
+ *  - `id`: `sched_<uuid>`. `tenant_id`: whose it is; every read filters on it.
+ *  - `site_url`: the crawl's seed, repeated from `config` for the listing.
+ *  - `config`: what a fire inserts (call C2): `{config, judgement, listed}` —
+ *    the effective crawl config exactly as `crawls.config_jsonb` stores it,
+ *    the judgement block as `storableBlock` stores it (null for none), and a
+ *    list crawl's distinct URLs in list order (null on a spider crawl).
+ *    Planned by `crawl_start`'s own `planStart` at create and update; a fire
+ *    does not re-plan. Never a credential value: those are in
+ *    `schedule_credentials`.
+ *  - `render`: the chain's render link: null for none, or `{urls?}`.
+ *  - `cron`, `timezone`: five-field cron in an IANA zone (src/schedule/cron.ts).
+ *  - `enabled`, `next_run_at`: the next slot, strictly after the last fire or
+ *    skip; null exactly while the schedule is disabled (the check below).
+ *  - `last_crawl_id`: the crawl the last fire inserted; nulled when that crawl
+ *    is deleted.
+ *  - `credential_generation`: as `crawls.credential_generation` — bumped by
+ *    every `CredentialVault.writeSchedule`, and kept here rather than on the
+ *    credentials row, which is deleted when they are removed.
+ */
+export const schedules = pgTable("schedules", {
+  id: text("id").primaryKey(),
+  tenantId: text("tenant_id").notNull(),
+  siteUrl: text("site_url").notNull(),
+  config: jsonb("config").$type<ScheduleCrawl>().notNull(),
+  render: jsonb("render").$type<ChainRender>(),
+  cron: text("cron").notNull(),
+  timezone: text("timezone").notNull(),
+  enabled: boolean("enabled").notNull(),
+  nextRunAt: timestamp("next_run_at", { withTimezone: true }),
+  lastCrawlId: text("last_crawl_id").references((): AnyPgColumn => crawls.id, { onDelete: "set null" }),
+  credentialGeneration: integer("credential_generation").notNull().default(0),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+}, (t) => [
+  check("schedules_next_run_while_enabled", sql`${t.enabled} = (${t.nextRunAt} is not null)`),
+  // `listSchedules`: a tenant's schedules, newest first.
+  index("schedules_tenant_created").on(t.tenantId, t.createdAt.desc(), t.id.desc()),
+  // The scheduler's due scan: enabled schedules by next slot.
+  index("schedules_due").on(t.nextRunAt, t.id).where(sql`${t.enabled}`),
+  // The foreign key's ON DELETE SET NULL when a crawl is deleted.
+  index("schedules_last_crawl").on(t.lastCrawlId).where(sql`${t.lastCrawlId} is not null`),
+]);
+
+/**
+ * A schedule's credential VALUES, encrypted (migration 0047, Phase 28c): the
+ * same columns and cipher as `crawl_credentials`, keyed by the schedule, with
+ * `schedule:${schedule_id}:${schedules.credential_generation}` as the
+ * associated data — so a schedule's ciphertext copied onto a crawl's row, or a
+ * crawl's onto a schedule's, does not authenticate. Written and read only
+ * through `CredentialVault` (`writeSchedule` / `readSchedule`); a fire reads
+ * them and writes them again under the fired crawl. Never swept by retention:
+ * a schedule needs them for as long as it exists, and they go with it.
+ */
+export const scheduleCredentials = pgTable("schedule_credentials", {
+  scheduleId: text("schedule_id").primaryKey().references(() => schedules.id, { onDelete: "cascade" }),
+  tenantId: text("tenant_id").notNull(),
+  generation: integer("generation").notNull(),
+  keyId: text("key_id").notNull(),
+  nonce: bytea("nonce").notNull(),
+  ciphertext: bytea("ciphertext").notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+});

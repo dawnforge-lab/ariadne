@@ -52,6 +52,7 @@ import { timingWith } from "../../src/worker/timing.js";
 import { LOCAL_TENANT, parseTenant } from "../../src/tenant.js";
 import { TEST_CREDENTIAL_KEYS } from "../helpers/credential-keys.js";
 import { acquirePoolLock } from "../helpers/pool-lock.js";
+import { insertSchedule, newScheduleId } from "../../src/schedule/store.js";
 
 function databaseUrl(): string {
   const url = process.env.DATABASE_URL;
@@ -451,7 +452,31 @@ describe("(f) recordEvent and listEvents by schedule", () => {
   const SECRET = "sk_live_28c_event_SENTINEL";
 
   it("writes an application event, and listEvents reads it by schedule id", async () => {
-    const scheduleId = `sched_${randomUUID()}`;
+    // A real schedule: `crawl_events.schedule_id` references `schedules` (migration 0047).
+    const scheduleId = newScheduleId();
+    const siteUrl = `https://events-schedule-${randomUUID()}.example/`;
+    await insertSchedule(db, {
+      id: scheduleId,
+      tenant: LOCAL_TENANT,
+      siteUrl,
+      crawl: {
+        config: storableConfig({
+          siteUrl,
+          maxPages: 10,
+          maxDepth: 3,
+          userAgent: "AriadneBot-events-test",
+          perHostDelayMs: 0,
+          maxConcurrency: 1,
+        }),
+        judgement: null,
+        listed: null,
+      },
+      render: null,
+      cron: "0 3 * * *",
+      timezone: "UTC",
+      enabled: false,
+      nextRunAt: null,
+    });
     try {
       await recordEvent(db, {
         tenant: LOCAL_TENANT,
@@ -474,6 +499,7 @@ describe("(f) recordEvent and listEvents by schedule", () => {
       expect(other.items).toEqual([]);
     } finally {
       await db.delete(crawlEvents).where(eq(crawlEvents.scheduleId, scheduleId));
+      await db.delete(schema.schedules).where(eq(schema.schedules.id, scheduleId));
     }
   });
 
