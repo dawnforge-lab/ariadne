@@ -302,6 +302,12 @@ what it costs if wrong.
 - **R18:** the API registers its `instances` row eagerly at boot in workers mode (spec item 8:
   every process heartbeats its instance row), so the smoke asserts exactly 1 api and 2 worker
   rows. Cost if wrong: one idle instance row per API process.
+- **R19 (final review):**
+  - **Rule:** `/readyz` treats "schema ahead" (more migrations applied than this code knows) as **ready** and logs it once per change in count. "Schema behind" stays 503.
+  - **Why:** during a migrate-then-roll deploy, the old replicas would otherwise all turn unready at once, an outage the deploy causes itself. Migrations here are additive. `docs/deploy.md` states the order.
+  - **Cost if wrong:** an old binary keeps serving against a newer schema that is not additive.
+
+The final whole-branch review was run on Sonnet, because Opus was capped by a usage limit until 2026-11-14. It found 0 Critical issues and 1 Important one (R19), plus 7 minors. The fix wave is `98d41ed` (167 files / 4,519 tests, compose smoke PASS), and its re-review is clean.
 
 ## Accepted behaviours
 
