@@ -183,60 +183,101 @@ export async function updateSchedule(
  * nulled (ON DELETE SET NULL), so a chain in flight runs to its end (Review
  * Focus 4). True when a schedule was deleted, false when it was missing or
  * another tenant's (nothing is written).
+ *
+ * THE LOCK ORDER, AND WHY IT HAS NO CYCLE. Every other writer takes a crawl
+ * row before the schedule row, or the schedule alone:
+ *
+ *  - a crawl status writer: its crawl row, then KEY SHARE on the schedule
+ *    (the event's foreign key);
+ *  - `crawl_delete`: its crawl `FOR UPDATE`, then — deleting the row — NO KEY
+ *    UPDATE on the schedule (`last_crawl_id` ON DELETE SET NULL);
+ *  - the fire (src/schedule/fire.ts): the schedule NO KEY UPDATE, then it
+ *    INSERTS a crawl — it never waits on an existing crawl row;
+ *  - `schedule_update`: the schedule alone; a job's trigger: KEY SHARE on the
+ *    schedule alone (migration 0049); the job claim: KEY SHARE on a crawl,
+ *    SKIP LOCKED.
+ *
+ * So this delete takes them in that order, and never WAITS on a crawl while it
+ * holds the schedule:
+ *
+ *  1. the schedule's crawls, `FOR NO KEY UPDATE` (as every crawl-row lock,
+ *     src/worker/reaper.ts), waiting as any crawl writer would;
+ *  2. the schedule `FOR UPDATE` — which waits out a fire in flight, after
+ *     which no fire can start (its claim skips a locked row) and no crawl can
+ *     be inserted with this `schedule_id` (its foreign key needs KEY SHARE);
+ *  3. the schedule's crawls again, `SKIP LOCKED`: a crawl fired between 1 and
+ *     2 is committed by now and is locked here too — unless another writer
+ *     holds it (a runner's status write, a `crawl_delete`), which may itself
+ *     be waiting on this schedule. Then nothing is waited on: the attempt
+ *     rolls back, releasing the schedule, and starts again, when step 1 waits
+ *     for that crawl in order. Fires are one a slot, so a second attempt is
+ *     the rare case; a `DELETE_ATTEMPTS`th that still meets one throws.
+ *
+ * With every crawl of the schedule held, the delete's ON DELETE SET NULL waits
+ * on nothing, and a status write that waited on a crawl here runs after the
+ * delete on a row whose `schedule_id` is null.
  */
 export async function deleteSchedule(db: Writer, tenant: TenantId, id: string): Promise<boolean> {
-  return await db.transaction(async (tx) => {
-    // FIRST, THE SCHEDULE `FOR NO KEY UPDATE` — the scheduler's claim
-    // (src/schedule/fire.ts) and `schedule_update` take it the same way. It
-    // waits for a fire in flight, and from here no fire can start (its claim
-    // skips a locked row), so the crawls locked next are ALL this schedule's
-    // crawls, a crawl fired a moment ago included. Without it, a crawl fired
-    // while the delete was between its crawl lock and its schedule lock was
-    // left unlocked, and a runner's status write on it (crawl row, then the
-    // schedule by the event's foreign key) deadlocked against the delete
-    // (schedule, then that crawl row by ON DELETE SET NULL). NO KEY UPDATE
-    // does not conflict with the KEY SHARE a status writer's event takes, so
-    // the order below is unchanged for them.
-    await tx
-      .select({ id: schedules.id })
-      .from(schedules)
-      .where(and(eq(schedules.id, id), eq(schedules.tenantId, tenant)))
-      .for("no key update");
-    // THEN THE LOCK ORDER IS CRAWL, THEN SCHEDULE `FOR UPDATE`. A fired
-    // crawl's status writer holds its crawl row and then, through the event
-    // trigger's foreign key, takes a key-share lock on the schedule; the
-    // delete's ON DELETE SET NULL updates those same crawl rows. Taking them
-    // first — `FOR NO KEY UPDATE`, as every crawl-row lock
-    // (src/worker/reaper.ts) — and the schedule's `FOR UPDATE` after keeps
-    // the two from waiting on each other, and a status write that waits
-    // here runs after the delete on a row whose `schedule_id` is null. A JOB
-    // write does not take the crawl row; its trigger reads the schedule
-    // `FOR KEY SHARE` instead (migration 0049), so it waits for this delete
-    // and then reads no schedule.
-    await tx
-      .select({ id: crawls.id })
-      .from(crawls)
-      .where(and(eq(crawls.scheduleId, id), eq(crawls.tenantId, tenant)))
-      .orderBy(asc(crawls.id))
-      .for("no key update");
-    // The schedule, locked, before anything is deleted: an event deleted for a
-    // schedule that then turned out to be foreign would be another tenant's
-    // history lost.
-    const [held] = await tx
-      .select({ id: schedules.id })
-      .from(schedules)
-      .where(and(eq(schedules.id, id), eq(schedules.tenantId, tenant)))
-      .for("update");
-    if (held === undefined) return false;
-    await tx
-      .delete(crawlEvents)
-      .where(
-        and(eq(crawlEvents.scheduleId, id), eq(crawlEvents.tenantId, tenant), isNull(crawlEvents.crawlId)),
-      );
-    const gone = await tx.delete(schedules).where(and(eq(schedules.id, id), eq(schedules.tenantId, tenant)));
-    if (gone.rowCount !== 1) {
-      throw new Error(`deleteSchedule: deleting ${id} removed ${String(gone.rowCount)} rows, not 1`);
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      return await db.transaction(async (tx) => deleteScheduleOnce(tx, tenant, id));
+    } catch (error) {
+      if (!(error instanceof FiredCrawlHeld)) throw error;
+      if (attempt >= DELETE_ATTEMPTS) {
+        throw new Error(
+          `deleteSchedule: ${id}: on each of ${DELETE_ATTEMPTS} attempts a crawl it fired during the delete ` +
+            `was held by another writer (last: ${error.crawlIds.join(", ")}); nothing was deleted`,
+          { cause: error },
+        );
+      }
     }
-    return true;
-  });
+  }
+}
+
+/** How many times `deleteSchedule` starts again when a crawl fired mid-delete is held by another writer. */
+const DELETE_ATTEMPTS = 5;
+
+/** A crawl this schedule fired while the delete waited could not be locked without waiting: start again. */
+class FiredCrawlHeld extends Error {
+  constructor(readonly crawlIds: readonly string[]) {
+    super(`fired crawl(s) ${crawlIds.join(", ")} held by another writer`);
+    this.name = "FiredCrawlHeld";
+  }
+}
+
+type WriterTx = Parameters<Parameters<Writer["transaction"]>[0]>[0];
+
+/** One attempt of `deleteSchedule` (its docblock has the order); throws `FiredCrawlHeld` to start again. */
+async function deleteScheduleOnce(tx: WriterTx, tenant: TenantId, id: string): Promise<boolean> {
+  const ofSchedule = and(eq(crawls.scheduleId, id), eq(crawls.tenantId, tenant));
+  // 1. Its crawls, waiting for them in order.
+  await tx.select({ id: crawls.id }).from(crawls).where(ofSchedule).orderBy(asc(crawls.id)).for("no key update");
+  // 2. The schedule, locked, before anything is deleted: an event deleted for
+  // a schedule that then turned out to be foreign would be another tenant's
+  // history lost.
+  const [held] = await tx
+    .select({ id: schedules.id })
+    .from(schedules)
+    .where(and(eq(schedules.id, id), eq(schedules.tenantId, tenant)))
+    .for("update");
+  if (held === undefined) return false;
+  // 3. Its crawls again — now including any fired between 1 and 2 — without waiting.
+  const locked = await tx
+    .select({ id: crawls.id })
+    .from(crawls)
+    .where(ofSchedule)
+    .orderBy(asc(crawls.id))
+    .for("no key update", { skipLocked: true });
+  const all = await tx.select({ id: crawls.id }).from(crawls).where(ofSchedule);
+  const lockedIds = new Set(locked.map((c) => c.id));
+  const busy = all.map((c) => c.id).filter((crawlId) => !lockedIds.has(crawlId));
+  if (busy.length > 0) throw new FiredCrawlHeld(busy);
+  await tx
+    .delete(crawlEvents)
+    .where(and(eq(crawlEvents.scheduleId, id), eq(crawlEvents.tenantId, tenant), isNull(crawlEvents.crawlId)));
+  const gone = await tx.delete(schedules).where(and(eq(schedules.id, id), eq(schedules.tenantId, tenant)));
+  if (gone.rowCount !== 1) {
+    throw new Error(`deleteSchedule: deleting ${id} removed ${String(gone.rowCount)} rows, not 1`);
+  }
+  return true;
 }

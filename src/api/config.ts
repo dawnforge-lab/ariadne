@@ -183,11 +183,14 @@ export interface ServiceConfig {
   /**
    * Whether this process is a scheduler candidate (Phase 28c,
    * src/schedule/scheduler.ts): off when absent, as the library's other
-   * background work is opt-in (call C3). `api:serve` and the stdio MCP entry
-   * set `true`. The scheduler starts when the instance registers (the entry
-   * points await `instanceId()` at boot), fires crawls with this service's
-   * crawl pin (C4: its own instance in-process, the pool in `workers` mode)
-   * and its allowlist, and is the first thing `close()` stops.
+   * background work is opt-in (call C3). `api:serve` sets `true`; the stdio
+   * MCP entry does not (a process that lives one agent session must not lead:
+   * the crawls it fired, pinned to it, would be stranded when it exits). The
+   * scheduler starts when the instance registers (`api:serve` awaits
+   * `instanceId()` at boot), fires crawls with this service's crawl pin (C4:
+   * its own instance in-process, the pool in `workers` mode) and its
+   * allowlist, and is stopped first: `stopScheduler()`, which `close()` calls
+   * before anything else.
    *
    * The object form is TEST ONLY (`SchedulerTestSeam`): a lock key and the
    * tenants a suite's scheduler is confined to, so parallel suites never fire

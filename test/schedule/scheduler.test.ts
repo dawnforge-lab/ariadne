@@ -23,6 +23,8 @@
  * registers, so no runner of another suite claims it.
  */
 import { randomUUID } from "node:crypto";
+import { readFileSync } from "node:fs";
+import net from "node:net";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { and, asc, eq, inArray } from "drizzle-orm";
 import pg from "pg";
@@ -41,6 +43,7 @@ import { fireDue, type FireDeps } from "../../src/schedule/fire.js";
 import { SCHEDULER_LOCK, Scheduler } from "../../src/schedule/scheduler.js";
 import { deleteSchedule, getSchedule, insertSchedule, newScheduleId, type NewSchedule } from "../../src/schedule/store.js";
 import { ApiService } from "../../src/api/service.js";
+import { deleteCrawlRows } from "../../src/api/crawl-delete.js";
 import { claimNextJob, enqueueJob } from "../../src/worker/jobs.js";
 import { registerInstance, stopInstance } from "../../src/worker/instance.js";
 import { startWorker } from "../../src/worker/main.js";
@@ -157,6 +160,69 @@ async function blockedOn(prefix: string): Promise<boolean> {
     [`${prefix}%`],
   );
   return (r.rows[0]?.n ?? 0) > 0;
+}
+
+/** `deleteSchedule`'s statements, as drizzle writes them: its schedule lock and its crawl locks. */
+const SCHEDULE_LOCK_SQL = 'select "id" from "schedules"';
+const CRAWLS_LOCK_SQL = 'select "id" from "crawls"';
+
+/**
+ * A TCP proxy to the database whose current connections can be FROZEN — no
+ * byte passes either way, and neither end is told — as a network partition
+ * leaves a half-open connection. A frozen connection's server side lives on
+ * until `cutFrozen()` closes it.
+ */
+async function freezableProxy(): Promise<{
+  url: string;
+  connections: () => number;
+  freeze: () => void;
+  cutFrozen: () => void;
+  close: () => Promise<void>;
+}> {
+  const target = new URL(databaseUrl());
+  const pairs: { client: net.Socket; upstream: net.Socket; frozen: boolean }[] = [];
+  const server = net.createServer((client) => {
+    const upstream = net.connect(Number(target.port || "5432"), target.hostname);
+    const pair = { client, upstream, frozen: false };
+    pairs.push(pair);
+    client.on("data", (d) => {
+      if (!pair.frozen) upstream.write(d);
+    });
+    upstream.on("data", (d) => {
+      if (!pair.frozen) client.write(d);
+    });
+    // A frozen pair's other end is never told: that is the partition.
+    const closeOther = (other: net.Socket) => () => {
+      if (!pair.frozen) other.destroy();
+    };
+    client.on("close", closeOther(upstream));
+    upstream.on("close", closeOther(client));
+    client.on("error", () => client.destroy());
+    upstream.on("error", () => upstream.destroy());
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const url = new URL(databaseUrl());
+  url.hostname = "127.0.0.1";
+  url.port = String((server.address() as net.AddressInfo).port);
+  return {
+    url: url.toString(),
+    connections: () => pairs.length,
+    freeze: () => pairs.forEach((p) => (p.frozen = true)),
+    cutFrozen: () =>
+      pairs
+        .filter((p) => p.frozen)
+        .forEach((p) => {
+          p.client.destroy();
+          p.upstream.destroy();
+        }),
+    close: async () => {
+      pairs.forEach((p) => {
+        p.client.destroy();
+        p.upstream.destroy();
+      });
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    },
+  };
 }
 
 beforeAll(async () => {
@@ -509,7 +575,7 @@ describe("Scheduler", () => {
   it("(g) the leader's connection killed: it logs the loss, another leads within 2 × scheduleEvery, and the slot fires once", async () => {
     const t = tenant();
     const key = lockKey();
-    const every = 500;
+    const every = 2_000;
     const linesA: string[] = [];
     const linesB: string[] = [];
     const a = scheduler(t, key, linesA, every);
@@ -521,10 +587,10 @@ describe("Scheduler", () => {
     try {
       a.start();
       b.start();
-      await until("one leader", () => a.isLeader() !== b.isLeader());
+      await until("one leader", () => a.isLeader() !== b.isLeader(), 3 * every);
       const [leader, other] = a.isLeader() ? [a, b] : [b, a];
       // The slot, a little after the kill, on a cron whose next slot is a year away.
-      const slot = new Date(Date.now() + 2_000);
+      const slot = new Date(Date.now() + 3 * every);
       const s = await seed(t, { cron: "0 0 1 1 *", nextRunAt: slot });
 
       const pid = await pidOf(leader.instanceId);
@@ -536,7 +602,7 @@ describe("Scheduler", () => {
       await until("the loss is logged", () => ids.get(leader)!.some((l) => l.includes("scheduler: lost the leader lock — ")));
       expect(leader.isLeader()).toBe(false);
 
-      await until("the slot fires", async () => (await crawlsOf(s.id)).length > 0, 10_000);
+      await until("the slot fires", async () => (await crawlsOf(s.id)).length > 0, 8 * every);
       // Two more ticks past it: still once.
       await new Promise((r) => setTimeout(r, 2 * every + 100));
       expect(await crawlsOf(s.id)).toHaveLength(1);
@@ -547,7 +613,7 @@ describe("Scheduler", () => {
       await a.stop();
       await b.stop();
     }
-  }, 30_000);
+  }, 90_000);
 });
 
 describe("a schedule deleted while a fire is in flight (the Task 3 carry: deleteSchedule vs a fresh fired crawl)", () => {
@@ -587,7 +653,7 @@ describe("a schedule deleted while a fire is in flight (the Task 3 carry: delete
         (deleted) => ({ deleted, error: null as unknown }),
         (error: unknown) => ({ deleted: false, error }),
       );
-      await new Promise((r) => setTimeout(r, 300));
+      await until("the delete to wait on the fire's schedule lock", () => blockedOn(SCHEDULE_LOCK_SQL));
       gated.release();
       expect(await firing).toEqual({ fired: 1, skipped: 0 });
       const [fired] = await crawlsOf(s.id);
@@ -627,9 +693,169 @@ describe("a schedule deleted while a fire is in flight (the Task 3 carry: delete
       await statusWriter.end();
     }
   }, 30_000);
+
+  /**
+   * `crawl_delete`'s transaction as the service runs it: the crawl `FOR
+   * UPDATE`, held until `release`, then its rows (`deleteCrawlRows`) — whose
+   * crawls delete sets the schedule's `last_crawl_id` null, taking the
+   * schedule row.
+   */
+  function crawlDeleteHeld(crawlId: string): {
+    holding: Promise<void>;
+    release: () => void;
+    done: Promise<{ error: unknown }>;
+  } {
+    let holds!: () => void;
+    const holding = new Promise<void>((r) => (holds = r));
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const done = db
+      .transaction(async (tx) => {
+        await tx.select({ id: crawls.id }).from(crawls).where(eq(crawls.id, crawlId)).for("update");
+        holds();
+        await gate;
+        await deleteCrawlRows(tx, crawlId);
+      })
+      .then(
+        () => ({ error: null as unknown }),
+        (error: unknown) => ({ error }),
+      );
+    return { holding, release, done };
+  }
+
+  it("crawl_delete of the schedule's last fired crawl racing schedule_delete: both commit, no deadlock", async () => {
+    const t = tenant();
+    const s = await seed(t);
+    await fireDue(db, deps(t), NOW);
+    const [fired] = await crawlsOf(s.id);
+    await db.update(jobs).set({ status: "done", finishedAt: new Date() }).where(eq(jobs.crawlId, fired!.id));
+    await db
+      .update(crawls)
+      .set({ status: "finished", finishedAt: new Date(), pagesCrawled: 0 })
+      .where(eq(crawls.id, fired!.id));
+    expect((await row(s.id)).lastCrawlId).toBe(fired!.id);
+
+    const crawlDelete = crawlDeleteHeld(fired!.id);
+    await crawlDelete.holding;
+    const deleting = deleteSchedule(db, t, s.id).then(
+      (deleted) => ({ deleted, error: null as unknown }),
+      (error: unknown) => ({ deleted: false, error }),
+    );
+    await until("the schedule delete to wait on the crawl", () => blockedOn(CRAWLS_LOCK_SQL));
+    crawlDelete.release();
+    const crawlDeleted = await crawlDelete.done;
+    const scheduleDeleted = await deleting;
+    expect(crawlDeleted.error, String((crawlDeleted.error as Error | null)?.message)).toBeNull();
+    expect(scheduleDeleted.error, String((scheduleDeleted.error as Error | null)?.message)).toBeNull();
+    expect(scheduleDeleted.deleted).toBe(true);
+    expect(await getSchedule(db, t, s.id)).toBeNull();
+    expect(await db.select().from(crawls).where(eq(crawls.id, fired!.id))).toEqual([]);
+  }, 30_000);
+
+  it("a crawl fired during the delete and taken by a crawl_delete first: the delete starts again behind it, both commit", async () => {
+    const t = tenant();
+    const s = await seed(t);
+    // A KEY SHARE holder on the schedule keeps the delete waiting in its
+    // schedule lock after the fire commits — the window a writer can take the
+    // fresh crawl in.
+    const keyShare = new pg.Client({ connectionString: databaseUrl() });
+    await keyShare.connect();
+    try {
+      await keyShare.query("begin");
+      await keyShare.query("select id from schedules where id = $1 for key share", [s.id]);
+      const gated = new GatedVault(db, TEST_CREDENTIAL_KEYS);
+      const firing = fireDue(db, deps(t, { vault: gated }), NOW);
+      await gated.atGate;
+      const deleting = deleteSchedule(db, t, s.id).then(
+        (deleted) => ({ deleted, error: null as unknown }),
+        (error: unknown) => ({ deleted: false, error }),
+      );
+      await until("the delete to wait on the schedule", () => blockedOn(SCHEDULE_LOCK_SQL));
+      gated.release();
+      expect(await firing).toEqual({ fired: 1, skipped: 0 });
+      const [fired] = await crawlsOf(s.id);
+
+      // crawl_delete takes the fresh crawl, while the delete still waits.
+      const crawlDelete = crawlDeleteHeld(fired!.id);
+      await crawlDelete.holding;
+      await keyShare.query("commit");
+      // The delete took the schedule, found the fresh crawl held, rolled back,
+      // and now waits on that crawl in order (only a second attempt waits here).
+      await until("the delete's second attempt to wait on the crawl", () => blockedOn(CRAWLS_LOCK_SQL));
+      crawlDelete.release();
+      const crawlDeleted = await crawlDelete.done;
+      const scheduleDeleted = await deleting;
+      expect(crawlDeleted.error, String((crawlDeleted.error as Error | null)?.message)).toBeNull();
+      expect(scheduleDeleted.error, String((scheduleDeleted.error as Error | null)?.message)).toBeNull();
+      expect(scheduleDeleted.deleted).toBe(true);
+      expect(await getSchedule(db, t, s.id)).toBeNull();
+      expect(await db.select().from(crawls).where(eq(crawls.id, fired!.id))).toEqual([]);
+    } finally {
+      await keyShare.query("rollback").catch(() => undefined);
+      await keyShare.end();
+    }
+  }, 30_000);
 });
 
 describe("where it runs", () => {
+  it("the candidates are api:serve and worker:serve; the stdio MCP entry builds its service without a scheduler", () => {
+    const source = (path: string): string => readFileSync(new URL(`../../${path}`, import.meta.url), "utf8");
+    expect(source("src/api/serve.ts")).toMatch(/^\s*scheduler: true,$/m);
+    expect(source("src/worker/serve.ts")).toMatch(/^\s*scheduler: true,$/m);
+    expect(source("src/api/mcp-serve.ts")).not.toMatch(/scheduler/);
+    // api:serve stops it before anything else.
+    expect(source("src/api/serve.ts")).toMatch(/api\.service\s*\.stopScheduler\(\)[\s\S]*reaper\.stop\(\)[\s\S]*api\.close\(\)/);
+  });
+
+  it("a half-open leader connection: the query times out, the loss is logged, a fresh connection tries again, and stop() returns", async () => {
+    const t = tenant();
+    const proxy = await freezableProxy();
+    const lines: string[] = [];
+    const sched = new Scheduler(proxy.url, db, {
+      ...deps(t, { log: (l) => lines.push(l) }),
+      instanceId: `t-${randomUUID()}`,
+      timing: timingWith({ scheduleEvery: 30_000 }),
+      lockKey: lockKey(),
+      queryTimeoutMs: 500,
+    });
+    try {
+      await sched.tickOnce();
+      expect(sched.isLeader()).toBe(true);
+
+      // The network goes quiet; the server's session lives on, holding the lock.
+      proxy.freeze();
+      const started = Date.now();
+      await sched.tickOnce();
+      expect(Date.now() - started).toBeLessThan(5_000);
+      expect(sched.isLeader()).toBe(false);
+      expect(lines.some((l) => l.startsWith("scheduler: lost the leader lock — Query read timeout"))).toBe(true);
+
+      // One tick's pause, then a try on a fresh connection: the zombie session still holds the lock.
+      await sched.tickOnce();
+      expect(proxy.connections()).toBe(1);
+      await sched.tickOnce();
+      expect(proxy.connections()).toBe(2);
+      expect(sched.isLeader()).toBe(false);
+
+      // The partition ends the zombie session; the lock is free, and the next try leads.
+      proxy.cutFrozen();
+      await until("it leads again", async () => {
+        await sched.tickOnce();
+        return sched.isLeader();
+      });
+
+      // stop() on a half-open leader returns, with the timeout, rather than hang.
+      proxy.freeze();
+      const stopping = Date.now();
+      await expect(sched.stop()).rejects.toThrow(/Query read timeout/);
+      expect(Date.now() - stopping).toBeLessThan(5_000);
+    } finally {
+      await sched.stop().catch(() => undefined);
+      proxy.cutFrozen();
+      await proxy.close();
+    }
+  }, 30_000);
+
   it("an ApiService with `scheduler` fires a due schedule pinned to its own instance (C4), and close() stops the scheduler first", async () => {
     const t = tenant();
     const key = lockKey();

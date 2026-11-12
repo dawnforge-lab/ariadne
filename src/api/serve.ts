@@ -110,8 +110,16 @@ for (const signal of ["SIGINT", "SIGTERM"] as const) {
     console.error(`ariadne api: ${signal} — closing (a running crawl is paused (shutdown), not killed)`);
     // The queue's close aborts the crawl in flight and waits for it to write
     // its `paused` (shutdown) row, so a restart resumes rather than re-crawls.
-    reaper
-      .stop()
+    // The scheduler first (nothing is fired into a closing process), then the
+    // reaper, then the surface.
+    // A scheduler that could not release its lock is said and the shutdown
+    // goes on: its session is ended either way, which frees the lock.
+    api.service
+      .stopScheduler()
+      .catch((error: unknown) => {
+        console.error(`ariadne api: the scheduler did not stop cleanly — ${String(error)}`);
+      })
+      .then(() => reaper.stop())
       .then(() => api.close())
       .then(() => closeDb(db))
       .then(() => process.exit(0))

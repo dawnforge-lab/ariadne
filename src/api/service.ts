@@ -2542,6 +2542,8 @@ export class ApiService {
   private scheduler: Scheduler | null = null;
   /** The database URL the scheduler's own session connects with; null when it is off. */
   private readonly schedulerUrl: string | null = null;
+  /** Set by `stopScheduler()`: a registration that completes later starts no scheduler. */
+  private schedulerHalted = false;
   private closed = false;
 
   constructor(
@@ -2711,7 +2713,7 @@ export class ApiService {
   private startScheduler(instanceId: string): void {
     const seam = this.config.scheduler;
     if (seam === undefined || seam === false || this.schedulerUrl === null) return;
-    if (this.closed || this.scheduler !== null) return;
+    if (this.closed || this.schedulerHalted || this.scheduler !== null) return;
     const scheduler = new Scheduler(this.schedulerUrl, this.db, {
       vault: this.vault,
       hostAllowed: (host) => this.crawlHostAllowed(host),
@@ -2729,6 +2731,17 @@ export class ApiService {
           "scheduler fires stay queued for this instance until a later start or resume builds it",
       );
     });
+  }
+
+  /**
+   * Stop this process's scheduler, if it runs one, and never start one after:
+   * the first step of a shutdown (`api:serve` calls it before its reaper and
+   * `close()`; `close()` calls it first too). Rejects when the scheduler's
+   * release of its lock failed; its session is ended either way.
+   */
+  async stopScheduler(): Promise<void> {
+    this.schedulerHalted = true;
+    if (this.scheduler !== null) await this.scheduler.stop();
   }
 
   /**
@@ -7207,14 +7220,12 @@ export class ApiService {
   async close(): Promise<void> {
     this.closed = true;
     // The scheduler first: nothing is fired into a service that is closing.
-    if (this.scheduler !== null) {
-      try {
-        await this.scheduler.stop();
-      } catch (error) {
-        // Said, not thrown: its client is ended either way, and the session's
-        // end releases the lock it held.
-        this.log(`api: the scheduler did not stop cleanly — ${messageOf(error)}`);
-      }
+    try {
+      await this.stopScheduler();
+    } catch (error) {
+      // Said, not thrown: its client is ended either way, and the session's
+      // end releases the lock it held.
+      this.log(`api: the scheduler did not stop cleanly — ${messageOf(error)}`);
     }
     if (this.sweepTimer !== null) clearInterval(this.sweepTimer);
     this.sweepTimer = null;
