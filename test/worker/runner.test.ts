@@ -863,6 +863,7 @@ describe("reaping and auto-resume over the pool (28b T4b)", () => {
     const summary = await reap([x]);
     expect(summary).toEqual({
       abandonedJobs: 1,
+      chainLinksFailed: 0,
       pausedCrawls: 1,
       cancelledCrawls: 0,
       requeuedCrawls: 1,

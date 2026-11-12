@@ -43,6 +43,8 @@ import { fireDue } from "../../src/schedule/fire.js";
 import { crawlJobCloseHook } from "../../src/worker/crawl-job.js";
 import { claimNextJob } from "../../src/worker/jobs.js";
 import { startWorker } from "../../src/worker/main.js";
+import { reapOnce, type ReapSummary } from "../../src/worker/reaper.js";
+import { timingWith } from "../../src/worker/timing.js";
 import { parseTenant, type TenantId } from "../../src/tenant.js";
 import { startFixtureApp, type FixtureApp } from "../fixtures/app.js";
 import { startAssetHost, type AssetHost } from "../fixtures/assets.js";
@@ -411,50 +413,52 @@ describe("chains run by an in-process service", () => {
   }, 120_000);
 });
 
+/** A fired crawl whose crawl job this test claimed, pinned to an instance nobody runs. */
+async function claimedFiredCrawl(render: { urls?: string[] } | null): Promise<{
+  crawlId: string;
+  jobId: string;
+  pin: string;
+  t: TenantId;
+  scheduleId: string;
+}> {
+  const t = tenant();
+  const service = new ApiService(db, { ...SERVICE_BASE, log: () => undefined });
+  let made: { scheduleId: string; nextRunAt: Date };
+  try {
+    made = await createSchedule(service, t, render);
+  } finally {
+    await service.close();
+  }
+  const pin = `test-chain-${randomUUID()}`;
+  const crawlId = await fire(t, made.scheduleId, pin, after(made.nextRunAt));
+  const claimed = await claimNextJob(db, { instanceId: pin, kinds: ["crawl"], pinnedTo: pin });
+  expect(claimed?.crawlId).toBe(crawlId);
+  return { crawlId, jobId: claimed!.id, pin, t, scheduleId: made.scheduleId };
+}
+
+/** Close the crawl as the loop does, with the hook in the close's transaction. */
+async function close(
+  crawlId: string,
+  jobId: string,
+  pin: string,
+  closed: { status: "finished" | "paused" | "cancelled" | "failed"; pauseReason: "request" | null; failureReason: string | null },
+): Promise<void> {
+  await db.transaction(async (tx) => {
+    await tx
+      .update(crawls)
+      .set({
+        status: closed.status,
+        finishedAt: new Date(),
+        pauseReason: closed.pauseReason,
+        failureReason: closed.failureReason,
+        ...(closed.status === "cancelled" ? { cancelledAt: new Date() } : {}),
+      })
+      .where(eq(crawls.id, crawlId));
+    await crawlJobCloseHook(jobId, pin)(tx, closed);
+  });
+}
+
 describe("(d) the close hook", () => {
-  /** A fired crawl whose crawl job this test claimed, pinned to an instance nobody runs. */
-  async function claimedFiredCrawl(render: { urls?: string[] } | null): Promise<{
-    crawlId: string;
-    jobId: string;
-    pin: string;
-  }> {
-    const t = tenant();
-    const service = new ApiService(db, { ...SERVICE_BASE, log: () => undefined });
-    let made: { scheduleId: string; nextRunAt: Date };
-    try {
-      made = await createSchedule(service, t, render);
-    } finally {
-      await service.close();
-    }
-    const pin = `test-chain-${randomUUID()}`;
-    const crawlId = await fire(t, made.scheduleId, pin, after(made.nextRunAt));
-    const claimed = await claimNextJob(db, { instanceId: pin, kinds: ["crawl"], pinnedTo: pin });
-    expect(claimed?.crawlId).toBe(crawlId);
-    return { crawlId, jobId: claimed!.id, pin };
-  }
-
-  /** Close the crawl as the loop does, with the hook in the close's transaction. */
-  async function close(
-    crawlId: string,
-    jobId: string,
-    pin: string,
-    closed: { status: "finished" | "paused" | "cancelled" | "failed"; pauseReason: "request" | null; failureReason: string | null },
-  ): Promise<void> {
-    await db.transaction(async (tx) => {
-      await tx
-        .update(crawls)
-        .set({
-          status: closed.status,
-          finishedAt: new Date(),
-          pauseReason: closed.pauseReason,
-          failureReason: closed.failureReason,
-          ...(closed.status === "cancelled" ? { cancelledAt: new Date() } : {}),
-        })
-        .where(eq(crawls.id, crawlId));
-      await crawlJobCloseHook(jobId, pin)(tx, closed);
-    });
-  }
-
   for (const closed of [
     { status: "paused", pauseReason: "request", failureReason: null },
     { status: "cancelled", pauseReason: null, failureReason: null },
@@ -498,6 +502,86 @@ describe("(d) the close hook", () => {
     expect((await crawlRow(crawlId)).status).toBe(before);
     expect(before).not.toBe("finished");
     expect((await jobsOf(crawlId)).map((j) => [j.kind, j.status])).toEqual([["crawl", "running"]]);
+  });
+});
+
+describe("a chain link whose process stopped (final review I1)", () => {
+  /** A reaper tick confined to `pin` (TEST ONLY, R11), on a tight clock: `pin` registers no instance, so it is dead. */
+  function reap(pin: string): Promise<ReapSummary> {
+    return reapOnce(db, {
+      now: new Date(),
+      timing: timingWith({ heartbeat: 50, deadAfter: 300, reapEvery: 100, claimPoll: 50 }),
+      vault,
+      retentionDays: 36_500,
+      onlyInstances: [pin],
+    });
+  }
+
+  async function history(t: TenantId, scheduleId: string): Promise<[string, string | null, unknown][]> {
+    const service = new ApiService(db, { ...SERVICE_BASE, log: () => undefined });
+    try {
+      return (await service.scheduleHistory(t, scheduleId)).items.map((e) => [e.kind, e.crawlId, e.detail]);
+    } finally {
+      await service.close();
+    }
+  }
+
+  it("a RUNNING render link of a dead instance: the reaper abandons it and records schedule_chain_failed in the schedule's history", async () => {
+    const { crawlId, jobId, pin, t, scheduleId } = await claimedFiredCrawl({});
+    await close(crawlId, jobId, pin, { status: "finished", pauseReason: null, failureReason: null });
+    const link = await claimNextJob(db, { instanceId: pin, kinds: ["render"], pinnedTo: pin });
+    expect(link?.crawlId).toBe(crawlId);
+
+    expect(await reap(pin)).toMatchObject({ abandonedJobs: 1, chainLinksFailed: 1, pausedCrawls: 0 });
+    expect(await history(t, scheduleId)).toEqual([
+      ["schedule_fired", null, { crawlId }],
+      ["schedule_chain_failed", crawlId, { link: "render", reason: "the process running it stopped" }],
+    ]);
+    expect((await jobsOf(crawlId)).map((j) => [j.kind, j.status])).toEqual([
+      ["crawl", "done"],
+      ["render", "abandoned"],
+    ]);
+    expect((await crawlRow(crawlId)).status).toBe("finished");
+    const failed = (await eventsOf(crawlId)).filter((e) => e.kind === "schedule_chain_failed");
+    expect(failed.map((e) => e.scheduleId)).toEqual([scheduleId]);
+    // Once: a second tick finds nothing to settle.
+    expect(await reap(pin)).toMatchObject({ abandonedJobs: 0, chainLinksFailed: 0 });
+  });
+
+  it("a QUEUED rules link pinned to a dead instance: abandoned, schedule_chain_failed recorded, the instance row then free to go", async () => {
+    const { crawlId, jobId, pin, t, scheduleId } = await claimedFiredCrawl(null);
+    await close(crawlId, jobId, pin, { status: "finished", pauseReason: null, failureReason: null });
+    expect((await jobsOf(crawlId)).map((j) => [j.kind, j.status])).toEqual([
+      ["crawl", "done"],
+      ["rules", "queued"],
+    ]);
+
+    expect(await reap(pin)).toMatchObject({ abandonedJobs: 1, chainLinksFailed: 1 });
+    expect(await history(t, scheduleId)).toEqual([
+      ["schedule_fired", null, { crawlId }],
+      ["schedule_chain_failed", crawlId, { link: "rules", reason: "the process it was pinned to stopped" }],
+    ]);
+    expect((await jobsOf(crawlId)).map((j) => [j.kind, j.status])).toEqual([
+      ["crawl", "done"],
+      ["rules", "abandoned"],
+    ]);
+    expect(await reap(pin)).toMatchObject({ abandonedJobs: 0, chainLinksFailed: 0 });
+  });
+
+  it("a QUEUED crawl job pinned to a dead instance stays queued (crawl_resume adopts it, 28b)", async () => {
+    const t = tenant();
+    const service = new ApiService(db, { ...SERVICE_BASE, log: () => undefined });
+    let made: { scheduleId: string; nextRunAt: Date };
+    try {
+      made = await createSchedule(service, t, {});
+    } finally {
+      await service.close();
+    }
+    const pin = `test-chain-${randomUUID()}`;
+    const crawlId = await fire(t, made.scheduleId, pin, after(made.nextRunAt));
+    expect(await reap(pin)).toMatchObject({ abandonedJobs: 0, chainLinksFailed: 0 });
+    expect((await jobsOf(crawlId)).map((j) => [j.kind, j.status])).toEqual([["crawl", "queued"]]);
+    expect((await eventsOf(crawlId)).map((e) => e.kind)).not.toContain("schedule_chain_failed");
   });
 });
 

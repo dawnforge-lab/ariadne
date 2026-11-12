@@ -165,6 +165,7 @@ function reap(only: readonly string[], extra: { retentionDays?: number; timing?:
 
 const NOTHING: ReapSummary = {
   abandonedJobs: 0,
+  chainLinksFailed: 0,
   pausedCrawls: 0,
   cancelledCrawls: 0,
   requeuedCrawls: 0,
