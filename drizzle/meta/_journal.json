@@ -351,6 +351,13 @@
       "when": 1794491415573,
       "tag": "0049_job_event_schedule_lock",
       "breakpoints": true
+    },
+    {
+      "idx": 50,
+      "version": "7",
+      "when": 1794507161597,
+      "tag": "0050_rendered_doc_index",
+      "breakpoints": true
     }
   ]
 }

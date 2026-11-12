@@ -1122,6 +1122,13 @@ export const pages = pgTable("pages", {
   index("pages_dupe_og_description")
     .on(t.crawlId, sql`btrim(${t.ogDescription})`, t.url)
     .where(sql`${t.fetchClass} = 'ok' and ${t.statusCode} = 200 and ${t.isIndexable} = true and ${t.ogDescription} is not null`),
+  // `crawl_status.renderDocuments` (28c C7, final review M3): whether any page
+  // of the crawl kept a rendered document. Without it a never-rendered crawl —
+  // the common case — answered "not kept" by scanning every one of its pages
+  // on every `crawl_status`; with it, an empty index range.
+  index("pages_crawl_rendered_doc")
+    .on(t.crawlId)
+    .where(sql`${t.renderedHtmlPath} is not null`),
 ]);
 
 export const links = pgTable("links", {

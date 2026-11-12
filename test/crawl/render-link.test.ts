@@ -12,7 +12,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { and, eq } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 
 import { createApiServer, type ApiServer } from "../../src/api/http.js";
 import { CredentialVault } from "../../src/crawl/credential-vault.js";
@@ -199,4 +199,24 @@ describe("the links are tenant-scoped", () => {
     expect(await db.select().from(crawls).where(eq(crawls.id, id))).toEqual(before);
     expect(await db.select().from(pages).where(eq(pages.crawlId, id))).toEqual(pagesBefore);
   }, 60_000);
+});
+
+describe("renderDocuments' read (final review M3)", () => {
+  it("is an index read over the crawl's kept documents (pages_crawl_rendered_doc), never a scan of every page", async () => {
+    // The statement `renderDocumentsState` sends (src/api/service.ts), planned
+    // with sequential scans priced out so the choice is between indexes: the
+    // partial index answers from the rows that kept a document, where any other
+    // index would read every page of the crawl and filter.
+    // Any crawl id plans the same; this one need not exist.
+    const crawlId = "crawl_render_documents_plan_probe";
+    const plan = await db.transaction(async (tx) => {
+      await tx.execute(sql`set local enable_seqscan = off`);
+      const explained = await tx.execute<{ "QUERY PLAN": string }>(sql`
+        explain select exists (
+          select 1 from pages p where p.crawl_id = ${crawlId} and p.rendered_html_path is not null
+        ) as kept`);
+      return explained.rows.map((r) => r["QUERY PLAN"]).join("\n");
+    });
+    expect(plan).toContain("pages_crawl_rendered_doc");
+  });
 });
