@@ -729,8 +729,19 @@ async function main(): Promise<number> {
     recorded.push(message);
     return 1;
   };
-  /** Phase wall times, kept as they are measured so a failed run reports what it reached. */
-  const durationsMs = { crawl: 0, render: 0, rules: 0, inferPageTemplates: 0 };
+  /**
+   * Phase wall times, kept as they are measured so a failed run reports what
+   * it reached: null for a phase it never reached (never 0, which reads as a
+   * phase that took no time). `inferPageTemplatesRescanMs` is the re-run below
+   * the crawl phase — a rescan of the collapsed population, not the crawl's own
+   * inference with its retype.
+   */
+  const durationsMs: {
+    crawl: number | null;
+    inferPageTemplatesRescanMs: number | null;
+    render: number | null;
+    rules: number | null;
+  } = { crawl: null, inferPageTemplatesRescanMs: null, render: null, rules: null };
   if (exclude.length > 0 && reuse !== null) {
     throw new RangeError("gate: --exclude needs a crawl in this process; GATE_CRAWL_ID runs none");
   }
@@ -774,12 +785,14 @@ async function main(): Promise<number> {
    * is no fixture to render and the numbers would be another run's.
    */
   let renderReport: { summary: RenderPassSummary; ms: number; rss: PhaseRss } | null = null;
-  /** The crawl phase's own peak, kept for the three-phase summary at the end. */
-  let crawlPeakBytes = 0;
+  /** The crawl phase's own peak, kept for the three-phase summary at the end; null until that phase ends. */
+  let crawlPeakBytes: number | null = null;
   /** The exclude census, or null when no `--exclude` was given. */
   let census: ScopeCensus | null = null;
-  /** The rules phase's own peak; 0 until that phase ends. */
-  let rulesPeakBytes = 0;
+  /** The render phase's own peak (this process, not the browser); null until that phase ends. */
+  let renderPeakBytes: number | null = null;
+  /** The rules phase's own peak; null until that phase ends. */
+  let rulesPeakBytes: number | null = null;
 
   try {
     let crawlId: string;
@@ -932,21 +945,34 @@ async function main(): Promise<number> {
       // `crawls.template_inference_jsonb` with a zero-retype record, so the real
       // record is read first and put back: the row ends as the crawl left it.
       // It runs after the crawl phase's RSS reading, so it is in no phase peak.
+      // The time is the RESCAN's alone: the crawl's own inference also retyped
+      // pages, which this re-run, over a population already collapsed, must not
+      // — a re-run that retypes anything means the crawl's close left pages
+      // uncollapsed, and the number would time different work.
       const stamped = await db
         .select({ record: crawls.templateInferenceJsonb })
         .from(crawls)
         .where(eq(crawls.id, crawlId));
       if (stamped.length === 0) throw new Error(`gate: crawl ${crawlId} vanished before the inference timing`);
       const inferStartedAt = performance.now();
-      await inferPageTemplates(db, crawlId);
-      durationsMs.inferPageTemplates = Math.round(performance.now() - inferStartedAt);
+      const rescan = await inferPageTemplates(db, crawlId);
+      durationsMs.inferPageTemplatesRescanMs = Math.round(performance.now() - inferStartedAt);
       await db
         .update(crawls)
         .set({ templateInferenceJsonb: stamped[0]?.record ?? null })
         .where(eq(crawls.id, crawlId));
+      if (rescan.pagesRetyped !== 0) {
+        return fail(
+          `the inference re-run retyped ${rescan.pagesRetyped} page(s) of crawl ${crawlId}; over the ` +
+            "population the crawl's close collapsed it must retype none",
+        );
+      }
 
       console.log(line("crawl id", summary.crawlId));
-      console.log(`inferPageTemplates   ${durationsMs.inferPageTemplates} ms`);
+      console.log(
+        `inferPageTemplates rescan of the collapsed population (excludes the retype)   ` +
+          `${durationsMs.inferPageTemplatesRescanMs} ms`,
+      );
       console.log(
         line("status", `${summary.status}${summary.note === null ? "" : ` (${summary.note})`}`),
       );
@@ -1068,6 +1094,7 @@ async function main(): Promise<number> {
       const renderMs = Date.now() - renderStartedAt;
       durationsMs.render = renderMs;
       const renderRss = sampler.endPhase();
+      renderPeakBytes = renderRss.peakBytes;
       const servedAfter = site.served();
 
       const attempted = render.rendered + render.failures;
@@ -1308,6 +1335,8 @@ async function main(): Promise<number> {
     const peak = sampler.peakBytes();
     console.log("");
     if (renderReport !== null) {
+      // A render phase runs only after a crawl phase in this process.
+      if (crawlPeakBytes === null) throw new Error("gate: a render phase ran with no crawl phase peak recorded");
       console.log(
         line(
           "phase peaks",
@@ -1358,30 +1387,41 @@ async function main(): Promise<number> {
     recorded.push(`threw: ${error instanceof Error ? error.message : String(error)}`);
     throw error;
   } finally {
-    // Written on success and on failure, before anything below can throw, with
-    // what the run had measured by then (a phase it never reached reads 0).
+    // Written on success and on failure, with what the run had measured by
+    // then (a phase it never reached reads null). In its own try: a write that
+    // fails is said, loudly, and fails the run (`jsonOutFailed`, read where the
+    // exit code is set) — and the cleanup below runs regardless.
     if (jsonOut !== null) {
-      writeFileSync(
-        jsonOut,
-        `${JSON.stringify(
-          {
-            node: process.version,
-            pages,
-            passed: recorded.length === 0,
-            failures: recorded,
-            peaks: {
-              crawlBytes: crawlPeakBytes,
-              renderBytes: renderReport?.rss.peakBytes ?? 0,
-              rulesBytes: rulesPeakBytes,
-              overallBytes: sampler.peakBytes(),
+      try {
+        writeFileSync(
+          jsonOut,
+          `${JSON.stringify(
+            {
+              node: process.version,
+              pages,
+              isGate,
+              passed: recorded.length === 0,
+              failures: recorded,
+              peaks: {
+                crawlBytes: crawlPeakBytes,
+                renderBytes: renderPeakBytes,
+                rulesBytes: rulesPeakBytes,
+                overallBytes: sampler.peakBytes(),
+              },
+              durationsMs,
             },
-            durationsMs,
-          },
-          null,
-          2,
-        )}\n`,
-      );
-      console.log(line("json out", jsonOut));
+            null,
+            2,
+          )}\n`,
+        );
+        console.log(line("json out", jsonOut));
+      } catch (error) {
+        jsonOutFailed = true;
+        console.error(
+          `FAIL: writing --json-out ${jsonOut} failed — ` +
+            `${error instanceof Error ? error.message : String(error)}; the run fails with it`,
+        );
+      }
     }
     sampler.stop();
     await closeDb(db);
@@ -1395,4 +1435,12 @@ async function main(): Promise<number> {
   }
 }
 
-process.exitCode = await main();
+/**
+ * Set when `--json-out` could not be written. The run's own verdict is
+ * overridden to a failure: CI reads that file, and a run whose result it
+ * cannot read has not passed. (A run that threw exits non-zero already.)
+ */
+let jsonOutFailed = false;
+
+const code = await main();
+process.exitCode = jsonOutFailed ? 1 : code;

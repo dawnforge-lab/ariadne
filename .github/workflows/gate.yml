@@ -65,7 +65,9 @@ jobs:
             if (!fs.existsSync("gate.json")) { console.log("::warning::gate.json was not written; no crawl peak to check"); process.exit(0); }
             const { peaks } = JSON.parse(fs.readFileSync("gate.json", "utf8"));
             const limit = 290.2 * 1024 * 1024;
-            if (peaks.crawlBytes > limit) {
+            if (peaks.crawlBytes === null) {
+              console.log("::warning::crawl phase not reached; no crawl peak to check");
+            } else if (peaks.crawlBytes > limit) {
               console.log(`::warning::crawl phase peak ${(peaks.crawlBytes / 1048576).toFixed(1)} MB exceeds 290.2 MB`);
             }
           '
