@@ -1,11 +1,147 @@
 # The Ariadne surface Talos codes against
 
-**Status:** the contract as of Phase 28b (ruleset 0.25.1, migrations 0000–0044,
-27 MCP tools / 27 HTTP routes; every column label in this document is served
+**Status:** the contract as of Phase 28c (ruleset 0.25.1, migrations 0000–0049,
+34 MCP tools / 34 HTTP routes; every column label in this document is served
 under the ruleset version the engine reports — `rules_catalog`'s
 `rulesetVersion`, which the metric-table pass moves).
 `docs/talos-integration.md` says *why* the seam exists and what obligations bind
 it; this document says *what the seam is*.
+
+**What Phase 28c changed here (2026-11-12): schedules, and a crawl's history.** Seven
+tools and seven routes are added (34 MCP tools / 34 HTTP routes), `crawl_status` gains
+one field, and the ruleset is unchanged (0.25.1); migrations 0045–0049 add
+`crawl_events`, its triggers, `schedules` and `schedule_credentials`. Gate evidence:
+`docs/gates/phase-28c.md`.
+
+- **`crawl_history` (`GET /crawls/:id/history`)** answers a crawl's lifecycle events,
+  oldest first, paginated (`{items, nextCursor}`, `limit` and `cursor` as everywhere):
+  `{id, at, kind, scheduleId, crawlId, detail}`. The kinds and their `detail`:
+  `queued`; `claimed` `{instanceId, role}` (a runner took the job; `role` is null when
+  the claimer registered no instance row); `started`; `paused` `{reason}` (one of the
+  five `pauseReason` values except `worker_lost`, which is its own kind); `worker_lost`;
+  `resumed` `{auto}` (`auto` true when the engine's reaper requeued it after a lost
+  worker or a shutdown, false when `crawl_resume` did); `cancelled`; `finished`
+  `{pagesCrawled}`; `failed` `{reason}`; `render_queued`, `render_started`,
+  `render_finished` `{outcome}` and the same three for `rules_*` (`outcome` is the job's
+  end: `done`, `failed` or `abandoned`); and, on a fired crawl, `schedule_chain_failed`
+  `{link, reason}`. A crawl that ran in one go reads queued, claimed, started, finished.
+  The database's own triggers write every lifecycle kind, wherever in the engine the
+  status was changed, so no transition goes unrecorded; the application writes only the
+  three schedule kinds. Events are O(lifecycle), never O(URLs), and `detail` is built
+  from an allowlist per kind: no credential name or value and no key a caller sent can
+  reach it. Another tenant's crawl is a 404, as on every crawl route.
+- **Schedules: `schedule_create` (`POST /schedules`, 201), `schedule_list` (`GET
+  /schedules`), `schedule_get` (`GET /schedules/:id`), `schedule_update` (`PATCH
+  /schedules/:id`), `schedule_delete` (`DELETE /schedules/:id`) and `schedule_history`
+  (`GET /schedules/:id/history`).** The body is `{crawl, cron, timezone, enabled?,
+  render?}`; `crawl` is a `crawl_start` body, `PATCH` takes the same keys, all optional
+  and at least one. A schedule answers `{scheduleId, siteUrl, cron, timezone, enabled,
+  nextRunAt, lastCrawlId, render, credentials, createdAt, updatedAt}`; `credentials`
+  shows the stored kinds and names, every value `[redacted]`, as `crawl_config_get`
+  does. `schedule_delete` answers `{scheduleId, deleted: true}`.
+  - **`crawl` is planned once, when the schedule is written**, by `crawl_start`'s own
+    planner: every refusal `crawl_start` gives is given here with its path prefixed
+    `crawl.` (a host off the allowlist is 403 `FORBIDDEN` naming `crawl.siteUrl`). What
+    is stored is the effective config, the judgement block and a list crawl's URLs, and
+    a fire inserts exactly that, without planning again. So a later change to an
+    operator default reaches a schedule only when it is updated with its `crawl` again.
+  - **`cron` is exactly five fields** (minute hour day-of-month month day-of-week). Six
+    fields (seconds), `@daily`-style aliases and `H` are refused (400 `VALIDATION` naming
+    `cron`), and so is an expression with no slot in the next 366 days (`0 0 30 2 *`).
+    **`timezone` is an IANA zone name** (`Europe/London`, `UTC`); an offset or an
+    abbreviation is a 400 naming `timezone`. The slot is computed in that zone, so a
+    daylight-saving change fires `30 1 * * *` once on the day 01:30 does not exist and
+    once on the day it happens twice.
+  - **`nextRunAt`** is the next slot, strictly after now, and null while `enabled` is
+    false. Changing the cron or the zone, or enabling, recomputes it from now. A
+    schedule whose cron has no slot left within a year when it fires is disabled by
+    the engine (`enabled: false`, `nextRunAt: null`, and a log line naming it).
+  - **`schedule_update`'s `crawl` replaces the stored crawl AND its credentials
+    together**: a `crawl` without credential fields removes the stored ones, as a new
+    `crawl_start` would carry none.
+  - **Credentialed schedules are accepted.** The values are stored encrypted in
+    `schedule_credentials` under the same key and scheme as a crawl's (bound to the
+    schedule and its write), copied re-encrypted under each fired crawl's id, and
+    deleted with the schedule; retention does not apply to a schedule's own copy.
+  - **`render`**: null (the default) is crawl then rules; `{}` adds a render pass over
+    the engine's own selection between them; `{urls: [...]}` renders exactly those
+    pages. The URLs are checked when the render runs, as `crawl_render` checks a
+    caller's list (URL policy, the allowlist, a page of this crawl that answered 200).
+- **A fire is a chain: crawl, then render if asked, then rules.** Each link is a job
+  queued in the same transaction that closes the link before it, with the crawl job's
+  pin: none for a fired crawl, so any worker runs it. A link that fails ends the chain with `schedule_chain_failed` `{link,
+  reason}` in the crawl's history and the schedule's; the crawl keeps what it has. A
+  fired crawl that ends `paused` or `cancelled` ends the chain silently (the pause or
+  cancel is its own event). So two fired crawls are each judged, and `crawl_compare`
+  between them answers `comparable: true` (the gate's clause 1).
+- **Who fires.** Every `api:serve` and `worker:serve` process is a scheduler candidate;
+  exactly one leads, by a Postgres advisory lock held on a connection of its own, and
+  every 30 s it fires or skips what is due. **The stdio MCP server is not a candidate**
+  (it lives as long as one agent session, and a leader that exits strands what it
+  pinned): a local user runs `worker:serve` or `api:serve` beside it for schedules to
+  fire. A process tries for the lock 30 s after it boots. A leader that dies frees the
+  lock with its session, and another candidate leads at its next try, within 30 s; slots
+  missed meanwhile fire once, late, not once each. No slot fires twice, whoever leads
+  (the claim of a due schedule is `SKIP LOCKED`, with the slot moved in the same
+  transaction).
+- **A slot fires or is skipped, and the skip is recorded.** `schedule_history` answers
+  the schedule's own events: `schedule_fired` `{crawlId}`, `schedule_skipped` `{reason,
+  crawlId?}` and `schedule_chain_failed` `{link, reason}`. A fire or skip carries
+  `crawlId` null at the top level and names the crawl in `detail`, so its record
+  outlives a deleted crawl. **Known defect at this commit** (found by the gate,
+  `docs/gates/phase-28c.md` clause 1d; fix pending): `schedule_history` also answers
+  every lifecycle event of the crawls the schedule fired, because those carry its
+  `scheduleId` too. Until it is fixed, read the three schedule kinds and skip the rest;
+  `crawl_history` is the place for a fired crawl's lifecycle. The skip reasons, checked in this order:
+  - `overlap`: a crawl this schedule fired is still `queued`, `running` or `paused`, or
+    one of its chain links is queued or running. `detail.crawlId` names it. A schedule
+    never stacks crawls. A system pause resumes by itself (Phase 28b), so a deploy does
+    not hold a schedule; an agent's pause does, deliberately, until the crawl is resumed
+    or cancelled.
+  - `not-allowed`: the leading process's allowlist does not admit the crawl's `siteUrl`,
+    `legacyHosts` or `sitemapUrls`. The allowlist is checked at fire time as well as at
+    create, so a host removed from it stops its schedules firing.
+  - `credentials_unreadable`: the schedule's stored copy cannot be decrypted with the
+    leading process's keys. Nothing fires without its credentials;
+    `schedule_update` with the credentials again stores a copy the deployment can read.
+  Either way `nextRunAt` moves to the first slot after now.
+- **Every event carries `scheduleId`** when its crawl was fired by a schedule (the
+  crawl's `schedule_id`). **`schedule_delete`** removes the schedule's own fire and skip
+  events and its credentials; the crawls it fired stay, with their findings and their
+  lifecycle history, which then reads `scheduleId` null. A chain in flight runs to its end.
+- **`crawl_status.renderDocuments`** is `"kept"` when any page of the crawl has a rendered
+  document on this server's disk, `"not kept"` otherwise. A worker running a fired
+  crawl's render link keeps no documents (the rendered facts are stored as always; only
+  the HTML file is not written), so a fired crawl reads `"not kept"`; the stdio MCP
+  server and the API's synchronous `crawl_render` keep writing them.
+- **`crawl_delete`'s `rows` gains `crawl_events`.**
+- **Errors as implemented**: 400 `VALIDATION` for a malformed body, cron or zone, 403
+  `FORBIDDEN` for a host off the allowlist or refused by URL policy, 404 `NOT_FOUND` for
+  a missing schedule and, identically, for another tenant's, and 409 `CONFLICT` for a
+  write while the server shuts down. An unknown body key is refused by its position,
+  never quoted.
+- **Pinned** by `test/api/schedules.test.ts:125` ("creates an enabled schedule with a next
+  slot"), `test/api/schedules.test.ts:327` ("a cron that never matches is a 400 naming
+  cron"), `test/api/schedules.test.ts:281` ("crawl in an update replaces the credentials
+  with it"), `test/schedule/cron.test.ts:165` ("2026-10-25 (01:30 happens twice): one slot
+  that day, not two"), `test/schedule/scheduler.test.ts:284` ("(c) missed slots"),
+  `test/schedule/scheduler.test.ts:293` ("(d) overlap: the last fired crawl is paused"),
+  `test/schedule/scheduler.test.ts:327` ("(e) not-allowed: hostAllowed false skips the slot"),
+  `test/schedule/scheduler.test.ts:342` ("(f) credentials_unreadable"),
+  `test/schedule/scheduler.test.ts:575` ("(g) the leader's connection killed"),
+  `test/schedule/scheduler.test.ts:801` ("the candidates are api:serve and worker:serve"),
+  `test/worker/chain.test.ts:194` ("(a) two fires of a render-less schedule are each judged
+  last, and compare comparable: true"), `test/worker/chain.test.ts:334` ("(e) the schedule
+  deleted after the fire"), `test/crawl/render-link.test.ts:143` ("renders, writes no file
+  and leaves rendered_html_path null"), `test/events/crawl-events.test.ts:206` ("(a) reads
+  queued, claimed, started, paused{request}, resumed{auto:false}"),
+  `test/api/no-key-echo.test.ts:633` ("no event detail carries any of it") and
+  `test/api/tenant-isolation.test.ts:560` ("an invalid body against a foreign schedule is
+  still the missing answer").
+- **Not in 28c**: the domain allowlist is still one operator-set list (a per-tenant
+  allowlist is an open item); nothing bounds how long a live crawl holds a host from other
+  tenants; the per-tenant cap does not count a chain's render and rules links. All three
+  are open items in the gate record.
 
 **What Phase 28b changed here (2026-11-11): crawls run on worker processes, and a
 crawl's credentials survive a restart.** Ruleset **0.25.1** (`sitemap.invalid` now
@@ -1274,6 +1410,13 @@ webhooks**: polling `crawl_status` is the contract until Talos asks otherwise.
 | `crawl_cancel` | `POST /crawls/:id/cancel` | — (final; queued or paused: cancelled now, 200; running: requested, 202) |
 | `crawl_delete` | `DELETE /crawls/:id?confirm=<crawlId>` | `confirm` (required; must repeat `crawlId`). Hard delete of every row and the render and export files; 409 while queued or running |
 | `crawl_mark_failed` | `POST /crawls/:id/fail` | — |
+| `crawl_history` | `GET /crawls/:id/history` | `limit`, `cursor` (the crawl's lifecycle events, oldest first; the Phase 28c summary lists the kinds) |
+| `schedule_create` | `POST /schedules` | `crawl` (a `crawl_start` body, required), `cron` (five fields, required), `timezone` (IANA, required), `enabled` (default true), `render` (null, `{}` or `{urls}`). 201 with the schedule |
+| `schedule_list` | `GET /schedules` | `limit`, `cursor` (the caller's schedules, newest first) |
+| `schedule_get` | `GET /schedules/:id` | `scheduleId` (required; the path's `:id` over HTTP) |
+| `schedule_update` | `PATCH /schedules/:id` | `scheduleId` (required), and at least one of `crawl`, `cron`, `timezone`, `enabled`, `render`. `crawl` replaces the stored crawl and its credentials together |
+| `schedule_delete` | `DELETE /schedules/:id` | `scheduleId` (required). The fired crawls stay |
+| `schedule_history` | `GET /schedules/:id/history` | `scheduleId` (required), `limit`, `cursor` (fires, skips and chain failures, oldest first) |
 | `crawl_render` | `POST /crawls/:id/render` | `urls[]` (optional; replaces the automatic selection); `requestHeaders`, `httpAuth`, `cookies` (optional, as on `crawl_resume`) |
 | `crawl_rules` | `POST /crawls/:id/rules` | — |
 | `crawl_config_get` | `GET /crawls/:id/config` | — (`crawl` and its `mutability`, the judgement block, every overridable threshold, the last run's stamp and `judgementStale`, §4.9) |
@@ -1629,7 +1772,8 @@ the count is unknown.
 **`crawl_delete`** takes `{crawlId, confirm}` (`DELETE /crawls/:id?confirm=<crawlId>`;
 the confirm is a query parameter because DELETE bodies are poorly supported) and
 answers `{crawlId, rows, files}`: the rows removed per table (`crawls: 1`
-included; since Phase 28b `crawl_credentials` and `jobs` appear too) and `{renders, exports}`, the files removed from this server. **There is no
+included; since Phase 28b `crawl_credentials` and `jobs` appear too, and since Phase 28c
+`crawl_events`, the crawl's history) and `{renders, exports}`, the files removed from this server. **There is no
 undo and no soft delete.** `confirm` must repeat `crawlId` exactly (400 otherwise).
 Refused (409), each naming what holds the crawl: a `queued` or `running` crawl (pause or
 cancel it and wait until it stops), a crawl with a pause or cancel pending, a crawl this
@@ -1716,6 +1860,16 @@ came back:
 Read: the Shopify profile clamped the crawl to one request at a time at 1 s; the host
 pushed back twice, stepped down once after a clean run, then escalated again and is
 locked at 2 s for the rest of the crawl.
+
+Since Phase 28c the answer also carries **`renderDocuments`**, after `renderPassCount`:
+`"kept"` when any page of the crawl has a rendered HTML document on this server's disk,
+`"not kept"` otherwise (derived from the pages, no column of its own). It is about the
+FILE only: a render pass that kept no document still stored every rendered fact the
+rules read. A fired crawl's render link runs on a worker, which keeps no documents, so a
+scheduled crawl reads `"not kept"`; a pass run by `crawl_render` or by the stdio MCP
+server keeps them. Pinned: `test/crawl/render-link.test.ts:143` ("renders, writes no file
+and leaves rendered_html_path null") and `test/crawl/render-link.test.ts:169` ("crawl_status
+answers 'kept' after a pass with a directory").
 
 Read as a Talos dashboard: `blockedPages` and `hostSpacingMs` are the
 politeness pair (§8) — this crawl was configured at `perHostDelayMs: 2000` and
@@ -4234,6 +4388,23 @@ byte for byte, as it writes it".
 - **`excludedDropped` counts discoveries under the scope that refused them.** A URL
   turned away past the budget is a count, not a row, so widening the scope later
   cannot re-admit it; only an `excluded` row can be re-admitted.
+- **Schedules fire only while an `api:serve` or `worker:serve` process runs** (Phase 28c).
+  The stdio MCP server is not a scheduler candidate, so a local setup with only
+  `mcp:serve` stores schedules and never fires them. A slot missed while no candidate
+  runs fires once when one does.
+- **A schedule stores its crawl as planned when it was written.** A later change to an
+  operator default (the config defaults, a politeness floor) reaches it only when it is
+  updated with its `crawl` again. The allowlist and the credentials are the two things
+  re-checked at every fire.
+- **A skip is per slot, and an agent's pause holds a schedule.** A fired crawl an agent
+  paused makes every later slot an `overlap` skip until it is resumed or cancelled, by
+  design; `schedule_history` names the crawl on each skip.
+- **The per-tenant cap (`ARIADNE_TENANT_MAX_RUNNING`) counts crawl jobs, not a chain's
+  render and rules links**, which any worker may run beside the tenant's crawl.
+- **A chain link pinned to a process that stopped stays queued.** Only a fired crawl
+  resumed through the stdio MCP server pins its chain to that process; if it exits
+  mid-chain the link waits, the schedule skips as `overlap` naming the crawl, and the
+  tenant's `crawl_rules` (or `crawl_render`) adopts the link and runs it.
 
 ## Cross-references
 
@@ -4242,6 +4413,10 @@ byte for byte, as it writes it".
 - `docs/gates/phase-10.md` and `docs/gates/phase-11.md` — the measurements
   behind this file's Phase 10 and Phase 11 numbers; each number here also names
   the test or the measurement it came from directly.
+- `docs/gates/phase-28c.md` — the Phase 28c gate: a one-minute schedule fired exactly
+  ten times by two scheduler candidates while the leader was killed, the overlap and
+  not-allowed skips, `crawl_history` over a paused, resumed and finished crawl, and the
+  weekly 50k gate in CI.
 - `docs/gates/phase-28b.md` — the Phase 28b gate: workers killed with `kill -9`, the
   encrypted credentials and their secret scan, the health endpoints and the 50k crawl as
   a worker job.

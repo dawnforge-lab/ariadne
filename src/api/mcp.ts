@@ -965,7 +965,7 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "timezone, enabled, nextRunAt, lastCrawlId, render, credentials, createdAt, updatedAt}. " +
         "credentials shows the NAMES of the stored credentials, every value '[redacted]'.\n\n" +
         "crawl is a crawl_start body, validated now (a host off the allowlist is refused 403 " +
-        "NOT_ALLOWED here as it is at crawl_start). Each slot fires one crawl of it, then the " +
+        "FORBIDDEN here as it is at crawl_start). Each slot fires one crawl of it, then the " +
         "rules run (and the render pass, when render asks for one). A slot that finds the " +
         "schedule's previous crawl still queued, running or paused is skipped, never stacked; " +
         "schedule_history says so.",

@@ -29,6 +29,7 @@
  *   GET  /crawls/:id                   one crawl: status, counts, frontier, timings,
  *                                      and `job` — the work item behind the
  *                                      status (`{kind, status, claimedBy?}`, 28b)
+ *   GET  /crawls/:id/history           its lifecycle events, oldest first, paginated (28c)
  *   POST /crawls/:id/fail              close a crawl nobody is working
  *   POST /crawls/:id/resume            continue a crawl that stopped with work
  *                                      still owed — the same crawl, the same id,

@@ -210,6 +210,10 @@ const API_FIELDS = new Set<string>([
   ]),
   ...declaredFields(join(ROOT, "src/rules/run.ts"), ["RunSummary"]),
   ...declaredFields(join(ROOT, "src/rules/registry/types.ts"), ["Finding", "Metric"]),
+  // Phase 28c: a schedule as the `schedule_*` tools answer it, and one event as
+  // `crawl_history` and `schedule_history` answer it.
+  ...declaredFields(join(ROOT, "src/api/service.ts"), ["ScheduleOut"]),
+  ...declaredFields(join(ROOT, "src/events/events.ts"), ["CrawlEvent"]),
   // Phase 27c: the facts `crawl_config_get.crawl` reports beside the settings
   // (`scopeChangedAt` …), and the `mutability` values it answers per key
   // (`whenPaused` …), read off the field table that publishes them.

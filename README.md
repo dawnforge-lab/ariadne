@@ -10,7 +10,7 @@ engine produces facts (this URL 404s, these 340 URLs share a title, inlinks
 median is 4); the agent supplies judgement (severity in context, root cause,
 opportunity). Neither side does the other's job.
 
-**Status: implemented through Phase 24a** (each phase's gate evidence is in
+**Status: implemented through Phase 28c** (each phase's gate evidence is in
 `docs/gates/`). What comes next is in the roadmap below.
 
 ## Documents — read in this order
@@ -42,7 +42,7 @@ TypeScript (Node 22), no crawl framework — own loop over a Postgres frontier.
 Dependencies kept deliberately small: `undici`, `htmlparser2`, `robots-parser`,
 `fast-xml-parser`, `playwright` (render pass only), `pg` + `drizzle-orm`, and
 `@modelcontextprotocol/sdk` + `zod` (agent surface only — the MCP transport and
-its tool schemas). `cheerio` in devDependencies only, as a parity oracle in
+its tool schemas), `cron-parser` (a schedule's next slot, Phase 28c). `cheerio` in devDependencies only, as a parity oracle in
 tests.
 
 Two transports, one service layer: `npm run api:serve` (HTTP, bearer-token
@@ -64,6 +64,14 @@ compose layout). Environment:
 `ARIADNE_CREDENTIALS_KEY` is `<id>:<base64 of 32 bytes>`, the AES-256-GCM key a crawl's
 credentials are stored under; the database never holds it. `/healthz`, `/readyz` and
 `/metrics` answer before authentication on the API and each worker.
+
+Schedules (Phase 28c): `schedule_create` fires a crawl on a five-field cron in an IANA
+zone, then the rules (and a render pass if asked), so fired crawls can be compared;
+`schedule_history` and `crawl_history` say what happened, in order. The scheduler runs
+inside every `api:serve` and `worker:serve` process, one leader at a time by a Postgres
+advisory lock. **`mcp:serve` is not a scheduler candidate**: locally, run `npm run
+worker:serve` (or `api:serve`) beside it for schedules to fire. `docs/deploy.md` has the
+details, and the weekly 50k memory gate in CI (`.github/workflows/gate.yml`).
 
 Hard memory contract: RAM is O(concurrency), not O(URLs). 50k pages under
 512MB is the Phase 1 gate; 1M under 512MB is the target.

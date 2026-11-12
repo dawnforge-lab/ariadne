@@ -30,6 +30,18 @@ Worker: `ARIADNE_WORKER_HTTP_PORT`, `ARIADNE_WORKER_CONCURRENCY` (default 1), `A
 
 `/healthz`, `/readyz` and `/metrics` are served before auth on the API port and on each worker's port.
 
+## The scheduler
+
+Every `api` and `worker` process is a scheduler candidate (Phase 28c); there is no scheduler service to deploy and nothing to configure. One leads at a time:
+
+- A candidate opens one dedicated Postgres connection, outside the pool, named `ariadne-scheduler:<instanceId>` (`application_name`), and tries `pg_try_advisory_lock(2028004002)` on it every 30 s, the first try 30 s after boot. The one holding it fires or skips the due schedules every 30 s. Count one extra connection per process for it, briefly, and one held by the leader.
+- To see who leads: `select a.application_name from pg_locks l join pg_stat_activity a on a.pid = l.pid where l.locktype = 'advisory' and l.granted and l.objid = 2028004002 and l.objsubid = 1;` (the key fits in `objid`, with `classid` 0).
+- A leader that dies, or whose connection is cut, frees the lock with its session; another candidate leads within 30 s, and a slot missed meanwhile fires once. A leader that loses its connection logs `scheduler: lost the leader lock` and waits one tick before trying again. No slot fires twice whoever leads, because a due schedule is claimed `FOR NO KEY UPDATE SKIP LOCKED`.
+- SIGTERM stops the scheduler first (it releases the lock), then the crawls, as before.
+- The leader applies its OWN `ARIADNE_ALLOWED_DOMAINS` and credentials keys when it fires, which is one more reason they must be identical everywhere: a leader whose list lacks a schedule's host skips its slot `not-allowed`, and one without the key a schedule's credentials were written under skips it `credentials_unreadable`.
+- **The stdio MCP server (`mcp:serve`) is never a candidate.** It lives as long as one agent session, and a leader that exits would strand what it fired. A local setup that wants schedules to fire runs `npm run worker:serve` (or `api:serve`) beside it, against the same database.
+- A worker runs a schedule's render link with no documents directory: it keeps no rendered HTML (`crawl_status.renderDocuments` reads `"not kept"`). Chromium is still needed on workers for that render; the image carries it.
+
 ## Rolling a deploy
 
 Run `migrate` first, then roll the API and the workers. Migrations are additive, so replicas still running the old code stay ready against the newer schema: `/readyz` answers 200 when the database has MORE migrations applied than the code knows (and logs one line naming the counts, once per transition; Ruling R19). It answers 503 `schema behind` only when FEWER are applied than the code knows, i.e. a new replica started before `migrate` ran, and 503 `database unreachable` when the database cannot be reached.
@@ -58,3 +70,7 @@ If a host's runtime forbids unprivileged user namespaces (some hardened kernels,
 ## CI
 
 The `docker` job in `.github/workflows/ci.yml` builds the image on every PR and pushes nothing.
+
+`.github/workflows/gate.yml` is the 50k memory gate (hard rule 6), too long for every PR. It runs weekly (`0 3 * * 1`, Mondays 03:00 UTC), on `workflow_dispatch`, and on a pull request that changes `gate.yml` itself (GitHub dispatches only workflows already on the default branch, so that is how a change to it is exercised before it lands). Against a Postgres 16 service it migrates and runs `node --max-old-space-size=512 --import tsx scripts/gate-rules.ts --json-out gate.json` with `GATE_PAGES=50000`: crawl, render and rules over 50,000 fixture pages, the command the gate records name. Timeout 120 min. The job fails when the script exits non-zero, which it does on a peak RSS above 512 MB or any other recorded failure; it writes a `::warning::` annotation, not a failure, when the crawl phase peaks above 290.2 MB (the last recorded bound; runner hardware differs from the dev machine). `gate.json` (the peak per phase, the durations, an `inferPageTemplates` timing line) is uploaded as the `gate-json` artifact on every run, pass or fail, so a slow drift shows week to week.
+
+The scheduler gate (`scripts/gate-schedules.ts`, Phase 28c) is not in CI: it takes about fifteen minutes of wall clock (ten one-minute slots) and needs a database of its own (`ariadne_gate28c`), whose due schedules its workers fire. `docs/gates/phase-28c.md` records how it is run.

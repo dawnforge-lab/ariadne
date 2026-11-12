@@ -127,6 +127,22 @@ crawler inside Talos. The intended shape:
    Host exclusivity (one running crawl per host across all workers, rule 9) keys on the
    seed host (www and non-www alike, plus a non-default port); `legacyHosts` probes,
    `sitemapUrls` on other hosts and redirect targets are low-volume and not covered by it.
+
+   **Amended in Phase 28c: schedules, and why a system pause cannot strand one.** A
+   schedule (`schedule_create`, a cron in an IANA zone) fires a crawl unattended, then
+   the render pass if it asks for one, then the rules, so two fired crawls can be
+   compared. A slot whose previous fired crawl is still queued, running or **paused**
+   is skipped as `overlap`, never stacked. Because system pauses resume by themselves
+   (above), a deploy does not hold a schedule; an agent's pause (`request`) does, by
+   design, until Talos resumes or cancels that crawl, and `schedule_history` names the
+   crawl on every skip. A host the allowlist no longer admits is skipped `not-allowed` at
+   fire time. One process leads the firing (a Postgres advisory lock among every
+   `api:serve` and `worker:serve`; not the stdio MCP server), a leader that dies is
+   replaced within 30 s, and no slot fires twice. `crawl_history` answers what happened
+   to any crawl, in order (claims, pauses with their reason, worker losses, automatic and
+   agent resumes, the render and rules links), so Talos can explain a crawl's state
+   instead of inferring it from `crawl_status`. The surface is `docs/talos-surface.md`'s
+   Phase 28c summary; the evidence is `docs/gates/phase-28c.md`.
 8. **Talos is still the source of truth for a crawl's credentials; Ariadne keeps an
    encrypted copy for reruns.** Since Phase 27c a crawl can carry custom request
    headers, HTTP Basic auth and cookies (staging sites, pre-issued sessions). Since
@@ -159,6 +175,20 @@ crawler inside Talos. The intended shape:
    `ARIADNE_CREDENTIALS_KEY_PREVIOUS`; a write re-encrypts under the new key. The surface
    is `docs/talos-surface.md`'s Phase 28b and 27c summaries, §1 and §4.1a.
 
+   **Amended in Phase 28c: a schedule carries its own encrypted copy.**
+   `schedule_create` and `schedule_update` take the same credentials `crawl_start` does.
+   They are stored in `schedule_credentials` under the same key and scheme, bound to the
+   schedule and its write, and each fire copies them, re-encrypted, into the crawl it
+   starts; that crawl's copy then follows the rules above. The schedule's own copy is
+   deleted with the schedule and is not subject to retention while the schedule exists,
+   because a weekly crawl must still run in month three. A `schedule_update` that sends
+   `crawl` replaces the crawl and its credentials together, so a `crawl` without them
+   removes the stored ones. When the leading process cannot decrypt the schedule's copy
+   (a key rotated past it, tampering) the slot is skipped `credentials_unreadable` and
+   nothing is fired without them: Talos re-sends the values with `schedule_update`. The
+   values never reach an event's `detail`, a schedule answer (names only, values
+   `[redacted]`), a log or a metric.
+
 9. **Tenancy: Talos names the tenant on every call, and a foreign crawl is a missing
    crawl.** Since Phase 28a every HTTP request carries `X-Ariadne-Tenant` beside the
    bearer token (400 `TENANT_REQUIRED` / `INVALID_TENANT` otherwise), and the stdio
@@ -179,7 +209,11 @@ crawler inside Talos. The intended shape:
   them on `CREDENTIALS_REQUIRED` (obligation 8): Ariadne keeps only an encrypted copy for
   reruns, and a rotated key or an expired retention makes it unreadable.
 - Run `worker:serve` beside `api:serve`, give both the same database and credentials
-  key, and give every worker the crawl allowlist (below).
+  key, and give every worker the crawl allowlist (below). Both are scheduler candidates,
+  so schedules fire as long as either runs.
+- Re-send a schedule's credentials with `schedule_update` when `schedule_history` shows
+  `credentials_unreadable` skips, and resume or cancel a fired crawl an agent paused when
+  it shows `overlap` skips that should not continue (obligations 7 and 8).
 - Update `docs/talos/api-contract.md` if any tenant-visible surface changes.
 
 ## Runtime requirements
@@ -188,9 +222,9 @@ crawler inside Talos. The intended shape:
   `pg_input_is_valid`, which Postgres added in 16. On an older server that rule
   errors loudly rather than reporting nothing, so a deployment, a sidecar or a
   shared instance must run 16+. The dev container and CI already do.
-- **Node 22**, and **Chromium** wherever a crawl's render pass runs. Since Phase 28b the
-  render pass still runs synchronously in the API process, so the API image carries
-  Chromium; the worker image is the same image.
+- **Node 22**, and **Chromium** wherever a crawl's render pass runs: in the API process
+  for `crawl_render`, and since Phase 28c on a worker for a schedule's render link. Both
+  run the same image, which carries Chromium.
 - **Workers (Phase 28b).** `api:serve` accepts and answers and runs no crawl;
   `npm run worker:serve` claims and runs them, and at least one must be running for a
   crawl to start. Both processes need `DATABASE_URL` and `ARIADNE_CREDENTIALS_KEY`
@@ -205,13 +239,21 @@ crawler inside Talos. The intended shape:
   the orchestrator's probes at them. `docs/deploy.md` has the image and compose layout and
   `docs/gates/phase-28b.md` the measured behaviour, including that a worker's 50,000-page
   crawl peaked at 188.3 MB against a 290.2 MB bound.
+- **The scheduler (Phase 28c)** runs inside every `api:serve` and `worker:serve` process,
+  one leader at a time by a Postgres advisory lock on a dedicated connection; nothing to
+  deploy or configure for it. The leader applies its OWN allowlist and keys at fire time,
+  which is one more reason every process must carry the same `ARIADNE_ALLOWED_DOMAINS` and
+  `ARIADNE_CREDENTIALS_KEY`. The stdio MCP server is not a candidate. A worker running a
+  fired crawl's render link keeps no rendered HTML documents (`crawl_status.renderDocuments`
+  is `"not kept"`); the rendered facts are stored as always.
 
 ## Cross-references
 
 - The surface contract: `docs/talos-surface.md`. Obligation 9 (tenancy) is met as of
   Phase 28a: the listing and every per-crawl read are scoped by the tenant header
   (`docs/gates/phase-28a.md`). Obligations 7 and 8 were amended in Phase 28b (workers,
-  auto-resume, encrypted credentials; `docs/gates/phase-28b.md`).
+  auto-resume, encrypted credentials; `docs/gates/phase-28b.md`) and again in Phase 28c
+  (schedules and their credentials, crawl history; `docs/gates/phase-28c.md`).
 - Talos repo pointer to this project: `docs/talos/crawler-engine.md` in the
   talos repo (`github.com/dawnforge-lab/talos`, local `/home/eugen-dev/Documents/Workflows/talos`).
 - Talos deep history: serena memory `talos-rewrite-status` in the talos
