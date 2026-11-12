@@ -614,6 +614,59 @@ describe("Scheduler", () => {
       await b.stop();
     }
   }, 90_000);
+
+  it("the leader's session carries server-side TCP keepalives (idle 30 s, interval 10 s, count 3), so a partitioned leader's lock is freed in about a minute", async () => {
+    const t = tenant();
+    const sched = scheduler(t, lockKey());
+    try {
+      await sched.tickOnce(NOW);
+      expect(sched.isLeader()).toBe(true);
+      // The scheduler's own session, read on its own connection: the options reached the server.
+      const session = (sched as unknown as { client: pg.Client }).client;
+      const read = async (name: string): Promise<string> =>
+        (await session.query<Record<string, string>>(`show ${name}`)).rows[0]![name]!;
+      expect([
+        await read("tcp_keepalives_idle"),
+        await read("tcp_keepalives_interval"),
+        await read("tcp_keepalives_count"),
+      ]).toEqual(["30", "10", "3"]);
+    } finally {
+      await sched.stop();
+    }
+  });
+
+  it("a candidate whose try fails logs the holder's application_name, once per change of holder", async () => {
+    const t = tenant();
+    const key = lockKey();
+    const holderName = (n: number): string => `test-holder-${RUN}-${n}`;
+    const hold = async (n: number): Promise<pg.Client> => {
+      const c = new pg.Client({ connectionString: databaseUrl(), application_name: holderName(n) });
+      await c.connect();
+      await c.query("select pg_advisory_lock($1::bigint)", [key]);
+      return c;
+    };
+    const lines: string[] = [];
+    const sched = scheduler(t, key, lines);
+    let holder = await hold(1);
+    try {
+      await sched.tickOnce(NOW);
+      await sched.tickOnce(NOW);
+      expect(sched.isLeader()).toBe(false);
+      const named = (n: number): string[] => lines.filter((l) => l.includes(`'${holderName(n)}'`));
+      expect(named(1)).toHaveLength(1);
+      expect(named(1)[0]).toMatch(/does not lead: the leader lock is held by the session '/);
+
+      await holder.end();
+      holder = await hold(2);
+      await sched.tickOnce(NOW);
+      await sched.tickOnce(NOW);
+      expect(named(1)).toHaveLength(1);
+      expect(named(2)).toHaveLength(1);
+    } finally {
+      await sched.stop();
+      await holder.end();
+    }
+  });
 });
 
 describe("a schedule deleted while a fire is in flight (the Task 3 carry: deleteSchedule vs a fresh fired crawl)", () => {

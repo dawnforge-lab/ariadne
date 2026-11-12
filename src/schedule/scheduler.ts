@@ -27,11 +27,31 @@
  * process whose connection just failed racing it back. It fires nothing until
  * it leads again.
  *
- * NO SILENT HANG. The client has TCP keepalive on, and every connect and
- * query on it is bounded by `queryTimeoutMs` (`SCHEDULER_QUERY_TIMEOUT_MS`): a
- * half-open connection — a query that is never answered — is a timeout, which
- * takes the lost-connection path above and is logged like any other loss. So
- * a tick always ends, and `stop()` always returns.
+ * NO SILENT HANG, ON THIS SIDE. The client has TCP keepalive on, and every
+ * connect and query on it is bounded by `queryTimeoutMs`
+ * (`SCHEDULER_QUERY_TIMEOUT_MS`): a half-open connection — a query that is
+ * never answered — is a timeout, which takes the lost-connection path above
+ * and is logged like any other loss. So every query on the dedicated client
+ * ends within that bound, and `stop()`'s release does too. `fireDue` is not
+ * bounded here: it runs on the pool, which sets no query timeout, so a tick —
+ * and `stop()`, which waits for the tick in flight — lasts as long as that
+ * fire's transactions do.
+ *
+ * NO ZOMBIE LEADER, ON THE SERVER'S SIDE (final review I3). A network partition
+ * ends the leader's view of its session at once (the timeout above), but the
+ * SERVER keeps the session — and with it the lock — until its own TCP stack
+ * calls the peer dead: by the server's defaults, over two hours, during which
+ * no candidate can lead. So the session is opened with server-side keepalives
+ * (`SCHEDULER_SESSION_OPTIONS`: idle 30 s, then 3 probes 10 s apart), and the
+ * server ends a partitioned leader's session — freeing the lock — about a
+ * minute after its last traffic; another candidate leads at its next try.
+ * (`idle_session_timeout` is not set: a leader's session is idle while a long
+ * `fireDue` runs on the pool, and a timeout there would end a healthy lead.)
+ *
+ * WHO HOLDS IT. A candidate whose try fails reads the holder's
+ * `application_name` and backend pid (`pg_locks` ⨝ `pg_stat_activity`) and
+ * logs it once per change of holder, so an operator sees which process leads
+ * — or that something other than a scheduler holds the key.
  *
  * NO SLOT FIRES TWICE, whatever leadership does: two processes may both
  * believe they lead for the instant between a leader's session dying and its
@@ -62,6 +82,14 @@ export const SCHEDULER_LOCK = 2_028_004_002;
  * server.
  */
 export const SCHEDULER_QUERY_TIMEOUT_MS = 5_000;
+
+/**
+ * The scheduler session's server-side TCP keepalives (module header, "No
+ * zombie leader"): the server probes a silent peer after 30 s and calls it dead
+ * after 3 unanswered probes 10 s apart, ending the session and its lock.
+ */
+export const SCHEDULER_SESSION_OPTIONS =
+  "-c tcp_keepalives_idle=30 -c tcp_keepalives_interval=10 -c tcp_keepalives_count=3";
 
 /** Postgres keeps this many bytes of an `application_name` (NAMEDATALEN - 1) and silently drops the rest. */
 const APPLICATION_NAME_MAX_BYTES = 63;
@@ -113,6 +141,8 @@ export class Scheduler {
   private leading = false;
   /** Set when the lead is lost: the next try is skipped (`tryLead`). */
   private pauseOneTry = false;
+  /** The holder last logged by a failed try (`pid:application_name`), so a holder is logged once. */
+  private lastHolder: string | null = null;
   private timer: NodeJS.Timeout | null = null;
   /** The tick in flight, if any: ticks never overlap. */
   private ticking: Promise<void> | null = null;
@@ -239,6 +269,7 @@ export class Scheduler {
     const fresh = new pg.Client({
       connectionString: this.databaseUrl,
       application_name: this.applicationName,
+      options: SCHEDULER_SESSION_OPTIONS,
       keepAlive: true,
       connectionTimeoutMillis: this.queryTimeoutMs,
       query_timeout: this.queryTimeoutMs,
@@ -247,12 +278,24 @@ export class Scheduler {
     fresh.on("error", (error) => this.lose(fresh, error));
     this.client = fresh;
     let locked: boolean;
+    let holder: { pid: number; application_name: string } | null = null;
     try {
       await fresh.connect();
       const result = await fresh.query<{ locked: boolean }>("select pg_try_advisory_lock($1::bigint) as locked", [
         this.lockKey,
       ]);
       locked = result.rows[0]?.locked === true;
+      if (!locked) {
+        // Who holds it (module header, "Who holds it"), on the same session.
+        const held = await fresh.query<{ pid: number; application_name: string }>(
+          `select a.pid, a.application_name from pg_locks l join pg_stat_activity a on a.pid = l.pid
+            where l.locktype = 'advisory' and l.granted
+              and l.classid = ($1::bigint >> 32)::oid and l.objid = ($1::bigint & 4294967295)::oid
+              and l.objsubid = 1`,
+          [this.lockKey],
+        );
+        holder = held.rows[0] ?? null;
+      }
     } catch (error) {
       this.lose(fresh, error);
       return false;
@@ -261,11 +304,27 @@ export class Scheduler {
       // Another session leads. This one holds nothing; it is not kept open.
       this.client = null;
       await fresh.end();
+      this.logHolder(holder);
       return false;
     }
+    this.lastHolder = null;
     this.leading = true;
     this.deps.log(`scheduler ${this.instanceId}: leading (advisory lock ${this.lockKey})`);
     return true;
+  }
+
+  /** A failed try's holder, logged when it differs from the last one logged. */
+  private logHolder(holder: { pid: number; application_name: string } | null): void {
+    const key = holder === null ? "" : `${holder.pid}:${holder.application_name}`;
+    if (key === this.lastHolder) return;
+    this.lastHolder = key;
+    this.deps.log(
+      holder === null
+        ? `scheduler ${this.instanceId}: does not lead: the leader lock (advisory ${this.lockKey}) was held at ` +
+            "the try, and its holder ended before it could be read"
+        : `scheduler ${this.instanceId}: does not lead: the leader lock is held by the session ` +
+            `'${holder.application_name}' (backend pid ${holder.pid}, advisory ${this.lockKey})`,
+    );
   }
 
   /** Whether the dedicated session still holds the lock; a session that does not, or cannot answer, is lost. */
