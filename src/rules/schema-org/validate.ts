@@ -38,9 +38,12 @@
  *    finding); pending or superseded → `propertyStatus`; a nested node with a
  *    known type the property's range refuses → `typeMismatches`. Strings and
  *    numbers are never judged against a range;
- *  - Google features (`google-features.ts`) and withdrawn features. A nested
- *    Review / AggregateRating matches only under a parent whose known types
- *    are reviewable (`REVIEWABLE_PARENTS`).
+ *  - Google features (`google-features.ts`) match by hierarchy: a subtype of a
+ *    feature's type matches it. A nested Review / AggregateRating matches only
+ *    under a parent whose known types are reviewable (`REVIEWABLE_PARENTS`).
+ *    Withdrawn features (`deprecatedFeatures`) match the deprecated type
+ *    EXACTLY, never its subtypes: Recipe is a schema.org subtype of HowTo, and
+ *    Recipe rich results are alive.
  *
  * Paths: `$` is the block, then `.prop` (or `["prop"]` for a key that is not an
  * identifier) and `[i]` where the value is an array, e.g. `$.offers[0].seller`.
@@ -314,7 +317,8 @@ class Walker {
       });
     }
     for (const deprecated of DEPRECATED_FEATURES) {
-      const type = known.find((k) => isSubtypeOf(k, deprecated.type));
+      // Exact, not by hierarchy: Recipe is a subtype of HowTo and is not withdrawn.
+      const type = known.find((k) => k === deprecated.type);
       if (type !== undefined) this.push("deprecatedFeatures", { feature: deprecated.id, path, type });
     }
   }

@@ -418,6 +418,13 @@ describe("validateBlock", () => {
     expect(howTo.deprecatedFeatures).toEqual([{ feature: "how-to", path: "$", type: "HowTo" }]);
   });
 
+  it("deprecated features match the type exactly: a Recipe (a HowTo subtype) is not withdrawn", () => {
+    const recipe = validate({ "@context": CTX, "@type": "Recipe", name: "Soup" });
+    expect(recipe.deprecatedFeatures).toEqual([]);
+    const both = validate({ "@context": CTX, "@type": ["Recipe", "HowTo"], name: "Soup" });
+    expect(both.deprecatedFeatures).toEqual([{ feature: "how-to", path: "$", type: "HowTo" }]);
+  });
+
   it("an untyped nested object is not judged, but typed nodes inside it are walked", () => {
     const v = validate({
       "@context": CTX,
