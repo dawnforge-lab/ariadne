@@ -44,8 +44,24 @@ import { schemaOrgName } from "./schema-names.js";
 
 const SCHEMA_VOCAB = /^https?:\/\/schema\.org\/?$/i;
 const SCHEMA_PREFIX_TERM = /^schema:/i;
-/** Prefix bindings, `name: iri` pairs; only the `schema` binding matters. */
-const PREFIX_PAIR = /([^\s:]+):\s+(\S+)/g;
+
+/**
+ * The `schema` binding of a `prefix` attribute, if it has one: its IRI.
+ * A linear walk over whitespace tokens (page-controlled input, so no
+ * backtracking regex): a token ending in `:` is a prefix name and the next
+ * token is its IRI. Only the `schema` binding matters here.
+ */
+function schemaBinding(prefixAttr: string): string | null {
+  const tokens = prefixAttr.trim().split(/\s+/);
+  let bound: string | null = null;
+  for (let i = 0; i + 1 < tokens.length; i++) {
+    const token = tokens[i]!;
+    if (!token.endsWith(":") || token.length === 1) continue;
+    const name = token.slice(token.lastIndexOf(":", token.length - 2) + 1, -1);
+    if (name.toLowerCase() === "schema") bound = tokens[i + 1]!;
+  }
+  return bound;
+}
 
 type Vocab = "schema" | "other" | "none";
 
@@ -118,9 +134,8 @@ export function createRdfaMachine(
             unsupported = true;
           }
         }
-        for (const [, prefix, iri] of (attribs["prefix"] ?? "").matchAll(PREFIX_PAIR)) {
-          if (prefix!.toLowerCase() === "schema") schemaPrefix = SCHEMA_VOCAB.test(iri!);
-        }
+        const bound = schemaBinding(attribs["prefix"] ?? "");
+        if (bound !== null) schemaPrefix = SCHEMA_VOCAB.test(bound);
         contexts.push({ openedAt: depth, vocab, schemaPrefix });
         current = contexts[contexts.length - 1]!;
       }

@@ -115,7 +115,7 @@ describe("RDFa Lite extraction", () => {
       `<div vocab="http://xmlns.com/foaf/0.1/" typeof="Person"><span property="name">x</span></div>`,
     );
     expect(foaf.blocks).toEqual([]);
-    expect(foaf.skips.rdfaUnsupported).toBeGreaterThanOrEqual(1);
+    expect(foaf.skips.rdfaUnsupported).toBe(2);
 
     const prefixed = rdfa(`<div typeof="foaf:Person"><span property="foaf:name">x</span></div>`);
     expect(prefixed.blocks).toEqual([]);
@@ -177,6 +177,32 @@ describe("RDFa Lite extraction", () => {
   });
 });
 
+describe("prefix attribute parsing is linear", () => {
+  const timed = (prefix: string) => {
+    const start = performance.now();
+    const r = rdfa(`<div prefix="${prefix}" typeof="schema:Thing"></div>`);
+    return { ms: performance.now() - start, r };
+  };
+
+  it("100,000 colon-free characters", () => {
+    const { ms, r } = timed("a".repeat(100_000));
+    expect(ms).toBeLessThan(250);
+    expect(r.blocks).toHaveLength(1);
+    expect(r.skips.rdfaUnsupported).toBe(0);
+  });
+
+  it("100,000 characters of a: b pairs, then a schema rebind still bites", () => {
+    const pairs = "a: b ".repeat(20_000);
+    const ok = timed(pairs);
+    expect(ok.ms).toBeLessThan(250);
+    expect(ok.r.blocks).toHaveLength(1);
+    const rebound = timed(`${pairs}schema: http://example.org/ns#`);
+    expect(rebound.ms).toBeLessThan(250);
+    expect(rebound.r.blocks).toEqual([]);
+    expect(rebound.r.skips.rdfaUnsupported).toBe(1);
+  });
+});
+
 describe("machine end() with a frame still open", () => {
   const counts = (): StructuredDataCounts => ({
     errors: 0,
@@ -196,9 +222,11 @@ describe("machine end() with a frame still open", () => {
     expect(() => machine.end()).toThrow(/microdata: end\(\) with 1 item frame/);
   });
 
-  it("the core throws too, and is quiet when everything closed", () => {
+  it("the core throws with an open frame and is quiet when everything closed", () => {
     const core = createItemCore("rdfa", () => {}, counts());
     expect(() => core.end()).not.toThrow();
+    core.openDead(1);
+    expect(() => core.end()).toThrow(/rdfa: end\(\) with 1 item frame/);
   });
 
   it("a document that ends inside an item still emits it (through parser.end)", () => {
