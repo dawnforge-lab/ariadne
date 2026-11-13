@@ -551,6 +551,7 @@ import {
   type ItemMachine,
   type StructuredDataCounts,
 } from "./microdata.js";
+import { createRdfaMachine } from "./rdfa.js";
 import {
   ALT_TEXT_LONG_CHARS,
   ARIA_LABEL_MAX,
@@ -1630,9 +1631,10 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
   // The streaming item extractors, driven from the hooks below: `open` and
   // `close` below the noscript returns and only while no `<template>` is open,
   // `text` below the `suppressDepth` return and the same template gate (R0.9),
-  // `end` after `parser.end()`. A second machine (RDFa) is one more entry.
+  // `end` after `parser.end()`: a sanity check that throws on depth drift.
   const itemMachines: ItemMachine[] = [
     createMicrodataMachine(pageUrl, pushStructuredData, structuredDataCounts),
+    createRdfaMachine(pageUrl, pushStructuredData, structuredDataCounts),
   ];
 
   const h1s: string[] = [];
@@ -2857,7 +2859,10 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
   parser.end();
   // A document that ends inside a JSON-LD script still owes us its block.
   if (inLdJson) flushLdJson();
-  // And one that ends inside an item still owes its items, outermost last.
+  // htmlparser2's `onend` has already closed every open element (and so every
+  // item), which is how a truncated document still emits its items. A machine
+  // that still has a frame open here has drifted from `elementDepth`: it
+  // throws, naming itself (hard rule 7), rather than recover quietly.
   for (const machine of itemMachines) machine.end();
 
   const rawText = (sawBody ? bodyParts : fallbackParts).join("");
