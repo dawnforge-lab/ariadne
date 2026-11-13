@@ -226,6 +226,7 @@ export const TRIAGE: Readonly<Record<string, Readonly<TriageRow>>> = {
   "schema.parse-error": { type: "issue", priority: "medium", sfIssue: "Structured Data: Parse Errors" },
   "schema.property-pending-or-superseded": { type: "warning", priority: "low", sfIssue: "Structured Data: Validation Warnings" },
   "schema.self-serving-reviews": { type: "warning", priority: "low" },
+  "schema.template-inconsistent": { type: "issue", priority: "medium" },
   "schema.unknown-property": { type: "warning", priority: "low", sfIssue: "Structured Data: Validation Errors" },
   "schema.unknown-type": { type: "issue", priority: "medium", sfIssue: "Structured Data: Validation Errors" },
   "security.form-insecure": { type: "issue", priority: "high", sfIssue: "Security: Form URL Insecure" },

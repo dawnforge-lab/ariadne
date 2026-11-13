@@ -34,6 +34,8 @@ import {
 } from "../registry/registry.js";
 import type { RuleCaps } from "../registry/types.js";
 import { assertCrawl, capsOr, limitTo, noteTruncation } from "./crawl-evidence.js";
+import { v4Gate } from "./page-facts.js";
+import { descendants } from "../schema-org/vocabulary.js";
 import {
   BREADCRUMB_PAGE_FLOOR,
   NONE_PAGE_FLOOR,
@@ -63,15 +65,11 @@ export {
  * organisation publishes about itself are the case the policy names, and
  * Google ignores them for rich results.
  *
- * Matched as exact `@type` strings, so the SUBTYPES of LocalBusiness —
- * `Restaurant`, `Store`, `Dentist` and the rest of that branch — are not
- * reported, and neither are the subtypes of Organization. The policy covers
- * them; this rule under-reports them, which is the safe direction (a missed
- * finding, never a false one) but is a real gap: a restaurant rating itself
- * goes unnamed here. Widening it means enumerating the schema.org hierarchy,
- * which is a data set this engine does not carry today.
+ * Matched against the whole Organization branch of the schema.org hierarchy
+ * (`descendants`, which includes the type itself), so `LocalBusiness`,
+ * `Restaurant`, `Dentist` and every other subtype are reported.
  */
-export const SELF_SERVING_TYPES: readonly string[] = ["Organization", "LocalBusiness"];
+export const SELF_SERVING_TYPES: readonly string[] = descendants("Organization");
 export const SELF_SERVING_FIELDS: readonly string[] = ["aggregateRating", "review"];
 
 /**
@@ -141,6 +139,9 @@ async function siteShape(
  */
 async function noneOnSiteFindings(db: Db, crawlId: string, caps: RuleCaps): Promise<Finding[]> {
   await assertCrawl(db, crawlId, NONE.id);
+  // Microdata and RDFa are read from extraction 4 on: below it "no blocks" may
+  // only mean "not read" (R0.7). `extraction.not-recorded` speaks for the crawl.
+  if (!(await v4Gate(db, crawlId)).recorded) return [];
   const { hasBlocks, indexablePages } = await siteShape(db, crawlId, null);
   if (hasBlocks || indexablePages < NONE_PAGE_FLOOR) return [];
   return [
@@ -164,6 +165,8 @@ async function noneOnSiteFindings(db: Db, crawlId: string, caps: RuleCaps): Prom
  */
 async function breadcrumbFindings(db: Db, crawlId: string, caps: RuleCaps): Promise<Finding[]> {
   await assertCrawl(db, crawlId, BREADCRUMB_ABSENT.id);
+  // As `schema.none-on-site`: a breadcrumb in microdata is invisible below v4 (R0.7).
+  if (!(await v4Gate(db, crawlId)).recorded) return [];
   const { hasBlocks, indexablePages } = await siteShape(
     db,
     crawlId,

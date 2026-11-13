@@ -117,7 +117,7 @@ describe("the published schema", () => {
     const thresholds =
       props["judgement"]?.properties?.["thresholds"]?.properties ?? {};
     expect(Object.keys(thresholds).sort()).toEqual(Object.keys(OVERRIDABLE_THRESHOLDS).sort());
-    expect(Object.keys(thresholds)).toHaveLength(20);
+    expect(Object.keys(thresholds)).toHaveLength(22);
     for (const [name, row] of Object.entries(OVERRIDABLE_THRESHOLDS)) {
       expect(thresholds[name]?.minimum, `${name}.minimum`).toBe(row.min);
       expect(thresholds[name]?.maximum, `${name}.maximum`).toBe(row.max);
@@ -133,7 +133,7 @@ describe("the published schema", () => {
       .filter((rule) => rule.kind !== "metric")
       .map((rule) => rule.id);
     expect([...names].sort()).toEqual([...findingRules].sort());
-    expect(names).toHaveLength(182);
+    expect(names).toHaveLength(183);
     for (const metric of registry.byKind("metric")) {
       expect(names, metric.id).not.toContain(metric.id);
     }

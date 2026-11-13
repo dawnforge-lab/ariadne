@@ -981,14 +981,14 @@ export const COPY_TEMPLATES: Record<string, IssueCopy> = {
   "schema.none-on-site": {
     title: "Structured data: No JSON-LD on the site",
     explanation:
-      "No page in the crawl carries JSON-LD. Structured data states in machine-readable form what a page is, and is what search engines and AI assistants read to build rich results and cite sources. Only JSON-LD is read; microdata and RDFa are not detected.",
+      "No page in the crawl carries JSON-LD. Structured data states in machine-readable form what a page is, and is what search engines and AI assistants read to build rich results and cite sources. JSON-LD, microdata and RDFa are all read.",
     howToFix:
       "Add JSON-LD to the templates that matter most: Organization on the home page, Product on product pages, Article on editorial, FAQPage where questions are answered. Validate with the Rich Results Test.",
   },
   "schema.self-serving-reviews": {
     title: "Structured data: Self-serving reviews on Organization or LocalBusiness markup",
     explanation:
-      "Indexable, self-canonical pages whose markup typed exactly Organization or LocalBusiness carries a rating or reviews about the business itself. Google's review snippet policy treats these as self-serving and does not show the stars.",
+      "Indexable, self-canonical pages whose markup typed Organization or any of its subtypes (LocalBusiness, Restaurant, …) carries a rating or reviews about the business itself. Google's review snippet policy treats these as self-serving and does not show the stars.",
     howToFix:
       "Move the ratings to the type they are about (Product, Service, Course, Recipe) and let independent review platforms carry the business-level rating.",
   },
@@ -1041,6 +1041,13 @@ export const COPY_TEMPLATES: Record<string, IssueCopy> = {
       "Indexable, self-canonical pages with a node of a type Google offers a rich result for, that lacks a field Google recommends but does not require. The node stays eligible; the fields give Google more to show. The row names the feature, the node and the missing fields.",
     howToFix:
       "Add the recommended fields where the page has the data. Skip any the page cannot truthfully fill.",
+  },
+  "schema.template-inconsistent": {
+    title: "Structured data: Page lacks the markup its page type usually carries",
+    explanation:
+      "Within a page type of at least {SCHEMA_TEMPLATE_MIN_PAGES} indexable, self-canonical pages, a structured-data type is carried by at least {SCHEMA_TEMPLATE_SHARE}% of them but not all, and the pages without it are listed. Each row gives the page type, the markup type and how many pages of the type do and do not carry it. A gap like that is usually a template that skips the markup under some condition; pages with no page type are not compared.",
+    howToFix:
+      "Find what the template does differently on the listed pages, such as a missing field or a branch that skips the block, and make it output the same markup everywhere.",
   },
   "schema.deprecated-feature": {
     title: "Structured data: Markup for a Google feature that is withdrawn",

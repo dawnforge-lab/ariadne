@@ -546,11 +546,17 @@ describe("checklist coverage", () => {
   //   page    72
   //   query   102 + 8 = 110
   //   total   188 + 8 = 196
-  it("pins the ruleset split: 196 rules = 72 page + 110 query + 14 metric", () => {
+  //
+  // Phase 29a Task 8 adds ONE query rule, `schema.template-inconsistent`.
+  //
+  //   page    72
+  //   query   110 + 1 = 111
+  //   total   196 + 1 = 197
+  it("pins the ruleset split: 197 rules = 72 page + 111 query + 14 metric", () => {
     const registry = buildRegistry();
-    expect(registry.all()).toHaveLength(196);
+    expect(registry.all()).toHaveLength(197);
     expect(registry.byKind("page")).toHaveLength(72);
-    expect(registry.byKind("query")).toHaveLength(110);
+    expect(registry.byKind("query")).toHaveLength(111);
     // The link-graph five, the two content metrics and hreflang coverage, plus
     // the URL-parameter, redirect-volume and sitemap-structure metrics, plus
     // the render pass's coverage, the health rollup, and the page-weight table.

@@ -15,6 +15,7 @@
  *  - `schema.google-required-missing`          a Google rich-result feature missing a required field
  *  - `schema.google-recommended-missing`       the same, for a recommended field
  *  - `schema.deprecated-feature`               markup for a feature Google has withdrawn
+ *  - `schema.template-inconsistent`            a page lacking the type most pages of its kind carry
  *
  * **One finding per page (ruling R0.3).** A page's problems ride in one
  * finding's evidence, up to `MAX_PROBLEMS_IN_EVIDENCE` of them plus the full
@@ -46,6 +47,8 @@ import type { RuleCaps } from "../registry/types.js";
 import { DEPRECATED_FEATURES } from "../schema-org/google-features.js";
 import { blockValidationSchema, type BlockValidation } from "../schema-org/validate.js";
 import { assertCrawl, capsOr, limitTo, noteTruncation } from "./crawl-evidence.js";
+import { v4Gate } from "./page-facts.js";
+import { judgementOr } from "../registry/types.js";
 
 const CATEGORY = "structured-data" as const;
 
@@ -60,6 +63,7 @@ const MISMATCH: RuleIdentity = { id: "schema.embedded-type-mismatch", severity: 
 const GOOGLE_REQUIRED: RuleIdentity = { id: "schema.google-required-missing", severity: "warning" };
 const GOOGLE_RECOMMENDED: RuleIdentity = { id: "schema.google-recommended-missing", severity: "info" };
 const DEPRECATED: RuleIdentity = { id: "schema.deprecated-feature", severity: "info" };
+const TEMPLATE: RuleIdentity = { id: "schema.template-inconsistent", severity: "warning" };
 
 type Problem = Record<string, unknown>;
 
@@ -198,6 +202,95 @@ async function perPageFindings(
   return noteTruncation(findings, result.rows[0]?.total_matches ?? 0);
 }
 
+/**
+ * `template-inconsistent` (CHECK-43): within a page type, a schema type most
+ * pages carry and some do not. The pages lacking it are the finding.
+ *
+ * Refuses a crawl that is not wholly extraction 4 (ruling R0.7): a page read
+ * before microdata and RDFa were extracted has no blocks of those formats, so
+ * "lacks Product" would be a statement about the extractor. The marker
+ * `extraction.not-recorded` speaks for such a crawl.
+ *
+ * Judged pages with a null or empty `page_type` are never bucketed: an untyped
+ * page is not a member of any template. Types are the bare schema.org name
+ * (`schema_type`, 'unknown' excluded) of top-level blocks, counted once per page.
+ *
+ * One SQL statement, grouped by page type and schema type, so memory is bounded
+ * by the number of (page type, schema type) groups that qualify and by the
+ * listing cap, never by pages (hard rules 3 and 6).
+ */
+async function templateFindings(
+  db: Db,
+  crawlId: string,
+  caps: RuleCaps,
+  share: number,
+  minPages: number,
+): Promise<Finding[]> {
+  await assertCrawl(db, crawlId, TEMPLATE.id);
+  const gate = await v4Gate(db, crawlId);
+  if (!gate.recorded) return [];
+  const result = await db.execute<{
+    page_id: string;
+    url: string;
+    page_type: string;
+    schema_type: string;
+    pages_with: number;
+    pages_in_type: number;
+    total_matches: number;
+  }>(sql`
+    with typed as (
+      select p.id, p.url, p.page_type
+      from pages p
+      where p.crawl_id = ${crawlId}
+        and ${JUDGED("p")}
+        and p.page_type is not null and p.page_type <> ''
+    ),
+    sizes as (
+      select page_type, count(*)::int as n from typed
+      group by page_type
+      having count(*) >= ${minPages}
+    ),
+    carried as (
+      select t.page_type, sd.schema_type, count(distinct t.id)::int as c
+      from typed t
+      join structured_data sd on sd.crawl_id = ${crawlId} and sd.page_id = t.id
+      where sd.schema_type <> 'unknown'
+      group by t.page_type, sd.schema_type
+    ),
+    templates as (
+      select c.page_type, c.schema_type, c.c, s.n
+      from carried c
+      join sizes s using (page_type)
+      where c.c * 100 >= ${share} * s.n and c.c < s.n
+    )
+    select t.id as page_id, t.url, tp.page_type, tp.schema_type,
+           tp.c as pages_with, tp.n as pages_in_type,
+           count(*) over ()::int as total_matches
+    from templates tp
+    join typed t on t.page_type = tp.page_type
+    where not exists (
+      select 1 from structured_data sd
+      where sd.crawl_id = ${crawlId} and sd.page_id = t.id
+        and sd.schema_type = tp.schema_type
+    )
+    order by t.url, tp.schema_type
+    ${limitTo(caps.listing)}`);
+  const findings = result.rows.map((row) =>
+    queryFinding(TEMPLATE, {
+      pageId: row.page_id,
+      pageUrl: row.url,
+      evidence: {
+        pageType: row.page_type,
+        schemaType: row.schema_type,
+        pagesWith: row.pages_with,
+        pagesInType: row.pages_in_type,
+      },
+      dedupeKey: `${row.url}#${row.schema_type}`,
+    }),
+  );
+  return noteTruncation(findings, result.rows[0]?.total_matches ?? 0);
+}
+
 const distinct = (problems: Problem[]): string[] => [
   ...new Set(problems.map((p) => p["feature"] as string)),
 ];
@@ -314,6 +407,32 @@ function perPageRule(
   });
 }
 
+const templateRule: QueryRule = defineRule<QueryRule>({
+  kind: "query",
+  id: TEMPLATE.id,
+  checkIds: ["CHECK-43"],
+  category: CATEGORY,
+  severity: TEMPLATE.severity,
+  columns: [
+    { key: "pageType", label: "Page Type" },
+    { key: "schemaType", label: "Schema Type" },
+    { key: "pagesWith", label: "Pages With" },
+    { key: "pagesInType", label: "Pages In Type" },
+  ],
+  ...copyFor(TEMPLATE.id),
+  rulesetVersion: RULESET_VERSION,
+  run: (db, crawlId, caps, ctx) => {
+    const { thresholds } = judgementOr(ctx);
+    return templateFindings(
+      db,
+      crawlId,
+      capsOr(caps),
+      thresholds.SCHEMA_TEMPLATE_SHARE,
+      thresholds.SCHEMA_TEMPLATE_MIN_PAGES,
+    );
+  },
+});
+
 export const schemaValidationRules: QueryRule[] = [
   defineRule<QueryRule>({
     kind: "query",
@@ -340,4 +459,5 @@ export const schemaValidationRules: QueryRule[] = [
     ["CHECK-43"],
     [FEATURES_COLUMN, { key: "restriction", label: "Restriction" }, COUNT_COLUMN],
   ),
+  templateRule,
 ];

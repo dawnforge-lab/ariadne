@@ -532,7 +532,9 @@ describe("check universe", () => {
     // crawl.list-mode marker; a spider crawl's findings do not move.
     // 0.25.1: Phase 28b — sitemap.invalid judges a kept earlier walk's failures beside an
     // unreachable robots.txt (docsFetched > 0), where it was silent; no copy or other rule moved.
-    expect(RULESET_VERSION).toBe("0.25.1");
+    // 0.26.0: Phase 29a — structured data validated: nine new schema.* rules, microdata and
+    // RDFa read since extraction 4, two thresholds; registry.ts carries the grounds.
+    expect(RULESET_VERSION).toBe("0.26.0");
   });
   it("every listed check id is a well-formed CHECK-NN and unique", () => {
     expect(new Set(CRAWL_CHECK_IDS).size).toBe(CRAWL_CHECK_IDS.length);
@@ -637,11 +639,11 @@ describe("check annotations", () => {
 describe("severity shape of the ruleset", () => {
   const all = buildRegistry().all();
 
-  it("holds 33 critical, 70 warning and 93 info rules", () => {
+  it("holds 33 critical, 71 warning and 93 info rules", () => {
     const counts = { critical: 0, warning: 0, info: 0 };
     for (const r of all) counts[r.severity] += 1;
-    expect(counts).toEqual({ critical: 33, warning: 70, info: 93 });
-    expect(all).toHaveLength(196);
+    expect(counts).toEqual({ critical: 33, warning: 71, info: 93 });
+    expect(all).toHaveLength(197);
   });
 
   it("names exactly the rules that are critical", () => {

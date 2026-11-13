@@ -339,11 +339,14 @@ const SKIP_HARNESS_CLAIMS: string[] = [
   // Phase 29a T7: the per-node schema rules whose fixtures land in Task 10
   // (`/authored29a/*`). Each fires in test/rules/schema-validation-query.test.ts
   // today; Task 10 authors the pages that make them fire here and removes these
-  // six entries.
+  // six entries. Task 8's `schema.template-inconsistent` joins them: no fixture
+  // page type has ten pages with one schema type on most of them yet, and Task 10
+  // authors that template.
   "schema.deprecated-feature",
   "schema.embedded-type-mismatch",
   "schema.parse-error",
   "schema.property-pending-or-superseded",
+  "schema.template-inconsistent",
   "schema.unknown-property",
   "schema.unknown-type",
   "schema.none-on-site",
@@ -3826,7 +3829,7 @@ describe("the fixture site end to end", () => {
       .filter((id) => !fired.has(id) && !exempt.has(id))
       .sort();
     // The strict form, over every kind at last: every registered rule speaks on
-    // this one crawl, save the thirty-two `SKIP_HARNESS_CLAIMS` names and
+    // this one crawl, save the thirty-three `SKIP_HARNESS_CLAIMS` names and
     // explains (the count was written as nine when the list held nine and has
     // been carried stale through four phases of markers; P17 corrected it,
     // P19-T2's near-duplicate marker made fifteen and Phase 23's
@@ -3836,10 +3839,10 @@ describe("the fixture site end to end", () => {
     // made twenty-three, and Phase 26c's `sitemap.oversized` and
     // `social.image-insecure` make twenty-five, and Phase 27c's `crawl.list-mode`
     // twenty-six; Phase 29a T7's six schema rules awaiting their T10 fixtures make
-    // thirty-two, and T10 takes them back out — asserted below, so the number cannot go stale again). A
+    // thirty-two, T8's `schema.template-inconsistent` thirty-three, and T10 takes them back out — asserted below, so the number cannot go stale again). A
     // new rule arrives here with no fixture and fails immediately, which is the
     // point — the alternative is a rule nobody has ever seen speak.
-    expect(SKIP_HARNESS_CLAIMS).toHaveLength(32);
+    expect(SKIP_HARNESS_CLAIMS).toHaveLength(33);
     expect(
       unfired,
       "a rule that fires nowhere is a rule no fixture proves — author a fixture " +

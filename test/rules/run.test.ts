@@ -166,7 +166,8 @@ describe("buildRegistry", () => {
     expect(ids).toContain("hreflang.declarations-incomplete");
     // Phase 29a Task 7: the eight per-node schema rules.
     expect(ids).toContain("schema.google-required-missing");
-    expect(ids.length).toBe(196);
+    expect(ids).toContain("schema.template-inconsistent");
+    expect(ids.length).toBe(197);
   });
 
   it("registers every kind the runner drives", () => {

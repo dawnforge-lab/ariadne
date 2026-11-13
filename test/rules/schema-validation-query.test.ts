@@ -21,6 +21,8 @@ import {
   schemaValidationRules,
 } from "../../src/rules/query/schema-validation.js";
 import type { Finding, QueryRule } from "../../src/rules/registry/types.js";
+import { DEFAULT_THRESHOLDS } from "../../src/rules/judgement.js";
+import type { JudgementContext } from "../../src/rules/registry/types.js";
 import { LOCAL_TENANT } from "../../src/tenant.js";
 import { mkDiscovery } from "./mk-discovery.js";
 import { writerIndexable, type IndexabilitySpec } from "./mk-page.js";
@@ -53,7 +55,7 @@ const IMAGELESS_PRODUCT = { ...COMPLETE_PRODUCT, image: undefined };
 const CLEAN_ORG = { "@context": ctx, "@type": "Organization", name: "Estuary" };
 
 describe("schemaValidationRules metadata", () => {
-  it("defines the eight per-node rules with the severities and checks the table assigns", () => {
+  it("defines the per-node rules and the template rule with the severities and checks the table assigns", () => {
     expect(
       Object.fromEntries(
         schemaValidationRules.map((r) => [r.id, [r.checkIds, r.severity, r.category]]),
@@ -67,6 +69,7 @@ describe("schemaValidationRules metadata", () => {
       "schema.google-required-missing": [["CHECK-43", "CHECK-44"], "warning", "structured-data"],
       "schema.google-recommended-missing": [["CHECK-43", "CHECK-44"], "info", "structured-data"],
       "schema.deprecated-feature": [["CHECK-43"], "info", "structured-data"],
+      "schema.template-inconsistent": [["CHECK-43"], "warning", "structured-data"],
     });
   });
 });
@@ -79,6 +82,8 @@ describe("the schema validation rules against the database", () => {
     path: string;
     parseErrors?: number;
     microdataErrors?: number | null;
+    pageType?: string | null;
+    extractionVersion?: number;
   }
 
   async function newCrawl(): Promise<string> {
@@ -116,6 +121,8 @@ describe("the schema validation rules against the database", () => {
         discoveredVia: "link",
         structuredDataParseErrors: s.parseErrors ?? 0,
         structuredDataMicrodataErrors: s.microdataErrors === undefined ? 0 : s.microdataErrors,
+        pageType: s.pageType ?? null,
+        extractionVersion: s.extractionVersion ?? 4,
       };
     });
     await db.insert(pages).values(rows);
@@ -398,6 +405,105 @@ describe("the schema validation rules against the database", () => {
         listing: 2,
       } as never);
       expect(found.map((f) => f.pageUrl)).toEqual([url("/a"), url("/b")]);
+      expect(found[1]!.evidence).toMatchObject({ truncated: { reported: 2, total: 3 } });
+    });
+  });
+  describe("schema.template-inconsistent", () => {
+    const ID = "schema.template-inconsistent";
+    const PRODUCT = { "@context": ctx, "@type": "Product", name: "Mug" };
+
+    /** `total` product pages `/p0..`; the first `with` carry a Product block. */
+    async function productSite(
+      total: number,
+      withProduct: number,
+      opts: { extractionVersion?: number; pageType?: string | null } = {},
+    ): Promise<string> {
+      const crawlId = await newCrawl();
+      const specs = Array.from({ length: total }, (_, i) => ({
+        path: `/p${String(i).padStart(2, "0")}`,
+        pageType: opts.pageType === undefined ? "product" : opts.pageType,
+        ...(opts.extractionVersion === undefined ? {} : { extractionVersion: opts.extractionVersion }),
+      }));
+      const ids = await addPages(crawlId, specs);
+      for (let i = 0; i < withProduct; i += 1) {
+        await addBlock(crawlId, ids.get(specs[i]!.path)!, PRODUCT);
+      }
+      return crawlId;
+    }
+
+    const ctxWith = (overrides: Partial<Record<keyof typeof DEFAULT_THRESHOLDS, number>>): JudgementContext => ({
+      thresholds: { ...DEFAULT_THRESHOLDS, ...overrides },
+      disabledRules: new Set(),
+    });
+
+    it("fires on the 3 of 12 product pages lacking Product", async () => {
+      const found = await run(ID, await productSite(12, 9));
+      expect(found.map((f) => f.pageUrl)).toEqual([url("/p09"), url("/p10"), url("/p11")]);
+      expect(found[0]).toMatchObject({
+        ruleId: ID,
+        severity: "warning",
+        dedupeKey: `${url("/p09")}#Product`,
+        evidence: { pageType: "product", schemaType: "Product", pagesWith: 9, pagesInType: 12 },
+      });
+    });
+
+    it("is silent at 8 of 12 (66.7%)", async () => {
+      expect(await run(ID, await productSite(12, 8))).toEqual([]);
+    });
+
+    it("an override of SCHEMA_TEMPLATE_SHARE 60 makes 8 of 12 fire", async () => {
+      const crawlId = await productSite(12, 8);
+      const found = await rule(ID).run(db, crawlId, undefined, ctxWith({ SCHEMA_TEMPLATE_SHARE: 60 }));
+      expect(found).toHaveLength(4);
+      expect(found[0]!.evidence).toMatchObject({ pagesWith: 8, pagesInType: 12 });
+    });
+
+    it("an override of SCHEMA_TEMPLATE_MIN_PAGES 5 makes 4 of 5 fire", async () => {
+      const crawlId = await productSite(5, 4);
+      expect(await run(ID, crawlId)).toEqual([]);
+      const found = await rule(ID).run(db, crawlId, undefined, ctxWith({ SCHEMA_TEMPLATE_MIN_PAGES: 5 }));
+      expect(found).toHaveLength(1);
+    });
+
+    it("is silent below 10 pages of the type", async () => {
+      expect(await run(ID, await productSite(9, 8))).toEqual([]);
+    });
+
+    it("is silent when every page of the type carries it", async () => {
+      expect(await run(ID, await productSite(12, 12))).toEqual([]);
+    });
+
+    it("never buckets untyped pages (null or empty page type)", async () => {
+      expect(await run(ID, await productSite(12, 9, { pageType: null }))).toEqual([]);
+      expect(await run(ID, await productSite(12, 9, { pageType: "" }))).toEqual([]);
+    });
+
+    it("is silent on a v3 crawl", async () => {
+      expect(await run(ID, await productSite(12, 9, { extractionVersion: 3 }))).toEqual([]);
+    });
+
+    it("excludes the 'unknown' type from the comparison", async () => {
+      const crawlId = await newCrawl();
+      const specs = Array.from({ length: 12 }, (_, i) => ({
+        path: `/u${String(i).padStart(2, "0")}`,
+        pageType: "product",
+      }));
+      const ids = await addPages(crawlId, specs);
+      for (let i = 0; i < 9; i += 1) {
+        await db.insert(structuredData).values({
+          crawlId,
+          pageId: ids.get(specs[i]!.path)!,
+          schemaType: "unknown",
+          format: "jsonld",
+          raw: {},
+        });
+      }
+      expect(await run(ID, crawlId)).toEqual([]);
+    });
+
+    it("notes truncation at caps.listing", async () => {
+      const found = await rule(ID).run(db, await productSite(12, 9), { listing: 2 } as never);
+      expect(found).toHaveLength(2);
       expect(found[1]!.evidence).toMatchObject({ truncated: { reported: 2, total: 3 } });
     });
   });

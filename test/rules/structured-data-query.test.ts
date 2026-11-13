@@ -25,6 +25,7 @@ import {
   structuredDataRules,
 } from "../../src/rules/query/structured-data.js";
 import type { Finding, QueryRule } from "../../src/rules/registry/types.js";
+import { descendants } from "../../src/rules/schema-org/vocabulary.js";
 import { mkDiscovery } from "./mk-discovery.js";
 import { writerIndexable, type IndexabilitySpec } from "./mk-page.js";
 import { LOCAL_TENANT } from "../../src/tenant.js";
@@ -80,7 +81,8 @@ describe("structuredDataRules metadata", () => {
   });
 
   it("names the self-serving types and fields Google's policy is about", () => {
-    expect([...SELF_SERVING_TYPES]).toEqual(["Organization", "LocalBusiness"]);
+    expect(SELF_SERVING_TYPES).toEqual(descendants("Organization"));
+    expect(SELF_SERVING_TYPES).toEqual(expect.arrayContaining(["Organization", "LocalBusiness", "Restaurant"]));
     expect([...SELF_SERVING_FIELDS]).toEqual(["aggregateRating", "review"]);
   });
 });
@@ -91,6 +93,7 @@ describe("the structured-data rules against the database", () => {
 
   interface PageSpec extends IndexabilitySpec {
     path: string;
+    extractionVersion?: number;
   }
 
   async function newCrawl(): Promise<string> {
@@ -125,6 +128,7 @@ describe("the structured-data rules against the database", () => {
         xRobotsTag: s.xRobotsTag ?? null,
         depth: 1,
         discoveredVia: "link",
+        extractionVersion: s.extractionVersion ?? 4,
       };
     });
     await db.insert(pages).values(rows);
@@ -223,6 +227,16 @@ describe("the structured-data rules against the database", () => {
       expect(await run(ID, allNoindex)).toHaveLength(1);
     });
 
+    it("is silent on a v3 crawl: no blocks may only mean not read", async () => {
+      const crawlId = await newCrawl();
+      await addPages(crawlId, [
+        { path: "/a", extractionVersion: 3 },
+        { path: "/b", extractionVersion: 3 },
+        { path: "/c", extractionVersion: 3 },
+      ]);
+      expect(await run(ID, crawlId)).toEqual([]);
+    });
+
     it("is silent as soon as one block of any type was stored", async () => {
       // Any type at all: the check is whether the site uses structured data,
       // not whether it uses the two types this engine profiles.
@@ -286,6 +300,18 @@ describe("the structured-data rules against the database", () => {
       expect(await run(ID, crawlId)).toHaveLength(0);
     });
 
+    it("is silent on a v3 crawl, where a breadcrumb in microdata would be invisible", async () => {
+      const crawlId = await newCrawl();
+      await addPages(
+        crawlId,
+        Array.from({ length: BREADCRUMB_PAGE_FLOOR }, (_, i) => ({
+          path: `/v3-${i}`,
+          extractionVersion: 3,
+        })),
+      );
+      expect(await run(ID, crawlId)).toEqual([]);
+    });
+
     it("refuses a crawl id nothing knows", async () => {
       await expect(run(ID, "crawl_nope")).rejects.toThrow(/no such crawl/);
     });
@@ -319,6 +345,26 @@ describe("the structured-data rules against the database", () => {
         dedupeKey: `${url("/about")}#Organization`,
         evidence: { schemaType: "Organization", fields: ["aggregateRating"] },
       });
+    });
+
+    it("fires on a Restaurant (a LocalBusiness subtype) carrying aggregateRating", async () => {
+      const crawlId = await crawlOfPages(1);
+      const ids = await addPages(crawlId, [{ path: "/menu" }]);
+      await addBlocks(crawlId, [
+        {
+          pageId: ids.get("/menu")!,
+          type: "Restaurant",
+          raw: {
+            "@type": "Restaurant",
+            name: "Estuary",
+            aggregateRating: { "@type": "AggregateRating", ratingValue: "4.8" },
+          },
+        },
+      ]);
+      const found = await run(ID, crawlId);
+      expect(found).toHaveLength(1);
+      expect(found[0]!.evidence).toEqual({ schemaType: "Restaurant", fields: ["aggregateRating"] });
+      expect(found[0]!.dedupeKey).toBe(`${url("/menu")}#Restaurant`);
     });
 
     it("fires on a LocalBusiness carrying reviews, naming both fields when both are there", async () => {

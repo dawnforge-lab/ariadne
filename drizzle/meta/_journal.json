@@ -379,6 +379,13 @@
       "when": 1794573514099,
       "tag": "0053_graceful_jubilee",
       "breakpoints": true
+    },
+    {
+      "idx": 54,
+      "version": "7",
+      "when": 1794577634334,
+      "tag": "0054_schema_template_thresholds",
+      "breakpoints": true
     }
   ]
 }

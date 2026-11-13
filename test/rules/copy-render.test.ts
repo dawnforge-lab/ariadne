@@ -54,10 +54,24 @@ const ADDED_SINCE_0_22 = [
   "schema.google-required-missing",
   "schema.google-recommended-missing",
   "schema.deprecated-feature",
+  "schema.template-inconsistent", // 0.26.0, Phase 29a T8
 ];
 // Entries whose text was deliberately changed after 0.22.0: the fields that
 // differ from the fixture, spelled out so any other drift still fails.
 const CHANGED_SINCE_0_22: Record<string, Partial<Entry>> = {
+  // 0.26.0, Phase 29a T8: microdata and RDFa are read, and self-serving reviews walk the Organization hierarchy.
+  "schema.none-on-site": {
+    explanation: FIXTURE["schema.none-on-site"]!.explanation.replace(
+      "Only JSON-LD is read; microdata and RDFa are not detected.",
+      "JSON-LD, microdata and RDFa are all read.",
+    ),
+  },
+  "schema.self-serving-reviews": {
+    explanation: FIXTURE["schema.self-serving-reviews"]!.explanation.replace(
+      "typed exactly Organization or LocalBusiness carries",
+      "typed Organization or any of its subtypes (LocalBusiness, Restaurant, …) carries",
+    ),
+  },
   // 0.25.0, Phase 27d: the sitemap walk's time budget, and a stop during a re-walk, are causes of "partly read".
   "hreflang.declarations-incomplete": {
     explanation: FIXTURE["hreflang.declarations-incomplete"]!.explanation
