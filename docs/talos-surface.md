@@ -166,7 +166,7 @@ index that keeps `renderDocuments` from scanning a crawl's pages. Gate evidence:
   and leaves rendered_html_path null"), `test/events/crawl-events.test.ts:206` ("(a) reads
   queued, claimed, started, paused{request}, resumed{auto:false}"),
   `test/api/no-key-echo.test.ts:633` ("no event detail carries any of it"),
-  `test/api/tenant-isolation.test.ts:560` ("an invalid body against a foreign schedule is
+  `test/api/tenant-isolation.test.ts:562` ("an invalid body against a foreign schedule is
   still the missing answer"), `test/api/schedules.test.ts:401` ("a URL the URL policy
   refuses is a 403 FORBIDDEN at create"), `test/api/schedules.test.ts:436` ("an update's
   crawl is checked against the stored render.urls"), `test/worker/chain.test.ts:529` ("a
@@ -1476,7 +1476,7 @@ webhooks**: polling `crawl_status` is the contract until Talos asks otherwise.
 | `export_crawl` | `GET /crawls/:id/export` | `format` (`jsonl.gz` \| `csv`), `dataset` (jsonl.gz only), `view` + `ruleId` \| `metricId` (csv only) |
 
 Pinned: the tool list and every schema — `test/api/mcp.test.ts:673`
-("advertises exactly the thirty-four tools of the agent surface"),
+("advertises exactly the thirty-five tools of the agent surface"),
 `test/api/mcp.test.ts:700` ("closes every input schema and describes every
 field"), `test/api/mcp.test.ts:732` ("names every member of the closed
 vocabulary each field enumerates"). `crawl_start`'s field set is not a second
@@ -4297,7 +4297,7 @@ Semantics a consumer must repeat to its own users:
 
 Pinned: `test/api/csv.test.ts` (the writer, the guard, the
 flattening, the SQL keyset pins, and the view vocabulary — including
-`test/api/csv.test.ts:248` "heads the issue_urls view with the rule's own
+`test/api/csv.test.ts:252` "heads the issue_urls view with the rule's own
 columns, in the rule's own order");
 `test/api/query.test.ts:2910` "writes each view's header, always, and the row a
 caller came for" (including the three recheck columns, empty on a page nobody

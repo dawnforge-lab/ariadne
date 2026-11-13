@@ -1,5 +1,5 @@
 /**
- * The MCP transport: thirty-four tools over the same service layer the HTTP
+ * The MCP transport: thirty-five tools over the same service layer the HTTP
  * routes use. Twelve of them change something (`crawl_start`, `crawl_resume`,
  * `crawl_pause`, `crawl_cancel`, `crawl_delete`, `crawl_render`, `crawl_rules`,
  * `crawl_mark_failed`, `crawl_config_set`, `schedule_create`, `schedule_update`,
@@ -79,6 +79,7 @@ import type { McpServerConfig } from "./config.js";
 import { credentialInputSchemas } from "./config-schema.js";
 import { CSV_VIEWS, EXPORT_FORMATS } from "./csv.js";
 import { strictInput } from "./mcp-input.js";
+import { GOOGLE_FEATURE_IDS, STRUCTURED_DATA_FORMATS, STRUCTURED_DATA_PROBLEMS } from "./structured-data.js";
 import {
   ApiService,
   COMPARE_SETS,
@@ -138,6 +139,7 @@ export const TOOL_NAMES = [
   "metrics_get",
   "metric_table",
   "pages_query",
+  "structured_data",
   "export_crawl",
   "rules_catalog",
   "crawl_compare",
@@ -1799,6 +1801,71 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
   );
 
   server.registerTool(
+    named("structured_data"),
+    {
+      title: "The crawl's structured data, page by page",
+      description:
+        "One row per page that carries structured data — a JSON-LD, microdata or " +
+        "RDFa block — or a JSON-LD parse error or microdata error: {url, pageType, " +
+        "indexable, formats, types, googleFeatures, warningCount, infoCount, " +
+        "jsonLdParseErrors, microdataErrors, skips}. A page with neither is not " +
+        "listed. Use it to see which templates publish which markup, and where " +
+        "the problems are, before reading the schema.* findings.\n\n" +
+        "formats are the syntaxes found and types the schema.org types of the " +
+        "page's blocks, both distinct and sorted. googleFeatures are the Google " +
+        "rich-result features a block matched (whatever it was missing).\n\n" +
+        "TWO COUNTS, NAMED AFTER THE SEVERITIES. warningCount is unknown types, " +
+        "unknown properties, type mismatches, matched Google features missing a " +
+        "REQUIRED property, plus jsonLdParseErrors and microdataErrors. infoCount " +
+        "is pending or superseded properties, matched features missing a " +
+        "RECOMMENDED property, and markup for a feature Google has withdrawn. The " +
+        "problem-by-problem detail is the structured_data_nodes CSV view " +
+        "(export_crawl format=csv), one row per block and problem.\n\n" +
+        "NULL IS NOT ZERO. microdataErrors and skips are null on a page crawled " +
+        "before microdata was read (extraction below version 4): nobody looked, " +
+        "so warningCount there has no microdata errors in it. skips counts what " +
+        "the reader dropped — itemref elements it does not follow, full-RDFa " +
+        "constructs RDFa Lite does not interpret, values past the per-page cap.\n\n" +
+        "REFUSED, never answered empty, on a crawl the rules have not judged " +
+        "(the counts are written by crawl_rules) and on a crawl judged before " +
+        "structured data validation existed: run crawl_rules and ask again.\n\n" +
+        "Filters (each selects PAGES; the row is always the whole page):\n" +
+        "  pageType — a template cohort as this crawl typed it; '(untyped)' for " +
+        "the pages it could not type\n" +
+        `  format   — ${STRUCTURED_DATA_FORMATS.join(", ")}: pages holding at least ` +
+        "one block of that syntax\n" +
+        `  feature  — a Google feature id (${GOOGLE_FEATURE_IDS.join(", ")}): pages ` +
+        "with a block that matched it\n\n" +
+        "Ordered by URL. Paginated: {items, nextCursor}; limit defaults to " +
+        `${PAGE_SIZE_DEFAULT}, maximum ${PAGE_SIZE_MAX}. The CSV view's Problem ` +
+        `column is one of: ${STRUCTURED_DATA_PROBLEMS.join(", ")}.`,
+      inputSchema: strictInput({
+        crawlId: crawlIdField(),
+        pageType: z
+          .string()
+          .describe("Only pages of this template cohort, e.g. 'product', or '(untyped)'.")
+          .optional(),
+        format: z
+          .string()
+          .describe(
+            `Only pages holding a block of this syntax: ${STRUCTURED_DATA_FORMATS.join(", ")}.`,
+          )
+          .optional(),
+        feature: z
+          .string()
+          .describe(
+            `Only pages with a block that matched this Google feature: ${GOOGLE_FEATURE_IDS.join(", ")}.`,
+          )
+          .optional(),
+        limit: limitField(),
+        cursor: cursorField(),
+      }),
+    },
+    async ({ crawlId, ...rest }) =>
+      run("structured_data", () => service.listStructuredData(tenant, crawlId, defined(rest))),
+  );
+
+  server.registerTool(
     named("robots_get"),
     {
       title: "The site's robots.txt, as this crawl read it",
@@ -2094,7 +2161,7 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "metric_table is one metric's table and needs a metricId; issues_overview is " +
         "the issues_overview tool's one-row-per-rule table; crawl_overview is the " +
         "crawl_overview tool's sections as Section,Label,Value,Percent rows; the other " +
-        "seven, like the two overviews, refuse both. Answers {format, view, path, rows, " +
+        "eight, like the two overviews, refuse both. Answers {format, view, path, rows, " +
         "bytes}, plus disabledRules on the four views that read findings (issues, " +
         "issue_urls, issues_overview, crawl_overview): the rules the crawl's judgement " +
         "disables, whose findings the file leaves out, with notMeasured beside it.\n" +
@@ -2106,6 +2173,11 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "  links_to_4xx and links_to_5xx are the two inlinks worksheets — Source, " +
         "Destination, Anchor, Status Code, one row per internal link whose target " +
         "answered 4xx or 5xx, the same rows issue_inlinks paginates.\n" +
+        "  structured_data_nodes is the structured_data listing's detail — URL, " +
+        "Format, Schema Type, Path, Node Type, Problem, Detail — one row per block " +
+        "and problem, and one row with an empty Problem for a block with none. " +
+        "Refused, as the listing is, on a crawl the rules have not judged or judged " +
+        "before structured data validation existed.\n" +
         "'dataset' is the first format's word and 'view' is the second's; asking " +
         "with both is refused rather than resolved.\n\n" +
         "WHAT THE CSV LOOKS LIKE, because a human opens it and you are the one who " +

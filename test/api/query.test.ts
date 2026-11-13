@@ -4366,3 +4366,24 @@ describe("a share image on the resources surface", () => {
     expect(detail.body["resources"]).toMatchObject({ seen: 1, fetched: 1 });
   });
 });
+
+// Phase 29a T9. Appended at the end so no line the surface document cites
+// moves; a top-level `beforeAll` runs before every test of the file wherever it
+// is written, and after the fixture's own (hooks run in the order registered).
+// The CSV fixture crawl is judged by hand, so the one structured-data block it
+// gets here carries the blob the derivation would have written: without a
+// block, "reads every view through a cursor" would walk `structured_data_nodes`
+// to no rows at all, which proves nothing about its keyset.
+beforeAll(async () => {
+  const { structuredData } = await import("../../src/db/schema.js");
+  const { validateBlock } = await import("../../src/rules/schema-org/validate.js");
+  const raw = { "@context": "https://schema.org", "@type": "Organization", name: "CSV fixture" };
+  await db.insert(structuredData).values({
+    crawlId: crawlF,
+    pageId: `${crawlF}_page_csv-home`,
+    schemaType: "Organization",
+    format: "jsonld",
+    raw,
+    validation: validateBlock(raw),
+  });
+});

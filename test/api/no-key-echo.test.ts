@@ -675,3 +675,16 @@ describe("crawl events: no credential and no sent key in any detail", () => {
     }
   }, 60_000);
 });
+
+// Phase 29a T9. Appended at the end so no line the surface document cites moves.
+describe("the structured_data listing never quotes a key it was sent", () => {
+  it("GET /crawls/:id/structured-data?SENTINEL and structured_data {SENTINEL}", async () => {
+    const res = await http("GET", `/crawls/${crawlId}/structured-data?format=jsonld&${SENTINEL}=1`);
+    expect(res.status).toBe(400);
+    refusedWithoutEcho("structured-data ?format&SENTINEL", res.text, 2);
+
+    const read = await tool("structured_data", { crawlId, [SENTINEL]: 1 });
+    expect(read.isError).toBe(true);
+    refusedWithoutEcho("structured_data", read.text, 2);
+  });
+});

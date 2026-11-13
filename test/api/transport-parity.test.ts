@@ -33,7 +33,7 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 
 import { closeDb, createDb, type Db } from "../../src/db/client.js";
 import { runMigrations } from "../../src/db/migrate.js";
-import { crawls, pages } from "../../src/db/schema.js";
+import { crawls, pages, structuredData } from "../../src/db/schema.js";
 import { mkDiscovery } from "../rules/mk-discovery.js";
 import { mkPage } from "../rules/mk-page.js";
 import { closeFetchAgents } from "../../src/crawl/http.js";
@@ -559,5 +559,76 @@ describe("the issues overview over both transports (27d)", () => {
       expect(viaMcp.body).toEqual(viaHttp.body);
       expect((viaHttp.body["rows"] as unknown[]).length).toBeGreaterThan(0);
     }
+  });
+});
+
+// Phase 29a T9. Appended at the end so no line the surface document cites moves.
+describe("the structured_data listing over both transports (29a)", () => {
+  it("GET /crawls/:id/structured-data deep-equals the MCP structured_data result, refusals included", async () => {
+    // A finished, one-page crawl with one JSON-LD block, judged through the
+    // HTTP rules route so the derivation writes the blob; nothing is fetched.
+    const id = `crawl_parity_sd_${randomUUID()}`;
+    const pageId = `page_${randomUUID()}`;
+    createdCrawls.push(id);
+    await db.insert(crawls).values({
+      tenantId: LOCAL_TENANT,
+      id,
+      siteUrl: "https://parity-sd.example/", hostKey: hostKeyOf("https://parity-sd.example/"),
+      config: { siteUrl: "https://parity-sd.example/", maxPages: 10, userAgent: "AriadneBot-test" },
+      discovery: mkDiscovery(),
+      rulesetVersion: "test",
+      status: "finished",
+      pagesCrawled: 1,
+    });
+    await db.insert(pages).values(
+      mkPage({
+        id: pageId,
+        crawlId: id,
+        url: "https://parity-sd.example/",
+        urlNormalised: "https://parity-sd.example/",
+        depth: 0,
+        clickDepth: 0,
+        discoveredVia: "seed",
+        pageType: "home",
+      }),
+    );
+    await db.insert(structuredData).values({
+      crawlId: id,
+      pageId,
+      schemaType: "Product",
+      format: "jsonld",
+      raw: { "@context": "https://schema.org", "@type": "Product", name: "Widget" },
+    });
+
+    // Unjudged: the same refusal on both.
+    const early = await call("GET", `/crawls/${id}/structured-data`);
+    expect(early.status).toBe(409);
+    const earlyMcp = await tool("structured_data", { crawlId: id });
+    expect(earlyMcp.isError).toBe(true);
+    expect(earlyMcp.body).toEqual(early.body);
+
+    const judged = await call("POST", `/crawls/${id}/rules`);
+    expect(judged.status, JSON.stringify(judged.body)).toBe(200);
+
+    const cases: [string, Record<string, unknown>][] = [
+      ["", {}],
+      ["?format=jsonld&limit=1", { format: "jsonld", limit: 1 }],
+      ["?feature=product-snippet&pageType=home", { feature: "product-snippet", pageType: "home" }],
+    ];
+    for (const [query, args] of cases) {
+      const viaHttp = await call("GET", `/crawls/${id}/structured-data${query}`);
+      expect(viaHttp.status, JSON.stringify(viaHttp.body)).toBe(200);
+      const viaMcp = await tool("structured_data", { crawlId: id, ...args });
+      expect(viaMcp.isError, viaMcp.text).toBe(false);
+      expect(viaMcp.body).toEqual(viaHttp.body);
+      expect((viaHttp.body["items"] as unknown[]).length).toBe(1);
+    }
+
+    // A wrong value is the same 400 on both.
+    const bad = await call("GET", `/crawls/${id}/structured-data?format=xml`);
+    expect(bad.status).toBe(400);
+    const badMcp = await tool("structured_data", { crawlId: id, format: "xml" });
+    expect(badMcp.isError).toBe(true);
+    expect(badMcp.body).toEqual(bad.body);
   });
 });
