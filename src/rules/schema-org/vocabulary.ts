@@ -8,6 +8,11 @@ export function isKnownType(name: string): boolean {
   return has(SCHEMA_ORG_TYPES, name);
 }
 
+/** A primitive schema.org DataType leaf (Text, URL, Number, Date, …): a value kind, not a node type. */
+export function isDataType(name: string): boolean {
+  return SCHEMA_ORG_DATATYPES.includes(name);
+}
+
 const ancestorCache = new Map<string, ReadonlySet<string>>();
 
 /** The type and every ancestor. Throws for a type not in the vocabulary. */

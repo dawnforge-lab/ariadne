@@ -33,6 +33,7 @@ import { eq, sql, type SQL } from "drizzle-orm";
 
 import type { Db } from "../../db/client.js";
 import { crawls } from "../../db/schema.js";
+import { GTIN_FIELDS, hasValue, offersCarry } from "../schema-org/values.js";
 
 /** A schema type's fields, and how to tell whether a block carries one. */
 export interface SchemaProfile {
@@ -77,31 +78,6 @@ export const SCOPED_SEPARATOR = ".";
  * Merchant listing with neither shows no price at all.
  */
 export const OFFER_PRICE_FIELDS: readonly string[] = ["price", "priceSpecification"];
-
-/**
- * The spellings of a product's GTIN.
- *
- * `gtin` with the code's length appended is how schema.org spells the same
- * identifier at each length, and the checklist's CHECK-44 names `gtin`, `gtin13`
- * and `ean` in one breath as alternatives ("gtin / gtin13 / ean / mpn —
- * product identifiers for Google Shopping"). A product carrying a `gtin13` has
- * a GTIN, so a profile field called `gtin` that only looked at the key `gtin`
- * would report a missing identifier to a client who supplied one — the false
- * accusation the whole presence blob exists to avoid.
- *
- * `mpn` is deliberately NOT here: it is a different identifier (the
- * manufacturer's own part number, not a GTIN), the checklist names it
- * separately, and a product may honestly have one and not the other. It is its
- * own recommended field.
- */
-export const GTIN_FIELDS: readonly string[] = [
-  "gtin",
-  "gtin8",
-  "gtin12",
-  "gtin13",
-  "gtin14",
-  "ean",
-];
 
 /**
  * The schema types this engine has an opinion about, and what that opinion is.
@@ -202,30 +178,6 @@ export interface FieldPresenceDerivation extends Record<string, number> {
  */
 export const FIELD_PRESENCE_PAGE_BATCH = 100;
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-/**
- * Whether a JSON value declares something.
- *
- * The rule layer's `present()` applied to JSON: a key whose value is null, an
- * empty (or blank) string, or an empty array declares nothing, and reading it
- * as a declaration would hide a page from the rule that reports the absence
- * while every other reader treats the field as missing (hard rule 1).
- *
- * An array counts when at least one member does, so `image: ["", "/a.jpg"]` is
- * an image. An object counts as present whatever it holds: this engine has no
- * profile for an arbitrary nested type, and calling `brand: {}` absent would be
- * a judgement about a shape nothing here checked.
- */
-export function hasValue(value: unknown): boolean {
-  if (value === null || value === undefined) return false;
-  if (typeof value === "string") return value.trim() !== "";
-  if (Array.isArray(value)) return value.some((entry) => hasValue(entry));
-  return true;
-}
-
 /**
  * Whether a Product's `offers` names a price.
  *
@@ -235,28 +187,7 @@ export function hasValue(value: unknown): boolean {
  * never a falsy number.
  */
 export function offersCarryPrice(value: unknown): boolean {
-  return offersCarryAny(value, OFFER_PRICE_FIELDS);
-}
-
-/**
- * Whether any of a Product's offers carries a usable value under `field` —
- * what the `offers.*` profile fields are judged by.
- *
- * The same "one offer is enough" reading as `offersCarryPrice`, for the same
- * reason: `offers` may be a single Offer or an array of them, and a rich result
- * needs one complete offer rather than every variant being complete. A product
- * whose in-stock size carries an availability and whose sold-out sizes do not
- * has an availability.
- */
-export function offersCarry(value: unknown, field: string): boolean {
-  return offersCarryAny(value, [field]);
-}
-
-function offersCarryAny(value: unknown, fields: readonly string[]): boolean {
-  const offers = Array.isArray(value) ? value : [value];
-  return offers.some(
-    (offer) => isRecord(offer) && fields.some((field) => hasValue(offer[field])),
-  );
+  return OFFER_PRICE_FIELDS.some((field) => offersCarry(value, field));
 }
 
 /**

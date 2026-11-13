@@ -25,11 +25,8 @@
 import { sql, type SQL } from "drizzle-orm";
 
 import type { Db } from "../../db/client.js";
-import {
-  SCHEMA_PROFILES,
-  hasValue,
-  type SchemaProfile,
-} from "../derive/field-presence.js";
+import { SCHEMA_PROFILES, type SchemaProfile } from "../derive/field-presence.js";
+import { hasValue } from "../schema-org/values.js";
 import { JUDGED, queryFinding, type RuleIdentity } from "../helpers.js";
 import { copyFor } from "../registry/copy/index.js";
 import {

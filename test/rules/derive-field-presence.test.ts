@@ -20,13 +20,13 @@ import { runMigrations } from "../../src/db/migrate.js";
 import { crawls, structuredData } from "../../src/db/schema.js";
 import {
   FIELD_PRESENCE_PAGE_BATCH,
-  GTIN_FIELDS,
   PROFILED_FIELDS,
   SCHEMA_PROFILES,
   SCOPED_SEPARATOR,
   deriveFieldPresence,
   type FieldPresence,
 } from "../../src/rules/derive/field-presence.js";
+import { GTIN_FIELDS } from "../../src/rules/schema-org/values.js";
 import { mkDiscovery } from "./mk-discovery.js";
 import { LOCAL_TENANT } from "../../src/tenant.js";
 import { hostKeyOf } from "../../src/crawl/host-key.js";
