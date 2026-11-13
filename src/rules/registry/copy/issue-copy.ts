@@ -1045,7 +1045,7 @@ export const COPY_TEMPLATES: Record<string, IssueCopy> = {
   "schema.template-inconsistent": {
     title: "Structured data: Page lacks the markup its page type usually carries",
     explanation:
-      "Within a page type of at least {SCHEMA_TEMPLATE_MIN_PAGES} indexable, self-canonical pages, a structured-data type is carried by at least {SCHEMA_TEMPLATE_SHARE}% of them but not all, and the pages without it are listed. Each row gives the page type, the markup type and how many pages of the type do and do not carry it. A gap like that is usually a template that skips the markup under some condition; pages with no page type are not compared.",
+      "Within a page type of at least {SCHEMA_TEMPLATE_MIN_PAGES} indexable, self-canonical pages, a structured-data type is carried by at least {SCHEMA_TEMPLATE_SHARE}% of them but not all, and the pages without it are listed. Each row gives the page type, the markup type and how many of the type's pages carry it, out of how many. A gap like that is usually a template that skips the markup under some condition; pages with no page type are not compared.",
     howToFix:
       "Find what the template does differently on the listed pages, such as a missing field or a branch that skips the block, and make it output the same markup everywhere.",
   },

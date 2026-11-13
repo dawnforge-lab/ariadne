@@ -336,19 +336,6 @@ const SKIP_HARNESS_CLAIMS: string[] = [
   "crawl.list-mode",
   "robots.check-skipped",
   "robots.missing",
-  // Phase 29a T7: the per-node schema rules whose fixtures land in Task 10
-  // (`/authored29a/*`). Each fires in test/rules/schema-validation-query.test.ts
-  // today; Task 10 authors the pages that make them fire here and removes these
-  // six entries. Task 8's `schema.template-inconsistent` joins them: no fixture
-  // page type has ten pages with one schema type on most of them yet, and Task 10
-  // authors that template.
-  "schema.deprecated-feature",
-  "schema.embedded-type-mismatch",
-  "schema.parse-error",
-  "schema.property-pending-or-superseded",
-  "schema.template-inconsistent",
-  "schema.unknown-property",
-  "schema.unknown-type",
   "schema.none-on-site",
   // Phase 26a: the four HTTPS rules and the headers marker, argued above.
   "security.headers-missing",
@@ -1889,6 +1876,118 @@ describe("the fixture site end to end", () => {
     });
   });
 
+  it("the Phase 29a fixtures carry the evidence the validator produces", () => {
+    const d = (path: string, rule: string) => detailsByPath.get(`${path}\n${rule}`);
+    const url = (path: string) => `${app.base}${path}`;
+
+    // Each page's one finding names the node's path, its type and the format
+    // it was written in, which is what lets an agent point at the markup.
+    expect(d("/authored29a/parse-error", "schema.parse-error")).toEqual({
+      pageUrl: url("/authored29a/parse-error"),
+      jsonLdParseErrors: 1,
+      microdataErrors: 0,
+    });
+    expect(d("/authored29a/unknown-type", "schema.unknown-type")).toEqual({
+      pageUrl: url("/authored29a/unknown-type"),
+      problems: [{ path: "$", type: "Prodcut", format: "jsonld" }],
+      problemCount: 1,
+    });
+    // The microdata Product is complete, so the one made-up property is the
+    // only thing the page is judged on: it is read from attributes and named.
+    expect(d("/authored29a/unknown-property", "schema.unknown-property")).toEqual({
+      pageUrl: url("/authored29a/unknown-property"),
+      problems: [{ path: "$", type: "Product", format: "microdata", property: "colour" }],
+      problemCount: 1,
+    });
+    expect(d("/authored29a/pending-property", "schema.property-pending-or-superseded")).toEqual({
+      pageUrl: url("/authored29a/pending-property"),
+      problems: [
+        {
+          path: "$",
+          format: "jsonld",
+          status: "pending",
+          property: "authorizedRepresentative",
+          supersededBy: null,
+        },
+      ],
+      problemCount: 1,
+    });
+    expect(d("/authored29a/type-mismatch", "schema.embedded-type-mismatch")).toEqual({
+      pageUrl: url("/authored29a/type-mismatch"),
+      problems: [
+        {
+          path: "$.author",
+          type: "Offer",
+          format: "jsonld",
+          property: "author",
+          expected: ["Organization", "Person"],
+        },
+      ],
+      problemCount: 1,
+    });
+    expect(d("/authored29a/event-no-date", "schema.google-required-missing")).toEqual({
+      pageUrl: url("/authored29a/event-no-date"),
+      features: ["event"],
+      problems: [
+        { path: "$", type: "Event", format: "jsonld", feature: "event", missing: ["startDate"] },
+      ],
+      problemCount: 1,
+    });
+    expect(d("/authored29a/faq", "schema.deprecated-feature")).toEqual({
+      pageUrl: url("/authored29a/faq"),
+      features: ["faq"],
+      restriction: ["Google no longer shows FAQ rich results (since May 7, 2026)"],
+      problemCount: 1,
+    });
+    // Nine of the ten pages of `/authored29a/tpl/:id` carry a Product: the page
+    // that does not is the finding, and the evidence is the census.
+    expect(d("/authored29a/tpl/10", "schema.template-inconsistent")).toEqual({
+      pageUrl: url("/authored29a/tpl/10"),
+      pageType: "/authored29a/tpl/:id",
+      schemaType: "Product",
+      pagesWith: 9,
+      pagesInType: 10,
+    });
+    // `/authored3/product-incomplete` is the proof of the recommended rule: it
+    // misses its image (required) and, under both Product features, fields
+    // Google recommends. Each feature is its own problem row.
+    expect(d("/authored3/product-incomplete", "schema.google-recommended-missing")).toEqual({
+      pageUrl: url("/authored3/product-incomplete"),
+      features: ["product-snippet", "merchant-listing"],
+      problems: [
+        {
+          path: "$",
+          type: "Product",
+          format: "jsonld",
+          feature: "product-snippet",
+          missing: ["aggregateRating", "review", "offers.priceValidUntil"],
+        },
+        {
+          path: "$",
+          type: "Product",
+          format: "jsonld",
+          feature: "merchant-listing",
+          missing: [
+            "aggregateRating",
+            "brand",
+            "brand.name",
+            "category",
+            "color",
+            "gtin",
+            "material",
+            "mpn",
+            "pattern",
+            "review",
+            "size",
+            "offers.itemCondition",
+            "offers.priceValidUntil",
+          ],
+        },
+      ],
+      problemCount: 2,
+    });
+  });
+
   it("the duplicate rules see the site's real duplicates, end to end", async () => {
     // The simhash round trip, through the real crawler for once: an unsigned
     // 64-bit value from the analyzer, stored as a signed bigint by the writer,
@@ -2277,8 +2376,9 @@ describe("the fixture site end to end", () => {
       // before, 2.6; 100 x 4 / 160 = 2.5 exactly). Owner call O1's
       // `/p26b/aria-label-link` makes 161: 100 x 4 / 161 = 2.48 -> 2.5.
       // Phase 26c's five `/p26c/` pages make 166: 100 x 4 / 166 = 2.41 -> 2.4.
-      totalPages: 166,
-      ratioPct: 2.4,
+      // Phase 29a's nineteen `/authored29a/` pages make 185: 100 x 4 / 185 = 2.16 -> 2.2.
+      totalPages: 185,
+      ratioPct: 2.2,
       chains: 1,
       loops: 1,
     });
@@ -2510,6 +2610,8 @@ describe("the fixture site end to end", () => {
         "page_type|/authored11/heavy-image",
         "page_type|/authored26/:slug",
         "page_type|/authored26/shop/shop/x",
+        "page_type|/authored29a/:slug",
+        "page_type|/authored29a/tpl/:id",
         "page_type|/authored3/:slug",
         "page_type|/authored7/:slug",
         "page_type|/content/:slug",
@@ -2640,9 +2742,15 @@ describe("the fixture site end to end", () => {
       // have two and stay literal, so typesBefore 112 -> 116. Five pages under
       // `/p26c/` are a family, so the three literals fold into `/p26c/:slug`:
       // typesAfter 26 -> 27 and pagesRetyped 91 -> 94.
-      typesBefore: 116,
-      typesAfter: 27,
-      pagesRetyped: 94,
+      // Phase 29a adds nineteen `/authored29a/` pages: six single-word-pair names
+      // (`parse-error`, `unknown-type`, `unknown-property`, `pending-property`,
+      // `type-mismatch`, `faq`) stay literal, `event-no-date` and the two `clean-`
+      // pages fold into one `/authored29a/:slug`, and the ten `/tpl/N` are already
+      // one type, `/authored29a/tpl/:id`. typesBefore 116 -> 124, typesAfter 27 ->
+      // 29 and pagesRetyped 94 -> 100 (the six literals fold into the family).
+      typesBefore: 124,
+      typesAfter: 29,
+      pagesRetyped: 100,
     });
   });
 
@@ -2711,8 +2819,9 @@ describe("the fixture site end to end", () => {
     // indexable 200 whose canonical is itself. 137 with owner call O1's
     // `/p26b/aria-label-link`, the same kind of page. 142 with Phase 26c's
     // five `/p26c/` pages, each a hub-linked, listed, indexable 200 whose
-    // canonical is itself.
-    const COHORT = 142;
+    // canonical is itself. 161 with Phase 29a's nineteen `/authored29a/` pages
+    // (nine single pages and the ten of `/tpl/`), all of the same kind.
+    const COHORT = 161;
 
     // THE LINK GRAPH. Every anchor the site renders, and there are only five
     // kinds: the hub at `/` links the 121 fixtures whose `linkedFromHub` is not
@@ -2837,7 +2946,8 @@ describe("the fixture site end to end", () => {
       // `/p26b/aria-label-link` (declares none).
       // 100 x 17 / 142 = 11.97 -> 12.0 with Phase 26c's five pages: the
       // `/p26c/header-en` / `-de` pair declares, the other three do not.
-      coveragePct: 12.0,
+      // 100 x 17 / 161 = 10.56 -> 10.6 with Phase 29a's nineteen pages (none declares).
+      coveragePct: 10.6,
     });
     // The two counts are read from the tables the harness already holds, so a
     // fixture that stopped declaring hreflang, or a page that stopped being
@@ -2878,24 +2988,25 @@ describe("the fixture site end to end", () => {
     //   O1's `/p26b/aria-label-link` makes thirty-one; and Phase 26c's five
     //   `/p26c/` pages, all listed)
     // + 1 (/private/hidden)
-    // = 145 entries (1 + 143 + 1), all distinct, so the walk's first-source-wins
-    // dedupe drops none of them. (Counted from the fixture collection: 166
-    // fixtures, 23 of them opted out, 143 listed.)
+    // = 164 with Phase 29a's nineteen listed `/authored29a/` pages (145 before),
+    // all distinct, so the walk's first-source-wins dedupe drops none of them.
+    // (Counted from the fixture collection: 185 fixtures, 23 of them opted out,
+    // 162 listed; 166 and 143 before Phase 29a.)
     //
     // `/sitemap-extra.xml` lists one of those URLs, `/p26c/sitemap-twice`,
-    // twice. It is a URL already listed, so `totalUrls` stays 145 (distinct
-    // URLs); it is one more MEMBERSHIP, so `totalMemberships` is 146; and the
+    // twice. It is a URL already listed, so `totalUrls` stays 164 (distinct
+    // URLs); it is one more MEMBERSHIP, so `totalMemberships` is 165; and the
     // repeat inside the extra document is not a second membership of it, so it
-    // is 146 and not 147 (review focus 2, end to end).
+    // is 165 and not 147 (review focus 2, end to end).
     //
-    // 145 is nowhere near `SITEMAP_URL_CAP` (50,000), so no document breaches
+    // 164 is nowhere near `SITEMAP_URL_CAP` (50,000), so no document breaches
     // it; no document was dropped for exceeding the read cap; and the walk
     // stopped at no entry cap — which is what makes every count above exact
     // rather than a floor.
     expect(siteMetric("sitemap.structure")).toEqual({
       docs: 2,
-      totalUrls: 145,
-      totalMemberships: 146,
+      totalUrls: 164,
+      totalMemberships: 165,
       oversizedDocsSkipped: 0,
       urlCapBreaches: 0,
       entryCapReached: false,
@@ -2908,7 +3019,7 @@ describe("the fixture site end to end", () => {
       overlongLocsSkipped: 0, alternatesCapped: 0,
     });
     // The per-document rows beneath it, which is where `docs: 2` is spent: the
-    // main document with its 145 entries, and the extra one with its single
+    // main document with its 164 entries, and the extra one with its single
     // URL, listed twice and counted once. Asserted as the exact key set, so the
     // broken document appearing here — or a good one vanishing — is a failure
     // rather than a number nobody reads.
@@ -2918,7 +3029,7 @@ describe("the fixture site end to end", () => {
       "site|",
     ]);
     expect(metricsById.get("sitemap.structure")?.get(`sitemap_doc|${app.base}/sitemap.xml`)).toEqual(
-      { urls: 145, breaches50k: false },
+      { urls: 164, breaches50k: false },
     );
     expect(
       metricsById.get("sitemap.structure")?.get(`sitemap_doc|${app.base}/sitemap-extra.xml`),
@@ -2974,7 +3085,7 @@ describe("the fixture site end to end", () => {
     // Task 12's four pixel-width pages and Phase 26b Task 6's seven social pages
     // are hub-linked cohort pages: depth 1.)
     expect(siteMetric("structure.click-depth-distribution")).toEqual({
-      count: 142,
+      count: 161,
       nullCount: 4,
       min: 0,
       p25: 1,
@@ -2996,10 +3107,13 @@ describe("the fixture site end to end", () => {
       // 138 pages with a depth, v0 = 0, v1…v130 = 1, then 2,2,3,4,5,6,7.
       // mean = 159/138 = 1.152 -> 1.15; p95 at pos 130.15 interpolates
       // v130 = 1 and v131 = 2 -> 1.15.
+      // Phase 29a's nineteen pages are hub-linked at depth 1 too: 157 pages with a
+      // depth, v0 = 0, v1…v149 = 1, then 2,2,3,4,5,6,7. mean = 178/157 = 1.134 ->
+      // 1.13; p95 at pos 148.2 sits inside the run of 1s -> 1.
       p75: 1,
-      p95: 1.15,
+      p95: 1,
       max: 7,
-      mean: 1.15,
+      mean: 1.13,
     });
 
     // The same two facts read off the pages table rather than out of the metric,
@@ -3015,7 +3129,8 @@ describe("the fixture site end to end", () => {
     // (136 before Task 10's four pages, which are indexable 200s like the rest; 140 before Task 11's four;
     // 145 with owner call O1's `/p26b/aria-label-link`; 150 with Phase 26c's
     // five `/p26c/` pages.)
-    expect(cohort).toHaveLength(150);
+    // 169 with Phase 29a's nineteen `/authored29a/` pages.
+    expect(cohort).toHaveLength(169);
     expect(
       cohort.filter(([, p]) => p.clickDepth === null).map(([path]) => path).sort(),
     ).toEqual([
@@ -3044,7 +3159,7 @@ describe("the fixture site end to end", () => {
     // reached them at. (104 before Phase 26b Task 6's seven listed social pages;
     // 135 with owner call O1's listed `/p26b/aria-label-link`; 140 with Phase
     // 26c's five listed `/p26c/` pages.)
-    expect(cohort.filter(([, p]) => p.depth === 0)).toHaveLength(140);
+    expect(cohort.filter(([, p]) => p.depth === 0)).toHaveLength(159);
     expect(cohort.filter(([, p]) => p.clickDepth === 0).map(([path]) => path)).toEqual(["/"]);
   });
 
@@ -3174,6 +3289,12 @@ describe("the fixture site end to end", () => {
     // sampled 7 -> 8. Pages crawled 161 -> 166, selected 136 -> 141, rendered
     // 135 -> 140.
     //
+    // Phase 29a's nineteen `/authored29a/` pages (Task 10) render no anchor, so
+    // every one is a suspect, bar the page that takes a sample seat instead (the
+    // sample counts a page on the suspect side when it is on both): pages crawled
+    // 166 -> 185, suspects 133 -> 151, sampled 8 -> 9, selected 141 -> 160,
+    // rendered 140 -> 159. The numbers are what the crawl recorded.
+    //
     // selectionSampled = 6, and it MOVED FROM 9 IN P8-T5 — the one number in
     // this file that the template inference changes, and the change is the
     // point of it. The sample takes `renderSamplePerType` (3) pages of every
@@ -3209,7 +3330,7 @@ describe("the fixture site end to end", () => {
     // satisfy, because it was selected once. The one failure is
     // `/render/js-redirect-offsite`, whose row shape the next test pins.
     expect(siteMetric("render.coverage")).toEqual({
-      pagesCrawled: 166,
+      pagesCrawled: 185,
       // P12-T4. The end-to-end crawl really did render, so this is the `ran`
       // side of the field — the whole-site case the unit tests bound from the
       // other end. `pagesRendered: 120` below is evidence enough on its own
@@ -3220,12 +3341,12 @@ describe("the fixture site end to end", () => {
       // and this is the field that says so. The five numbers under it describe
       // that decision and are present only because it was taken.
       selectionMode: "auto",
-      selectionBudget: 166,
-      selectionSuspects: 133,
-      selectionSampled: 8,
-      selectionSelected: 141,
+      selectionBudget: 185,
+      selectionSuspects: 151,
+      selectionSampled: 9,
+      selectionSelected: 160,
       selectionTruncated: false,
-      pagesRendered: 140,
+      pagesRendered: 159,
       renderFailures: 1,
     });
 
@@ -3233,12 +3354,12 @@ describe("the fixture site end to end", () => {
     // the statement that actually promoted the frontier rows. Asserting both
     // is what proves `renderSelectionStats` describes the selection that
     // happened rather than one it would make today.
-    expect(render.selection.budget).toBe(166);
-    expect(render.selection.suspects).toBe(133);
-    expect(render.selection.sampled).toBe(8);
+    expect(render.selection.budget).toBe(185);
+    expect(render.selection.suspects).toBe(151);
+    expect(render.selection.sampled).toBe(9);
     expect(render.selection.truncated).toBe(false);
-    expect(render.selection.selected).toHaveLength(141);
-    expect(render.rendered).toBe(140);
+    expect(render.selection.selected).toHaveLength(160);
+    expect(render.rendered).toBe(159);
     expect(render.failures).toBe(1);
     // No URL left behind: the pass was not aborted, so every leased render was
     // recorded and completed.
@@ -3266,7 +3387,7 @@ describe("the fixture site end to end", () => {
       .select({ count: crawls.renderPassCount })
       .from(crawls)
       .where(eq(crawls.id, summary.crawlId));
-    expect(crawlRow?.count).toBe(140);
+    expect(crawlRow?.count).toBe(159);
   });
 
   it("the health rollup agrees with a page-by-page recount (P10-T2)", () => {
@@ -3352,7 +3473,8 @@ describe("the fixture site end to end", () => {
       // Task 10's four pages, also judged; 161 with Task 11's four; 162 with
       // owner call O1's `/p26b/aria-label-link`, judged; 167 with Phase 26c's
       // five `/p26c/` pages, all judged.)
-      pagesNotAuditable: 167 - judged - canonicalised - noindex,
+      // 186 with Phase 29a's nineteen `/authored29a/` pages, all judged.
+      pagesNotAuditable: 186 - judged - canonicalised - noindex,
       urlsCanonicalised: canonicalised,
       urlsNoindex: noindex,
       // Inside `urlsTotal`, not a partition member: judged pages declaring
@@ -3370,8 +3492,8 @@ describe("the fixture site end to end", () => {
         health["urlsCanonicalised"]! +
         health["urlsNoindex"]! +
         health["pagesNotAuditable"]!,
-    ).toBe(167);
-    expect(pageByPath.size).toBe(167);
+    ).toBe(186);
+    expect(pageByPath.size).toBe(186);
   });
 
   it("the resource findings carry what the asset server actually answered (P11-T3)", () => {
@@ -3468,7 +3590,7 @@ describe("the fixture site end to end", () => {
     expect(weight.atLeast).toBe(true);
     // And the distribution is over the same cohort every other metric uses, so
     // its count is the constant the three quotable metrics are pinned against.
-    expect(weight.pageWeight.count).toBe(142);
+    expect(weight.pageWeight.count).toBe(161);
     // The heavy page is the heaviest thing on this site by a wide margin, so
     // the maximum is at least the image the assertion above pinned. Stated as a
     // floor rather than a sum: the page's own HTML is in there too.
@@ -3829,7 +3951,7 @@ describe("the fixture site end to end", () => {
       .filter((id) => !fired.has(id) && !exempt.has(id))
       .sort();
     // The strict form, over every kind at last: every registered rule speaks on
-    // this one crawl, save the thirty-three `SKIP_HARNESS_CLAIMS` names and
+    // this one crawl, save the twenty-six `SKIP_HARNESS_CLAIMS` names and
     // explains (the count was written as nine when the list held nine and has
     // been carried stale through four phases of markers; P17 corrected it,
     // P19-T2's near-duplicate marker made fifteen and Phase 23's
@@ -3838,11 +3960,10 @@ describe("the fixture site end to end", () => {
     // `sitemap.over-50k-urls` twenty-two; Phase 26b's `extraction.not-recorded`
     // made twenty-three, and Phase 26c's `sitemap.oversized` and
     // `social.image-insecure` make twenty-five, and Phase 27c's `crawl.list-mode`
-    // twenty-six; Phase 29a T7's six schema rules awaiting their T10 fixtures make
-    // thirty-two, T8's `schema.template-inconsistent` thirty-three, and T10 takes them back out — asserted below, so the number cannot go stale again). A
+    // twenty-six; Phase 29a's seven schema rules waited here for their fixtures and left again in T10, which is the number it stands at now — asserted below, so it cannot go stale again). A
     // new rule arrives here with no fixture and fails immediately, which is the
     // point — the alternative is a rule nobody has ever seen speak.
-    expect(SKIP_HARNESS_CLAIMS).toHaveLength(33);
+    expect(SKIP_HARNESS_CLAIMS).toHaveLength(26);
     expect(
       unfired,
       "a rule that fires nowhere is a rule no fixture proves — author a fixture " +

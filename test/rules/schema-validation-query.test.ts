@@ -400,6 +400,9 @@ describe("the schema validation rules against the database", () => {
       const crawlId = await newCrawl();
       const ids = await addPages(crawlId, [{ path: "/c" }, { path: "/a" }, { path: "/b" }]);
       for (const id of ids.values()) await addBlock(crawlId, id, IMAGELESS_PRODUCT);
+      // `/c` carries a second block: the total counts PAGES (3), so a regression
+      // to counting blocks (4) would fail here.
+      await addBlock(crawlId, ids.get("/c")!, IMAGELESS_PRODUCT);
       await deriveSchemaValidation(db, crawlId);
       const found = await rule("schema.google-required-missing").run(db, crawlId, {
         listing: 2,
@@ -463,6 +466,41 @@ describe("the schema validation rules against the database", () => {
       expect(await run(ID, crawlId)).toEqual([]);
       const found = await rule(ID).run(db, crawlId, undefined, ctxWith({ SCHEMA_TEMPLATE_MIN_PAGES: 5 }));
       expect(found).toHaveLength(1);
+    });
+
+    it("pins the share boundary at >=: 7 of 10 (exactly 70%) fires, 6 of 9 (66.7%) is silent", async () => {
+      const found = await run(ID, await productSite(10, 7));
+      expect(found.map((f) => f.pageUrl)).toEqual([url("/p07"), url("/p08"), url("/p09")]);
+      expect(found[0]!.evidence).toMatchObject({ pagesWith: 7, pagesInType: 10 });
+      // Nine pages is under the default floor of ten, so the floor is lowered to
+      // nine and the share alone decides.
+      const nine = await productSite(9, 6);
+      expect(
+        await rule(ID).run(db, nine, undefined, ctxWith({ SCHEMA_TEMPLATE_MIN_PAGES: 9 })),
+      ).toEqual([]);
+    });
+
+    it("counts a page once however many blocks carry the type", async () => {
+      // 10 pages, 6 carrying Product, one of them in two blocks. By pages that is
+      // 60% (silent); a count of blocks would read 7 of 10 and fire.
+      const crawlId = await productSite(10, 6);
+      const first = (
+        await db.select({ id: pages.id, url: pages.url }).from(pages).where(eq(pages.crawlId, crawlId))
+      ).find((p) => p.url === url("/p00"));
+      if (first === undefined) throw new Error("fixture page /p00 was not inserted");
+      await addBlock(crawlId, first.id, PRODUCT);
+      expect(await run(ID, crawlId)).toEqual([]);
+
+      // And with a seventh page, the share is 7 of 10 by pages, and the evidence
+      // says 7, not 8.
+      const seven = await productSite(10, 7);
+      const p00 = (
+        await db.select({ id: pages.id, url: pages.url }).from(pages).where(eq(pages.crawlId, seven))
+      ).find((p) => p.url === url("/p00"));
+      await addBlock(seven, p00!.id, PRODUCT);
+      const found = await run(ID, seven);
+      expect(found).toHaveLength(3);
+      expect(found[0]!.evidence).toMatchObject({ pagesWith: 7, pagesInType: 10 });
     });
 
     it("is silent below 10 pages of the type", async () => {

@@ -44,7 +44,7 @@ const URLS = "url";
  * image, and comfortably more than `THIN_WORDS` words, so a page that fires
  * `content.thin` here would be a page that was written too short by accident.
  */
-function healthyBody(opts: {
+export function healthyBody(opts: {
   h1: string;
   lede: string;
   what: string;
