@@ -23,6 +23,8 @@ import { runMigrations } from "../../src/db/migrate.js";
 import { crawls, pages, structuredData } from "../../src/db/schema.js";
 import type { StructuredDataFormat } from "../../src/crawl/parse/page-analyzer.js";
 import { validateBlock, type BlockValidation } from "../../src/rules/schema-org/validate.js";
+import { GOOGLE_FEATURES } from "../../src/rules/schema-org/google-features.js";
+import { LABEL_SEPARATOR, problemCells } from "../../src/api/structured-data.js";
 import { mkDiscovery } from "../rules/mk-discovery.js";
 import { mkPage } from "../rules/mk-page.js";
 import { LOCAL_TENANT, parseTenant } from "../../src/tenant.js";
@@ -41,7 +43,9 @@ const runId = randomUUID();
 const crawlId = `crawl_sd_listing_${runId}`;
 const unjudgedId = `crawl_sd_listing_unjudged_${runId}`;
 const staleId = `crawl_sd_listing_stale_${runId}`;
-const allCrawls = [crawlId, unjudgedId, staleId];
+const skipsId = `crawl_sd_listing_skips_${runId}`;
+const malformedId = `crawl_sd_listing_malformed_${runId}`;
+const allCrawls = [crawlId, unjudgedId, staleId, skipsId, malformedId];
 
 const PRODUCT = {
   "@context": C,
@@ -185,7 +189,25 @@ beforeAll(async () => {
   await db.execute(sql`
     update structured_data set validation_jsonb = null
      where id = (select min(id) from structured_data where crawl_id = ${staleId})`);
-}, 120_000);
+
+  // Judged, then a stored skips object given a key the writer never writes.
+  await seedCrawl(skipsId);
+  await service.runRulesForCrawl(LOCAL_TENANT, skipsId);
+  await db.execute(sql`
+    update pages set structured_data_skips = structured_data_skips || '{"surprise": 1}'::jsonb
+     where crawl_id = ${skipsId} and url = ${`${SITE}/product`}`);
+
+  // Judged, then the Product block's first Google feature entry stripped of
+  // `missingRequired`: every list is still an array, so only the entry-level
+  // check can tell this blob from a clean one.
+  await seedCrawl(malformedId);
+  await service.runRulesForCrawl(LOCAL_TENANT, malformedId);
+  await db.execute(sql`
+    update structured_data
+       set validation_jsonb = jsonb_set(validation_jsonb, '{googleFeatures,0}',
+                                        (validation_jsonb #> '{googleFeatures,0}') - 'missingRequired')
+     where id = (select min(id) from structured_data where crawl_id = ${malformedId})`);
+}, 180_000);
 
 afterAll(async () => {
   await service.close();
@@ -382,17 +404,17 @@ describe("the structured_data_nodes CSV view", () => {
         [P, "jsonld", "Product", "$", "Product", "google-required", "merchant-listing: image"],
         [
           P, "jsonld", "Product", "$", "Product", "google-recommended",
-          "product-snippet: aggregateRating|review|offers.availability|offers.priceValidUntil",
+          "product-snippet: aggregateRating, review, offers.availability, offers.priceValidUntil",
         ],
         [
           P, "jsonld", "Product", "$", "Product", "google-recommended",
-          "merchant-listing: aggregateRating|brand|brand.name|category|color|description|gtin|" +
-            "material|mpn|pattern|review|size|sku|offers.availability|offers.itemCondition|" +
+          "merchant-listing: aggregateRating, brand, brand.name, category, color, description, gtin, " +
+            "material, mpn, pattern, review, size, sku, offers.availability, offers.itemCondition, " +
             "offers.priceValidUntil",
         ],
         [
           P, "microdata", "Organization", "$", "Organization", "google-recommended",
-          "organization: logo|sameAs|address|contactPoint|telephone|email|description",
+          "organization: logo, sameAs, address, contactPoint, telephone, email, description",
         ],
         [A, "jsonld", "Article", "$", "Blorpticle", "unknown-type", "Blorpticle is not a schema.org type"],
         [A, "jsonld", "Article", "$", "Article", "unknown-property", "fooBar is not a property of Article"],
@@ -402,7 +424,7 @@ describe("the structured_data_nodes CSV view", () => {
         ],
         [
           A, "jsonld", "Article", "$", "Article", "google-recommended",
-          "article: author.name|author.url|dateModified|datePublished|image",
+          "article: author.name, author.url, dateModified, datePublished, image",
         ],
         [A, "jsonld", "Person", "", "", "", ""],
         [A, "jsonld", "FAQPage", "$", "FAQPage", "deprecated-feature", "faq"],
@@ -444,5 +466,50 @@ describe("the structured_data_nodes CSV view", () => {
     const row = result.rows.find((r) => String(r["id"]) === String(nulled!.id));
     expect(row).toBeDefined();
     expect(() => def.cells(row!, NO_RULE_COPY)).toThrow(/re-run the rules/);
+  });
+});
+
+describe("the google-* Detail keeps AND and OR apart (review I1)", () => {
+  it("no Google requirement label contains the comma the Detail joins labels with", () => {
+    const labels = GOOGLE_FEATURES.flatMap((f) => [...f.required, ...f.recommended].map((r) => r.label));
+    expect(labels.length).toBeGreaterThan(0);
+    expect(LABEL_SEPARATOR.trim()).toBe(",");
+    expect(labels.filter((label) => label.includes(","))).toEqual([]);
+  });
+
+  it("joins an anyOf label beside a plain one with ', ', leaving the label's own ' | ' readable as OR", () => {
+    // A Product with an Offer that carries no price and no name: product-snippet
+    // misses the plain `name` and the anyOf price label.
+    const verdict = validateBlock({ "@context": C, "@type": "Product", offers: { "@type": "Offer" } });
+    const snippet = verdict.googleFeatures.find((f) => f.feature === "product-snippet");
+    const anyOf = "offers.price | offers.priceSpecification.price | offers.lowPrice";
+    expect(snippet?.missingRequired).toEqual(["name", anyOf]);
+    const cells = problemCells({ ...snippet, problem: "google-required" }, "test entry");
+    expect(cells.detail).toBe(`product-snippet: name, ${anyOf}`);
+  });
+});
+
+describe("the stored skips object is projected, not passed through (review I2)", () => {
+  it("refuses, naming crawl and page, a skips object with a key the writer never writes", async () => {
+    const error = await service.listStructuredData(LOCAL_TENANT, skipsId, {}).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(Error);
+    expect(error).not.toMatchObject({ code: expect.anything() });
+    const message = String((error as Error).message);
+    expect(message).toContain(skipsId);
+    expect(message).toContain(`${SITE}/product`);
+    expect(message).toContain("surprise");
+  });
+});
+
+describe("a Google feature entry without its two lists is unreadable (review I3)", () => {
+  it("the listing throws rather than counting the entry as clean", async () => {
+    const error = await service.listStructuredData(LOCAL_TENANT, malformedId, {}).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(Error);
+    expect(String((error as Error).message)).toMatch(new RegExp(`${malformedId}.*not a BlockValidation`));
+  });
+
+  it("the CSV view throws rather than writing the block as clean", async () => {
+    // The refusal before the header passes (no blob is null); the row throws.
+    await expect(csvLines(malformedId)).rejects.toThrow(/not a BlockValidation/);
   });
 });

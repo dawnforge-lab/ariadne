@@ -260,6 +260,7 @@ import {
   blockWarnings,
   parseGoogleFeature,
   parseStructuredDataFormat,
+  projectSkips,
   storedFormat,
   validationReadable,
 } from "./structured-data.js";
@@ -6931,7 +6932,7 @@ export class ApiService {
           is_indexable: boolean | null;
           parse_errors: number;
           microdata_errors: number | null;
-          skips: StructuredDataSkips | null;
+          skips: unknown;
           formats: string[];
           types: string[];
           features: string[];
@@ -6992,7 +6993,7 @@ export class ApiService {
             infoCount: row.info_count,
             jsonLdParseErrors: row.parse_errors,
             microdataErrors: row.microdata_errors,
-            skips: row.skips,
+            skips: projectSkips(row.skips, crawlId, row.url),
           };
         });
         const last = rows.length > limit ? rows[limit - 1] : undefined;

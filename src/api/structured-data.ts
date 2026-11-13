@@ -20,9 +20,46 @@
  */
 import { sql, type SQL } from "drizzle-orm";
 
-import type { StructuredDataFormat } from "../crawl/parse/page-analyzer.js";
+import type { StructuredDataFormat, StructuredDataSkips } from "../crawl/parse/page-analyzer.js";
 import { GOOGLE_FEATURES } from "../rules/schema-org/google-features.js";
 import { ServiceError, clip } from "./errors.js";
+
+/** The keys of `StructuredDataSkips`, which a stored `structured_data_skips` must hold exactly. */
+const SKIP_KEYS = ["microdataItemrefSkipped", "rdfaUnsupported", "valuesCapped"] as const satisfies readonly (keyof StructuredDataSkips)[];
+type MissingSkipKey = Exclude<keyof StructuredDataSkips, (typeof SKIP_KEYS)[number]>;
+const _everySkipKey: MissingSkipKey extends never ? true : never = true;
+void _everySkipKey;
+
+/**
+ * A page's stored `structured_data_skips`, projected key by key onto the wire
+ * (Talos obligation 6: named fields, never a stored blob passed through).
+ *
+ * Null stays null — a page extracted below version 4, which never counted.
+ * Anything but an object of exactly the three non-negative integer counters is
+ * a row this engine did not write, and throws naming the crawl and page rather
+ * than dropping a key or answering a partial object.
+ */
+export function projectSkips(value: unknown, crawlId: string, url: string): StructuredDataSkips | null {
+  if (value === null) return null;
+  const bad = (why: string): never => {
+    throw new Error(`crawl ${crawlId}, page ${url}: structured_data_skips ${why}`);
+  };
+  if (typeof value !== "object" || Array.isArray(value)) return bad("is not an object");
+  const stored = value as Record<string, unknown>;
+  const keys = Object.keys(stored).sort();
+  if (keys.join(",") !== [...SKIP_KEYS].sort().join(",")) {
+    return bad(`holds keys [${keys.join(", ")}], not exactly [${SKIP_KEYS.join(", ")}]`);
+  }
+  const count = (key: (typeof SKIP_KEYS)[number]): number => {
+    const n = stored[key];
+    return typeof n === "number" && Number.isInteger(n) && n >= 0 ? n : bad(`has a ${key} that is not a non-negative integer`);
+  };
+  return {
+    microdataItemrefSkipped: count("microdataItemrefSkipped"),
+    rdfaUnsupported: count("rdfaUnsupported"),
+    valuesCapped: count("valuesCapped"),
+  };
+}
 
 /** The syntaxes a block is stored from — the `format` filter's closed vocabulary. */
 export const STRUCTURED_DATA_FORMATS = ["jsonld", "microdata", "rdfa"] as const satisfies readonly StructuredDataFormat[];
@@ -101,10 +138,13 @@ function list(blob: SQL, name: (typeof VALIDATION_LISTS)[number]): SQL {
 }
 
 /**
- * True when `blob` is an object holding all six lists as arrays.
+ * True when `blob` is an object holding all six lists as arrays, and every
+ * `googleFeatures` entry holds `missingRequired` and `missingRecommended` as
+ * arrays.
  *
  * Without it a blob missing a list would count as zero in `jsonb_array_length`'s
- * null and expand to no rows in `jsonb_array_elements` — a malformed verdict
+ * null and expand to no rows in `jsonb_array_elements`, and a feature entry
+ * without its two lists would fail both counting filters — a malformed verdict
  * read as a clean one. The derivation writes only parsed `BlockValidation`s, so
  * a false here is a row this engine did not write, and the readers throw.
  */
@@ -112,8 +152,19 @@ export function validationReadable(blob: SQL): SQL {
   return sql`(jsonb_typeof(${blob}) = 'object' and ${sql.join(
     VALIDATION_LISTS.map((name) => sql`jsonb_typeof(${list(blob, name)}) = 'array'`),
     sql` and `,
-  )})`;
+  )} and not jsonb_path_exists(${blob}, ${sql.raw(`'${MALFORMED_FEATURE_ENTRY}'`)}))`;
 }
+
+/**
+ * A `googleFeatures` entry that is not an object carrying both lists as arrays.
+ * The `exists` clauses are not redundant: in lax mode a MISSING key yields an
+ * empty sequence, whose `.type()` comparison is false, so without them an entry
+ * lacking `missingRequired` would pass.
+ */
+const MALFORMED_FEATURE_ENTRY =
+  'lax $.googleFeatures[*] ? (@.type() != "object"' +
+  " || !exists(@.missingRequired) || !exists(@.missingRecommended)" +
+  ' || @.missingRequired.type() != "array" || @.missingRecommended.type() != "array")';
 
 /** One block's warnings (R0.8), null when the blob is unreadable. */
 export function blockWarnings(blob: SQL): SQL {
@@ -166,6 +217,16 @@ export function blockProblems(blob: SQL): SQL {
 
 /** The list separator inside a cell — the CSV writer's own (`|`, src/api/csv.ts). */
 const LIST_SEPARATOR = "|";
+
+/**
+ * Between the missing Google requirement LABELS in a google-* Detail cell — a
+ * list of things that are ALL missing. Not `|`: a label that is itself a choice
+ * is spelled with `|` ("offers.price | offers.priceSpecification.price | …",
+ * google-features.ts), and the type-mismatch Detail uses `|` for "any of", so a
+ * `|` here would make AND and OR one character. No label contains a comma
+ * (pinned over `GOOGLE_FEATURES` in test/api/structured-data.test.ts).
+ */
+export const LABEL_SEPARATOR = ", ";
 
 /** The view's cells for one problem entry: Path, Node Type, Problem, Detail. */
 export interface ProblemCells {
@@ -238,14 +299,14 @@ export function problemCells(entry: unknown, where: string): ProblemCells {
         path,
         nodeType: text("type"),
         problem: "google-required",
-        detail: `${text("feature")}: ${texts("missingRequired").join(LIST_SEPARATOR)}`,
+        detail: `${text("feature")}: ${texts("missingRequired").join(LABEL_SEPARATOR)}`,
       };
     case "google-recommended":
       return {
         path,
         nodeType: text("type"),
         problem: "google-recommended",
-        detail: `${text("feature")}: ${texts("missingRecommended").join(LIST_SEPARATOR)}`,
+        detail: `${text("feature")}: ${texts("missingRecommended").join(LABEL_SEPARATOR)}`,
       };
     case "deprecated-feature":
       return { path, nodeType: text("type"), problem: "deprecated-feature", detail: text("feature") };
