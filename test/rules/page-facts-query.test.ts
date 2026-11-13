@@ -16,6 +16,7 @@ import {
   sitemapFactsRecorded,
   v2Gate,
   v3Gate,
+  v4Gate,
 } from "../../src/rules/query/page-facts.js";
 import type { QueryRule } from "../../src/rules/registry/types.js";
 import { LOCAL_TENANT } from "../../src/tenant.js";
@@ -126,7 +127,7 @@ describe("extraction.not-recorded and v2Gate", () => {
       pageId: null,
       pageUrl: null,
       dedupeKey: "site",
-      evidence: { pagesNotRecorded: 2, pagesRecorded: 0, requiredVersion: 3, sitemapFactsRecorded: true },
+      evidence: { pagesNotRecorded: 2, pagesRecorded: 0, requiredVersion: 4, sitemapFactsRecorded: true },
     });
   });
 
@@ -134,7 +135,7 @@ describe("extraction.not-recorded and v2Gate", () => {
     const crawl = await newCrawl();
     await addPages(crawl, [{ url: `${SITE}/a`, extractionVersion: null }]);
     expect((await marker().run(db, crawl)).map((f) => f.evidence)).toEqual([
-      { pagesNotRecorded: 1, pagesRecorded: 0, requiredVersion: 3, sitemapFactsRecorded: true },
+      { pagesNotRecorded: 1, pagesRecorded: 0, requiredVersion: 4, sitemapFactsRecorded: true },
     ]);
   });
 
@@ -146,7 +147,7 @@ describe("extraction.not-recorded and v2Gate", () => {
     ]);
     expect(await v2Gate(db, crawl)).toEqual({ recorded: false, atOrAbove: 1, below: 1 });
     expect((await marker().run(db, crawl)).map((f) => f.evidence)).toEqual([
-      { pagesNotRecorded: 2, pagesRecorded: 0, requiredVersion: 3, sitemapFactsRecorded: true },
+      { pagesNotRecorded: 2, pagesRecorded: 0, requiredVersion: 4, sitemapFactsRecorded: true },
     ]);
   });
 
@@ -159,30 +160,44 @@ describe("extraction.not-recorded and v2Gate", () => {
     expect(await v2Gate(db, crawl)).toEqual({ recorded: true, atOrAbove: 2, below: 0 });
     expect(await v3Gate(db, crawl)).toEqual({ recorded: false, atOrAbove: 0, below: 2 });
     expect((await marker().run(db, crawl)).map((f) => f.evidence)).toEqual([
-      { pagesNotRecorded: 2, pagesRecorded: 0, requiredVersion: 3, sitemapFactsRecorded: true },
+      { pagesNotRecorded: 2, pagesRecorded: 0, requiredVersion: 4, sitemapFactsRecorded: true },
     ]);
   });
 
-  it("an all-v3 crawl is silent and both gates are open", async () => {
+  it("an all-v3 crawl keeps v3Gate open, closes v4Gate and fires the marker at version 4", async () => {
     const crawl = await newCrawl();
     await addPages(crawl, [
       { url: `${SITE}/a`, extractionVersion: 3 },
       { url: `${SITE}/b`, extractionVersion: 3 },
     ]);
+    expect(await v3Gate(db, crawl)).toEqual({ recorded: true, atOrAbove: 2, below: 0 });
+    expect(await v4Gate(db, crawl)).toEqual({ recorded: false, atOrAbove: 0, below: 2 });
+    expect((await marker().run(db, crawl)).map((f) => f.evidence)).toEqual([
+      { pagesNotRecorded: 2, pagesRecorded: 0, requiredVersion: 4, sitemapFactsRecorded: true },
+    ]);
+  });
+
+  it("an all-v4 crawl is silent and every gate is open", async () => {
+    const crawl = await newCrawl();
+    await addPages(crawl, [
+      { url: `${SITE}/a`, extractionVersion: 4 },
+      { url: `${SITE}/b`, extractionVersion: 4 },
+    ]);
     expect(await v2Gate(db, crawl)).toEqual({ recorded: true, atOrAbove: 2, below: 0 });
     expect(await v3Gate(db, crawl)).toEqual({ recorded: true, atOrAbove: 2, below: 0 });
+    expect(await v4Gate(db, crawl)).toEqual({ recorded: true, atOrAbove: 2, below: 0 });
     expect(await marker().run(db, crawl)).toEqual([]);
   });
 
-  it("a mixed v2/v3 crawl fires and v3Gate is closed", async () => {
+  it("a mixed v3/v4 crawl fires and v4Gate is closed", async () => {
     const crawl = await newCrawl();
     await addPages(crawl, [
-      { url: `${SITE}/old`, extractionVersion: 2 },
-      { url: `${SITE}/new`, extractionVersion: 3 },
+      { url: `${SITE}/old`, extractionVersion: 3 },
+      { url: `${SITE}/new`, extractionVersion: 4 },
     ]);
-    expect(await v3Gate(db, crawl)).toEqual({ recorded: false, atOrAbove: 1, below: 1 });
+    expect(await v4Gate(db, crawl)).toEqual({ recorded: false, atOrAbove: 1, below: 1 });
     expect((await marker().run(db, crawl)).map((f) => f.evidence)).toEqual([
-      { pagesNotRecorded: 1, pagesRecorded: 1, requiredVersion: 3, sitemapFactsRecorded: true },
+      { pagesNotRecorded: 1, pagesRecorded: 1, requiredVersion: 4, sitemapFactsRecorded: true },
     ]);
   });
 
@@ -190,6 +205,7 @@ describe("extraction.not-recorded and v2Gate", () => {
     const crawl = await newCrawl();
     expect(await v2Gate(db, crawl)).toEqual({ recorded: true, atOrAbove: 0, below: 0 });
     expect(await v3Gate(db, crawl)).toEqual({ recorded: true, atOrAbove: 0, below: 0 });
+    expect(await v4Gate(db, crawl)).toEqual({ recorded: true, atOrAbove: 0, below: 0 });
     expect(await marker().run(db, crawl)).toEqual([]);
   });
 
@@ -201,18 +217,18 @@ describe("extraction.not-recorded and v2Gate", () => {
 
   // Ruling R1: the marker also speaks for the sitemap facts discovery records
   // from Phase 26c on (`discovery_jsonb.sitemapFacts`).
-  it("an all-v3 crawl whose discovery predates sitemapFacts fires, with no stale pages", async () => {
+  it("an all-v4 crawl whose discovery predates sitemapFacts fires, with no stale pages", async () => {
     const crawl = await newCrawl({ sitemapFacts: false });
-    await addPages(crawl, [{ url: `${SITE}/a`, extractionVersion: 3 }]);
+    await addPages(crawl, [{ url: `${SITE}/a`, extractionVersion: 4 }]);
     expect(await sitemapFactsRecorded(db, crawl)).toBe(false);
     expect((await marker().run(db, crawl)).map((f) => f.evidence)).toEqual([
-      { pagesNotRecorded: 0, pagesRecorded: 1, requiredVersion: 3, sitemapFactsRecorded: false },
+      { pagesNotRecorded: 0, pagesRecorded: 1, requiredVersion: 4, sitemapFactsRecorded: false },
     ]);
   });
 
-  it("an all-v3 crawl with sitemapFacts is silent", async () => {
+  it("an all-v4 crawl with sitemapFacts is silent", async () => {
     const crawl = await newCrawl();
-    await addPages(crawl, [{ url: `${SITE}/a`, extractionVersion: 3 }]);
+    await addPages(crawl, [{ url: `${SITE}/a`, extractionVersion: 4 }]);
     expect(await sitemapFactsRecorded(db, crawl)).toBe(true);
     expect(await marker().run(db, crawl)).toEqual([]);
   });
@@ -224,7 +240,7 @@ describe("extraction.not-recorded and v2Gate", () => {
       { url: `${SITE}/b`, extractionVersion: 2 },
     ]);
     expect((await marker().run(db, crawl)).map((f) => f.evidence)).toEqual([
-      { pagesNotRecorded: 2, pagesRecorded: 0, requiredVersion: 3, sitemapFactsRecorded: false },
+      { pagesNotRecorded: 2, pagesRecorded: 0, requiredVersion: 4, sitemapFactsRecorded: false },
     ]);
   });
 
@@ -234,7 +250,7 @@ describe("extraction.not-recorded and v2Gate", () => {
     created.push(id);
     expect(await sitemapFactsRecorded(db, id)).toBe(false);
     expect((await marker().run(db, id)).map((f) => f.evidence)).toEqual([
-      { pagesNotRecorded: 0, pagesRecorded: 0, requiredVersion: 3, sitemapFactsRecorded: false },
+      { pagesNotRecorded: 0, pagesRecorded: 0, requiredVersion: 4, sitemapFactsRecorded: false },
     ]);
   });
 

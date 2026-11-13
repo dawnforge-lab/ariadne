@@ -9,6 +9,7 @@ import type { StoredHostSpacing } from "../crawl/politeness.js";
 import type { StoredPlatformProfile } from "../crawl/platform.js";
 import type { RenderConsole } from "../crawl/render/console-capture.js";
 import type { StoredResponseHeaders } from "../crawl/response-headers.js";
+import type { StructuredDataFormat, StructuredDataSkips } from "../crawl/parse/page-analyzer.js";
 import type {
   AnchorCounts, HtmlStructure, InsecureRefs, OverlongUrls, RefreshFact, RobotsMetaEntry, SocialFacts,
 } from "../crawl/parse/page-facts.js";
@@ -680,6 +681,14 @@ export const pages = pgTable("pages", {
   structuredDataParseErrors: integer("structured_data_parse_errors")
     .notNull()
     .default(0),
+  // Structural errors the microdata AND RDFa Lite extractors found on this page:
+  // an itemprop/property with no enclosing item, a top-level item with no usable
+  // type, an item past the depth cap. One counter for both syntaxes. Null on a
+  // row written below extraction version 4 (never measured), never zero.
+  structuredDataMicrodataErrors: integer("structured_data_microdata_errors"),
+  // What the microdata/RDFa machines left out (`StructuredDataSkips`), so a
+  // property missing for that reason is visible. Null on the same terms.
+  structuredDataSkips: jsonb("structured_data_skips").$type<StructuredDataSkips>(),
   responseTimeMs: integer("response_time_ms"),
   htmlBytes: integer("html_bytes"),
   domSize: integer("dom_size"),
@@ -1167,9 +1176,18 @@ export const hreflang = pgTable("hreflang", {
            index("hreflang_crawl_target").on(t.crawlId, t.targetUrl)]);
 
 export const structuredData = pgTable("structured_data", {
+  // The derivation's stable cursor (Phase 29a, migration 0051): a block has no
+  // natural key, and one page can carry several of one type.
+  id: bigserial("id", { mode: "number" }).primaryKey(),
   crawlId: text("crawl_id").notNull().references(() => crawls.id, { onDelete: "cascade" }),
   pageId: text("page_id").notNull(),
+  // `schemaOrgName(type) ?? type`: a schema.org type is stored by its bare name
+  // whatever the page's spelling (ruling R0.6); anything else verbatim.
   schemaType: text("schema_type").notNull(),
+  // Which syntax the block came from (`StructuredDataFormat`). Migrations 0051/0052
+  // backfilled every older row to 'jsonld', then dropped the default: the writer
+  // names the format, so no default can mislabel a microdata row.
+  format: text("format").notNull().$type<StructuredDataFormat>(),
   raw: jsonb("raw_jsonb").notNull(),
   fieldPresence: jsonb("field_presence_jsonb"),
 }, (t) => [
@@ -1182,6 +1200,7 @@ export const structuredData = pgTable("structured_data", {
   // never an error, which is exactly the failure that hides. Change the cursor
   // there, change this index here (the `pages_simhash_band*` precedent).
   index("sd_crawl_page").on(t.crawlId, t.pageId),
+  index("sd_crawl_id").on(t.crawlId, t.id),
 ]);
 
 /**

@@ -41,6 +41,13 @@ const V2 = 2;
  */
 const V3 = 3;
 
+/**
+ * The extraction version that introduced microdata and RDFa Lite nodes,
+ * `structured_data.format` and the pages' microdata error and skip counts
+ * (Phase 29a). The marker demands it of every page.
+ */
+const V4 = 4;
+
 const NOT_RECORDED: RuleIdentity = { id: "extraction.not-recorded", severity: "info" };
 
 /**
@@ -66,6 +73,19 @@ export async function v3Gate(
   crawlId: string,
 ): Promise<{ recorded: boolean; atOrAbove: number; below: number }> {
   const { atOrAbove, below } = await extractionCoverage(db, crawlId, V3);
+  return { recorded: below === 0, atOrAbove, below };
+}
+
+/**
+ * `v3Gate`'s sibling for the Phase 29a facts: whether every page of the crawl
+ * was written by extraction version 4 or later. A v3-or-older or mixed crawl is
+ * closed; the rule that called it returns `[]` and the marker speaks.
+ */
+export async function v4Gate(
+  db: Db,
+  crawlId: string,
+): Promise<{ recorded: boolean; atOrAbove: number; below: number }> {
+  const { atOrAbove, below } = await extractionCoverage(db, crawlId, V4);
   return { recorded: below === 0, atOrAbove, below };
 }
 
@@ -155,8 +175,8 @@ async function notRecordedFindings(
 ): Promise<Finding[]> {
   await assertCrawl(db, crawlId, self.id);
   // The marker's bar is the newest extraction: a v2-only crawl is complete for
-  // the 26b rules and still lacks the 26c facts, so it speaks for both.
-  const gate = await v3Gate(db, crawlId);
+  // the 26b rules and still lacks the 26c and 29a facts, so it speaks for all.
+  const gate = await v4Gate(db, crawlId);
   // Ruling R1: and for the sitemap facts discovery records from 26c on, which
   // belong to the crawl rather than to any page — so they are asked for even
   // when no page was fetched.
@@ -180,7 +200,7 @@ async function notRecordedFindings(
       evidence: {
         pagesNotRecorded: gate.below,
         pagesRecorded: gate.atOrAbove,
-        requiredVersion: V3,
+        requiredVersion: V4,
         sitemapFactsRecorded: sitemapFacts,
       },
       dedupeKey: "site",

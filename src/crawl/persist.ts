@@ -106,6 +106,7 @@ import {
 import type { FetchResult } from "./fetch-page.js";
 import { hreflangTarget, type PageAnalysis } from "./parse/page-analyzer.js";
 import type { OverlongUrls } from "./parse/page-facts.js";
+import { schemaOrgName } from "./parse/schema-names.js";
 import { fitsIndex, isSameOrigin, normalizeUrl } from "./parse/url-utils.js";
 import { completeUrls } from "./frontier.js";
 import { derivePageType, type PageTypePattern } from "./page-type.js";
@@ -340,7 +341,8 @@ export class PageWriter {
         analysis.structuredData.map((block) => ({
           crawlId: this.crawlId,
           pageId,
-          schemaType: block.type,
+          schemaType: schemaOrgName(block.type) ?? block.type,
+          format: block.format,
           raw: block.raw,
           fieldPresence: null,
         })),
@@ -932,6 +934,17 @@ export class PageWriter {
       footerLinkCount: analysis?.footerLinkCount ?? 0,
       frameworkMarkers: analysis?.frameworkMarkers ?? [],
       structuredDataParseErrors: analysis?.structuredDataParseErrors ?? 0,
+      // Phase 29a (migration 0051), written on EVERY v4 row like the parse-error
+      // count above: a page with no analysis extracted nothing and had no
+      // structural error, so it is 0 / all-zero skips, not null. Null means "a
+      // row written below version 4", which the extraction_version stamp and
+      // `v4Gate` already say; this writer never produces it.
+      structuredDataMicrodataErrors: analysis?.structuredDataMicrodataErrors ?? 0,
+      structuredDataSkips: analysis?.structuredDataSkips ?? {
+        microdataItemrefSkipped: 0,
+        rdfaUnsupported: 0,
+        valuesCapped: 0,
+      },
     };
   }
 

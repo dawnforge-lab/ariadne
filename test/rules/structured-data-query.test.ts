@@ -177,6 +177,7 @@ describe("the structured-data rules against the database", () => {
         crawlId,
         pageId: b.pageId,
         schemaType: b.type,
+        format: "jsonld" as const,
         raw: b.raw,
       })),
     );

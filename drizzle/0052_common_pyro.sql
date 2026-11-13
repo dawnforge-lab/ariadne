@@ -1,0 +1,1 @@
+ALTER TABLE "structured_data" ALTER COLUMN "format" DROP DEFAULT;

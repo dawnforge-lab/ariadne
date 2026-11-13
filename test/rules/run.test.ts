@@ -478,6 +478,7 @@ describe("runRules against the database", () => {
         crawlId,
         pageId: listing.id,
         schemaType: "Product",
+        format: "jsonld" as const,
         raw: { "@type": "Product", name: "A product with nothing else" },
       },
     ]);
@@ -566,6 +567,7 @@ describe("runRules against the database", () => {
         crawlId,
         pageId: listing.id,
         schemaType: "Product",
+        format: "jsonld" as const,
         raw: { "@type": "Product", name: "A product with nothing else" },
       },
     ]);
