@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { SCHEMA_ORG_PROPERTIES, SCHEMA_ORG_TYPES } from "../../src/rules/schema-org/vocabulary.generated.js";
+import { SCHEMA_ORG_DATATYPES, SCHEMA_ORG_PROPERTIES, SCHEMA_ORG_TYPES } from "../../src/rules/schema-org/vocabulary.generated.js";
 import {
   ancestors,
   descendants,
@@ -47,6 +47,19 @@ describe("schema.org vocabulary", () => {
       expect(rangeAccepts(p, ["Role"])).toBe(true);
       expect(rangeAccepts(p, ["OrganizationRole"])).toBe(true);
     }
+  });
+
+  it("keeps the Quantity family as types, not datatypes", () => {
+    expect(isKnownType("Duration")).toBe(true);
+    expect(() => ancestors("Distance")).not.toThrow();
+    expect(isSubtypeOf("Mass", "Quantity")).toBe(true);
+    expect(rangeAccepts("cookTime", ["Duration"])).toBe(true);
+    expect(rangeAccepts("height", ["Distance"])).toBe(true);
+    expect(rangeAccepts("weight", ["Mass"])).toBe(true);
+    expect(rangeAccepts("cookTime", ["NoSuchType"])).toBe(false);
+    expect(SCHEMA_ORG_DATATYPES).toContain("Text");
+    expect(SCHEMA_ORG_DATATYPES).not.toContain("Duration");
+    expect(SCHEMA_ORG_DATATYPES).not.toContain("Quantity");
   });
 
   it("records pending and superseded properties", () => {

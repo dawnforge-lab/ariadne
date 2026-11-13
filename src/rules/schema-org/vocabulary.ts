@@ -1,4 +1,4 @@
-import { SCHEMA_ORG_PROPERTIES, SCHEMA_ORG_TYPES } from "./vocabulary.generated.js";
+import { SCHEMA_ORG_DATATYPES, SCHEMA_ORG_PROPERTIES, SCHEMA_ORG_TYPES } from "./vocabulary.generated.js";
 
 type PropertyDef = (typeof SCHEMA_ORG_PROPERTIES)[string];
 
@@ -54,6 +54,7 @@ export function rangeAccepts(property: string, nodeTypes: readonly string[]): bo
   if (!def) return false;
   const known = nodeTypes.filter(isKnownType);
   if (known.some((t) => ancestors(t).has("Role"))) return true;
+  if (nodeTypes.some((t) => def.range.includes(t) && (isKnownType(t) || SCHEMA_ORG_DATATYPES.includes(t)))) return true;
   if (def.range.includes("Thing")) return known.length > 0;
   return known.some((t) => def.range.some((r) => ancestors(t).has(r)));
 }

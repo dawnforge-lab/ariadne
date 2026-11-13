@@ -10,7 +10,9 @@
  *
  * Rules:
  *  - Types are `rdfs:Class` entries other than DataTypes. DataTypes are classes
- *    typed `schema:DataType`, `schema:DataType` itself, and subclasses of it.
+ *    typed `schema:DataType`, `schema:DataType` itself, and subclasses of it, except
+ *    classes that reach Thing or are the Quantity family (Quantity, Duration,
+ *    Distance, Energy, Mass): those stay types.
  *  - Terms whose `schema:isPartOf` is the attic are dropped. Pending terms are
  *    kept; a property is `pending` from `schema:isPartOf` pending.schema.org.
  *    `supersededBy` is recorded from `schema:supersededBy`; if both apply,
@@ -72,6 +74,20 @@ for (let grew = true; grew; ) {
       grew = true;
     }
   }
+}
+
+// A class that is also typed DataType is still a TYPE when it can appear as a node's @type:
+// it reaches Thing through rdfs:subClassOf, or it is Quantity (typed DataType in the release,
+// no parent chain) or a subclass of Quantity (Duration, Distance, Energy, Mass). Only the
+// primitive leaves (Text, Number, Date, ...) stay DataTypes.
+const reaches = (target: string, id: string, seen = new Set<string>()): boolean => {
+  if (id === target) return true;
+  if (seen.has(id)) return false;
+  seen.add(id);
+  return (parentsOf.get(id) ?? []).some((p) => reaches(target, p, seen));
+};
+for (const id of [...dataTypeIds]) {
+  if (id !== "schema:DataType" && (reaches("schema:Thing", id) || reaches("schema:Quantity", id))) dataTypeIds.delete(id);
 }
 
 const typeIds = new Set(classes.map((c) => c["@id"]).filter((id) => !dataTypeIds.has(id)));
