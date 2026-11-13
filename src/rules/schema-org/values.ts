@@ -89,15 +89,16 @@ export function membersOf(value: unknown): unknown[] {
 }
 
 /**
- * A bare node reference: `{"@id": …}` and nothing else that describes the node
- * (no `@type`, no non-`@` key). It points at a node described elsewhere — in
+ * A bare node reference: `{"@id": …}` with a non-empty `@id`, and nothing else
+ * that describes the node (no `@type`, no non-`@` key). An empty `@id` points
+ * nowhere, so it is no reference. It points at a node described elsewhere — in
  * another block of the `@graph`, or on another page — so nothing can be said
  * here about what that node carries.
  */
 export function isBareReference(value: unknown): boolean {
   return (
     isRecord(value) &&
-    "@id" in value &&
+    hasValue(value["@id"]) &&
     !("@type" in value) &&
     Object.keys(value).every((key) => key.startsWith("@"))
   );

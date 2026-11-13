@@ -248,6 +248,31 @@ describe("validateBlock", () => {
     expect(feature(middle, "breadcrumb")!.missingRequired).toEqual(["itemListElement.item"]);
   });
 
+  it("N1: a URL item does not stand in for a crumb's name; a named or referenced item node does", () => {
+    const crumbs = (first: Record<string, unknown>) =>
+      validate({
+        "@type": "BreadcrumbList",
+        itemListElement: [first, { "@type": "ListItem", position: 2, name: "Here" }],
+      });
+    const urlItem = crumbs({ "@type": "ListItem", position: 1, item: "https://example.com/" });
+    expect(feature(urlItem, "breadcrumb")!.missingRequired).toEqual(["itemListElement.name"]);
+    const refItem = crumbs({ "@type": "ListItem", position: 1, item: { "@id": "https://example.com/" } });
+    expect(feature(refItem, "breadcrumb")!.missingRequired).toEqual([]);
+    const namedItem = crumbs({ "@type": "ListItem", position: 1, item: { "@id": "https://example.com/", name: "Home" } });
+    expect(feature(namedItem, "breadcrumb")!.missingRequired).toEqual([]);
+    const emptyRef = crumbs({ "@type": "ListItem", position: 1, item: { "@id": "" } });
+    expect(feature(emptyRef, "breadcrumb")!.missingRequired).toEqual(["itemListElement.name"]);
+    const bare = crumbs({ "@type": "ListItem", position: 1 });
+    expect(feature(bare, "breadcrumb")!.missingRequired).toEqual(["itemListElement.name", "itemListElement.item"]);
+  });
+
+  it("N2: an empty @id is no reference", () => {
+    const v = validate({ "@type": "Product", name: "P", offers: { "@id": "" } });
+    expect(feature(v, "product-snippet")!.missingRequired).toEqual([
+      "offers.price | offers.priceSpecification.price | offers.lowPrice",
+    ]);
+  });
+
   it("I7: an @list-wrapped crumb list reads like an array", () => {
     const v = validate({
       "@type": "BreadcrumbList",

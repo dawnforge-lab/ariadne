@@ -23,7 +23,7 @@
  * RULESET_VERSION; nothing here is synced.
  */
 import { schemaOrgName } from "../../crawl/parse/schema-names.js";
-import { carries, describes, hasValue, membersOf } from "./values.js";
+import { carries, describes, hasValue, isBareReference, membersOf } from "./values.js";
 import { isKnownType, isSubtypeOf } from "./vocabulary.js";
 
 /** The day the Google Search Central pages behind these profiles were read. */
@@ -132,6 +132,20 @@ function knownTypesOf(node: unknown): string[] {
 
 function nodeIsA(node: unknown, type: string): boolean {
   return knownTypesOf(node).some((t) => isSubtypeOf(t, type));
+}
+
+/**
+ * Whether a crumb's `item` stands in for its `name` (Google: `name` is not
+ * needed when `item` is a Thing carrying its own). Only a node does: one that
+ * carries a name, or a bare reference that may resolve to a named node. A URL
+ * string is no name — `carries`' text-names-its-node reading must not apply
+ * here, or a crumb with a URL item and no name would pass Google's
+ * "Missing field name" error.
+ */
+function itemNamesItself(item: unknown): boolean {
+  return membersOf(item).some(
+    (m) => isBareReference(m) || (isRecord(m) && carries(m, ["name"])),
+  );
 }
 
 /** A crumb's `position` as a number, when it is one (a number, or a numeric string). */
@@ -265,7 +279,7 @@ export const GOOGLE_FEATURES: readonly GoogleFeature[] = [
       has("itemListElement"),
       everyListItem("position", false, (m) => carries(m, ["position"])),
       // A crumb whose `item` is a node carrying its own name needs no `name`.
-      everyListItem("name", false, (m) => carries(m, ["name"]) || carries(m, ["item", "name"])),
+      everyListItem("name", false, (m) => carries(m, ["name"]) || itemNamesItself(m["item"])),
       everyListItem("item", true, (m) => carries(m, ["item"])),
     ],
     recommended: [],

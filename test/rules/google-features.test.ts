@@ -65,6 +65,7 @@ describe("Google rich-result profiles", () => {
     // A bare reference satisfies any deeper step; an @list unwraps.
     expect(req.met({ offers: { "@id": "#o" } }, { nested: false })).toBe(true);
     expect(req.met({ offers: { "@id": "#o", "@type": "Offer" } }, { nested: false })).toBe(false);
+    expect(req.met({ offers: { "@id": "" } }, { nested: false })).toBe(false);
     expect(req.met({ offers: { "@list": [{ price: 1 }] } }, { nested: false })).toBe(true);
     // A non-empty string satisfies a final `name` step only.
     expect(has("author.name").met({ author: "Jane" }, { nested: false })).toBe(true);
