@@ -546,6 +546,12 @@ import { fitsIndex, normalizeUrl, isSameOrigin } from "./url-utils.js";
 import { simhash64 } from "./simhash.js";
 import { storableCap } from "../storable-text.js";
 import {
+  createMicrodataMachine,
+  type BlockSink,
+  type ItemMachine,
+  type StructuredDataCounts,
+} from "./microdata.js";
+import {
   ALT_TEXT_LONG_CHARS,
   ARIA_LABEL_MAX,
   H2_TEXT_MAX,
@@ -635,12 +641,37 @@ export interface ResourceRef {
   kind: ResourceKind;
 }
 
-/** One JSON-LD node lifted out of a `<script type="application/ld+json">`. */
+/** Which syntax a structured-data node was read from (Phase 29a). */
+export type StructuredDataFormat = "jsonld" | "microdata" | "rdfa";
+
+/**
+ * One structured-data node: a JSON-LD node lifted out of a
+ * `<script type="application/ld+json">`, or a top-level microdata / RDFa item
+ * read into the same node shape (src/crawl/parse/microdata.ts).
+ */
 export interface StructuredDataBlock {
-  /** `@type`, or the first entry when `@type` is an array; else "unknown". */
+  /**
+   * JSON-LD: `@type`, or the first entry when `@type` is an array; else
+   * "unknown". Microdata / RDFa: the item's type, normalised to the bare
+   * schema.org name when it is one.
+   */
   type: string;
-  /** The parsed node itself, untouched. */
+  format: StructuredDataFormat;
+  /** JSON-LD: the parsed node itself, untouched. Microdata / RDFa: the node built from the markup. */
   raw: unknown;
+}
+
+/**
+ * What the microdata and RDFa machines left out of a page, counted so a
+ * property missing for that reason is visible (Phase 29a).
+ */
+export interface StructuredDataSkips {
+  /** Elements carrying `itemref`, which a forward pass does not follow. */
+  microdataItemrefSkipped: number;
+  /** Full-RDFa constructs RDFa Lite does not interpret (Task 3). */
+  rdfaUnsupported: number;
+  /** Property values dropped by the per-page `MAX_ITEM_VALUES` budget. */
+  valuesCapped: number;
 }
 
 /** Data extracted from a single page's HTML. */
@@ -776,7 +807,11 @@ export interface PageAnalysis {
   textRatio: number;
   /** `rel=alternate` targets in document order, capped at MAX_HREFLANG_PAIRS. */
   hreflang: HreflangPair[];
-  /** JSON-LD nodes in document order, capped at MAX_STRUCTURED_DATA_BLOCKS. */
+  /**
+   * JSON-LD nodes and microdata items, each in the order the parse finishes
+   * it (a JSON-LD script's nodes at its `</script>`, a top-level item at its
+   * close), capped together at MAX_STRUCTURED_DATA_BLOCKS.
+   */
   structuredData: StructuredDataBlock[];
   /**
    * JSON-LD blocks that produced nothing: invalid JSON, or larger than the
@@ -784,6 +819,15 @@ export interface PageAnalysis {
    * structured data does not parse is an audit finding, not an empty list.
    */
   structuredDataParseErrors: number;
+  /**
+   * Microdata the extractor could not place: an `itemprop` with no item
+   * scope, a top-level `itemscope` without a usable `itemtype` (R0.2), an item
+   * nested past `MAX_ITEM_DEPTH`, an `@`-keyword `itemprop` token. See
+   * src/crawl/parse/microdata.ts.
+   */
+  structuredDataMicrodataErrors: number;
+  /** What the microdata / RDFa machines counted and left out. */
+  structuredDataSkips: StructuredDataSkips;
   /** sha256 (hex) of the normalised visible text — exact-duplicate key. */
   contentHash: string;
   /**
@@ -1569,6 +1613,27 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
   let ldJsonParts: string[] = [];
   let ldJsonChars = 0;
   let ldJsonOversize = false;
+  // THE ONE SINK every structured-data format pushes through, so the
+  // MAX_STRUCTURED_DATA_BLOCKS cap counts JSON-LD, microdata and RDFa nodes
+  // together (Phase 29a): a block past the cap is dropped here.
+  const pushStructuredData: BlockSink = (block) => {
+    if (structuredData.length < MAX_STRUCTURED_DATA_BLOCKS) structuredData.push(block);
+  };
+  // One counts object per page, shared by every item machine: `errors`, the
+  // skips, and `valuesUsed`, the per-page MAX_ITEM_VALUES budget the machines
+  // spend from together (src/crawl/parse/microdata.ts).
+  const structuredDataCounts: StructuredDataCounts = {
+    errors: 0,
+    skips: { microdataItemrefSkipped: 0, rdfaUnsupported: 0, valuesCapped: 0 },
+    valuesUsed: 0,
+  };
+  // The streaming item extractors, driven from the hooks below: `open` and
+  // `close` below the noscript returns and only while no `<template>` is open,
+  // `text` below the `suppressDepth` return and the same template gate (R0.9),
+  // `end` after `parser.end()`. A second machine (RDFa) is one more entry.
+  const itemMachines: ItemMachine[] = [
+    createMicrodataMachine(pageUrl, pushStructuredData, structuredDataCounts),
+  ];
 
   const h1s: string[] = [];
   const headingOrder: number[] = [];
@@ -2274,7 +2339,7 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
     collectLdJsonNodes(parsed, nodes, 0);
     for (const node of nodes) {
       if (structuredData.length >= MAX_STRUCTURED_DATA_BLOCKS) break;
-      structuredData.push({ type: ldJsonType(node), raw: node });
+      pushStructuredData({ type: ldJsonType(node), format: "jsonld", raw: node });
     }
   };
 
@@ -2395,6 +2460,13 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
         if (CHROME_TAGS.has(name)) chromeDepth += 1;
         if (name === "noscript") noscriptDepth += 1;
         if (noscriptDepth > 0) return;
+        // Phase 29a: microdata (R0.9). Below the noscript return and outside
+        // `<template>` — both subtrees are inert, and `templateDepth` already
+        // counts this tag's own `<template>` above, so neither element opens an
+        // item. The item is identified by the `elementDepth` it opened at.
+        if (templateDepth === 0) {
+          for (const machine of itemMachines) machine.open(name, attribs, elementDepth);
+        }
         // Phase 26c: an element inside an open link may name it. Below the
         // noscript return, so `<noscript>` content names nothing, as its text
         // is no anchor; never the `<a>` itself, which closes this one below.
@@ -2654,6 +2726,12 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
         // `titleCount` and `titleOutsideHead` keep their own svg guard.
         if (openAnchor?.svgTitleParts && noscriptDepth === 0) openAnchor.svgTitleParts.push(text);
         if (suppressDepth > 0) return;
+        // Phase 29a: microdata text values, read outside NON_CONTENT_TAGS (the
+        // return above) and never inside `<template>` (R0.9). Above the title
+        // branch, which returns: a `<title itemprop>` has a text value too.
+        if (templateDepth === 0) {
+          for (const machine of itemMachines) machine.text(text);
+        }
         if (titleDepth > 0) {
           titleParts.push(text);
           return;
@@ -2727,6 +2805,13 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
           return;
         }
         if (noscriptDepth > 0) return;
+        // Phase 29a: the open-tag hook's mirror, under the same two gates.
+        // `elementDepth` was lowered above, so the closing element opened at
+        // one deeper; a closing `<template>` has already lowered its own count
+        // and matches no item, as it opened none.
+        if (templateDepth === 0) {
+          for (const machine of itemMachines) machine.close(elementDepth + 1);
+        }
         if (isTextBoundary(name)) emitTextBoundary();
         if (name === "script" && inLdJson) flushLdJson();
         if (name === "title" && titleDepth > 0) {
@@ -2772,6 +2857,8 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
   parser.end();
   // A document that ends inside a JSON-LD script still owes us its block.
   if (inLdJson) flushLdJson();
+  // And one that ends inside an item still owes its items, outermost last.
+  for (const machine of itemMachines) machine.end();
 
   const rawText = (sawBody ? bodyParts : fallbackParts).join("");
   const bodyText = rawText.replace(/\s+/g, " ").trim();
@@ -2891,6 +2978,8 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
     hreflang,
     structuredData,
     structuredDataParseErrors,
+    structuredDataMicrodataErrors: structuredDataCounts.errors,
+    structuredDataSkips: { ...structuredDataCounts.skips },
     contentHash: createHash("sha256").update(bodyText).digest("hex"),
     simhash: simhash64(bodyText),
     mainSimhash: mainWordCount === null ? null : simhash64(mainText),
@@ -2987,6 +3076,8 @@ export function analyzePage(html: string, url: string): PageAnalysis {
     hreflang: raw.hreflang,
     structuredData: raw.structuredData,
     structuredDataParseErrors: raw.structuredDataParseErrors,
+    structuredDataMicrodataErrors: raw.structuredDataMicrodataErrors,
+    structuredDataSkips: { ...raw.structuredDataSkips },
     contentHash: raw.contentHash,
     simhash: raw.simhash,
     mainSimhash: raw.mainSimhash,

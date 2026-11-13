@@ -261,6 +261,11 @@ const EXTENSION_FIELDS = [
   // `imageRefTooLong` is compared. Counts covered in
   // test/crawl/page-analyzer.test.ts.
   "overlongUrls",
+  // Phase 29a's microdata counts, stripped with `structuredData` itself: the
+  // microdata machine has its own cheerio oracle, which models the same spec
+  // subset, in test/crawl/microdata-parity.test.ts.
+  "structuredDataMicrodataErrors",
+  "structuredDataSkips",
 ] as const;
 
 /** The eleven social tags `PageAnalysis.social` reads, as the oracle lists them. */
@@ -981,6 +986,8 @@ function expectParity(html: string) {
     hreflang: _hreflang,
     structuredData: _structuredData,
     structuredDataParseErrors: _structuredDataParseErrors,
+    structuredDataMicrodataErrors: _structuredDataMicrodataErrors,
+    structuredDataSkips: _structuredDataSkips,
     contentHash: _contentHash,
     simhash: _simhash,
     hasLoremIpsum: _hasLoremIpsum,
