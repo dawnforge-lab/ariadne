@@ -4,6 +4,7 @@ import {
   DEPRECATED_FEATURES,
   GOOGLE_DOCS_READ,
   GOOGLE_FEATURES,
+  REVIEWABLE_PARENTS,
   anyOf,
   has,
   unlessNested,
@@ -20,6 +21,11 @@ describe("Google rich-result profiles", () => {
       for (const t of f.appliesTo) expect(isKnownType(t), `${f.id}: ${t}`).toBe(true);
     }
     for (const d of DEPRECATED_FEATURES) expect(isKnownType(d.type), d.id).toBe(true);
+    for (const t of REVIEWABLE_PARENTS) expect(isKnownType(t), t).toBe(true);
+    for (const f of GOOGLE_FEATURES) {
+      for (const t of f.nestedUnder ?? []) expect(isKnownType(t), `${f.id}: ${t}`).toBe(true);
+    }
+    expect(REVIEWABLE_PARENTS).toHaveLength(17);
   });
 
   it("starts every requirement path at a vocabulary property", () => {
@@ -56,6 +62,14 @@ describe("Google rich-result profiles", () => {
     expect(req.met({ offers: [{ price: "" }, {}] }, { nested: false })).toBe(false);
     expect(req.met({ offers: "9.99" }, { nested: false })).toBe(false);
     expect(req.met({}, { nested: false })).toBe(false);
+    // A bare reference satisfies any deeper step; an @list unwraps.
+    expect(req.met({ offers: { "@id": "#o" } }, { nested: false })).toBe(true);
+    expect(req.met({ offers: { "@id": "#o", "@type": "Offer" } }, { nested: false })).toBe(false);
+    expect(req.met({ offers: { "@list": [{ price: 1 }] } }, { nested: false })).toBe(true);
+    // A non-empty string satisfies a final `name` step only.
+    expect(has("author.name").met({ author: "Jane" }, { nested: false })).toBe(true);
+    expect(has("author.name").met({ author: " " }, { nested: false })).toBe(false);
+    expect(has("author.url").met({ author: "Jane" }, { nested: false })).toBe(false);
   });
 
   it("anyOf is met by one alternative and labels the group", () => {

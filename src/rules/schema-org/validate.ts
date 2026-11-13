@@ -29,15 +29,18 @@
  * **Per node** (types resolved through `schemaOrgName`):
  *  - a schema.org name the vocabulary does not know (and that is not a DataType
  *    such as `Text`) → `unknownTypes`;
- *  - an untyped node (no `@type`) is not judged; only its values are walked, so
- *    a typed node inside it is;
+ *  - an untyped node (no `@type`, or only `@type` entries that are not
+ *    schema.org names) is not judged; only its values are walked, so a typed
+ *    node inside it is;
  *  - each property of a typed node: not in the vocabulary, or not applicable to
  *    the node's known types → `unknownProperties` (skipped when the node has no
  *    known type, so one mistyped `@type` does not turn every property into a
  *    finding); pending or superseded → `propertyStatus`; a nested node with a
  *    known type the property's range refuses → `typeMismatches`. Strings and
  *    numbers are never judged against a range;
- *  - Google features (`google-features.ts`) and withdrawn features.
+ *  - Google features (`google-features.ts`) and withdrawn features. A nested
+ *    Review / AggregateRating matches only under a parent whose known types
+ *    are reviewable (`REVIEWABLE_PARENTS`).
  *
  * Paths: `$` is the block, then `.prop` (or `["prop"]` for a key that is not an
  * identifier) and `[i]` where the value is an array, e.g. `$.offers[0].seller`.
@@ -156,22 +159,42 @@ class Walker {
     target.push(entry);
   }
 
-  /** The node's known schema.org types, after recording unknown and outside ones. */
+  /**
+   * The node's known schema.org types, after recording unknown and outside
+   * ones; null when the node is untyped for this walk — no `@type`, or no
+   * `@type` entry that is a schema.org name at all (a node typed only in
+   * another vocabulary, e.g. `http://data-vocabulary.org/Breadcrumb`, is
+   * walked like an untyped one).
+   */
   private resolveTypes(node: Record<string, unknown>, path: string): string[] | null {
     if (!("@type" in node)) return null;
     const raw = node["@type"];
     const known: string[] = [];
+    let schemaNamed = false;
     for (const entry of Array.isArray(raw) ? raw : [raw]) {
       const name = typeof entry === "string" ? schemaOrgName(entry) : null;
-      if (name === null) this.outside += 1;
-      else if (isKnownType(name)) known.push(name);
+      if (name === null) {
+        this.outside += 1;
+        continue;
+      }
+      schemaNamed = true;
+      if (isKnownType(name)) known.push(name);
       else if (!isDataType(name)) this.push("unknownTypes", { path, type: name });
     }
-    return known;
+    return schemaNamed ? known : null;
   }
 
-  /** Walks a node; returns its primary known type. */
-  node(node: Record<string, unknown>, path: string, depth: number): string | null {
+  /**
+   * Walks a node; returns its primary known type. `parentKnown` is the known
+   * types of the node whose property holds this one (empty at the root and
+   * under an untyped node).
+   */
+  node(
+    node: Record<string, unknown>,
+    path: string,
+    depth: number,
+    parentKnown: readonly string[],
+  ): string | null {
     if (depth > MAX_LD_JSON_NESTING) {
       throw new Error(
         `validateBlock: nodes nested deeper than ${MAX_LD_JSON_NESTING} at ${path} — ` +
@@ -183,7 +206,7 @@ class Walker {
       for (const [key, value] of Object.entries(node)) {
         if (key.startsWith("@")) continue;
         this.outside += 1;
-        this.value(value, keyPath(path, key), depth, null);
+        this.value(value, keyPath(path, key), depth, null, []);
       }
       return null;
     }
@@ -191,7 +214,7 @@ class Walker {
     const known = this.resolveTypes(node, path);
     const typed = known !== null;
     const primary = typed ? primaryType(known) : null;
-    if (typed && known.length > 0) this.features(node, path, known);
+    if (typed && known.length > 0) this.features(node, path, known, parentKnown);
 
     for (const [key, value] of Object.entries(node)) {
       if (key.startsWith("@")) continue;
@@ -199,7 +222,7 @@ class Walker {
       const name = schemaOrgName(key);
       if (name === null) this.outside += 1;
       if (name === null || !typed) {
-        this.value(value, childPath, depth, null);
+        this.value(value, childPath, depth, null, known ?? []);
         continue;
       }
       const def = propertyDef(name);
@@ -214,15 +237,21 @@ class Walker {
           supersededBy: def.supersededBy ?? null,
         });
       }
-      this.value(value, childPath, depth, def === undefined ? null : name);
+      this.value(value, childPath, depth, def === undefined ? null : name, known);
     }
     return primary;
   }
 
   /** Walks a property value; `rangeOf` names the property whose range a nested node is judged against. */
-  private value(value: unknown, path: string, depth: number, rangeOf: string | null): void {
+  private value(
+    value: unknown,
+    path: string,
+    depth: number,
+    rangeOf: string | null,
+    parentKnown: readonly string[],
+  ): void {
     if (Array.isArray(value)) {
-      value.forEach((entry, i) => this.value(entry, `${path}[${i}]`, depth, rangeOf));
+      value.forEach((entry, i) => this.value(entry, `${path}[${i}]`, depth, rangeOf, parentKnown));
       return;
     }
     if (!isRecord(value)) return;
@@ -231,11 +260,11 @@ class Walker {
     // A list or set container holds the values themselves.
     for (const container of ["@list", "@set"] as const) {
       if (container in value) {
-        this.value(value[container], path, depth, rangeOf);
+        this.value(value[container], path, depth, rangeOf, parentKnown);
         return;
       }
     }
-    const nestedType = this.node(value, path, depth + 1);
+    const nestedType = this.node(value, path, depth + 1, parentKnown);
     if (rangeOf !== null && nestedType !== null) {
       const types = typesOf(value);
       if (!rangeAccepts(rangeOf, types)) {
@@ -249,11 +278,24 @@ class Walker {
     }
   }
 
-  private features(node: Record<string, unknown>, path: string, known: readonly string[]): void {
+  private features(
+    node: Record<string, unknown>,
+    path: string,
+    known: readonly string[],
+    parentKnown: readonly string[],
+  ): void {
     const nested = path !== "$";
     const matched: { id: string; type: string; feature: (typeof GOOGLE_FEATURES)[number] }[] = [];
     for (const feature of GOOGLE_FEATURES) {
       if (feature.depth === "top" && nested) continue;
+      // A nested match needs a parent the feature reads (REVIEWABLE_PARENTS).
+      if (
+        nested &&
+        feature.nestedUnder !== undefined &&
+        !parentKnown.some((p) => feature.nestedUnder!.some((t) => isSubtypeOf(p, t)))
+      ) {
+        continue;
+      }
       const type = known.find((k) => feature.appliesTo.some((a) => isSubtypeOf(k, a)));
       if (type === undefined) continue;
       if (feature.applies !== undefined && !feature.applies(node)) continue;
@@ -294,7 +336,7 @@ export function validateBlock(raw: unknown): BlockValidation {
     );
   }
   const walker = new Walker(judgedContext(raw["@context"]));
-  const topType = walker.node(raw, "$", 1);
+  const topType = walker.node(raw, "$", 1, []);
   return {
     topType,
     ...walker.lists,

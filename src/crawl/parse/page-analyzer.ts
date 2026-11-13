@@ -658,7 +658,12 @@ export interface StructuredDataBlock {
    */
   type: string;
   format: StructuredDataFormat;
-  /** JSON-LD: the parsed node itself, untouched. Microdata / RDFa: the node built from the markup. */
+  /**
+   * JSON-LD: the parsed node itself, untouched — except a `@graph` member
+   * without its own `@context`, stored as a shallow copy carrying the
+   * container's (see `collectLdJsonNodes`). Microdata / RDFa: the node built
+   * from the markup.
+   */
   raw: unknown;
 }
 
@@ -1478,25 +1483,47 @@ function jsonNestingDepth(text: string): number {
  * Flatten a parsed JSON-LD document into its nodes: arrays and `@graph`
  * containers expand to one entry per node. A container that is itself typed
  * (`{"@type":…,"@graph":[…]}`) counts as a node too.
+ *
+ * A `@graph` member is stored as a block of its own, so the container's
+ * `@context` would otherwise be lost with it — and the context decides which
+ * vocabulary the member's names are in (R0.5). A member without a `@context`
+ * of its own is therefore stored as a shallow copy carrying the nearest
+ * enclosing one (`{"@context": ctx, ...member}`); the parsed member itself is
+ * left untouched.
  */
-function collectLdJsonNodes(value: unknown, out: unknown[], depth: number): void {
+function collectLdJsonNodes(
+  value: unknown,
+  out: unknown[],
+  depth: number,
+  inheritedContext?: unknown,
+): void {
   if (depth > MAX_LD_JSON_DEPTH || out.length >= MAX_STRUCTURED_DATA_BLOCKS) {
     return;
   }
   if (Array.isArray(value)) {
-    for (const entry of value) collectLdJsonNodes(entry, out, depth + 1);
+    for (const entry of value) collectLdJsonNodes(entry, out, depth + 1, inheritedContext);
     return;
   }
   // Scalars and null are not JSON-LD nodes: valid JSON, nothing to record.
   if (typeof value !== "object" || value === null) return;
   const node = value as Record<string, unknown>;
+  const ownContext = "@context" in node;
+  const stored =
+    ownContext || inheritedContext === undefined
+      ? node
+      : { "@context": inheritedContext, ...node };
   const graph = node["@graph"];
   if (graph !== undefined) {
-    if ("@type" in node) out.push(node);
-    collectLdJsonNodes(graph, out, depth + 1);
+    if ("@type" in node) out.push(stored);
+    collectLdJsonNodes(
+      graph,
+      out,
+      depth + 1,
+      ownContext ? node["@context"] : inheritedContext,
+    );
     return;
   }
-  out.push(value);
+  out.push(stored);
 }
 
 /**

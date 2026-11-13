@@ -23,7 +23,7 @@
  * RULESET_VERSION; nothing here is synced.
  */
 import { schemaOrgName } from "../../crawl/parse/schema-names.js";
-import { carries } from "./values.js";
+import { carries, describes, hasValue, membersOf } from "./values.js";
 import { isKnownType, isSubtypeOf } from "./vocabulary.js";
 
 /** The day the Google Search Central pages behind these profiles were read. */
@@ -45,6 +45,11 @@ export interface GoogleFeature {
   appliesTo: readonly string[];
   /** "top": the block's root node only. "any": a node at any depth. */
   depth: "top" | "any";
+  /**
+   * For a nested match: the types (and their subtypes) the parent node must
+   * have one of. Absent: a nested node matches whatever its parent.
+   */
+  nestedUnder?: readonly string[];
   /** A further condition on the node, beyond its type. */
   applies?(node: Record<string, unknown>): boolean;
   /** Feature ids which, when they also match the same node, drop this one. */
@@ -68,9 +73,17 @@ export function anyOf(label: string, ...reqs: Requirement[]): Requirement {
   };
 }
 
-/** Waived on a nested node (Google's "omit itemReviewed when the review is nested"). */
+/**
+ * Waived on a nested node (Google's "omit itemReviewed when the review is
+ * nested"), and on a node carrying an `@id`: another node may point at it
+ * (`"review": {"@id": …}` from a `@graph` sibling), which makes it nested in
+ * every sense Google reads, and nothing in one block can show it is not.
+ */
 export function unlessNested(req: Requirement): Requirement {
-  return { ...req, met: (node, ctx) => ctx.nested || req.met(node, ctx) };
+  return {
+    ...req,
+    met: (node, ctx) => ctx.nested || hasValue(node["@id"]) || req.met(node, ctx),
+  };
 }
 
 /** Asked only of a node whose type is, or descends from, `type`. */
@@ -78,10 +91,13 @@ function forType(type: string, req: Requirement): Requirement {
   return { ...req, met: (node, ctx) => !nodeIsA(node, type) || req.met(node, ctx) };
 }
 
-/** Asked only when `path` is present. */
+/**
+ * Asked only when `path` holds something more than bare references
+ * (`describes`): a referenced node is described elsewhere.
+ */
 function whenPresent(path: string, req: Requirement): Requirement {
   const steps = path.split(".");
-  return { ...req, met: (node, ctx) => !carries(node, steps) || req.met(node, ctx) };
+  return { ...req, met: (node, ctx) => !describes(node, steps) || req.met(node, ctx) };
 }
 
 /** Waived when every one of `paths` is present. */
@@ -93,13 +109,17 @@ function waivedWhenAll(paths: readonly string[], req: Requirement): Requirement 
   };
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
+/** Waived when any one of `paths` is present. */
+function waivedWhenAny(paths: readonly string[], req: Requirement): Requirement {
+  const split = paths.map((p) => p.split("."));
+  return {
+    ...req,
+    met: (node, ctx) => split.some((steps) => carries(node, steps)) || req.met(node, ctx),
+  };
 }
 
-function membersOf(value: unknown): unknown[] {
-  if (value === undefined || value === null) return [];
-  return Array.isArray(value) ? value : [value];
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 /** The node's schema.org types that the vocabulary knows. */
@@ -114,11 +134,23 @@ function nodeIsA(node: unknown, type: string): boolean {
   return knownTypesOf(node).some((t) => isSubtypeOf(t, type));
 }
 
+/** A crumb's `position` as a number, when it is one (a number, or a numeric string). */
+function numericPosition(item: unknown): number | null {
+  if (!isRecord(item)) return null;
+  const p = item["position"];
+  if (typeof p === "number" && Number.isFinite(p)) return p;
+  if (typeof p === "string" && /^\s*-?\d+(?:\.\d+)?\s*$/.test(p)) return Number(p);
+  return null;
+}
+
 /**
- * A requirement on every list item of a BreadcrumbList. `exceptLast` waives it
- * on the last member in document order (Google: the last crumb's `item` may be
- * omitted, the page's own URL standing in). An absent `itemListElement` meets
- * it vacuously — the `itemListElement` requirement reports that.
+ * A requirement on every list item of a BreadcrumbList (`membersOf`, so an
+ * `@list`-wrapped list reads like an array). `exceptLast` waives it on the last
+ * crumb (Google: the last crumb's `item` may be omitted, the page's own URL
+ * standing in) — and "last" is read both ways, so the requirement is waived on
+ * the last member in document order AND on every crumb carrying the highest
+ * numeric `position`. An absent `itemListElement` meets it vacuously — the
+ * `itemListElement` requirement reports that.
  */
 function everyListItem(
   field: "position" | "name" | "item",
@@ -131,7 +163,15 @@ function everyListItem(
     paths: [label],
     met: (node) => {
       const members = membersOf(node["itemListElement"]);
-      const judged = exceptLast ? members.slice(0, -1) : members;
+      let judged = members;
+      if (exceptLast) {
+        const positions = members.map(numericPosition);
+        const numeric = positions.filter((p): p is number => p !== null);
+        const highest = numeric.length > 0 ? Math.max(...numeric) : null;
+        judged = members.filter(
+          (_m, i) => i !== members.length - 1 && (highest === null || positions[i] !== highest),
+        );
+      }
       return judged.every((m) => isRecord(m) && met(m));
     },
   };
@@ -162,6 +202,33 @@ const GTIN = anyOf(
   "gtin",
   ...each("gtin", "gtin8", "gtin12", "gtin13", "gtin14", "isbn"),
 );
+
+/**
+ * The types Google's review-snippet page lists as reviewable. A nested Review
+ * or AggregateRating matches its feature only under a parent of one of these
+ * (or a subtype): a rating nested in an Article earns no review snippet, and
+ * judging it would report missing fields for a feature that cannot apply
+ * (29a T5 review, narrowing R0.4).
+ */
+export const REVIEWABLE_PARENTS: readonly string[] = [
+  "Book",
+  "Course",
+  "CreativeWorkSeason",
+  "CreativeWorkSeries",
+  "Episode",
+  "Event",
+  "Game",
+  "HowTo",
+  "LocalBusiness",
+  "MediaObject",
+  "Movie",
+  "MusicPlaylist",
+  "MusicRecording",
+  "Organization",
+  "Product",
+  "Recipe",
+  "SoftwareApplication",
+];
 
 /** Whether `offers` holds a node typed Offer (or a subtype) that is not an AggregateOffer (R0.4). */
 function holdsSingleOffer(node: Record<string, unknown>): boolean {
@@ -212,12 +279,17 @@ export const GOOGLE_FEATURES: readonly GoogleFeature[] = [
     required: [
       has("name"),
       anyOf("review | aggregateRating | offers", ...each("review", "aggregateRating", "offers")),
-      // The page's Offer table requires a price; its AggregateOffer table a lowPrice.
-      whenPresent(
-        "offers",
-        anyOf(
-          "offers.price | offers.priceSpecification.price | offers.lowPrice",
-          ...each("offers.price", "offers.priceSpecification.price", "offers.lowPrice"),
+      // The page's Offer table requires a price; its AggregateOffer table a
+      // lowPrice. Asked only when offers alone qualify the snippet: a product
+      // with a review or rating qualifies without them.
+      waivedWhenAny(
+        ["review", "aggregateRating"],
+        whenPresent(
+          "offers",
+          anyOf(
+            "offers.price | offers.priceSpecification.price | offers.lowPrice",
+            ...each("offers.price", "offers.priceSpecification.price", "offers.lowPrice"),
+          ),
         ),
       ),
     ],
@@ -257,6 +329,7 @@ export const GOOGLE_FEATURES: readonly GoogleFeature[] = [
     docUrl: `${DOCS}review-snippet`,
     appliesTo: ["Review"],
     depth: "any",
+    nestedUnder: REVIEWABLE_PARENTS,
     required: [
       has("author"),
       has("author.name"),
@@ -274,6 +347,7 @@ export const GOOGLE_FEATURES: readonly GoogleFeature[] = [
     docUrl: `${DOCS}review-snippet`,
     appliesTo: ["AggregateRating"],
     depth: "any",
+    nestedUnder: REVIEWABLE_PARENTS,
     required: [
       unlessNested(has("itemReviewed")),
       unlessNested(has("itemReviewed.name")),

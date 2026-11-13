@@ -74,15 +74,70 @@ export function offersCarry(value: unknown, field: string): boolean {
 }
 
 /**
+ * The members of a property value: an array's entries, a JSON-LD `@list` /
+ * `@set` container's contents (unwrapped exactly as the validator's walk does),
+ * or the value itself. An absent value has none.
+ */
+export function membersOf(value: unknown): unknown[] {
+  if (value === undefined || value === null) return [];
+  if (Array.isArray(value)) return value.flatMap((entry) => membersOf(entry));
+  if (isRecord(value)) {
+    if ("@list" in value) return membersOf(value["@list"]);
+    if ("@set" in value) return membersOf(value["@set"]);
+  }
+  return [value];
+}
+
+/**
+ * A bare node reference: `{"@id": …}` and nothing else that describes the node
+ * (no `@type`, no non-`@` key). It points at a node described elsewhere — in
+ * another block of the `@graph`, or on another page — so nothing can be said
+ * here about what that node carries.
+ */
+export function isBareReference(value: unknown): boolean {
+  return (
+    isRecord(value) &&
+    "@id" in value &&
+    !("@type" in value) &&
+    Object.keys(value).every((key) => key.startsWith("@"))
+  );
+}
+
+/**
  * Whether `value` reaches a usable value along `path`: each step reads the key
- * from every object member of the current value (an object, or an array of
- * them), and one member that gets all the way is enough — the `offersCarry`
- * reading applied at every level. `carries(node, ["offers", "price"])` is "some
- * member of `offers` carries `price`". An empty path asks `hasValue(value)`.
+ * from every object member of the current value (`membersOf`), and one member
+ * that gets all the way is enough — the `offersCarry` reading applied at every
+ * level. `carries(node, ["offers", "price"])` is "some member of `offers`
+ * carries `price`". An empty path asks `hasValue(value)`.
+ *
+ * Two members end the walk as satisfied, because nothing here can show they
+ * lack the rest of the path and reporting it missing would be a false
+ * accusation (29a T5 review; gate clause 2 — when unsure, under-report):
+ *  - a bare reference (`isBareReference`) satisfies any deeper step;
+ *  - a non-empty string satisfies a final `name` step: `author: "Jane"` names
+ *    the author, which is what `author.name` asks.
  */
 export function carries(value: unknown, path: readonly string[]): boolean {
   if (path.length === 0) return hasValue(value);
   const [head, ...rest] = path;
-  const members = Array.isArray(value) ? value : [value];
-  return members.some((member) => isRecord(member) && carries(member[head!], rest));
+  return membersOf(value).some((member) => {
+    if (isBareReference(member)) return true;
+    if (typeof member === "string") return rest.length === 0 && head === "name" && hasValue(member);
+    return isRecord(member) && carries(member[head!], rest);
+  });
+}
+
+/**
+ * Whether `path` reaches a member that is more than a bare reference — what a
+ * conditional requirement ("when `offers` is present") fires on. A value made
+ * only of references says nothing about what the referenced nodes carry.
+ */
+export function describes(value: unknown, path: readonly string[]): boolean {
+  if (path.length === 0) {
+    return membersOf(value).some((member) => hasValue(member) && !isBareReference(member));
+  }
+  const [head, ...rest] = path;
+  return membersOf(value).some(
+    (member) => isRecord(member) && !isBareReference(member) && describes(member[head!], rest),
+  );
 }
