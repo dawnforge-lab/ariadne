@@ -985,13 +985,6 @@ export const COPY_TEMPLATES: Record<string, IssueCopy> = {
     howToFix:
       "Add JSON-LD to the templates that matter most: Organization on the home page, Product on product pages, Article on editorial, FAQPage where questions are answered. Validate with the Rich Results Test.",
   },
-  "schema.product-incomplete": {
-    title: "Structured data: Product markup missing required fields",
-    explanation:
-      "Indexable, self-canonical pages whose Product markup, taken across all its Product blocks, lacks a field a product rich result needs; each row lists the missing fields. An offers block counts only with a price or priceSpecification; gtin, ean and any GTIN length count as a GTIN, and mpn is counted separately.",
-    howToFix:
-      "Fill in name, image and a priced offers block from the product data the page renders, then add currency, availability, a GTIN and an MPN where they exist, description, SKU and brand. Confirm the page in the Rich Results Test.",
-  },
   "schema.self-serving-reviews": {
     title: "Structured data: Self-serving reviews on Organization or LocalBusiness markup",
     explanation:

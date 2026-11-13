@@ -771,20 +771,6 @@ describe("copy: structured data", () => {
     expect(copy("schema.none-on-site").explanation).toMatch(/microdata|RDFa/i);
   });
 
-  // The presence blob behind the Product finding is the union across the page's
-  // Product blocks, so a field it names is missing from ALL of them. Copy about
-  // "the Product block" would misdescribe a page carrying several.
-  it("schema.product-incomplete speaks about the page's blocks, not one block", () => {
-    const c = copy("schema.product-incomplete");
-    expect(c.explanation).toMatch(/across all its Product blocks|all of the page's Product/i);
-    const singular = /your Product block\b|the Product block on this page\b/i;
-    expect(`${c.explanation} ${c.howToFix}`).not.toMatch(singular);
-    // The two field rulings a reader would otherwise dispute: an offers block
-    // counts only with a price, and any GTIN length counts.
-    expect(c.explanation, "the offers ruling").toMatch(/price|priceSpecification/);
-    expect(c.explanation, "the gtin ruling").toMatch(/gtin/i);
-  });
-
   // The self-serving finding is a statement about which snippets Google shows.
   // It is not an accusation that the reviews are fabricated, and there is no
   // penalty attached to publishing them.

@@ -651,7 +651,7 @@ const notInSitemap: Fixture = {
 };
 
 // ---------------------------------------------------------------------------
-// Structured data — schema.product-incomplete, schema.self-serving-reviews
+// Structured data — a Product page (the retired schema.product-incomplete), schema.self-serving-reviews
 //
 // These two pages are the reason `schema.none-on-site` can never fire on this
 // fixture site again: its condition is "no structured data anywhere on the
@@ -674,7 +674,9 @@ const productIncomplete: Fixture = {
   path: "/authored3/product-incomplete",
   category: SCHEMA,
   name: "Product markup missing its image",
-  expectedIssues: ["schema.product-incomplete"],
+  // `schema.product-incomplete` was retired in 29a T6; nothing fires here until
+  // T7 adds the Google rules (google-required-missing: no image).
+  expectedIssues: [],
   exact: true,
   handler: (req, res) =>
     serve(req, res, () => ({

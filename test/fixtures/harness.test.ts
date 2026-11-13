@@ -190,8 +190,8 @@ function databaseUrl(): string {
  * `schema.none-on-site` is the same trade in the structured-data family. Its
  * condition is "this crawl stored no JSON-LD of any type", and
  * `/authored3/product-incomplete` and `/authored3/reviews` had to publish some
- * for `schema.product-incomplete` and `schema.self-serving-reviews` to be
- * claimed at all. One rule out, two in. Its sibling `schema.breadcrumb-absent`
+ * for the Product rule (retired in 29a T6, its Google successors land in T7) and
+ * `schema.self-serving-reviews` to be claimed at all. One rule out, two in. Its sibling `schema.breadcrumb-absent`
  * survives and is asserted below: no fixture publishes a `BreadcrumbList`, and
  * none should — it is the only site-scoped structured-data rule a site with
  * markup can still provoke. `test/rules/structured-data-query.test.ts` covers
@@ -489,7 +489,6 @@ const FIXTURE_COLUMN_RULES: readonly string[] = [
   "resources.uncached",
   "robots.blocks-sitemap-urls",
   "schema.breadcrumb-absent",
-  "schema.product-incomplete",
   "schema.self-serving-reviews",
   "sitemap.invalid",
   "sitemap.non-200",
@@ -873,7 +872,7 @@ describe("the fixture site end to end", () => {
       "h1.duplicate-text", "content.placeholder", "content.thin",
       "content.near-duplicate", "content.exact-duplicate", "images.missing-alt",
       "images.missing-dimensions", "mobile.viewport-missing",
-      "performance.slow-response", "schema.product-incomplete",
+      "performance.slow-response",
       "schema.self-serving-reviews", "links.orphan", "structure.deep-page",
       "pages.not-in-sitemap", "url.parameter-pages-indexable",
     ];
@@ -1867,31 +1866,8 @@ describe("the fixture site end to end", () => {
     ).toEqual({ pageUrl: tracked, url: tracked, params: ["utm_source"] });
   });
 
-  it("the structured-data fixtures name the field that is missing and the rating that is self-serving", () => {
-    // The field names are what a client goes and adds, so they are pinned rather
-    // than counted: the Product block carries a name and a priced offer and no
-    // image, and eight of the twelve recommended fields are absent too. The two
-    // that are NOT absent are the pair read out of the offer — the fixture's
-    // offer carries both a currency and an availability — which is this
-    // collection's proof that the widened CHECK-44 profile reads them from
-    // inside `offers` rather than looking for top-level keys.
-    expect(
-      detailsByPath.get("/authored3/product-incomplete\nschema.product-incomplete"),
-    ).toEqual({
-      pageUrl: `${app.base}/authored3/product-incomplete`,
-      missingRequired: ["image"],
-      missingRecommended: [
-        "brand",
-        "gtin",
-        "mpn",
-        "aggregateRating",
-        "review",
-        "color",
-        "material",
-        "size",
-      ],
-    });
-
+  it("the structured-data fixture names the rating that is self-serving", () => {
+    // The Product fixture's own details test returns with the Google rules (29a T7).
     expect(detailsByPath.get("/authored3/reviews\nschema.self-serving-reviews")).toEqual({
       pageUrl: `${app.base}/authored3/reviews`,
       schemaType: "Organization",

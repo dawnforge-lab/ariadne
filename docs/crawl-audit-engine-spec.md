@@ -135,7 +135,7 @@ holds in heap.
 verification is a self-join; SF's "missing return links" is this query.
 
 ### `structured_data`
-`crawl_id, page_id, schema_type, raw_jsonb, field_presence_jsonb`. One row per
+`crawl_id, page_id, schema_type, raw_jsonb, validation_jsonb`. One row per
 `@type` found. A boolean flag is useless for CHECK-43 to CHECK-46, which need
 types per page type plus field-level completeness.
 

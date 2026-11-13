@@ -74,7 +74,7 @@ describe("buildRegistry", () => {
     expect(ids).toContain("url.normalisation-variants");
     expect(ids).toContain("host.http-serves-200");
     expect(ids).toContain("content.near-duplicate");
-    expect(ids).toContain("schema.product-incomplete");
+    expect(ids).not.toContain("schema.product-incomplete");
     // And Phase 4's metric rules.
     expect(ids).toContain("inlinks.distribution");
     expect(ids).toContain("structure.depth-distribution");
@@ -164,7 +164,7 @@ describe("buildRegistry", () => {
     expect(ids).toContain("hreflang.source-conflict");
     // PR #24 review: hreflang declarations not read in full.
     expect(ids).toContain("hreflang.declarations-incomplete");
-    expect(ids.length).toBe(189);
+    expect(ids.length).toBe(188);
   });
 
   it("registers every kind the runner drives", () => {
@@ -463,7 +463,7 @@ describe("runRules against the database", () => {
   // parameter inventory beside its findings — and the summary says how much was
   // written, because a phase that reported nothing would be a phase nobody
   // would notice had stopped running.
-  it("derives the crawl's url_params inventory and field presence, saying how much it wrote", async () => {
+  it("derives the crawl's url_params inventory and schema validation, saying how much it wrote", async () => {
     const crawlId = await newCrawl();
     const listing = mkRow(crawlId, "/list?colour=red&utm_source=news", {
       depth: 0,
@@ -492,7 +492,7 @@ describe("runRules against the database", () => {
     // is in the crawl because the sitemap named it.
     expect(summary.derived).toEqual({
       "deriveUrlParams.params": 2,
-      "deriveFieldPresence.blocks": 1,
+      "deriveSchemaValidation.blocks": 1,
       "deriveClickDepth.root": 1,
       "deriveClickDepth.rootRedirects": 0,
       "deriveClickDepth.reachable": 1,
@@ -521,17 +521,15 @@ describe("runRules against the database", () => {
       Object.fromEntries(rows.map((r) => [r.paramName, r.isTracking])),
     ).toEqual({ colour: false, utm_source: true });
 
-    // The derivation runs BEFORE the query rules, which is what lets
-    // `schema.product-incomplete` read a presence blob it did not compute — the
-    // ordering the runner's `derivations` list exists to guarantee.
+    // The validation blob is written, not merely counted, and the old
+    // derivation's name is gone from the summary.
     const blocks = await db
       .select()
       .from(structuredData)
       .where(eq(structuredData.crawlId, crawlId));
-    expect(blocks[0]!.fieldPresence).toMatchObject({
-      required: { name: true, image: false, offers: false },
-    });
-    expect(summary.byRule["schema.product-incomplete"]).toBe(1);
+    expect(blocks[0]!.validation).not.toBeNull();
+    expect(Object.keys(summary.derived).some((k) => k.startsWith("deriveFieldPresence"))).toBe(false);
+    expect(summary.byRule["schema.product-incomplete"]).toBeUndefined();
 
     // Re-running the whole runner is safe, inventory included: the derivation
     // rebuilds its rows rather than adding to them.

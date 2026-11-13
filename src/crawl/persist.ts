@@ -344,7 +344,6 @@ export class PageWriter {
           schemaType: schemaOrgName(block.type) ?? block.type,
           format: block.format,
           raw: block.raw,
-          fieldPresence: null,
         })),
         () => this.flushStructuredData(),
       );

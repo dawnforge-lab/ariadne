@@ -14,10 +14,22 @@ import {
 
 type Entry = { title: string; explanation: string; howToFix: string };
 
+// Rules removed after 0.22.0: their entry stays in the frozen fixture and is
+// dropped from the comparison, named here so an accidental removal still fails.
+const REMOVED_SINCE_0_22 = ["schema.product-incomplete"]; // Phase 29a T6
+
 // The text committed at ruleset 0.22.0, before copy became a template.
-const FIXTURE: Record<string, Entry> = JSON.parse(
+const FIXTURE_FILE: Record<string, Entry> = JSON.parse(
   readFileSync(new URL("./__fixtures__/issue-copy-0.22.json", import.meta.url), "utf8"),
 );
+
+const FIXTURE: Record<string, Entry> = Object.fromEntries(
+  Object.entries(FIXTURE_FILE).filter(([id]) => !REMOVED_SINCE_0_22.includes(id)),
+);
+// The frozen file must still carry what is declared removed.
+for (const id of REMOVED_SINCE_0_22) {
+  if (!(id in FIXTURE_FILE)) throw new Error(`REMOVED_SINCE_0_22 names '${id}', absent from the fixture`);
+}
 
 const OLD_EXPL = "the sitemaps were only partly read because a size, entry, file-count or nesting limit was reached, or a page";
 const NEW_EXPL = "the sitemaps were only partly read because a size, entry, file-count, nesting or time limit was reached or the crawl stopped or failed while re-reading or re-recording them, or a page";

@@ -2760,7 +2760,7 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
 - **Engine**: `issues_list` with `checkId: "CHECK-43"` — `schema.none-on-site` (info):
   the crawl stored no JSON-LD of any type, anywhere. That is the categorical case; a
   site with markup fires nothing here and is judged through its siblings —
-  `schema.product-incomplete` (CHECK-44), `schema.breadcrumb-absent` (CHECK-45) and
+  the Product completeness rules (CHECK-44, being replaced in Phase 29a), `schema.breadcrumb-absent` (CHECK-45) and
   `schema.self-serving-reviews` (CHECK-46). Read all four before writing this check up.
   The engine extracts JSON-LD during the crawl, so there is no "validation was not
   enabled" case: if `schema.none-on-site` did not fire, the site published markup.
@@ -2827,8 +2827,9 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
 
 ### CHECK-44: Product schema completeness
 - **Priority**: High | **Requires**: Engine + DevTools
-- **Engine**: `issues_list` with `checkId: "CHECK-44"` — `schema.product-incomplete`
-  (warning): a page carrying Product markup that is missing required or recommended
+- **Engine**: `issues_list` with `checkId: "CHECK-44"` — the Product completeness rule
+  (the old field-presence rule was retired in Phase 29a T6; its Google-profile
+  successors land in T7, and CHECK-44 is unclaimed until then): a page carrying Product markup that is missing required or recommended
   fields. `issue_urls` names the missing fields PER PAGE in the evidence, across
   every product page the crawl reached — which is the field checklist below, answered
   at site scale instead of on the one product page a person opened.
@@ -2836,7 +2837,7 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
   cannot answer it today.** A rule that found nothing is simply absent from
   `issues_list`; there is no pages-considered count beside it, so "every product's
   markup is complete" and "no product page carries Product markup at all" are
-  indistinguishable from a silent `schema.product-incomplete`. Do not try to close
+  indistinguishable from a silent Product completeness rule. Do not try to close
   the gap by comparing the product cohort's size against a number the surface does
   not publish. Where the site-scoped `schema.none-on-site` is also silent you know
   the crawl stored JSON-LD SOMEWHERE, which is weaker than it sounds and is not

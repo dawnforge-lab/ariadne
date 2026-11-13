@@ -74,7 +74,11 @@ describe("checklist coverage", () => {
     // with the render diff rules. Empty, and asserted as a literal because
     // there is no annotation constant left to assert it against — that is the
     // point of the phase rather than an accident of it.
-    expect(unclaimed).toEqual([]);
+    //
+    // CHECK-44 is unclaimed between 29a T6 (which retires
+    // `schema.product-incomplete`) and T7 (the Google rules reclaim it). T7
+    // removes it from this literal.
+    expect(unclaimed).toEqual(["CHECK-44"]);
   });
 
   // The gate document's ruleset table states these four numbers — the Phase 5
@@ -533,11 +537,18 @@ describe("checklist coverage", () => {
   //   page    72
   //   query   102 + 1 = 103
   //   total   188 + 1 = 189
-  it("pins the ruleset split: 189 rules = 72 page + 103 query + 14 metric", () => {
+  //
+  // Phase 29a Task 6 retires ONE query rule, `schema.product-incomplete`
+  // (its Google-profile successors arrive in T7).
+  //
+  //   page    72
+  //   query   103 - 1 = 102
+  //   total   189 - 1 = 188
+  it("pins the ruleset split: 188 rules = 72 page + 102 query + 14 metric", () => {
     const registry = buildRegistry();
-    expect(registry.all()).toHaveLength(189);
+    expect(registry.all()).toHaveLength(188);
     expect(registry.byKind("page")).toHaveLength(72);
-    expect(registry.byKind("query")).toHaveLength(103);
+    expect(registry.byKind("query")).toHaveLength(102);
     // The link-graph five, the two content metrics and hreflang coverage, plus
     // the URL-parameter, redirect-volume and sitemap-structure metrics, plus
     // the render pass's coverage, the health rollup, and the page-weight table.
@@ -652,7 +663,7 @@ describe("checklist coverage", () => {
     expect(byId.get("structure.deep-page")).toContain("CHECK-31");
   });
 
-  it("accounts for all 47 crawl-derived checks: 44 claimed, 3 agent, 0 unclaimed", () => {
+  it("accounts for all 47 crawl-derived checks: 43 claimed, 3 agent, 1 unclaimed", () => {
     // The arithmetic behind the pin above, stated so a drift in the universe
     // itself (an id added to or removed from `CRAWL_CHECK_IDS`) fails here
     // rather than silently changing what "unclaimed" means.
@@ -680,7 +691,7 @@ describe("checklist coverage", () => {
       "CHECK-30","CHECK-31","CHECK-32",
       "CHECK-33","CHECK-33b","CHECK-34",
       "CHECK-35","CHECK-36","CHECK-37","CHECK-39","CHECK-40",
-      "CHECK-43","CHECK-44","CHECK-45","CHECK-46",
+      "CHECK-43","CHECK-45","CHECK-46",
     ]);
     expect(claimedInUniverse.length + AGENT_CHECKS.length + unclaimed.length).toBe(
       CRAWL_CHECK_IDS.length,
@@ -760,6 +771,8 @@ describe("checklist coverage", () => {
         "phase can answer it, and a test pinning the pin against that constant — " +
         "the shape `RENDER_CHECKS` and `METRIC_PENDING_CHECKS` had before their " +
         "rules landed",
-    ).toEqual([]);
+      // CHECK-44: retired with `schema.product-incomplete` in 29a T6, reclaimed
+      // by the Google rules in T7, which removes it from this literal.
+    ).toEqual(["CHECK-44"]);
   });
 });

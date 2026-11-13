@@ -219,7 +219,6 @@ export const TRIAGE: Readonly<Record<string, Readonly<TriageRow>>> = {
   "robots.missing": { type: "opportunity", priority: "low" },
   "schema.breadcrumb-absent": { type: "opportunity", priority: "low" },
   "schema.none-on-site": { type: "opportunity", priority: "low", sfIssue: "Structured Data: Missing" },
-  "schema.product-incomplete": { type: "issue", priority: "high", sfIssue: "Structured Data: Rich Result Validation Errors" },
   "schema.self-serving-reviews": { type: "warning", priority: "low" },
   "security.form-insecure": { type: "issue", priority: "high", sfIssue: "Security: Form URL Insecure" },
   "security.headers-missing": { type: "warning", priority: "low", sfIssue: "Security: Missing Content-Security-Policy Header" },

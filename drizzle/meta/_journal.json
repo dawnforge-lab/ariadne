@@ -372,6 +372,13 @@
       "when": 1794569342209,
       "tag": "0052_common_pyro",
       "breakpoints": true
+    },
+    {
+      "idx": 53,
+      "version": "7",
+      "when": 1794573514099,
+      "tag": "0053_graceful_jubilee",
+      "breakpoints": true
     }
   ]
 }
