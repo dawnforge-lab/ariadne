@@ -43,7 +43,18 @@ const FIELDS = ["title", "explanation", "howToFix"] as const;
 // Rules added after 0.22.0 have no entry in the fixture, which is frozen text.
 // Each is named here, so a rule that is missing from the fixture by accident
 // still fails the key comparison below.
-const ADDED_SINCE_0_22 = ["crawl.list-mode"]; // 0.24.0, Phase 27c
+const ADDED_SINCE_0_22 = [
+  "crawl.list-mode", // 0.24.0, Phase 27c
+  // 0.26.0, Phase 29a T7: the per-node schema rules.
+  "schema.parse-error",
+  "schema.unknown-type",
+  "schema.unknown-property",
+  "schema.property-pending-or-superseded",
+  "schema.embedded-type-mismatch",
+  "schema.google-required-missing",
+  "schema.google-recommended-missing",
+  "schema.deprecated-feature",
+];
 // Entries whose text was deliberately changed after 0.22.0: the fields that
 // differ from the fixture, spelled out so any other drift still fails.
 const CHANGED_SINCE_0_22: Record<string, Partial<Entry>> = {

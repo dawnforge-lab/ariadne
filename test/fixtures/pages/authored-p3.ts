@@ -674,17 +674,18 @@ const productIncomplete: Fixture = {
   path: "/authored3/product-incomplete",
   category: SCHEMA,
   name: "Product markup missing its image",
-  // `schema.product-incomplete` was retired in 29a T6; nothing fires here until
-  // T7 adds the Google rules (google-required-missing: no image).
-  expectedIssues: [],
+  // The merchant-listing variant (a priced Offer) requires an image, so the
+  // Google rules fire: required missing, and the recommended fields the
+  // markup also leaves out.
+  expectedIssues: ["schema.google-required-missing", "schema.google-recommended-missing"],
   exact: true,
   handler: (req, res) =>
     serve(req, res, () => ({
       title: "Enamel camp mug, 350ml on the fixture site",
       metaDescription:
         "A product page whose JSON-LD names the product and a priced offer, and never names an image.",
-      // Name and a priced offer are present; `image` is not. The derivation
-      // records that absence and the rule names the field.
+      // Name and a priced offer are present; `image` is not. The validator
+      // records that absence in `validation_jsonb` and the Google rule names the field.
       headExtra: jsonLd({
         "@type": "Product",
         name: "Enamel camp mug, 350ml",
@@ -711,7 +712,11 @@ const selfServingReviews: Fixture = {
   path: "/authored3/reviews",
   category: SCHEMA,
   name: "Organization rating itself",
-  expectedIssues: ["schema.self-serving-reviews"],
+  // The nested AggregateRating omits bestRating and worstRating, and the
+  // Organization omits the fields Google recommends for it, so
+  // `schema.google-recommended-missing` also speaks. Nothing it requires is
+  // absent (itemReviewed is waived on a nested rating).
+  expectedIssues: ["schema.self-serving-reviews", "schema.google-recommended-missing"],
   exact: true,
   handler: (req, res) =>
     serve(req, res, () => ({

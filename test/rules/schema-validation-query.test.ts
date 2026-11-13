@@ -1,0 +1,404 @@
+/**
+ * The per-node schema rules against a real database.
+ *
+ * Blocks are inserted as the crawler stores them, `deriveSchemaValidation`
+ * fills the verdicts, and the rules read them. What is under test is what each
+ * rule makes of a verdict, so the JSON-LD here is written to provoke exactly one
+ * list.
+ */
+import { randomUUID } from "node:crypto";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { eq } from "drizzle-orm";
+
+import { normalizeUrl } from "../../src/crawl/parse/url-utils.js";
+import { hostKeyOf } from "../../src/crawl/host-key.js";
+import { closeDb, createDb, type Db } from "../../src/db/client.js";
+import { runMigrations } from "../../src/db/migrate.js";
+import { crawls, pages, structuredData } from "../../src/db/schema.js";
+import { deriveSchemaValidation } from "../../src/rules/derive/schema-validation.js";
+import {
+  MAX_PROBLEMS_IN_EVIDENCE,
+  schemaValidationRules,
+} from "../../src/rules/query/schema-validation.js";
+import type { Finding, QueryRule } from "../../src/rules/registry/types.js";
+import { LOCAL_TENANT } from "../../src/tenant.js";
+import { mkDiscovery } from "./mk-discovery.js";
+import { writerIndexable, type IndexabilitySpec } from "./mk-page.js";
+
+function databaseUrl(): string {
+  const url = process.env.DATABASE_URL;
+  if (!url) throw new Error("DATABASE_URL must be set for db tests (no fallback)");
+  return url;
+}
+
+const SITE = "https://schema-validation.example";
+const url = (path: string): string => `${SITE}${path}`;
+
+const byId = new Map(schemaValidationRules.map((r) => [r.id, r]));
+function rule(id: string): QueryRule {
+  const r = byId.get(id);
+  if (!r) throw new Error(`no rule '${id}' in schemaValidationRules`);
+  return r;
+}
+
+const ctx = "https://schema.org";
+const COMPLETE_PRODUCT = {
+  "@context": ctx,
+  "@type": "Product",
+  name: "Mug",
+  image: "https://schema-validation.example/mug.jpg",
+  offers: { "@type": "Offer", price: "14.00", priceCurrency: "GBP" },
+};
+const IMAGELESS_PRODUCT = { ...COMPLETE_PRODUCT, image: undefined };
+const CLEAN_ORG = { "@context": ctx, "@type": "Organization", name: "Estuary" };
+
+describe("schemaValidationRules metadata", () => {
+  it("defines the eight per-node rules with the severities and checks the table assigns", () => {
+    expect(
+      Object.fromEntries(
+        schemaValidationRules.map((r) => [r.id, [r.checkIds, r.severity, r.category]]),
+      ),
+    ).toEqual({
+      "schema.parse-error": [["CHECK-43"], "warning", "structured-data"],
+      "schema.unknown-type": [["CHECK-43"], "warning", "structured-data"],
+      "schema.unknown-property": [["CHECK-43"], "warning", "structured-data"],
+      "schema.property-pending-or-superseded": [["CHECK-43"], "info", "structured-data"],
+      "schema.embedded-type-mismatch": [["CHECK-43"], "warning", "structured-data"],
+      "schema.google-required-missing": [["CHECK-43", "CHECK-44"], "warning", "structured-data"],
+      "schema.google-recommended-missing": [["CHECK-43", "CHECK-44"], "info", "structured-data"],
+      "schema.deprecated-feature": [["CHECK-43"], "info", "structured-data"],
+    });
+  });
+});
+
+describe("the schema validation rules against the database", () => {
+  let db: Db;
+  const createdCrawls: string[] = [];
+
+  interface PageSpec extends IndexabilitySpec {
+    path: string;
+    parseErrors?: number;
+    microdataErrors?: number | null;
+  }
+
+  async function newCrawl(): Promise<string> {
+    const id = `crawl_${randomUUID()}`;
+    await db.insert(crawls).values({
+      tenantId: LOCAL_TENANT,
+      id,
+      siteUrl: SITE,
+      hostKey: hostKeyOf(SITE),
+      config: { userAgent: "AriadneBot-test", maxPages: 500 },
+      rulesetVersion: "test",
+      status: "finished",
+      discovery: mkDiscovery(),
+    });
+    createdCrawls.push(id);
+    return id;
+  }
+
+  async function addPages(crawlId: string, specs: PageSpec[]): Promise<Map<string, string>> {
+    const rows = specs.map((s) => {
+      const full = url(s.path);
+      const normalised = normalizeUrl(full);
+      if (normalised === null) throw new Error(`${full} does not normalise`);
+      return {
+        id: `page_${randomUUID()}`,
+        crawlId,
+        url: full,
+        urlNormalised: normalised,
+        fetchClass: s.fetchClass ?? "ok",
+        statusCode: s.statusCode === undefined ? 200 : s.statusCode,
+        isIndexable: writerIndexable(s),
+        robotsMeta: s.robotsMeta ?? null,
+        xRobotsTag: s.xRobotsTag ?? null,
+        depth: 1,
+        discoveredVia: "link",
+        structuredDataParseErrors: s.parseErrors ?? 0,
+        structuredDataMicrodataErrors: s.microdataErrors === undefined ? 0 : s.microdataErrors,
+      };
+    });
+    await db.insert(pages).values(rows);
+    return new Map(rows.map((r, i) => [specs[i]!.path, r.id]));
+  }
+
+  async function addBlock(
+    crawlId: string,
+    pageId: string,
+    raw: Record<string, unknown>,
+    format: "jsonld" | "microdata" | "rdfa" = "jsonld",
+  ): Promise<void> {
+    const type = typeof raw["@type"] === "string" ? raw["@type"] : "Unknown";
+    await db.insert(structuredData).values({
+      crawlId,
+      pageId,
+      schemaType: type,
+      format,
+      raw: JSON.parse(JSON.stringify(raw)) as Record<string, unknown>,
+    });
+  }
+
+  /** One indexable page `/a` carrying `blocks`, derived. */
+  async function onePage(...blocks: Record<string, unknown>[]): Promise<string> {
+    const crawlId = await newCrawl();
+    const ids = await addPages(crawlId, [{ path: "/a" }]);
+    for (const b of blocks) await addBlock(crawlId, ids.get("/a")!, b);
+    await deriveSchemaValidation(db, crawlId);
+    return crawlId;
+  }
+
+  const run = (id: string, crawlId: string): Promise<Finding[]> => rule(id).run(db, crawlId);
+
+  beforeAll(async () => {
+    db = createDb(databaseUrl());
+    await runMigrations(db);
+  });
+
+  afterAll(async () => {
+    for (const id of createdCrawls) await db.delete(crawls).where(eq(crawls.id, id));
+    await closeDb(db);
+  });
+
+  describe("schema.parse-error", () => {
+    const ID = "schema.parse-error";
+
+    it("fires on JSON-LD parse errors and on microdata errors, silent on a clean page", async () => {
+      const crawlId = await newCrawl();
+      await addPages(crawlId, [
+        { path: "/json", parseErrors: 2 },
+        { path: "/micro", microdataErrors: 1 },
+        { path: "/clean" },
+      ]);
+      const found = await run(ID, crawlId);
+      expect(found.map((f) => [f.pageUrl, f.evidence, f.dedupeKey, f.severity])).toEqual([
+        [url("/json"), { jsonLdParseErrors: 2, microdataErrors: 0 }, url("/json"), "warning"],
+        [url("/micro"), { jsonLdParseErrors: 0, microdataErrors: 1 }, url("/micro"), "warning"],
+      ]);
+    });
+
+    it("a v3 page with a JSON-LD parse error fires with microdataErrors null", async () => {
+      const crawlId = await newCrawl();
+      await addPages(crawlId, [{ path: "/v3", parseErrors: 1, microdataErrors: null }]);
+      const found = await run(ID, crawlId);
+      expect(found).toHaveLength(1);
+      expect(found[0]!.evidence).toEqual({ jsonLdParseErrors: 1, microdataErrors: null });
+    });
+
+    it("a v3 page with no JSON-LD error is silent", async () => {
+      const crawlId = await newCrawl();
+      await addPages(crawlId, [{ path: "/v3", microdataErrors: null }]);
+      expect(await run(ID, crawlId)).toEqual([]);
+    });
+
+    it("is silent on a noindex page", async () => {
+      const crawlId = await newCrawl();
+      await addPages(crawlId, [{ path: "/n", parseErrors: 3, robotsMeta: "noindex" }]);
+      expect(await run(ID, crawlId)).toEqual([]);
+    });
+
+    it("notes truncation at caps.listing", async () => {
+      const crawlId = await newCrawl();
+      await addPages(
+        crawlId,
+        ["/a", "/b", "/c"].map((path) => ({ path, parseErrors: 1 })),
+      );
+      const found = await rule(ID).run(db, crawlId, { listing: 2 } as never);
+      expect(found.map((f) => f.pageUrl)).toEqual([url("/a"), url("/b")]);
+      expect(found[1]!.evidence).toMatchObject({ truncated: { reported: 2, total: 3 } });
+    });
+  });
+
+  describe("schema.unknown-type", () => {
+    const ID = "schema.unknown-type";
+    it("fires on a type schema.org does not define and is silent on a clean page", async () => {
+      const bad = await onePage({ "@context": ctx, "@type": "Prodcut", name: "x" });
+      const found = await run(ID, bad);
+      expect(found).toHaveLength(1);
+      expect(found[0]!.evidence).toEqual({
+        problems: [{ format: "jsonld", path: "$", type: "Prodcut" }],
+        problemCount: 1,
+      });
+      expect(await run(ID, await onePage(CLEAN_ORG))).toEqual([]);
+    });
+  });
+
+  describe("schema.unknown-property", () => {
+    const ID = "schema.unknown-property";
+    it("fires on a property the type does not take", async () => {
+      const found = await run(ID, await onePage({ ...CLEAN_ORG, flavour: "mint" }));
+      expect(found).toHaveLength(1);
+      expect(found[0]!.evidence).toEqual({
+        problems: [{ format: "jsonld", path: "$", type: "Organization", property: "flavour" }],
+        problemCount: 1,
+      });
+      expect(await run(ID, await onePage(CLEAN_ORG))).toEqual([]);
+    });
+  });
+
+  describe("schema.property-pending-or-superseded", () => {
+    const ID = "schema.property-pending-or-superseded";
+    it("fires on a pending property, as info", async () => {
+      // `gtin` is pending in the pinned schema.org release.
+      const found = await run(
+        ID,
+        await onePage({ ...COMPLETE_PRODUCT, gtin: "0123456789012" }),
+      );
+      expect(found).toHaveLength(1);
+      expect(found[0]!.severity).toBe("info");
+      expect(found[0]!.evidence).toEqual({
+        problems: [
+          { format: "jsonld", path: "$", property: "gtin", status: "pending", supersededBy: null },
+        ],
+        problemCount: 1,
+      });
+    });
+    it("is silent on a clean page", async () => {
+      expect(await run(ID, await onePage(CLEAN_ORG))).toEqual([]);
+    });
+  });
+
+  describe("schema.embedded-type-mismatch", () => {
+    const ID = "schema.embedded-type-mismatch";
+    it("fires on a nested node of a type the property refuses", async () => {
+      const found = await run(
+        ID,
+        await onePage({
+          ...CLEAN_ORG,
+          address: { "@type": "Product", name: "not an address" },
+        }),
+      );
+      expect(found).toHaveLength(1);
+      expect(found[0]!.evidence["problems"]).toMatchObject([
+        { format: "jsonld", path: "$.address", property: "address", type: "Product" },
+      ]);
+      expect(await run(ID, await onePage(CLEAN_ORG))).toEqual([]);
+    });
+  });
+
+  describe("Google rules", () => {
+    it("google-required-missing judges per node: one complete and one image-less Product is one finding", async () => {
+      const crawlId = await onePage(COMPLETE_PRODUCT, IMAGELESS_PRODUCT);
+      const found = await run("schema.google-required-missing", crawlId);
+      expect(found).toHaveLength(1);
+      expect(found[0]!.evidence).toMatchObject({
+        features: ["merchant-listing"],
+        problemCount: 1,
+      });
+      expect(found[0]!.evidence["problems"]).toMatchObject([
+        { format: "jsonld", feature: "merchant-listing", type: "Product", missing: ["image"] },
+      ]);
+    });
+
+    it("google-required-missing is silent when every node is complete", async () => {
+      expect(
+        await run("schema.google-required-missing", await onePage(COMPLETE_PRODUCT)),
+      ).toEqual([]);
+    });
+
+    it("google-recommended-missing fires on a missing recommended field with the recommended list", async () => {
+      const crawlId = await onePage(IMAGELESS_PRODUCT);
+      const found = await run("schema.google-recommended-missing", crawlId);
+      expect(found).toHaveLength(1);
+      expect(found[0]!.severity).toBe("info");
+      const problems = found[0]!.evidence["problems"] as { missing: string[] }[];
+      expect(problems.length).toBeGreaterThan(0);
+      expect(found[0]!.evidence["problemCount"]).toBe(problems.length);
+    });
+
+    it("problems are capped at 20 with the full count beside them, and carry the block format", async () => {
+      const crawlId = await newCrawl();
+      const ids = await addPages(crawlId, [{ path: "/a" }]);
+      for (let i = 0; i < MAX_PROBLEMS_IN_EVIDENCE + 5; i += 1) {
+        await addBlock(crawlId, ids.get("/a")!, IMAGELESS_PRODUCT, i === 0 ? "microdata" : "jsonld");
+      }
+      await deriveSchemaValidation(db, crawlId);
+      const found = await run("schema.google-required-missing", crawlId);
+      expect(found).toHaveLength(1);
+      const problems = found[0]!.evidence["problems"] as { format: string }[];
+      expect(problems).toHaveLength(MAX_PROBLEMS_IN_EVIDENCE);
+      expect(found[0]!.evidence["problemCount"]).toBe(MAX_PROBLEMS_IN_EVIDENCE + 5);
+      // Block id order: the first block inserted is the microdata one.
+      expect(problems[0]!.format).toBe("microdata");
+      expect(problems[1]!.format).toBe("jsonld");
+    });
+  });
+
+  describe("schema.deprecated-feature", () => {
+    const ID = "schema.deprecated-feature";
+    it("fires on FAQPage with the withdrawn-feature sentence", async () => {
+      const found = await run(
+        ID,
+        await onePage({
+          "@context": ctx,
+          "@type": "FAQPage",
+          mainEntity: [
+            {
+              "@type": "Question",
+              name: "Q?",
+              acceptedAnswer: { "@type": "Answer", text: "A." },
+            },
+          ],
+        }),
+      );
+      expect(found).toHaveLength(1);
+      expect(found[0]!.evidence).toEqual({
+        features: ["faq"],
+        restriction: ["Google no longer shows FAQ rich results (since May 7, 2026)"],
+        problemCount: 1,
+      });
+      expect(await run(ID, await onePage(CLEAN_ORG))).toEqual([]);
+    });
+  });
+
+  describe("shared behaviour", () => {
+    it("non-JUDGED pages are silent", async () => {
+      const crawlId = await newCrawl();
+      const ids = await addPages(crawlId, [{ path: "/n", robotsMeta: "noindex" }]);
+      await addBlock(crawlId, ids.get("/n")!, IMAGELESS_PRODUCT);
+      await deriveSchemaValidation(db, crawlId);
+      expect(await run("schema.google-required-missing", crawlId)).toEqual([]);
+    });
+
+    it("a null validation on a judged page throws and says to re-run the rules", async () => {
+      const crawlId = await newCrawl();
+      const ids = await addPages(crawlId, [{ path: "/a" }]);
+      await addBlock(crawlId, ids.get("/a")!, CLEAN_ORG);
+      await expect(run("schema.unknown-type", crawlId)).rejects.toThrow(
+        new RegExp(`schema\\.unknown-type: ${url("/a")} structured data has no validation — re-run the rules`),
+      );
+    });
+
+    it("a malformed validation blob throws naming the row id", async () => {
+      const crawlId = await onePage(IMAGELESS_PRODUCT);
+      const [row] = await db
+        .select({ id: structuredData.id })
+        .from(structuredData)
+        .where(eq(structuredData.crawlId, crawlId));
+      const stored = await db
+        .select({ v: structuredData.validation })
+        .from(structuredData)
+        .where(eq(structuredData.id, row!.id));
+      // A valid blob plus a key the strict schema refuses: still selected by the
+      // SQL pre-filter, and malformed to the reader.
+      await db
+        .update(structuredData)
+        .set({ validation: { ...stored[0]!.v!, nonsense: true } as never })
+        .where(eq(structuredData.id, row!.id));
+      await expect(run("schema.google-required-missing", crawlId)).rejects.toThrow(
+        new RegExp(`row ${row!.id} `),
+      );
+    });
+
+    it("orders by URL and notes truncation at caps.listing", async () => {
+      const crawlId = await newCrawl();
+      const ids = await addPages(crawlId, [{ path: "/c" }, { path: "/a" }, { path: "/b" }]);
+      for (const id of ids.values()) await addBlock(crawlId, id, IMAGELESS_PRODUCT);
+      await deriveSchemaValidation(db, crawlId);
+      const found = await rule("schema.google-required-missing").run(db, crawlId, {
+        listing: 2,
+      } as never);
+      expect(found.map((f) => f.pageUrl)).toEqual([url("/a"), url("/b")]);
+      expect(found[1]!.evidence).toMatchObject({ truncated: { reported: 2, total: 3 } });
+    });
+  });
+});

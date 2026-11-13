@@ -189,9 +189,10 @@ function databaseUrl(): string {
  *
  * `schema.none-on-site` is the same trade in the structured-data family. Its
  * condition is "this crawl stored no JSON-LD of any type", and
- * `/authored3/product-incomplete` and `/authored3/reviews` had to publish some
- * for the Product rule (retired in 29a T6, its Google successors land in T7) and
- * `schema.self-serving-reviews` to be claimed at all. One rule out, two in. Its sibling `schema.breadcrumb-absent`
+ * `/authored3/product-incomplete` and `/authored3/reviews` publish some, for the
+ * Google rules (`schema.google-required-missing` and `-recommended-missing`) and
+ * `schema.self-serving-reviews` to be claimed at all. One rule out, the rest in.
+ * Its sibling `schema.breadcrumb-absent`
  * survives and is asserted below: no fixture publishes a `BreadcrumbList`, and
  * none should — it is the only site-scoped structured-data rule a site with
  * markup can still provoke. `test/rules/structured-data-query.test.ts` covers
@@ -335,6 +336,16 @@ const SKIP_HARNESS_CLAIMS: string[] = [
   "crawl.list-mode",
   "robots.check-skipped",
   "robots.missing",
+  // Phase 29a T7: the per-node schema rules whose fixtures land in Task 10
+  // (`/authored29a/*`). Each fires in test/rules/schema-validation-query.test.ts
+  // today; Task 10 authors the pages that make them fire here and removes these
+  // six entries.
+  "schema.deprecated-feature",
+  "schema.embedded-type-mismatch",
+  "schema.parse-error",
+  "schema.property-pending-or-superseded",
+  "schema.unknown-property",
+  "schema.unknown-type",
   "schema.none-on-site",
   // Phase 26a: the four HTTPS rules and the headers marker, argued above.
   "security.headers-missing",
@@ -3815,7 +3826,7 @@ describe("the fixture site end to end", () => {
       .filter((id) => !fired.has(id) && !exempt.has(id))
       .sort();
     // The strict form, over every kind at last: every registered rule speaks on
-    // this one crawl, save the twenty-six `SKIP_HARNESS_CLAIMS` names and
+    // this one crawl, save the thirty-two `SKIP_HARNESS_CLAIMS` names and
     // explains (the count was written as nine when the list held nine and has
     // been carried stale through four phases of markers; P17 corrected it,
     // P19-T2's near-duplicate marker made fifteen and Phase 23's
@@ -3824,10 +3835,11 @@ describe("the fixture site end to end", () => {
     // `sitemap.over-50k-urls` twenty-two; Phase 26b's `extraction.not-recorded`
     // made twenty-three, and Phase 26c's `sitemap.oversized` and
     // `social.image-insecure` make twenty-five, and Phase 27c's `crawl.list-mode`
-    // twenty-six — asserted below, so the number cannot go stale again). A
+    // twenty-six; Phase 29a T7's six schema rules awaiting their T10 fixtures make
+    // thirty-two, and T10 takes them back out — asserted below, so the number cannot go stale again). A
     // new rule arrives here with no fixture and fails immediately, which is the
     // point — the alternative is a rule nobody has ever seen speak.
-    expect(SKIP_HARNESS_CLAIMS).toHaveLength(26);
+    expect(SKIP_HARNESS_CLAIMS).toHaveLength(32);
     expect(
       unfired,
       "a rule that fires nowhere is a rule no fixture proves — author a fixture " +

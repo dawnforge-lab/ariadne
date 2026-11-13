@@ -164,7 +164,9 @@ describe("buildRegistry", () => {
     expect(ids).toContain("hreflang.source-conflict");
     // PR #24 review: hreflang declarations not read in full.
     expect(ids).toContain("hreflang.declarations-incomplete");
-    expect(ids.length).toBe(188);
+    // Phase 29a Task 7: the eight per-node schema rules.
+    expect(ids).toContain("schema.google-required-missing");
+    expect(ids.length).toBe(196);
   });
 
   it("registers every kind the runner drives", () => {

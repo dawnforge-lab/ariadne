@@ -993,6 +993,63 @@ export const COPY_TEMPLATES: Record<string, IssueCopy> = {
       "Move the ratings to the type they are about (Product, Service, Course, Recipe) and let independent review platforms carry the business-level rating.",
   },
 
+  "schema.parse-error": {
+    title: "Structured data: Markup that could not be parsed",
+    explanation:
+      "Indexable, self-canonical pages whose structured data the parser could not read: JSON-LD that is not valid JSON, or microdata and RDFa Lite with a structural fault such as an itemscope with no type. Search engines skip a block they cannot parse, so it earns nothing. A page extracted before microdata was read is judged on JSON-LD alone.",
+    howToFix:
+      "Fix the syntax the counts point to: validate the JSON-LD with a JSON linter, and give every top-level itemscope an itemtype. Check the template that outputs it, not just this page.",
+  },
+  "schema.unknown-type": {
+    title: "Structured data: Type name not in the shared vocabulary",
+    explanation:
+      "Indexable, self-canonical pages with a node typed with a name that is not in the shared structured-data vocabulary (the one Google and Bing read), listed per node with its path. Search engines cannot interpret a type they do not know, so the node earns no rich result.",
+    howToFix:
+      "Correct the spelling or pick the closest type the vocabulary defines. Names are case-sensitive: Product, not product.",
+  },
+  "schema.unknown-property": {
+    title: "Structured data: Property the node's type does not take",
+    explanation:
+      "Indexable, self-canonical pages with a property that is not defined for the type of the node it sits on, listed per node with its path. The property is ignored by search engines.",
+    howToFix:
+      "Rename the property to the vocabulary's own name for it, or move it to a node whose type takes it.",
+  },
+  "schema.property-pending-or-superseded": {
+    title: "Structured data: Pending or superseded property",
+    explanation:
+      "Indexable, self-canonical pages using a vocabulary property that is still pending (not yet part of the core vocabulary) or superseded by another, listed per node with its path and the replacement where there is one. Both still parse, but may be read less reliably.",
+    howToFix:
+      "Switch to the property named as the replacement. For a pending property, keep it only if no core property says the same thing.",
+  },
+  "schema.embedded-type-mismatch": {
+    title: "Structured data: Embedded node of a type the property does not accept",
+    explanation:
+      "Indexable, self-canonical pages where a nested node has a type that the property it sits under does not accept, such as a Person under a property that takes an Organization. Each row gives the property, the nested type and the types it expects.",
+    howToFix:
+      "Use one of the expected types for the nested node, or move it under a property that takes its type.",
+  },
+  "schema.google-required-missing": {
+    title: "Structured data: Required field missing for a Google rich result",
+    explanation:
+      "Indexable, self-canonical pages with a node of a type Google offers a rich result for, that lacks a field Google requires for it. Each node is judged on its own, as the Rich Results Test does, so a page with one complete and one incomplete Product is reported. The row names the feature, the node and the missing fields.",
+    howToFix:
+      "Add the missing fields to the node, populated from the same data as the visible page. Re-test with the Rich Results Test.",
+  },
+  "schema.google-recommended-missing": {
+    title: "Structured data: Recommended field missing for a Google rich result",
+    explanation:
+      "Indexable, self-canonical pages with a node of a type Google offers a rich result for, that lacks a field Google recommends but does not require. The node stays eligible; the fields give Google more to show. The row names the feature, the node and the missing fields.",
+    howToFix:
+      "Add the recommended fields where the page has the data. Skip any the page cannot truthfully fill.",
+  },
+  "schema.deprecated-feature": {
+    title: "Structured data: Markup for a Google feature that is withdrawn",
+    explanation:
+      "Indexable, self-canonical pages carrying markup for a rich result Google no longer shows, such as FAQPage or HowTo. The row gives the feature and the date Google withdrew it.",
+    howToFix:
+      "The markup is harmless but earns no rich result. Keep it if other consumers read it, or remove it to cut template weight.",
+  },
+
   // ----------------------------------------------------------------- images
   "images.legacy-format": {
     title: "Images: Over {IMAGE_WEIGHT_WARN:n} bytes served as PNG or JPEG",
