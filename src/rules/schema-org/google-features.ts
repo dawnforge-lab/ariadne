@@ -251,6 +251,21 @@ function holdsSingleOffer(node: Record<string, unknown>): boolean {
   );
 }
 
+/**
+ * Whether the node is a ProductGroup (or a subtype): a schema.org subtype of
+ * Product that the two Product features must not read. Google's
+ * product-variants page asks only a `name` of the group and puts the offers on
+ * its `hasVariant` Products, which are the nodes the features are about;
+ * reading the group as a Product would report `review | aggregateRating |
+ * offers` missing on Google's own example (29a final review I1). A variant
+ * page's own top-level Product is still judged. The group gets no profile of
+ * its own (the final review judged one optional), so it is matched by no
+ * feature and reported missing nothing.
+ */
+function isProductGroup(node: Record<string, unknown>): boolean {
+  return nodeIsA(node, "ProductGroup");
+}
+
 export const GOOGLE_FEATURES: readonly GoogleFeature[] = [
   {
     id: "article",
@@ -290,6 +305,7 @@ export const GOOGLE_FEATURES: readonly GoogleFeature[] = [
     docUrl: `${DOCS}product-snippet`,
     appliesTo: ["Product"],
     depth: "top",
+    applies: (node) => !isProductGroup(node),
     required: [
       has("name"),
       anyOf("review | aggregateRating | offers", ...each("review", "aggregateRating", "offers")),
@@ -319,7 +335,7 @@ export const GOOGLE_FEATURES: readonly GoogleFeature[] = [
     docUrl: `${DOCS}merchant-listing`,
     appliesTo: ["Product"],
     depth: "top",
-    applies: holdsSingleOffer,
+    applies: (node) => !isProductGroup(node) && holdsSingleOffer(node),
     required: [has("name"), has("image"), OFFER_PRICE, OFFER_CURRENCY],
     recommended: [
       ...each("aggregateRating", "brand", "brand.name", "category", "color", "description"),

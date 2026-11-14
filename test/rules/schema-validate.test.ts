@@ -324,6 +324,123 @@ describe("validateBlock", () => {
     expect(feature(software, "software-app")!.missingRequired).toEqual([]);
   });
 
+  /**
+   * Google's product-variants markup, as its Search Central page gives it (read
+   * 2026-11-14 by the 29a final review): the ProductGroup carries `name` and the
+   * grouping, and the offers sit on the `hasVariant` Products.
+   */
+  const VARIANT_GROUP = {
+    "@context": CTX,
+    "@type": "ProductGroup",
+    name: "Wool winter coat",
+    description: "Wool coat, new for this winter",
+    url: "https://www.example.com/coat",
+    brand: { "@type": "Brand", name: "Good brand" },
+    productGroupID: "44E01",
+    variesBy: ["https://schema.org/size", "https://schema.org/color"],
+    hasVariant: [
+      {
+        "@type": "Product",
+        sku: "44E01-M11000",
+        gtin14: "98766051104214",
+        image: "https://www.example.com/coat_small_green.jpg",
+        name: "Small green coat",
+        description: "Small wool green coat for the winter season",
+        color: "Green",
+        size: "small",
+        offers: {
+          "@type": "Offer",
+          url: "https://www.example.com/coat?size=small&color=green",
+          priceCurrency: "USD",
+          price: 39.99,
+          itemCondition: "https://schema.org/NewCondition",
+          availability: "https://schema.org/InStock",
+        },
+      },
+      {
+        "@type": "Product",
+        sku: "44E01-K11000",
+        gtin14: "98766051104207",
+        image: "https://www.example.com/coat_small_lightblue.jpg",
+        name: "Small light blue coat",
+        description: "Small wool light blue coat for the winter season",
+        color: "light blue",
+        size: "small",
+        offers: {
+          "@type": "Offer",
+          url: "https://www.example.com/coat?size=small&color=lightblue",
+          priceCurrency: "USD",
+          price: 39.99,
+          itemCondition: "https://schema.org/NewCondition",
+          availability: "https://schema.org/InStock",
+        },
+      },
+    ],
+  };
+
+  it("29a final review I1: a ProductGroup (Google's variant markup) matches no Product feature", () => {
+    const v = validate(VARIANT_GROUP);
+    expect(v.unknownTypes).toEqual([]);
+    expect(v.unknownProperties).toEqual([]);
+    expect(feature(v, "product-snippet")).toBeUndefined();
+    expect(feature(v, "merchant-listing")).toBeUndefined();
+    expect(v.googleFeatures.filter((f) => f.missingRequired.length > 0)).toEqual([]);
+    // A group that does carry a single Offer is still not a merchant listing:
+    // Google reads the offers on the variants.
+    const offered = validate({
+      ...VARIANT_GROUP,
+      offers: { "@type": "Offer", price: 39.99, priceCurrency: "USD" },
+    });
+    expect(feature(offered, "product-snippet")).toBeUndefined();
+    expect(feature(offered, "merchant-listing")).toBeUndefined();
+  });
+
+  it("29a final review I1: a variant Product is still judged, and fires without offers, review or rating", () => {
+    // A variant page's own Product, pointing at its group (Google's multi-page form).
+    const variant = validate({
+      "@context": CTX,
+      "@type": "Product",
+      name: "Small green coat",
+      sku: "44E01-M11000",
+      image: "https://www.example.com/coat_small_green.jpg",
+      color: "Green",
+      size: "small",
+      isVariantOf: { "@type": "ProductGroup", productGroupID: "44E01", name: "Wool winter coat" },
+    });
+    expect(feature(variant, "product-snippet")!.missingRequired).toEqual([
+      "review | aggregateRating | offers",
+    ]);
+    // The same variant with its offer is a merchant listing with nothing required missing.
+    const sold = validate({
+      ...VARIANT_GROUP.hasVariant[0],
+      "@context": CTX,
+      isVariantOf: { "@id": "https://www.example.com/coat#group" },
+    });
+    expect(feature(sold, "product-snippet")!.missingRequired).toEqual([]);
+    expect(feature(sold, "merchant-listing")!.missingRequired).toEqual([]);
+  });
+
+  it("29a final review: a text author in @value form names the author", () => {
+    const top = (author: unknown) =>
+      validate({
+        "@type": "Review",
+        author,
+        itemReviewed: { "@type": "Product", name: "Mug" },
+        reviewRating: { "@type": "Rating", ratingValue: 5 },
+      });
+    expect(feature(top({ "@value": "Jane" }), "review")!.missingRequired).toEqual([]);
+    expect(feature(top([{ "@value": "Jane", "@language": "en" }]), "review")!.missingRequired).toEqual([]);
+    // Nested under a reviewable parent, read the same way.
+    const nested = validate({
+      "@type": "Product",
+      name: "P",
+      review: { "@type": "Review", author: { "@value": "Jane" }, reviewRating: { "@type": "Rating", ratingValue: 5 } },
+    });
+    expect(feature(nested, "review")!.missingRequired).toEqual([]);
+    // A blank @value names nothing, as a blank string does.
+    expect(feature(top({ "@value": "  " }), "review")!.missingRequired).toEqual(["author.name"]);
+  });
+
   it("breadcrumb: every crumb needs a position and a name, every crumb but the last an item", () => {
     const ok = validate({
       "@context": CTX,

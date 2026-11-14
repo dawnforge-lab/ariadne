@@ -116,13 +116,16 @@ export function isBareReference(value: unknown): boolean {
  * accusation (29a T5 review; gate clause 2 — when unsure, under-report):
  *  - a bare reference (`isBareReference`) satisfies any deeper step;
  *  - a non-empty string satisfies a final `name` step: `author: "Jane"` names
- *    the author, which is what `author.name` asks.
+ *    the author, which is what `author.name` asks. A JSON-LD value object
+ *    whose `@value` is a string (`author: {"@value": "Jane"}`) is that string
+ *    written longhand, and reads the same way (29a final review).
  */
 export function carries(value: unknown, path: readonly string[]): boolean {
   if (path.length === 0) return hasValue(value);
   const [head, ...rest] = path;
-  return membersOf(value).some((member) => {
-    if (isBareReference(member)) return true;
+  return membersOf(value).some((entry) => {
+    if (isBareReference(entry)) return true;
+    const member = isRecord(entry) && typeof entry["@value"] === "string" ? entry["@value"] : entry;
     if (typeof member === "string") return rest.length === 0 && head === "name" && hasValue(member);
     return isRecord(member) && carries(member[head!], rest);
   });
