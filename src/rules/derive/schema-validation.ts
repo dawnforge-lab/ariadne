@@ -70,11 +70,13 @@ export async function deriveSchemaValidation(
     // cursor compared with `id > $cursor::bigint` stays exact past 2^53.
     let cursor = "0";
     for (;;) {
+      // Qualified on purpose: a bare `order by id` binds to the text alias above
+      // and sorts lexically while the cursor advances numerically.
       const batch = await tx.execute<BlockRow>(sql`
-        select id::text as id, raw_jsonb
-        from structured_data
-        where crawl_id = ${crawlId} and id > ${cursor}::bigint
-        order by id
+        select sd.id::text as id, sd.raw_jsonb
+        from structured_data sd
+        where sd.crawl_id = ${crawlId} and sd.id > ${cursor}::bigint
+        order by sd.id
         limit ${SCHEMA_VALIDATION_BATCH}`);
       if (batch.rows.length === 0) break;
 
@@ -106,6 +108,16 @@ export async function deriveSchemaValidation(
       blocks += written.rowCount;
 
       cursor = batch.rows[batch.rows.length - 1]!.id;
+    }
+    // A skipped row must fail here, naming the crawl, not later in a rule.
+    const total = await tx.execute<{ n: string }>(
+      sql`select count(*)::text as n from structured_data where crawl_id = ${crawlId}`,
+    );
+    if (String(blocks) !== total.rows[0]!.n) {
+      throw new Error(
+        `deriveSchemaValidation: crawl '${crawlId}' — validated ${blocks} blocks but the crawl ` +
+          `holds ${total.rows[0]!.n}; the cursor skipped or repeated rows`,
+      );
     }
     return { blocks };
   });

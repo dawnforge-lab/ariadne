@@ -136,4 +136,30 @@ describe("deriveSchemaValidation against the database", () => {
     expect(rows).toHaveLength(total);
     expect(rows.filter((r) => r.validation === null)).toHaveLength(0);
   });
+
+  it("validates every row when ids cross a digit boundary (numeric, not lexical, order)", async () => {
+    // Regression (29a gate): `order by id` bound to the text alias, so rows sorted
+    // lexically while the cursor advanced numerically, and every id below the
+    // boundary was skipped. Explicit ids sit far above the dev sequence.
+    const crawlId = await newCrawl();
+    const first = 99_999_999_700;
+    const total = SCHEMA_VALIDATION_BATCH + 100;
+    for (let i = 0; i < total; i += 300) {
+      await db.insert(structuredData).values(
+        Array.from({ length: Math.min(300, total - i) }, (_, j) => ({
+          id: first + i + j,
+          crawlId,
+          pageId: `page_${i + j}`,
+          schemaType: "Organization",
+          format: "jsonld" as const,
+          raw: { "@type": "Organization", name: `Org ${i + j}` },
+        })),
+      );
+    }
+    expect(first + total - 1).toBe(100_000_000_299);
+    expect(await deriveSchemaValidation(db, crawlId)).toEqual({ blocks: total });
+    const rows = await stored(crawlId);
+    expect(rows).toHaveLength(total);
+    expect(rows.filter((r) => r.validation === null).map((r) => r.id)).toEqual([]);
+  });
 });
