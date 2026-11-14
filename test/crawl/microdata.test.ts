@@ -5,6 +5,7 @@ import {
   MICRODATA_TEXT_MAX,
 } from "../../src/crawl/parse/microdata.js";
 import { analyzeHtml, analyzePage } from "../../src/crawl/parse/page-analyzer.js";
+import { validateBlock } from "../../src/rules/schema-org/validate.js";
 
 const PAGE_URL = "https://example.com/shop/mug";
 
@@ -220,6 +221,45 @@ describe("microdata extraction", () => {
         },
       },
     ]);
+  });
+
+  it("content is the value on any element that carries it, as Google reads it (29a final review M1)", () => {
+    const blocks = microdata(
+      page(
+        `<div itemscope itemtype="https://schema.org/Product"><span itemprop="name">Mug</span>` +
+          `<div itemprop="offers" itemscope itemtype="https://schema.org/Offer">` +
+          `<span itemprop="price" content="10.00">$10</span>` +
+          `<span itemprop="priceCurrency" content="USD"></span></div>` +
+          `<div itemprop="aggregateRating" itemscope itemtype="https://schema.org/AggregateRating">` +
+          `<span itemprop="ratingValue" content="4.5"></span><span itemprop="reviewCount" content="12"></span></div>` +
+          `<a itemprop="url" href="/mug" content="https://example.com/canonical-mug">mug</a>` +
+          `<time itemprop="releaseDate" datetime="2026-01-01" content="2026-02-02">Feb</time>` +
+          `<span itemprop="sku" content="">SKU-1</span>` +
+          `</div>`,
+      ),
+    );
+    expect(blocks.map((b) => b.raw)).toEqual([
+      {
+        "@context": "https://schema.org",
+        "@type": "Product",
+        name: "Mug",
+        offers: { "@type": "Offer", price: "10.00", priceCurrency: "USD" },
+        aggregateRating: { "@type": "AggregateRating", ratingValue: "4.5", reviewCount: "12" },
+        url: "https://example.com/canonical-mug",
+        releaseDate: "2026-02-02",
+        // An empty content attribute is the value as written, not the text.
+        sku: "",
+      },
+    ]);
+    // The empty elements' values reach the validator as present.
+    const v = validateBlock(blocks[0]!.raw);
+    const rating = v.googleFeatures.find((f) => f.feature === "aggregate-rating");
+    expect(rating!.missingRequired).toEqual([]);
+    const snippet = v.googleFeatures.find((f) => f.feature === "product-snippet");
+    expect(snippet!.missingRequired).toEqual([]);
+    expect(snippet!.missingRecommended).not.toContain(
+      "offers.priceCurrency | offers.priceSpecification.priceCurrency",
+    );
   });
 
   it("keeps a non-schema.org type as written, and property order is document order", () => {

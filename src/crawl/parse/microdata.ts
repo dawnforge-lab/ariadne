@@ -28,8 +28,11 @@
  * mid-item is closed by the tokenizer's own end-of-input closes; `end()` then
  * throws if a frame is still open, which would be depth drift.
  *
- * VALUES (spec §29a, the HTML microdata list):
- *  - `meta`: `content` ("" when absent);
+ * VALUES (spec §29a, the HTML microdata list, widened as Google reads it):
+ *  - any element carrying `content`: that attribute, as written (29a final
+ *    review M1 — Google and schema.org's own guide honour it beyond `meta`,
+ *    e.g. `<span itemprop="price" content="10.00">$10</span>`);
+ *  - `meta` without `content`: "";
  *  - `a`, `link`: `href`; `img`, `audio`, `video`, `source`, `iframe`,
  *    `embed`, `track`: `src`. Resolved with `new URL(v, pageUrl).href`, the raw
  *    string when it does not parse, "" when absent;
@@ -112,7 +115,11 @@ function attributeValue(
   attribs: Record<string, string>,
   pageUrl: string,
 ): string | undefined {
-  if (name === "meta") return attribs["content"] ?? "";
+  // `content` wins on ANY element, as Google's parser and schema.org's own
+  // guide read it (`<span itemprop="price" content="10.00">$10</span>`): an
+  // empty element carrying it is not an empty value (29a final review M1).
+  if ("content" in attribs) return attribs["content"];
+  if (name === "meta") return "";
   const urlAttribute = URL_ATTRIBUTE[name];
   if (urlAttribute !== undefined) {
     const raw = attribs[urlAttribute];

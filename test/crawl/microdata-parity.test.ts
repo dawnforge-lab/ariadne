@@ -10,8 +10,10 @@
  *    ancestor item when it carries `itemprop`, else a top-level item;
  *  - a top-level item needs a non-empty first `itemtype` token (R0.2); a
  *    nested one may be untyped;
- *  - values: `content` on meta, href/src on the URL elements (resolved),
- *    `datetime` on time (else text), `value` on data/meter, else text;
+ *  - values: `content` on ANY element that carries it, as written (Google's
+ *    reading, wider than the HTML spec's meta-only list: 29a final review M1),
+ *    else "" on meta, href/src on the URL elements (resolved), `datetime` on
+ *    time (else text), `value` on data/meter, else text;
  *  - text is read outside script/style/noscript/svg and never inside
  *    `<template>` (R0.9), whitespace collapsed and trimmed;
  *  - `<template>` and `<noscript>` subtrees, the elements themselves included,
@@ -159,7 +161,8 @@ function oracle(html: string, pageUrl: string): { blocks: unknown[]; errors: num
     } else if (names !== null && scope !== null && scope !== "dead") {
       const urlAttr = URL_ATTR[name];
       let value: string;
-      if (name === "meta") value = attribs["content"] ?? "";
+      if (attribs["content"] !== undefined) value = attribs["content"];
+      else if (name === "meta") value = "";
       else if (urlAttr !== undefined) {
         const raw = attribs[urlAttr];
         value = raw === undefined ? "" : resolve(raw, pageUrl);
@@ -222,6 +225,14 @@ const WELL_FORMED: Record<string, string> = {
     `<div itemprop="review" ${T("Review")}><span itemprop="author">Ann</span>` +
     `<div itemprop="reviewRating" ${T("Rating")}><data itemprop="ratingValue" value="5">five</data></div></div>` +
     `</div></body></html>`,
+  "content on elements other than meta (29a final review M1)":
+    `<!doctype html><html><body><div ${T("Product")}><span itemprop="name">Mug</span>` +
+    `<div itemprop="offers" ${T("Offer")}><span itemprop="price" content="10.00">$10</span>` +
+    `<span itemprop="priceCurrency" content="USD"></span></div>` +
+    `<a itemprop="url" href="/mug" content="https://example.com/m">m</a>` +
+    `<time itemprop="releaseDate" datetime="2026-01-01" content="2026-02-02">Feb</time>` +
+    `<data itemprop="sku" value="v" content="c">d</data><img itemprop="image" src="/i.png" content="">` +
+    `<meta itemprop="mpn"></div></body></html>`,
   "breadcrumb list":
     `<!doctype html><html><body><ol ${T("BreadcrumbList")}>` +
     `<li itemprop="itemListElement" ${T("ListItem")}><a itemprop="item" href="/"><span itemprop="name">Home</span></a>` +
