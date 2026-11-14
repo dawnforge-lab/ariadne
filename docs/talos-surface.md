@@ -2806,8 +2806,10 @@ warningCount, infoCount, jsonLdParseErrors, microdataErrors, skips
   extraction version 4: nobody looked for microdata, so `warningCount` there holds no
   microdata errors. `skips` is `{microdataItemrefSkipped, rdfaUnsupported,
   valuesCapped}` where the reader dropped something: `itemref` elements it does not
-  follow, full-RDFa constructs RDFa Lite does not interpret, values past the per-page
-  cap.
+  follow, RDFa it does not model (full-RDFa constructs RDFa Lite does not interpret,
+  terms outside schema.org, and a `property` with no enclosing `typeof`, which is
+  valid RDFa describing the document itself, so it is a skip and never a
+  `microdataErrors` count), values past the per-page cap.
 - **Filters** (each selects PAGES; the row stays the whole page): `pageType` (a
   template cohort as this crawl typed it, `(untyped)` for the pages it could not
   type), `format` (one of the three syntaxes) and `feature` (a Google feature id).

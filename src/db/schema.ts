@@ -683,8 +683,10 @@ export const pages = pgTable("pages", {
     .notNull()
     .default(0),
   // Structural errors the microdata AND RDFa Lite extractors found on this page:
-  // an itemprop/property with no enclosing item, a top-level item with no usable
-  // type, an item past the depth cap. One counter for both syntaxes. Null only on
+  // a microdata itemprop with no enclosing item, a top-level item with no usable
+  // type, an item past the depth cap. One counter for both syntaxes. An RDFa
+  // property with no enclosing typeof is valid (it describes the document) and
+  // is counted in `structured_data_skips.rdfaUnsupported`, not here. Null only on
   // a row written below extraction version 4 (never measured); zero means
   // measured and none found.
   structuredDataMicrodataErrors: integer("structured_data_microdata_errors"),

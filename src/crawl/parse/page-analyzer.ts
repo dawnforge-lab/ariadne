@@ -674,7 +674,11 @@ export interface StructuredDataBlock {
 export interface StructuredDataSkips {
   /** Elements carrying `itemref`, which a forward pass does not follow. */
   microdataItemrefSkipped: number;
-  /** Full-RDFa constructs RDFa Lite does not interpret (Task 3). */
+  /**
+   * RDFa this reader does not model (Task 3): full-RDFa constructs RDFa Lite
+   * does not interpret, terms outside schema.org, and a `property` with no
+   * enclosing `typeof`, which describes the document (29a final review I2).
+   */
   rdfaUnsupported: number;
   /** Property values dropped by the per-page `MAX_ITEM_VALUES` budget. */
   valuesCapped: number;

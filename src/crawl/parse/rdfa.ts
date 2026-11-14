@@ -11,8 +11,14 @@
  * `resource` on a `typeof` element is its `@id`. `property` without `typeof`
  * takes `content`, else `resource`, else `href` / `src` (resolved), else
  * `datetime` on `<time>`, else the element's text (capped like microdata's).
- * A `property` with no enclosing `typeof` node is `counts.errors += 1`, the
- * same page counter microdata uses.
+ * A `property` with no enclosing `typeof` node is NOT an error, unlike a stray
+ * microdata `itemprop`: in RDFa 1.1 it attaches to the document as subject,
+ * which is valid markup this reader does not model, so it is counted in
+ * `skips.rdfaUnsupported` (29a final review I2). With a `typeof` on the same
+ * element the node still opens as a top-level item; the skip is the dropped
+ * link from the document. The structural errors RDFa does feed into the
+ * shared `counts.errors` are item-core's: a top-level `typeof` naming no type
+ * (`typeof=""`) and an item nested past `MAX_ITEM_DEPTH`.
  *
  * VOCABULARY. `vocab` sets the vocabulary for its subtree and counts only when
  * it is schema.org (`http` or `https`, trailing slash optional); an empty
@@ -24,7 +30,8 @@
  * element contributes nothing): `rel`, `rev` or `about` alongside an RDFa
  * attribute (`vocab`, `typeof`, `property`, `prefix`); a `vocab` that is not
  * schema.org; a `typeof` / `property` term outside schema.org (another prefix,
- * a foreign IRI, a bare term without the schema.org vocabulary). An
+ * a foreign IRI, a bare term without the schema.org vocabulary); and a
+ * `property` with no enclosing `typeof` (above, counted once per element). An
  * unsupported element with `typeof` still opens a dead item, so the properties
  * inside it attach to nothing and are not misreported as errors. A `rel` on a
  * plain element with no RDFa attribute is ordinary HTML and is not counted.
@@ -155,7 +162,11 @@ export function createRdfaMachine(
       }
 
       const propertyNames = names !== null && names.length > 0 ? names : null;
-      if (propertyNames !== null && !core.hasScope()) counts.errors += 1;
+      // No enclosing `typeof`: in RDFa 1.1 the property attaches to the
+      // document, which is valid markup and not modelled here — a skip, never
+      // an error (29a final review I2). A `typeof` on the same element still
+      // opens a top-level item below; only its link from the document is lost.
+      if (propertyNames !== null && !core.hasScope()) counts.skips.rdfaUnsupported += 1;
 
       if (typeofValue !== undefined) {
         core.openItem(depth, propertyNames, types !== null && types.length > 0, () => {

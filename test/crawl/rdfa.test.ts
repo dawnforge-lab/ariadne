@@ -137,8 +137,38 @@ describe("RDFa Lite extraction", () => {
     expect(blocks).toEqual([]);
   });
 
-  it("a property with no enclosing typeof is a shared structural error", () => {
-    const { blocks, errors } = rdfa(`<span vocab="https://schema.org/" property="name">x</span>`);
+  it("a property with no enclosing typeof describes the document: a skip, not an error (29a final review I2)", () => {
+    // Valid RDFa 1.1: with no new subject, the property attaches to the document.
+    const { blocks, errors, skips } = rdfa(`<span vocab="https://schema.org/" property="name">x</span>`);
+    expect(blocks).toEqual([]);
+    expect(errors).toBe(0);
+    expect(skips.rdfaUnsupported).toBe(1);
+
+    // The Drupal shape: the page title outside the typed article, via the schema: prefix.
+    const drupal = rdfa(
+      `<h1 property="schema:name">Title</h1>` +
+        `<article typeof="schema:Article"><span property="schema:headline">Title</span></article>`,
+    );
+    expect(drupal.blocks.map((b) => b.raw)).toEqual([
+      { "@context": "https://schema.org", "@type": "Article", headline: "Title" },
+    ]);
+    expect(drupal.errors).toBe(0);
+    expect(drupal.skips.rdfaUnsupported).toBe(1);
+
+    // A typed node that is the document's property is still a block of its own;
+    // only the link from the document is dropped, and counted.
+    const linked = rdfa(
+      `<div vocab="https://schema.org/" property="mainEntity" typeof="Product"><span property="name">Mug</span></div>`,
+    );
+    expect(linked.blocks.map((b) => b.raw)).toEqual([
+      { "@context": "https://schema.org", "@type": "Product", name: "Mug" },
+    ]);
+    expect(linked.errors).toBe(0);
+    expect(linked.skips.rdfaUnsupported).toBe(1);
+  });
+
+  it("an empty top-level typeof is still a structural error", () => {
+    const { blocks, errors } = rdfa(`<div vocab="https://schema.org/" typeof=""><span property="name">x</span></div>`);
     expect(blocks).toEqual([]);
     expect(errors).toBe(1);
   });
