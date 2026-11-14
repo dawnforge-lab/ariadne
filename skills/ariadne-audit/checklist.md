@@ -41,6 +41,14 @@ WHAT CHANGED AFTER IMPORT (the living authority's own change log):
   - CHECK-01: the five `render.*-changed` rules, each also claiming its element's
     check.
 
+  Phase 29a (ruleset 0.26.0, 2026-11-13) — engine paragraphs only; no check's id,
+  title, priority, Evaluate criteria or Record list moved.
+  - CHECK-43: the `schema.*` validation rules over JSON-LD, microdata and RDFa, and
+    the `structured_data` listing.
+  - CHECK-44: `schema.google-required-missing` / `-recommended-missing` replace the
+    retired Product field-presence rule.
+  - CHECK-46: the self-serving match covers the Organization branch, not one type.
+
 WHAT DID NOT CHANGE, and must not: every CHECK id, every check's title, priority,
 `**Evaluate**` criteria and `**Record**` list. The rule registry's `checkIds`
 trace to the ids in this file and CI asserts the coverage.
@@ -2757,13 +2765,40 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
 
 ### CHECK-43: Schema markup audit — types, gaps, and opportunities
 - **Priority**: High | **Requires**: Engine + DevTools
-- **Engine**: `issues_list` with `checkId: "CHECK-43"` — `schema.none-on-site` (info):
-  the crawl stored no JSON-LD of any type, anywhere. That is the categorical case; a
-  site with markup fires nothing here and is judged through its siblings —
-  the Product completeness rules (CHECK-44, being replaced in Phase 29a), `schema.breadcrumb-absent` (CHECK-45) and
-  `schema.self-serving-reviews` (CHECK-46). Read all four before writing this check up.
-  The engine extracts JSON-LD during the crawl, so there is no "validation was not
-  enabled" case: if `schema.none-on-site` did not fire, the site published markup.
+- **Engine**: `issues_list` with `checkId: "CHECK-43"` — the `schema.*` rules, which
+  read JSON-LD, microdata and RDFa (extraction version 4; a crawl below it is named by
+  `extraction.not-recorded`, and the rules that depend on microdata or RDFa refuse it
+  rather than read it as clean). Every block's types and properties are checked against
+  the schema.org vocabulary (release 30.1) and, for the rich-result features Google
+  documents, against Google's own required and recommended lists. The rules:
+  - `schema.parse-error` (warning): a JSON-LD block that is not parseable JSON, or a
+    microdata / RDFa error;
+  - `schema.unknown-type` (warning) and `schema.unknown-property` (warning): a type or a
+    property the vocabulary does not define on that type;
+  - `schema.property-pending-or-superseded` (info): a property schema.org marks pending
+    or superseded;
+  - `schema.embedded-type-mismatch` (warning): a nested node whose type the property does
+    not accept;
+  - `schema.google-required-missing` (warning) and `schema.google-recommended-missing`
+    (info): a block that matched a Google feature and lacks a required or a recommended
+    property (CHECK-44 too, for the Product features);
+  - `schema.deprecated-feature` (info): markup for a feature Google has withdrawn
+    (`FAQPage`, `HowTo`, matched on exactly that type, not on its subtypes);
+  - `schema.template-inconsistent` (warning): a page type where a schema type is on most
+    pages (`SCHEMA_TEMPLATE_SHARE`, default 70 percent, of at least
+    `SCHEMA_TEMPLATE_MIN_PAGES`, default 10) and missing from the rest;
+  - `schema.none-on-site` (info): the crawl stored no structured data of any format
+    anywhere. A site with markup fires nothing here;
+  - `schema.breadcrumb-absent` (CHECK-45) and `schema.self-serving-reviews` (CHECK-46)
+    are the two sibling checks.
+  `schema.none-on-site` and `schema.breadcrumb-absent` need extraction version 4 across
+  the whole crawl. `issue_urls` names the problems per page. The `structured_data`
+  listing answers the question the findings cannot: which page types publish which
+  formats, types and Google features, and how many problems each page carries; its
+  detail, one row per block and problem, is the structured_data_nodes CSV view of
+  `export_crawl`. A crawl the rules have not judged, or judged before this validation
+  existed, is refused, never answered empty. There is no "validation was not enabled"
+  case: if `schema.none-on-site` did not fire, the site published markup.
 - **DevTools** (the per-page-type matrix and the opportunity assessment below need the
   documents themselves, which the query surface does not expose):
   - Execute on one page per page type: `JSON.stringify(Array.from(document.querySelectorAll('script[type="application/ld+json"]')).map(s => JSON.parse(s.textContent)['@type']))`
@@ -2827,23 +2862,23 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
 
 ### CHECK-44: Product schema completeness
 - **Priority**: High | **Requires**: Engine + DevTools
-- **Engine**: `issues_list` with `checkId: "CHECK-44"` — the Product completeness rule
-  (the old field-presence rule was retired in Phase 29a T6; its Google-profile
-  successors land in T7, and CHECK-44 is unclaimed until then): a page carrying Product markup that is missing required or recommended
-  fields. `issue_urls` names the missing fields PER PAGE in the evidence, across
-  every product page the crawl reached — which is the field checklist below, answered
-  at site scale instead of on the one product page a person opened.
-  A product page with NO Product markup at all is the other half, **and the surface
-  cannot answer it today.** A rule that found nothing is simply absent from
-  `issues_list`; there is no pages-considered count beside it, so "every product's
-  markup is complete" and "no product page carries Product markup at all" are
-  indistinguishable from a silent Product completeness rule. Do not try to close
-  the gap by comparing the product cohort's size against a number the surface does
-  not publish. Where the site-scoped `schema.none-on-site` is also silent you know
-  the crawl stored JSON-LD SOMEWHERE, which is weaker than it sounds and is not
-  per-cohort. So: a silent rule here is `SKIP` with the ambiguity written out, and
-  a browser reading of one product page settles it for that page — the missing
-  count is on the engine backlog, not something to estimate around.
+- **Engine**: `issues_list` with `checkId: "CHECK-44"` — `schema.google-required-missing`
+  (warning) and `schema.google-recommended-missing` (info), naming the feature in the
+  `Features` column: `merchant-listing` or `product-snippet` for a product page (the
+  same two rules also cover Google's other features, so read the column).
+  A product page whose markup matched a Product feature and lacks a required or a
+  recommended property fires them, and `issue_urls` names the missing properties PER
+  PAGE across every product page the crawl reached — the field checklist below,
+  answered at site scale instead of on the one product page a person opened.
+  A product page with NO Product markup at all is the other half, **and the findings
+  cannot answer it.** A rule that found nothing is simply absent from `issues_list`,
+  and "every product's markup is complete" and "no product page carries Product markup
+  at all" look the same there. The `structured_data` listing closes it: filter
+  `pageType: "product"` and read `types` and `googleFeatures` per page; a product page
+  that is missing from the listing, or listed without `Product` in `types`, carries no
+  Product markup. Compare that against the product cohort's size from `pages_query`
+  (`pageType=product`). The listing is refused on a crawl the rules have not judged or
+  judged before structured data validation existed: run `crawl_rules` first.
 - **DevTools** (only for the structure the rule does not judge — the `offers` shape and
   the price format):
   1. Navigate to a product page the engine flagged
@@ -2896,7 +2931,10 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
 - **Priority**: Medium | **Requires**: Engine + DevTools
 - **Engine**: `issues_list` with `checkId: "CHECK-46"` — `schema.self-serving-reviews`
   (info): pages publishing review or rating markup the site wrote about itself, which
-  Google's guidelines exclude from rich results. `issue_urls` for the pages.
+  Google's guidelines exclude from rich results. The match covers the whole
+  `Organization` branch of the schema.org hierarchy, so `LocalBusiness`, `Restaurant`,
+  `Dentist` and every other subtype are reported, not only `Organization` itself.
+  `issue_urls` for the pages.
 - **DevTools**: Where the markup exists and the rule is quiet, spot-check one product
   page for the Review/AggregateRating shape and its source attribution
 - **Evaluate**:

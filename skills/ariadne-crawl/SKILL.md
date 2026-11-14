@@ -83,6 +83,7 @@ same JSON:
 | `issue_inlinks` | `GET /crawls/:id/issues/:ruleId/inlinks` |
 | `metrics_get` | `GET /crawls/:id/metrics` |
 | `pages_query` | `GET /crawls/:id/pages` |
+| `structured_data` | `GET /crawls/:id/structured-data` |
 | `robots_get` | `GET /crawls/:id/robots` |
 | `export_crawl` | `GET /crawls/:id/export` |
 
@@ -820,10 +821,10 @@ upgrading the engine rather than re-crawling the site.
 
 `crawl_config_get` answers the crawl's judgement: `{crawlId, judgement, thresholds,
 judgedWith, judgementStale}`. `judgement` is the block, `{}` when nothing is set;
-`thresholds` lists all 20 overridable thresholds as `{value, default, min, max,
+`thresholds` lists all 22 overridable thresholds as `{value, default, min, max,
 overridden}`, where `value` is what the NEXT rules run will use; `judgedWith` is what
 the last completed run used — `{disabledRules, thresholds, findingCap?}`, its
-`thresholds` all 20 at the values that run actually judged with — (`null` if nobody
+`thresholds` all 22 at the values that run actually judged with — (`null` if nobody
 has judged the crawl); and
 `judgementStale` (`{stale, reasons}`) says whether the two differ.
 

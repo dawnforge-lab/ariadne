@@ -1,15 +1,49 @@
 # The Ariadne surface Talos codes against
 
-**Status:** the contract as of Phase 28c (ruleset 0.25.1, migrations 0000–0050,
-34 MCP tools / 34 HTTP routes; every column label in this document is served
+**Status:** the contract as of Phase 29a (ruleset 0.26.0, migrations 0000–0054,
+35 MCP tools / 35 HTTP routes; every column label in this document is served
 under the ruleset version the engine reports — `rules_catalog`'s
 `rulesetVersion`, which the metric-table pass moves).
 `docs/talos-integration.md` says *why* the seam exists and what obligations bind
 it; this document says *what the seam is*.
 
+**What Phase 29a changed here (2026-11-13): structured data is validated, not only
+counted.** One tool and one route are added (35 MCP tools / 35 HTTP routes),
+`export_crawl` gains a twelfth CSV view, and the ruleset moves to **0.26.0**
+(197 rules: 72 page / 111 query / 14 metric; severities 33 critical / 71 warning / 93
+info; 22 overridable thresholds). Extraction moves to **version 4**: the crawler now
+reads microdata and RDFa Lite as well as JSON-LD, with a per-page count of what the
+reader had to skip. Migrations 0051–0054 add the block `id` and `format` and the
+page's microdata and skip counts (0051, 0052), replace the per-block field-presence
+column with the per-block validation (0053), and stamp the two new thresholds onto
+every stored run stamp (0054).
+
+- **`structured_data` (`GET /crawls/:id/structured-data`)** is one row per page that
+  carries structured data (§4.6a).
+- **`structured_data_nodes`** is the listing's detail as a CSV view, one row per block
+  and problem (§12).
+- **Nine `schema.*` rules are new** (`schema.parse-error`, `schema.unknown-type`,
+  `schema.unknown-property`, `schema.property-pending-or-superseded`,
+  `schema.embedded-type-mismatch`, `schema.google-required-missing`,
+  `schema.google-recommended-missing`, `schema.deprecated-feature`,
+  `schema.template-inconsistent`), judged against schema.org release 30.1 and, for
+  the rich-result features Google documents, Google's required and recommended lists.
+  `schema.product-incomplete` is **retired**: a page carrying Product markup is judged
+  by the two Google rules, with feature `merchant-listing` or `product-snippet`. A
+  crawl judged at 0.25.1 or earlier still carries `schema.product-incomplete` findings
+  until it is re-judged, and `crawl_compare` raises `ruleset-mismatch` across the
+  boundary.
+- **Two thresholds are overridable:** `SCHEMA_TEMPLATE_SHARE` (percent, 50–100,
+  default 70) and `SCHEMA_TEMPLATE_MIN_PAGES` (2–100000, default 10), so
+  `crawl_config_get` lists 22 and every run stamp holds 22.
+- **`schema.none-on-site` and `schema.breadcrumb-absent` now need extraction 4** across
+  the whole crawl; on an older crawl `extraction.not-recorded` speaks
+  (`requiredVersion: 4`) and they are silent, not clean.
+  `schema.self-serving-reviews` matches `Organization` and every subtype.
+
 **What Phase 28c changed here (2026-11-12): schedules, and a crawl's history.** Seven
 tools and seven routes are added (34 MCP tools / 34 HTTP routes), `crawl_status` gains
-one field, and the ruleset is unchanged (0.25.1); migrations 0045–0049 add
+one field, and the ruleset is unchanged (0.25.1; 0.26.0 from Phase 29a); migrations 0045–0049 add
 `crawl_events`, its triggers, `schedules` and `schedule_credentials`, and 0050 a partial
 index that keeps `renderDocuments` from scanning a crawl's pages. Gate evidence:
 `docs/gates/phase-28c.md`.
@@ -1421,7 +1455,7 @@ config_validate ──▶ crawl_start ──▶ crawl_status (poll until status 
                             │
                             └─▶ issues_list · issues_overview · issue_urls · metrics_get
                                 crawl_overview (also before the rules: what it cannot measure is named)
-                                pages_query · robots_get · rules_catalog (with crawlId) · export_crawl
+                                pages_query · structured_data · robots_get · rules_catalog (with crawlId) · export_crawl
                                 crawl_compare · compare_urls (two judged crawls of one site)
 ```
 
@@ -1518,7 +1552,7 @@ every MCP tool's arguments. `crawl_start` and `config_validate` answer ONE
 `unknown_field` error per object, not one per key, so a body of a hundred thousand
 unknown keys is one short refusal, read in linear time. Rule ids in `judgement` are
 positional too, with the ruleset version (`key 2 in the order sent names no rule in
-ruleset 0.25.1`). Two things are still named: a credential header or cookie name that
+ruleset 0.26.0`). Two things are still named: a credential header or cookie name that
 is a valid HTTP token (27c), and a rule id already **stored** in a crawl's judgement
 that the ruleset no longer has, because that is the repair path (`crawl_config_set`,
 §4.9). "In the order sent" is `Object.keys` order, so an integer-like key counts first.
@@ -1937,7 +1971,7 @@ and after a `SLOW_MS` override on top of that, `{"stale":true,"reasons":["overri
 A crawl whose stored judgement overrides a rule this ruleset does not define is a
 **409** here, naming the rule, as on every surface that reads the judgement;
 `crawl_config_set` removing that override is the repair (§4.9). A judged crawl
-with no stamp, or with a stamp whose `thresholds` lack any of the 20 names or
+with no stamp, or with a stamp whose `thresholds` lack any of the 22 names or
 hold a value outside its range, is a 500 (the server log names the crawl under
 the correlation id), never "not stale" (hard rule 7). Pinned:
 `test/api/judgement-config.test.ts:599` "judgementStale on crawl_status,
@@ -2746,6 +2780,51 @@ row it answers with, in its own description", `test/api/query.test.ts:1935` "car
 reader quotes is the one they can see", `test/api/mcp.test.ts:2253` "answers the
 crawled pages, slim and ordered by URL".
 
+### 4.6a `structured_data` → `{items: StructuredDataPageRow[], nextCursor}`
+
+`GET /crawls/:id/structured-data`. One row per page that carries structured data (a
+JSON-LD, microdata or RDFa block) or a JSON-LD parse error or microdata error; a page
+with none of them is not listed.
+
+```
+url, pageType, indexable, formats, types, googleFeatures,
+warningCount, infoCount, jsonLdParseErrors, microdataErrors, skips
+```
+
+- **`formats`** are the syntaxes found (`jsonld`, `microdata`, `rdfa`) and **`types`**
+  the schema.org types of the page's blocks, both distinct and sorted.
+  **`googleFeatures`** are the Google rich-result feature ids a block matched
+  (`article`, `breadcrumb`, `product-snippet`, `merchant-listing`, `review`,
+  `aggregate-rating`, `organization`, `local-business`, `event`, `recipe`, `video`,
+  `job-posting`, `software-app`, `faq`, `how-to`), whatever it was missing.
+- **Two counts, named after the severities.** `warningCount` is unknown types,
+  unknown properties, type mismatches, matched Google features missing a REQUIRED
+  property, plus `jsonLdParseErrors` and `microdataErrors`. `infoCount` is pending or
+  superseded properties, matched features missing a RECOMMENDED property, and markup
+  for a feature Google has withdrawn.
+- **Null is not zero.** `microdataErrors` and `skips` are null on a page crawled below
+  extraction version 4: nobody looked for microdata, so `warningCount` there holds no
+  microdata errors. `skips` is `{microdataItemrefSkipped, rdfaUnsupported,
+  valuesCapped}` where the reader dropped something: `itemref` elements it does not
+  follow, full-RDFa constructs RDFa Lite does not interpret, values past the per-page
+  cap.
+- **Filters** (each selects PAGES; the row stays the whole page): `pageType` (a
+  template cohort as this crawl typed it, `(untyped)` for the pages it could not
+  type), `format` (one of the three syntaxes) and `feature` (a Google feature id).
+  An unknown `format` or `feature` is a validation error naming the closed set.
+  Ordered by URL; `limit` and `cursor` as everywhere.
+- **Refused, never answered empty.** A crawl the rules have not judged, and a crawl
+  judged before structured data validation existed, are 409 (`CONFLICT`): run
+  `crawl_rules` and ask again. An empty listing would read as a site whose markup has
+  no problems. A stored value this engine could not have written (a format outside
+  the three, a skips blob that is not exactly the three counters, a validation blob
+  that is not readable) throws naming the crawl and the page; it is never coerced.
+- The problem-by-problem detail is the `structured_data_nodes` CSV view (§12), one row
+  per block and problem. The findings are the `schema.*` rules (`issues_list`
+  with `checkId: "CHECK-43"`); this listing is what they cannot show, which templates
+  publish which markup. A page with a clean block is listed with zero counts; a page
+  that carries no markup is the one absent from the listing.
+
 ### 4.7 `robots_get` → the robots.txt this crawl obeyed
 
 `{crawlId, robotsUrl, outcome, raw, truncated, crawlDelaySec, note,
@@ -2786,8 +2865,9 @@ Both answer `{crawlId, crawl, mutability, judgement, thresholds, judgedWith,
 judgementStale}`; the paragraphs below describe the judgement half, and the **crawl
 half** follows them. The gate crawl,
 as it came back after its last re-judge (2026-11-08, after migration 0033; 18 of
-the 20 thresholds elided in `thresholds`, every one has the same five keys, and 16
-of the 20 in `judgedWith.thresholds`, which always holds all 20):
+the 20 thresholds it then had elided in `thresholds`, every one has the same five keys, and 16
+of the 20 in `judgedWith.thresholds`, which always holds every threshold; Phase 29a
+made it 22):
 
 ```json
 {"crawlId":"crawl_4dd32709-56c9-4a62-9af4-7a843f76ff6c","judgement":{},
@@ -2807,7 +2887,7 @@ of the 20 in `judgedWith.thresholds`, which always holds all 20):
   200 applies. It is stored where it always was, `config_jsonb.findingCap`
   (Deviation 1), so `crawl_status.findingCap`, `crawl_start`'s top-level key and
   this block read and write one value.
-- **`thresholds`** lists ALL 20 overridable thresholds as `{value, default, min,
+- **`thresholds`** lists ALL 22 overridable thresholds as `{value, default, min,
   max, overridden}`: `value` is what the NEXT rules run will use, `overridden` is
   true where the block sets it, and `min` / `max` are the inclusive bounds. The
   names: `TITLE_MIN`, `TITLE_MAX`, `META_MIN`, `META_MAX`, `H1_MAX`, `H2_MAX`,
@@ -2815,12 +2895,14 @@ of the 20 in `judgedWith.thresholds`, which always holds all 20):
   `META_PX_MAX`, `DEEP_DEPTH`, `THIN_WORDS`, `SOFT_404_WORDS`,
   `IMAGE_WEIGHT_WARN`, `CHAIN_HOPS`, `HIGH_INTERNAL_OUTLINKS`,
   `HIGH_EXTERNAL_OUTLINKS`, `UNAVAILABLE_AFTER_WARN_DAYS` (20, not the 19 the
-  plan's prose counted: ruling 5). Extraction-time limits, similarity distances,
+  plan's prose counted: ruling 5), and, from Phase 29a, `SCHEMA_TEMPLATE_SHARE`
+  (percent, 50–100, default 70) and `SCHEMA_TEMPLATE_MIN_PAGES` (2–100000, default
+  10), 22 in all. Extraction-time limits, similarity distances,
   render heuristics, walk bounds and protocol limits are engine internals and
   are not overridable.
 - **`judgedWith`** is the stamp the last completed rules run wrote of what it
   used, `{disabledRules, thresholds, findingCap?}`, or `null` on a crawl nobody
-  has judged. Its `thresholds` holds ALL 20 names at the EFFECTIVE values that
+  has judged. Its `thresholds` holds ALL 22 names at the EFFECTIVE values that
   run used (its override, else the default then in force), not only the
   overrides, so it stays true when a later ruleset moves a default: the copy is
   rendered from these values, and a moved default reads stale `thresholds`. **`judgementStale`** compares it with the
@@ -3006,7 +3088,7 @@ applied as well:** `type` and `priority` are that crawl's, with
 value; **`disabled: true`** marks a rule the judgement disables, which is still
 listed, and whose `fired.count` still counts its stored findings (338 for the
 gate crawl's disabled `title.same-as-h1`), while every findings listing and
-export leaves them out; the answer gains `thresholds` (the 20 values, by name,
+export leaves them out; the answer gains `thresholds` (the 22 values, by name,
 the crawl's findings were judged with) and `judgementStale`; and the copy is
 rendered from those thresholds, so an override shows in the text only after
 `crawl_rules` re-runs (the gate crawl's `performance.slow-response` title read
@@ -3876,10 +3958,28 @@ Six postures a Talos integrator should know about rather than discover:
 
 ## 11. Versioning, and what a ruleset change does to a served crawl
 
-`RULESET_VERSION` (**0.25.1** as of Phase 28b) stamps **judgement**: bump it when
+`RULESET_VERSION` (**0.26.0** as of Phase 29a) stamps **judgement**: bump it when
 a rule's verdict or copy changes. Adding a rule or a metric family adds rows
 without changing a verdict — `metrics` rows carry no version column at all —
 which is the argument Phase 10 held 0.7.0 on.
+
+**Phase 29a bumped to 0.26.0, once, and moved `EXTRACTION_VERSION` to 4.** Nine ids
+joined (`schema.parse-error`, `schema.unknown-type`, `schema.unknown-property`,
+`schema.property-pending-or-superseded`, `schema.embedded-type-mismatch`,
+`schema.google-required-missing`, `schema.google-recommended-missing`,
+`schema.deprecated-feature`, `schema.template-inconsistent`); `schema.product-incomplete`
+is retired into the two `schema.google-*` rules, so a crawl re-judged at 0.26.0 loses
+that id's findings and gains the Google ones. Two verdicts widened:
+`schema.self-serving-reviews` matches `Organization` and every subtype, and
+`schema.none-on-site` and `schema.breadcrumb-absent` count microdata and RDFa blocks as
+markup. Those two, with `schema.template-inconsistent`, are silent on a crawl not wholly
+at extraction 4, where the marker `extraction.not-recorded` fires with
+`requiredVersion: 4`. The ruleset is 197 rules (72 page / 111 query / 14 metric; 33
+critical / 71 warning / 93 info), and two thresholds, `SCHEMA_TEMPLATE_SHARE` and
+`SCHEMA_TEMPLATE_MIN_PAGES`, are overridable, 22 in all; migration 0054 rewrites every
+stored run stamp to hold both at their defaults, so `judgementStale` does not read
+stale on an old stamp for that reason. A crawl compared across the boundary raises
+`ruleset-mismatch`.
 
 **Phase 11 bumped to 0.8.0, once.** Two things in the phase each require it on
 the rule's own terms: six rules writing verdicts a page or a site could not
@@ -4168,6 +4268,7 @@ rest.
 | `metric_table` (needs `metricId`) | **the metric's own** — its `summary` labels, then its `columns` labels | one row of one metric's table | 40 rows (`inlinks.extremes`) |
 | `issues_overview` (Phase 27a) | Issue Name, Issue Type, Issue Priority, Severity, URLs, % of Judged, Description, How To Fix, Rule Id, Check Ids | one rule, as `issues_overview` (§4.3a) answers it | 46 rows / 27,040 B on the gate crawl `crawl_4dd32709` |
 | `crawl_overview` (Phase 27a) | Section, Label, Value, Percent | one entry of one `crawl_overview` section (§4.3b), then one row per `notMeasured` item | 75 rows / 2,332 B on the gate crawl `crawl_4dd32709` |
+| `structured_data_nodes` (Phase 29a) | URL, Format, Schema Type, Path, Node Type, Problem, Detail | one problem of one structured-data block; a block with none is one row with an empty Problem | — (added P29a-T9) |
 
 Semantics a consumer must repeat to its own users:
 
@@ -4194,6 +4295,17 @@ Semantics a consumer must repeat to its own users:
   fired: the view takes no `includeZero`. Like the JSON, it is refused on an
   unjudged crawl, before the first byte. It is named
   `crawl_<uuid>-issues_overview.csv`.
+- **`structured_data_nodes` is the `structured_data` listing's detail** (Phase 29a): one
+  row per (block, problem), and one row with an empty `Problem` for a block with
+  none, so a clean block is a row that says so. `Problem` is one of
+  `unknown-type`, `unknown-property`, `property-status`, `type-mismatch`,
+  `google-required`, `google-recommended`, `deprecated-feature`; `Path` and `Node Type`
+  place the problem inside the block and `Detail` names what is wrong (the property,
+  the type, the missing list). Refused before the first byte, 409, on a crawl the rules
+  have not judged or judged before structured data validation existed; a block met
+  with no validation blob mid-export throws and destroys the connection rather than
+  writing the block as clean. It pages by `(block id, problem position)` and, like the
+  overview views, carries no `disabledRules`.
 - **`crawl_overview` is the Crawl Overview as a sheet** (Phase 27a): one row per
   entry, section by section in the JSON's order, then one row per `notMeasured`
   item, written `<id>,Not measured: <reason>,,` with empty Value and Percent
@@ -4276,7 +4388,7 @@ Semantics a consumer must repeat to its own users:
 - **Formula injection is guarded uniformly:** a cell whose first non-whitespace
   character is `= + - @` is written with a leading apostrophe, before RFC 4180
   quoting. The trade is deliberate — a negative number would render `'-3`; no
-  column in these eleven views emits one (a metric's cells are counts, bytes,
+  numeric column in these twelve views emits one (a metric's cells are counts, bytes,
   distances and percentages, none of which go below zero). It is not a text-column guard: a
   `Cache-Control` header is the server's own string and lands in a cell exactly
   as a page title does, which is what `test/api/query.test.ts:3096` "never lets a
