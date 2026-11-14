@@ -2663,7 +2663,7 @@ header on the catalog, and only on metric rules",
 and one row per scope",
 `test/rules/metric-table.test.ts:377` "gives every metric rule a table whose
 columns are the catalog's",
-`test/fixtures/harness.test.ts:2488` "renders every metric's table, with no
+`test/fixtures/harness.test.ts:2524` "renders every metric's table, with no
 empty column and no unmapped key".
 
 **`judgementStale`** (Phase 27a) is the answer's last key, `crawl_status`'s flag
@@ -2792,11 +2792,16 @@ warningCount, infoCount, jsonLdParseErrors, microdataErrors, skips
 ```
 
 - **`formats`** are the syntaxes found (`jsonld`, `microdata`, `rdfa`) and **`types`**
-  the schema.org types of the page's blocks, both distinct and sorted.
+  the schema.org types of the page's blocks, both distinct and sorted. `types` names
+  each block's top-level node only: a Product nested inside a block (a WebPage's
+  `mainEntity`, say) is not listed.
   **`googleFeatures`** are the Google rich-result feature ids a block matched
   (`article`, `breadcrumb`, `product-snippet`, `merchant-listing`, `review`,
   `aggregate-rating`, `organization`, `local-business`, `event`, `recipe`, `video`,
-  `job-posting`, `software-app`, `faq`, `how-to`), whatever it was missing.
+  `job-posting`, `software-app`), whatever it was missing. A `ProductGroup` (Google's
+  variant markup) matches neither Product feature. Markup for a feature Google has
+  withdrawn (`FAQPage`, `HowTo`) is not a `googleFeatures` value and cannot be
+  filtered on; it counts in `infoCount` only.
 - **Two counts, named after the severities.** `warningCount` is unknown types,
   unknown properties, type mismatches, matched Google features missing a REQUIRED
   property, plus `jsonLdParseErrors` and `microdataErrors`. `infoCount` is pending or
@@ -3605,14 +3610,14 @@ canonicalises under noindex", `test/rules/health-metrics.test.ts:414`
 "partitions every fetched URL over the four columns",
 `test/rules/health-metrics.test.ts:567`
 "buckets the findings the capped run wrote, and no others"; the copy contracts —
-`test/rules/copy.test.ts:1510` "names every column and the population they
-are over", `test/rules/copy.test.ts:1535` "says the counts are the authority, not the
-ratio", `test/rules/copy.test.ts:1552` "grades nothing: no score, no label, no
+`test/rules/copy.test.ts:1512` "names every column and the population they
+are over", `test/rules/copy.test.ts:1537` "says the counts are the authority, not the
+ratio", `test/rules/copy.test.ts:1554` "grades nothing: no score, no label, no
 threshold";
 `test/rules/coverage.test.ts:633` "site.health is filed under the
 engine-coverage check, and CHECK-32 lost no claimant" (the re-file in both
 directions, and CHECK-83 outside the crawl-derived universe);
-`test/fixtures/harness.test.ts:3402` "the health rollup agrees with a
+`test/fixtures/harness.test.ts:3438` "the health rollup agrees with a
 page-by-page recount" — an independent recount in JavaScript over the end-to-end
 fixture crawl.
 

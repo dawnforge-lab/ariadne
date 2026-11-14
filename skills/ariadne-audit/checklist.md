@@ -2772,7 +2772,11 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
   the schema.org vocabulary (release 30.1) and, for the rich-result features Google
   documents, against Google's own required and recommended lists. The rules:
   - `schema.parse-error` (warning): a JSON-LD block that is not parseable JSON, or a
-    microdata / RDFa error;
+    microdata or RDFa Lite structural error. The two share one per-page count
+    (`microdataErrors` in the listing): a microdata `itemprop` outside any item, a
+    top-level `itemscope` or `typeof` that names no type, an item nested past 32
+    levels. An RDFa `property` with no enclosing `typeof` is valid RDFa that describes
+    the document; it is counted among the listing's RDFa `skips`, never as an error;
   - `schema.unknown-type` (warning) and `schema.unknown-property` (warning): a type or a
     property the vocabulary does not define on that type;
   - `schema.property-pending-or-superseded` (info): a property schema.org marks pending
@@ -2784,13 +2788,17 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
     property (CHECK-44 too, for the Product features);
   - `schema.deprecated-feature` (info): markup for a feature Google has withdrawn
     (`FAQPage`, `HowTo`, matched on exactly that type, not on its subtypes);
-  - `schema.template-inconsistent` (warning): a page type where a schema type is on most
-    pages (`SCHEMA_TEMPLATE_SHARE`, default 70 percent, of at least
-    `SCHEMA_TEMPLATE_MIN_PAGES`, default 10) and missing from the rest;
+  - `schema.template-inconsistent` (warning): a page type with at least
+    `SCHEMA_TEMPLATE_MIN_PAGES` judged pages (default 10; the floor is on the page
+    type's size, not on how many carry the schema type) where a schema type is on
+    `SCHEMA_TEMPLATE_SHARE` (default 70 percent) or more of them and missing from the
+    rest;
   - `schema.none-on-site` (info): the crawl stored no structured data of any format
     anywhere. A site with markup fires nothing here;
-  - `schema.breadcrumb-absent` (CHECK-45) and `schema.self-serving-reviews` (CHECK-46)
-    are the two sibling checks.
+  - `schema.breadcrumb-absent` and `schema.self-serving-reviews` are the two sibling
+    rules. They claim CHECK-45 and CHECK-46 respectively, not CHECK-43, so
+    `issues_list` with `checkId: "CHECK-43"` does not return them: ask for those
+    checks by their own ids.
   `schema.none-on-site` and `schema.breadcrumb-absent` need extraction version 4 across
   the whole crawl. `issue_urls` names the problems per page. The `structured_data`
   listing answers the question the findings cannot: which page types publish which
@@ -2876,8 +2884,14 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
   at all" look the same there. The `structured_data` listing closes it: filter
   `pageType: "product"` and read `types` and `googleFeatures` per page; a product page
   that is missing from the listing, or listed without `Product` in `types`, carries no
-  Product markup. Compare that against the product cohort's size from `pages_query`
-  (`pageType=product`). The listing is refused on a crawl the rules have not judged or
+  top-level Product markup. `types` names each block's top-level node only, so a
+  Product nested inside another node (a WebPage's `mainEntity`, or a microdata item
+  under a `body` itemscope) is not listed there, and is not judged against the Product
+  features either; open such a page in DevTools before calling it unmarked. Compare
+  that against the product cohort's size from `pages_query` (`pageType=product`).
+  A `ProductGroup` (Google's product-variant markup) matches neither Product feature,
+  since Google reads the offers on its variants; a variant page's own top-level
+  `Product` is judged as usual. The listing is refused on a crawl the rules have not judged or
   judged before structured data validation existed: run `crawl_rules` first.
 - **DevTools** (only for the structure the rule does not judge — the `offers` shape and
   the price format):
@@ -2934,7 +2948,9 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
   Google's guidelines exclude from rich results. The match covers the whole
   `Organization` branch of the schema.org hierarchy, so `LocalBusiness`, `Restaurant`,
   `Dentist` and every other subtype are reported, not only `Organization` itself.
-  `issue_urls` for the pages.
+  `issue_urls` for the pages. On an independent directory, booking or review site,
+  ratings of businesses the site does not own are not self-serving: dismiss the
+  finding there.
 - **DevTools**: Where the markup exists and the rule is quiet, spot-check one product
   page for the Review/AggregateRating shape and its source attribution
 - **Evaluate**:
