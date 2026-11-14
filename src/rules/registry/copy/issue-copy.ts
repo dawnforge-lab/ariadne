@@ -974,7 +974,7 @@ export const COPY_TEMPLATES: Record<string, IssueCopy> = {
   "schema.breadcrumb-absent": {
     title: "Structured data: No BreadcrumbList markup on the site",
     explanation:
-      "The site has at least 5 indexable, self-canonical pages and no page carries BreadcrumbList JSON-LD. Breadcrumb markup lets search results show the path to a page and tells search engines how sections relate.",
+      "The site has at least 5 indexable, self-canonical pages and no page carries a BreadcrumbList in JSON-LD, microdata or RDFa, the three formats that are read. Breadcrumb markup lets search results show the path to a page and tells search engines how sections relate.",
     howToFix:
       "Add a BreadcrumbList block to every template below the home page, generated from the same navigation data as the visible breadcrumbs.",
   },

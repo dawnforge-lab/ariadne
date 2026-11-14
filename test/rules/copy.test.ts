@@ -768,9 +768,12 @@ describe("copy: structured data", () => {
     }
     // And the site-wide rule names all three, since it is the one whose
     // silence a client would read as "we have no markup" (29a final review M3).
-    const none = copy("schema.none-on-site");
-    for (const format of ["JSON-LD", "microdata", "RDFa"]) expect(none.explanation).toContain(format);
-    expect(none.title).not.toContain("JSON-LD");
+    // breadcrumb-absent reads the same three formats and says so too.
+    for (const id of ["schema.none-on-site", "schema.breadcrumb-absent"]) {
+      const c = copy(id);
+      for (const format of ["JSON-LD", "microdata", "RDFa"]) expect(c.explanation, id).toContain(format);
+      expect(c.title, id).not.toContain("JSON-LD");
+    }
   });
 
   // The self-serving finding is a statement about which snippets Google shows.

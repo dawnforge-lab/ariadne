@@ -70,6 +70,13 @@ const CHANGED_SINCE_0_22: Record<string, Partial<Entry>> = {
       )
       .replace(" Only JSON-LD is read; microdata and RDFa are not detected.", ""),
   },
+  // 0.26.0, 29a final review: breadcrumb-absent names all three formats it reads, like none-on-site.
+  "schema.breadcrumb-absent": {
+    explanation: FIXTURE["schema.breadcrumb-absent"]!.explanation.replace(
+      "no page carries BreadcrumbList JSON-LD.",
+      "no page carries a BreadcrumbList in JSON-LD, microdata or RDFa, the three formats that are read.",
+    ),
+  },
   // 0.26.0, 29a final review M7: the Organization branch includes directory and booking sites.
   "schema.self-serving-reviews": {
     explanation: FIXTURE["schema.self-serving-reviews"]!.explanation
