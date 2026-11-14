@@ -254,10 +254,11 @@ const typeMismatch: Fixture = {
     serve(req, res, () => ({
       title: "Estuary pilot book listing on the fixture site",
       metaDescription: "A Book record whose author field holds a node of a type that an author can never be.",
-      // The brief's Recipe cannot carry this case: Recipe is a subtype of HowTo in
-      // schema.org, and `schema.deprecated-feature` matches by subtype, so every
-      // Recipe also fires it (reported in the task report). Book has no Google
-      // profile and no deprecated feature, so the mismatch fires alone.
+      // A Book, not the brief's Recipe: a Recipe matches Google's recipe profile,
+      // whose long recommended list would also fire google-recommended-missing
+      // unless the page carried every field. Book has no Google profile and is
+      // no withdrawn feature, so the mismatch fires alone. (deprecated-feature
+      // matches HowTo exactly since 9c4d222, so a Recipe no longer fires it.)
       headExtra: jsonLd({
         "@type": "Book",
         name: "A pilot book for the Swale and the Medway",

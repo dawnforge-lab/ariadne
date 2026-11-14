@@ -1997,6 +1997,42 @@ describe("the fixture site end to end", () => {
     });
   });
 
+  it("each schema.* rule wrote exactly the findings the fixtures call for (Gate 29a clause 1)", async () => {
+    // `exact` pins each fixture page's own set; this pins the crawl-wide count
+    // per rule, so a finding on a page no fixture names cannot hide. The only
+    // pages carrying markup are the two `/authored3/` structured-data pages and
+    // the nineteen `/authored29a/` pages, every one of them `exact`:
+    //  - one each from the seven single-rule `/authored29a/` pages (parse-error,
+    //    unknown-type, unknown-property, pending-property, type-mismatch, faq,
+    //    and tpl/10 for template-inconsistent);
+    //  - google-required-missing: `/authored29a/event-no-date` (startDate) and
+    //    `/authored3/product-incomplete` (image), so 2;
+    //  - google-recommended-missing: `/authored3/product-incomplete` and
+    //    `/authored3/reviews`, so 2 — every `/authored29a/` page is complete on
+    //    its recommended fields, the template's nine Products included;
+    //  - self-serving-reviews: `/authored3/reviews`;
+    //  - breadcrumb-absent: the one site-scoped finding (no BreadcrumbList);
+    //  - none-on-site: absent, since the site carries markup.
+    // The clean microdata and RDFa pages and tpl/1–9 add nothing.
+    const counts = await db.execute<{ rule_id: string; n: number }>(sql`
+      select rule_id, count(*)::int as n from issues
+      where crawl_id = ${summary.crawlId} and rule_id like 'schema.%'
+      group by rule_id order by rule_id`);
+    expect(Object.fromEntries(counts.rows.map((r) => [r.rule_id, Number(r.n)]))).toEqual({
+      "schema.breadcrumb-absent": 1,
+      "schema.deprecated-feature": 1,
+      "schema.embedded-type-mismatch": 1,
+      "schema.google-recommended-missing": 2,
+      "schema.google-required-missing": 2,
+      "schema.parse-error": 1,
+      "schema.property-pending-or-superseded": 1,
+      "schema.self-serving-reviews": 1,
+      "schema.template-inconsistent": 1,
+      "schema.unknown-property": 1,
+      "schema.unknown-type": 1,
+    });
+  });
+
   it("the duplicate rules see the site's real duplicates, end to end", async () => {
     // The simhash round trip, through the real crawler for once: an unsigned
     // 64-bit value from the analyzer, stored as a signed bigint by the writer,
@@ -3006,7 +3042,7 @@ describe("the fixture site end to end", () => {
     // twice. It is a URL already listed, so `totalUrls` stays 164 (distinct
     // URLs); it is one more MEMBERSHIP, so `totalMemberships` is 165; and the
     // repeat inside the extra document is not a second membership of it, so it
-    // is 165 and not 147 (review focus 2, end to end).
+    // is 165 and not 166 (review focus 2, end to end).
     //
     // 164 is nowhere near `SITEMAP_URL_CAP` (50,000), so no document breaches
     // it; no document was dropped for exceeding the read cap; and the walk
