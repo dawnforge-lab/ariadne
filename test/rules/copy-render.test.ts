@@ -60,17 +60,26 @@ const ADDED_SINCE_0_22 = [
 // differ from the fixture, spelled out so any other drift still fails.
 const CHANGED_SINCE_0_22: Record<string, Partial<Entry>> = {
   // 0.26.0, Phase 29a T8: microdata and RDFa are read, and self-serving reviews walk the Organization hierarchy.
+  // 0.26.0, 29a final review M3: the none-on-site title and opening name all three formats.
   "schema.none-on-site": {
-    explanation: FIXTURE["schema.none-on-site"]!.explanation.replace(
-      "Only JSON-LD is read; microdata and RDFa are not detected.",
-      "JSON-LD, microdata and RDFa are all read.",
-    ),
+    title: "Structured data: No structured data on the site",
+    explanation: FIXTURE["schema.none-on-site"]!.explanation
+      .replace(
+        "No page in the crawl carries JSON-LD.",
+        "No page in the crawl carries JSON-LD, microdata or RDFa, the three formats that are read.",
+      )
+      .replace(" Only JSON-LD is read; microdata and RDFa are not detected.", ""),
   },
+  // 0.26.0, 29a final review M7: the Organization branch includes directory and booking sites.
   "schema.self-serving-reviews": {
-    explanation: FIXTURE["schema.self-serving-reviews"]!.explanation.replace(
-      "typed exactly Organization or LocalBusiness carries",
-      "typed Organization or any of its subtypes (LocalBusiness, Restaurant, …) carries",
-    ),
+    explanation: FIXTURE["schema.self-serving-reviews"]!.explanation
+      .replace(
+        "typed exactly Organization or LocalBusiness carries",
+        "typed Organization or any of its subtypes (LocalBusiness, Restaurant, …) carries",
+      )
+      .concat(
+        " Because every Organization subtype is matched, a directory, booking or review site that marks up ratings of businesses it does not own is listed too; those ratings are not self-serving, and the finding can be dismissed on such a site.",
+      ),
   },
   // 0.25.0, Phase 27d: the sitemap walk's time budget, and a stop during a re-walk, are causes of "partly read".
   "hreflang.declarations-incomplete": {

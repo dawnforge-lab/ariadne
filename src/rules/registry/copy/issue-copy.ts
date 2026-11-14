@@ -979,16 +979,16 @@ export const COPY_TEMPLATES: Record<string, IssueCopy> = {
       "Add a BreadcrumbList block to every template below the home page, generated from the same navigation data as the visible breadcrumbs.",
   },
   "schema.none-on-site": {
-    title: "Structured data: No JSON-LD on the site",
+    title: "Structured data: No structured data on the site",
     explanation:
-      "No page in the crawl carries JSON-LD. Structured data states in machine-readable form what a page is, and is what search engines and AI assistants read to build rich results and cite sources. JSON-LD, microdata and RDFa are all read.",
+      "No page in the crawl carries JSON-LD, microdata or RDFa, the three formats that are read. Structured data states in machine-readable form what a page is, and is what search engines and AI assistants read to build rich results and cite sources.",
     howToFix:
       "Add JSON-LD to the templates that matter most: Organization on the home page, Product on product pages, Article on editorial, FAQPage where questions are answered. Validate with the Rich Results Test.",
   },
   "schema.self-serving-reviews": {
     title: "Structured data: Self-serving reviews on Organization or LocalBusiness markup",
     explanation:
-      "Indexable, self-canonical pages whose markup typed Organization or any of its subtypes (LocalBusiness, Restaurant, …) carries a rating or reviews about the business itself. Google's review snippet policy treats these as self-serving and does not show the stars.",
+      "Indexable, self-canonical pages whose markup typed Organization or any of its subtypes (LocalBusiness, Restaurant, …) carries a rating or reviews about the business itself. Google's review snippet policy treats these as self-serving and does not show the stars. Because every Organization subtype is matched, a directory, booking or review site that marks up ratings of businesses it does not own is listed too; those ratings are not self-serving, and the finding can be dismissed on such a site.",
     howToFix:
       "Move the ratings to the type they are about (Product, Service, Course, Recipe) and let independent review platforms carry the business-level rating.",
   },

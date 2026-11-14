@@ -755,10 +755,10 @@ describe("copy: structured data", () => {
     expect(c.explanation).not.toMatch(new RegExp(`\\bmore than ${BREADCRUMB_PAGE_FLOOR}\\b`));
   });
 
-  // The crawler reads JSON-LD and nothing else, so a site marked up in
-  // microdata or RDFa is invisible to these rules. Copy saying a site has no
-  // structured data, flatly, would be a claim about markup nobody looked at.
-  it("the site-scoped schema copy claims JSON-LD, not every markup format", () => {
+  // The crawler reads JSON-LD, microdata and RDFa (extraction version 4) and
+  // no other format. Copy saying a site has no markup of any kind would be a
+  // claim about formats nobody looked at, so the copy names what was read.
+  it("the site-scoped schema copy names the formats it read, not every markup format", () => {
     for (const id of ["schema.none-on-site", "schema.breadcrumb-absent"]) {
       const c = copy(id);
       expect(`${c.title} ${c.explanation}`, id).toContain("JSON-LD");
@@ -766,9 +766,11 @@ describe("copy: structured data", () => {
         /(?:has|have|uses?|carr(?:y|ies)) no structured data(?! .{0,20}JSON-LD)|no structured data (?:at all|of any kind|anywhere on the site\.)|no markup of any kind/i;
       expect(`${c.explanation} ${c.howToFix}`, id).not.toMatch(overclaim);
     }
-    // And the site-wide rule says so outright, since it is the one whose
-    // silence a client would read as "we have no markup".
-    expect(copy("schema.none-on-site").explanation).toMatch(/microdata|RDFa/i);
+    // And the site-wide rule names all three, since it is the one whose
+    // silence a client would read as "we have no markup" (29a final review M3).
+    const none = copy("schema.none-on-site");
+    for (const format of ["JSON-LD", "microdata", "RDFa"]) expect(none.explanation).toContain(format);
+    expect(none.title).not.toContain("JSON-LD");
   });
 
   // The self-serving finding is a statement about which snippets Google shows.
