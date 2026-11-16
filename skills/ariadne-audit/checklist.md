@@ -2833,7 +2833,7 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
   a page carries with their property names (`nodes`, each with `format`, `path`,
   `type`, `types` — every type the node states — and `properties`), and how many
   problems each page carries (`problemsCapped` when a block's list was cut, so the
-  counts are short). On a crawl not wholly at extraction 4 it does not count
+  counts may be short). On a crawl not wholly at extraction 4 it does not count
   unresolved references, and its `notMeasured` names them. Its detail, one row per
   block and problem, is the structured_data_nodes CSV view of `export_crawl`. A crawl
   the rules have not judged, judged before this validation existed, or validated by an
@@ -2906,8 +2906,11 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
 - **Engine**: `metric_table` for `schema.property-coverage` (CHECK-44): per schema type
   (metric scope `schema_type`, one row per top-level type as the markup states it, a
   name outside schema.org included), how many top-level nodes carry it and, per
-  property, how many of those nodes carry a non-empty value. Each `@graph` member is
-  one node, and a node with several types counts once under each of them (a node typed
+  property, how many of those nodes carry a non-empty value. It counts judged pages
+  only (fetched 200 OK, indexable, not canonicalised to another URL), as
+  `content.metrics-by-type` does, so its total sits below the crawl's block count when
+  markup repeats on duplicates; the structured_data listing covers every page. Each
+  `@graph` member is one node, and a node with several types counts once under each of them (a node typed
   Product and IndividualProduct is in both rows). JSON-LD nodes list every type; a
   microdata `itemtype` or RDFa `typeof` keeps only its first type at extraction 4, an
   extraction limit. A node's type list is capped like its property list, and the

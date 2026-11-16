@@ -749,7 +749,7 @@ describe("the per-page schema rules after the final review", () => {
         extractionVersion: 4,
       });
       for (const raw of spec.raws) {
-        await db.insert(structuredData).values({ crawlId, pageId, schemaType: "x", format: "jsonld", raw });
+        await db.insert(structuredData).values({ crawlId, pageId, schemaType: [raw["@type"]].flat()[0] as string, format: "jsonld", raw }); // first stated type, as the extractor writes it
       }
     }
     await deriveSchemaValidation(db, crawlId);

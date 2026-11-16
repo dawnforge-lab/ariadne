@@ -1832,7 +1832,7 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "not counted, and notMeasured says so. blocksAtCap: the page's stored " +
         "blocks reached the per-page limit, so an id may be defined in a block " +
         "that was not stored. problemsCapped: a block cut one of the lists these counts " +
-        "read at its per-block limit, so the counts are short. The " +
+        "read at its per-block limit, so the counts may be short. The " +
         "problem-by-problem detail is the structured_data_nodes CSV view " +
         "(export_crawl format=csv), one row per block and problem.\n\n" +
         "NULL IS NOT ZERO. microdataErrors and skips are null on a page crawled " +

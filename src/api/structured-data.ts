@@ -230,7 +230,7 @@ export function blockProblemsCapped(blob: SQL, crawlId: string): SQL {
  * the CSV list separator — the CSV view's Schema Type (final review I2).
  */
 export function blockTypesCell(blob: SQL): SQL {
-  return sql`(select coalesce(string_agg(t.type, '|' order by n.ord, t.ord), '')
+  return sql`(select coalesce(string_agg(t.type, ${LIST_SEPARATOR}::text order by n.ord, t.ord), '')
       from jsonb_array_elements(${list(blob, "nodes")}) with ordinality as n(node, ord)
       cross join lateral jsonb_array_elements_text(n.node -> 'types') with ordinality as t(type, ord))`;
 }

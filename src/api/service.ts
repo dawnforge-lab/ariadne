@@ -2399,8 +2399,8 @@ export interface StructuredDataPageRow {
   blocksAtCap: boolean;
   /**
    * A block on the page cut one of the lists the counts read at
-   * `MAX_PROBLEMS_PER_LIST`: `warningCount` / `infoCount` are short (final
-   * review I1).
+   * `MAX_PROBLEMS_PER_LIST`: `warningCount` / `infoCount` may be short (final
+   * review I1; a cut references list may or may not hide more unresolved ones).
    */
   problemsCapped: boolean;
 }

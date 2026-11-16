@@ -56,7 +56,11 @@ import { judgementOr } from "../registry/types.js";
 
 const CATEGORY = "structured-data" as const;
 
-/** Problems carried in one finding's evidence; the full count is `problemCount`. */
+/**
+ * Problems carried in one finding's evidence. `problemCount` counts every problem the
+ * stored lists hold; each list stops at `MAX_PROBLEMS_PER_LIST` per block, and
+ * `problemsCapped` says when one did.
+ */
 export const MAX_PROBLEMS_IN_EVIDENCE = 20;
 
 const PARSE_ERROR: RuleIdentity = { id: "schema.parse-error", severity: "warning" };

@@ -69,7 +69,10 @@ validated before it is refused (409, "re-run the rules"), never read.
     nodes whose type list was cut. JSON-LD lists every type a node states, up to 50 per node (`typesCapped` when cut; the coverage metric counts only the listed types); a microdata `itemtype` or RDFa `typeof` keeps only its first type at extraction 4 — an extraction limit — so a node from those formats lists one. It is bounded: types (100) and properties per type (100)
     are capped, and `typesNotListed`, `propertiesNotListed` and `propertyListsCapped` are
     counted, never dropped. The engine names no required set of properties; which a type
-    needs is the agent's judgement.
+    needs is the agent's judgement. Like `content.metrics-by-type`, it counts the judged
+    pages only (fetched 200 OK, indexable, not canonicalised to another URL), so its node
+    total sits below the crawl's block count when markup repeats on duplicate or
+    canonicalised URLs; the `structured_data` listing covers every page.
   - **`schema.product-incomplete` is retired**, with no rule replacing its field list
     (the metric reports counts; it does not decide which fields a Product needs). A
     crawl judged at 0.25.1 or earlier still carries `schema.product-incomplete`
@@ -2871,7 +2874,9 @@ problemsCapped
   per-page limit (50): blocks past it were not stored, so an id may be defined in a
   block that was not stored.
 - **`problemsCapped`** is true when a block on the page cut one of the lists the two
-  counts read at its per-block limit (50): `warningCount` / `infoCount` are short.
+  counts read at its per-block limit (50): `warningCount` / `infoCount` may be short
+  (an empty-value list cut at 50 holds more problems than it shows; a references list
+  cut at 50 may or may not hold more unresolved ones).
   The `structured_data_nodes` CSV holds the same lists, so its rows for one problem
   stop at 50 per block too; the cap is per block.
 - **`notMeasured`** is `{id, reason}[]`. On a crawl not wholly at extraction 4 the
