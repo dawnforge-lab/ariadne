@@ -17,12 +17,21 @@
  * O(batch) however many blocks the crawl holds. Each block's page is joined in
  * for its URL, the base its ids resolve against (29a rework): one text per row.
  *
+ * **Orphan blocks are skipped and counted, not refused.** The page writer
+ * leaves `structured_data` rows whose `page_id` has no page row BY DESIGN:
+ * when a page insert loses the `(crawl_id, url)` conflict, its child rows keep
+ * the minted id (src/crawl/persist.ts, `PageWriter.flushPages`, the comment
+ * on the conflict). No surface reads such a row — the rules, the listing, the
+ * CSV view and the metric all join `pages` — and its ids have no base to
+ * resolve against, so the derivation validates exactly the blocks that have a
+ * page (an inner join) and reports how many it left (`orphanBlocks`). Their
+ * `validation_jsonb` stays null, and every "re-run the rules" probe counts only
+ * blocks with a page, so the null can never refuse a crawl.
+ *
  * **Errors are loud.** `validateBlock` throws on a block it cannot judge (a
  * non-object, or one past the nesting cap). The analyzer never stores such a
  * block, so a row that does throw is one this engine did not write; the error
- * names the crawl and the row id, and the transaction rolls back. A block whose
- * page row is missing throws too: its ids have no base to resolve against, and
- * resolving them against anything else would be a guess.
+ * names the crawl and the row id, and the transaction rolls back.
  */
 import { eq, sql, type SQL } from "drizzle-orm";
 
@@ -38,15 +47,17 @@ import { validateBlock } from "../schema-org/validate.js";
 export const SCHEMA_VALIDATION_BATCH = 500;
 
 export interface SchemaValidationDerivation extends Record<string, number> {
-  /** `structured_data` rows whose validation blob was written. */
+  /** `structured_data` rows whose validation blob was written: the blocks of existing pages. */
   blocks: number;
+  /** Rows whose page row does not exist (see the header), left unvalidated. */
+  orphanBlocks: number;
 }
 
 type BlockRow = {
   id: string;
   raw_jsonb: unknown;
-  /** The block's page URL; null only when the page row is missing (refused). */
-  url: string | null;
+  /** The block's page URL: the base its ids resolve against. */
+  url: string;
 };
 
 /**
@@ -80,19 +91,13 @@ export async function deriveSchemaValidation(
       const batch = await tx.execute<BlockRow>(sql`
         select sd.id::text as id, sd.raw_jsonb, p.url
         from structured_data sd
-        left join pages p on p.crawl_id = sd.crawl_id and p.id = sd.page_id
+        join pages p on p.crawl_id = sd.crawl_id and p.id = sd.page_id
         where sd.crawl_id = ${crawlId} and sd.id > ${cursor}::bigint
         order by sd.id
         limit ${SCHEMA_VALIDATION_BATCH}`);
       if (batch.rows.length === 0) break;
 
       const values: SQL[] = batch.rows.map((row) => {
-        if (row.url === null) {
-          throw new Error(
-            `deriveSchemaValidation: crawl '${crawlId}' structured_data row ${row.id} has no page row — ` +
-              "the base its ids resolve against is unknown",
-          );
-        }
         let blob;
         try {
           blob = validateBlock(row.raw_jsonb, row.url);
@@ -121,16 +126,21 @@ export async function deriveSchemaValidation(
 
       cursor = batch.rows[batch.rows.length - 1]!.id;
     }
-    // A skipped row must fail here, naming the crawl, not later in a rule.
-    const total = await tx.execute<{ n: string }>(
-      sql`select count(*)::text as n from structured_data where crawl_id = ${crawlId}`,
-    );
+    // A skipped row must fail here, naming the crawl, not later in a rule: the
+    // crawl's blocks with a page are exactly the ones validated, and the rest
+    // are counted as orphans.
+    const total = await tx.execute<{ n: string; orphans: number }>(sql`
+      select count(*) filter (where p.id is not null)::text as n,
+             count(*) filter (where p.id is null)::int as orphans
+      from structured_data sd
+      left join pages p on p.crawl_id = sd.crawl_id and p.id = sd.page_id
+      where sd.crawl_id = ${crawlId}`);
     if (String(blocks) !== total.rows[0]!.n) {
       throw new Error(
         `deriveSchemaValidation: crawl '${crawlId}' — validated ${blocks} blocks but the crawl ` +
-          `holds ${total.rows[0]!.n}; the cursor skipped or repeated rows`,
+          `holds ${total.rows[0]!.n} on its pages; the cursor skipped or repeated rows`,
       );
     }
-    return { blocks };
+    return { blocks, orphanBlocks: total.rows[0]!.orphans };
   });
 }

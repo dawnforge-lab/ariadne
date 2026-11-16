@@ -53,7 +53,8 @@ const CONTENT_KEYWORDS: ReadonlySet<string> = new Set([
  *  - `[]`;
  *  - an object with no properties and no `@id` — `{}`, and also a node holding
  *    only keywords such as `{"@type": "Offer"}`: keywords are not properties,
- *    so a typed node with nothing in it states only that a thing exists;
+ *    so a typed node with nothing in it states only that a thing exists. A
+ *    blank `@id` (`""` or whitespace) is no `@id`;
  *  - a JSON-LD value object whose `@value` is blank text (`{"@value": " "}`,
  *    with or without `@language` / `@type`), which is `""` written longhand.
  *
@@ -72,7 +73,11 @@ export function isEmptyValue(value: unknown): boolean {
     const literal = value["@value"];
     return typeof literal === "string" && literal.trim() === "";
   }
-  return !Object.keys(value).some((key) => !key.startsWith("@") || CONTENT_KEYWORDS.has(key));
+  return !Object.keys(value).some((key) => {
+    // A blank `@id` names no node: no `@id`, as `definedId` and `bareReferenceId` read it.
+    if (key === "@id") return typeof value["@id"] !== "string" || value["@id"].trim() !== "";
+    return !key.startsWith("@") || CONTENT_KEYWORDS.has(key);
+  });
 }
 
 /**

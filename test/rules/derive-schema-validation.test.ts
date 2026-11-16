@@ -97,7 +97,7 @@ describe("deriveSchemaValidation against the database", () => {
       { "@type": "Organization", name: "Org" },
       { "@type": "NotARealType" },
     ]);
-    expect(await deriveSchemaValidation(db, crawlId)).toEqual({ blocks: 3 });
+    expect(await deriveSchemaValidation(db, crawlId)).toEqual({ blocks: 3, orphanBlocks: 0 });
     const rows = await stored(crawlId);
     expect(rows).toHaveLength(3);
     for (const row of rows) {
@@ -139,7 +139,7 @@ describe("deriveSchemaValidation against the database", () => {
       crawlId,
       Array.from({ length: total }, (_, i) => ({ "@type": "Organization", name: `Org ${i}` })),
     );
-    expect(await deriveSchemaValidation(db, crawlId)).toEqual({ blocks: total });
+    expect(await deriveSchemaValidation(db, crawlId)).toEqual({ blocks: total, orphanBlocks: 0 });
     const rows = await stored(crawlId);
     expect(rows).toHaveLength(total);
     expect(rows.filter((r) => r.validation === null)).toHaveLength(0);
@@ -166,7 +166,7 @@ describe("deriveSchemaValidation against the database", () => {
       );
     }
     expect(first + total - 1).toBe(100_000_000_299);
-    expect(await deriveSchemaValidation(db, crawlId)).toEqual({ blocks: total });
+    expect(await deriveSchemaValidation(db, crawlId)).toEqual({ blocks: total, orphanBlocks: 0 });
     const rows = await stored(crawlId);
     expect(rows).toHaveLength(total);
     expect(rows.filter((r) => r.validation === null).map((r) => r.id)).toEqual([]);
@@ -229,17 +229,27 @@ describe("deriveSchemaValidation resolves ids against the page", () => {
     ]);
   });
 
-  it("throws, naming the row, for a block whose page row is missing: its base is unknown", async () => {
+  // The page writer leaves such rows by design (src/crawl/persist.ts, `flushPages`):
+  // a page insert that loses the (crawl_id, url) race keeps its minted id on its
+  // child rows. No surface reads them (every reader joins pages), so they are
+  // skipped — and counted — rather than refused (re-review ruling (a)).
+  it("validates the blocks of real pages and skips, and counts, an orphan block", async () => {
     const crawlId = await newCrawl();
-    await db.insert(structuredData).values({
-      crawlId,
-      pageId: `${crawlId}_ghost`,
-      schemaType: "Thing",
-      format: "jsonld",
-      raw: { "@type": "Thing", name: "x" },
-    });
-    await expect(deriveSchemaValidation(db, crawlId)).rejects.toThrow(
-      new RegExp(`crawl '${crawlId}' structured_data row \\d+ has no page row`),
-    );
+    const real = `${crawlId}_real`;
+    await db.insert(pages).values(mkPage({ id: real, crawlId, url: `${SITE}/real` }));
+    await db.insert(structuredData).values([
+      { crawlId, pageId: real, schemaType: "Thing", format: "jsonld", raw: { "@type": "Thing", name: "x" } },
+      { crawlId, pageId: `${crawlId}_ghost`, schemaType: "Thing", format: "jsonld", raw: { "@type": "Thing", name: "y" } },
+    ]);
+    expect(await deriveSchemaValidation(db, crawlId)).toEqual({ blocks: 1, orphanBlocks: 1 });
+    const rows = await db
+      .select({ pageId: structuredData.pageId, v: structuredData.validation })
+      .from(structuredData)
+      .where(eq(structuredData.crawlId, crawlId))
+      .orderBy(asc(structuredData.id));
+    expect(rows.map((r) => [r.pageId, r.v === null])).toEqual([
+      [real, false],
+      [`${crawlId}_ghost`, true],
+    ]);
   });
 });

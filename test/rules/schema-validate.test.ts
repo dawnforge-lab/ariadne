@@ -600,6 +600,40 @@ describe("validateBlock — what defines an id (review M1)", () => {
   });
 });
 
+// 29a rework, re-review fix round 2.
+describe("validateBlock — a blank @id is no @id, and a null context resets the base", () => {
+  it("a typed node whose @id is blank is empty, as it defines and references nothing", () => {
+    const v = validate({
+      "@context": CTX,
+      "@type": "Product",
+      name: "Mug",
+      offers: { "@type": "Offer", "@id": "" },
+      brand: { "@type": "Brand", "@id": "   " },
+    });
+    expect(v.emptyValues).toEqual([
+      { path: "$.offers", type: "Product", property: "offers" },
+      { path: "$.brand", type: "Product", property: "brand" },
+    ]);
+    expect(v.definedIds).toEqual([]);
+    expect(v.references).toEqual([]);
+  });
+
+  it("a null entry in a context array resets the base to the document URL (JSON-LD 1.1)", () => {
+    const v = validate({
+      "@context": [{ "@base": "https://other.example/" }, null, CTX],
+      "@type": "Thing",
+      "@id": "#x",
+      name: "x",
+    });
+    expect(v.definedIds).toEqual(["https://example.com/page#x"]);
+    // Without the reset the declared base stands.
+    expect(
+      validate({ "@context": [{ "@base": "https://other.example/" }, CTX], "@type": "Thing", "@id": "#x", name: "x" })
+        .definedIds,
+    ).toEqual(["https://other.example/#x"]);
+  });
+});
+
 describe("validateBlock — every verdict round-trips", () => {
   // Runs last (vitest runs a file's describes in order): every case above round-trips.
   it("blockValidationSchema.parse(validateBlock(x)) round-trips for every case above", () => {

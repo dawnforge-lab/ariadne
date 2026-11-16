@@ -25,7 +25,7 @@ import type { StructuredDataFormat } from "../../src/crawl/parse/page-analyzer.j
 import { validateBlock, type BlockValidation } from "../../src/rules/schema-org/validate.js";
 import { UNRESOLVED_NOT_MEASURED, problemCells } from "../../src/api/structured-data.js";
 import { MAX_STRUCTURED_DATA_BLOCKS } from "../../src/crawl/parse/page-analyzer.js";
-import { issues } from "../../src/db/schema.js";
+import { issues, metrics } from "../../src/db/schema.js";
 import { mkDiscovery } from "../rules/mk-discovery.js";
 import { mkPage } from "../rules/mk-page.js";
 import { LOCAL_TENANT, parseTenant } from "../../src/tenant.js";
@@ -49,7 +49,8 @@ const malformedId = `crawl_sd_listing_malformed_${runId}`;
 const oldShapeId = `crawl_sd_listing_old_shape_${runId}`;
 const preV4Id = `crawl_sd_listing_pre_v4_${runId}`;
 const capId = `crawl_sd_listing_cap_${runId}`;
-const allCrawls = [crawlId, unjudgedId, staleId, skipsId, malformedId, oldShapeId, preV4Id, capId];
+const orphanId = `crawl_sd_listing_orphan_${runId}`;
+const allCrawls = [crawlId, unjudgedId, staleId, skipsId, malformedId, oldShapeId, preV4Id, capId, orphanId];
 
 const PRODUCT = {
   "@context": C,
@@ -235,6 +236,18 @@ beforeAll(async () => {
     });
   }
   await service.runRulesForCrawl(LOCAL_TENANT, capId);
+
+  // A block whose page row lost the (crawl_id, url) race (src/crawl/persist.ts,
+  // `flushPages`): it points at a page id with no row. Judged with it in place.
+  await seedCrawl(orphanId);
+  await db.insert(structuredData).values({
+    crawlId: orphanId,
+    pageId: `${orphanId}_lost`,
+    schemaType: "Product",
+    format: "jsonld",
+    raw: { "@context": C, "@type": "Product", name: "", brand: { "@id": "#nowhere" } },
+  });
+  await service.runRulesForCrawl(LOCAL_TENANT, orphanId);
 
   // Judged, then the Product block's blob put back in the shape written before
   // the 29a rework: Google lists in, the standards facts out.
@@ -590,5 +603,37 @@ describe("a page whose stored blocks reached the analyzer's cap (review I3)", ()
       .from(issues)
       .where(and(eq(issues.crawlId, capId), eq(issues.ruleId, "schema.unresolved-reference"), eq(issues.dedupeKey, `${SITE}/product`)));
     expect(finding?.details).toMatchObject({ blocksAtCap: true, problemCount: 1 });
+  });
+});
+
+// 29a rework, re-review fix round 2: orphan blocks are skipped, never refused.
+describe("a block whose page row does not exist (persist.ts flushPages, by design)", () => {
+  it("leaves the orphan unvalidated and every page's block validated", async () => {
+    const rows = await db
+      .select({ pageId: structuredData.pageId, v: structuredData.validation })
+      .from(structuredData)
+      .where(eq(structuredData.crawlId, orphanId));
+    expect(rows.filter((r) => r.v === null).map((r) => r.pageId)).toEqual([`${orphanId}_lost`]);
+    expect(rows.filter((r) => r.v !== null)).toHaveLength(BLOCKS.length);
+  });
+
+  it("the rules, the metric, the listing and the CSV answer as for the same crawl without it", async () => {
+    const page = await service.listStructuredData(LOCAL_TENANT, orphanId, {});
+    const clean = await service.listStructuredData(LOCAL_TENANT, crawlId, {});
+    const strip = (items: typeof page.items) => items.map(({ url, ...rest }) => [url.split("/").pop(), rest]);
+    expect(strip(page.items)).toEqual(strip(clean.items));
+    expect((await csvLines(orphanId)).slice(1).map((l) => l.replace(SITE, ""))).toEqual(
+      (await csvLines(crawlId)).slice(1).map((l) => l.replace(SITE, "")),
+    );
+    const found = await db
+      .select({ ruleId: issues.ruleId, dedupeKey: issues.dedupeKey })
+      .from(issues)
+      .where(and(eq(issues.crawlId, orphanId), eq(issues.ruleId, "schema.empty-value")));
+    expect(found.map((f) => f.dedupeKey)).toEqual([`${SITE}/product`]);
+    const coverage = await db
+      .select({ scope: metrics.scope, scopeValue: metrics.scopeValue, value: metrics.value })
+      .from(metrics)
+      .where(and(eq(metrics.crawlId, orphanId), eq(metrics.metricId, "schema.property-coverage")));
+    expect(coverage.find((m) => m.scope === "site")?.value).toMatchObject({ nodes: BLOCKS.length });
   });
 });

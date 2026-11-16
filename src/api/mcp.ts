@@ -2166,7 +2166,10 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "eight, like the two overviews, refuse both. Answers {format, view, path, rows, " +
         "bytes}, plus disabledRules on the four views that read findings (issues, " +
         "issue_urls, issues_overview, crawl_overview): the rules the crawl's judgement " +
-        "disables, whose findings the file leaves out, with notMeasured beside it.\n" +
+        "disables, whose findings the file leaves out, with notMeasured beside it. " +
+        "structured_data_nodes answers notMeasured alone: on a crawl not wholly at " +
+        "extraction 4 it writes no unresolved-reference rows and names " +
+        "schema.unresolved-reference there, as {id, reason}; [] otherwise.\n" +
         "  metric_table is the spreadsheet of the metric_table tool's table: the " +
         "header is the column LABELS, one row per table row, and the metric's " +
         "summary scalars lead every row as extra columns — a CSV has no place " +

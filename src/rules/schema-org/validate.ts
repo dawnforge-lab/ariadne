@@ -414,13 +414,20 @@ function typesOf(node: Record<string, unknown>): string[] {
 /**
  * The base the block's ids resolve against: the document URL, then each
  * `@base` the top-level `@context` declares, in order (a relative one resolved
- * against the base before it; `null` removes the base). A `@base` that cannot
+ * against the base before it; `"@base": null` removes the base; a `null`
+ * context entry resets it to the document URL). A `@base` that cannot
  * be resolved removes it too, so ids stay as written rather than resolving
  * against a base the markup did not mean.
  */
 function documentBase(context: unknown, documentUrl: string): string | null {
   let base: string | null = documentUrl;
   for (const entry of Array.isArray(context) ? context : [context]) {
+    // A null context resets the active context, and with it the base, to the
+    // document's (JSON-LD 1.1, Context Processing).
+    if (entry === null) {
+      base = documentUrl;
+      continue;
+    }
     if (!isRecord(entry) || !("@base" in entry)) continue;
     const declared = entry["@base"];
     if (typeof declared !== "string") {

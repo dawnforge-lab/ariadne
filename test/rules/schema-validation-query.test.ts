@@ -619,12 +619,13 @@ describe("the schema validation rules against the database", () => {
     it(`a page holding MAX_STRUCTURED_DATA_BLOCKS blocks still fires, with blocksAtCap: true`, async () => {
       const crawlId = await newCrawl();
       const ids = await addPages(crawlId, [{ path: "/a" }, { path: "/b" }]);
-      await addBlock(crawlId, ids.get("/a")!, PAGE);
-      for (let i = 1; i < MAX_STRUCTURED_DATA_BLOCKS; i += 1) {
-        await addBlock(crawlId, ids.get("/a")!, { "@context": ctx, "@type": "Thing", name: `t${i}` });
+      // /a holds exactly the cap; /b one block short of it — the same reference, and no flag.
+      for (const [path, count] of [["/a", MAX_STRUCTURED_DATA_BLOCKS], ["/b", MAX_STRUCTURED_DATA_BLOCKS - 1]] as const) {
+        await addBlock(crawlId, ids.get(path)!, PAGE);
+        for (let i = 1; i < count; i += 1) {
+          await addBlock(crawlId, ids.get(path)!, { "@context": ctx, "@type": "Thing", name: `t${i}` });
+        }
       }
-      // One block short of the cap: the same reference, and no flag.
-      await addBlock(crawlId, ids.get("/b")!, PAGE);
       await deriveSchemaValidation(db, crawlId);
       const found = await run(ID, crawlId);
       expect(found.map((f) => [f.pageUrl, f.evidence["blocksAtCap"]])).toEqual([

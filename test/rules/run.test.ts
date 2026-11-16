@@ -496,7 +496,7 @@ describe("runRules against the database", () => {
     // is in the crawl because the sitemap named it.
     expect(summary.derived).toEqual({
       "deriveUrlParams.params": 2,
-      "deriveSchemaValidation.blocks": 1,
+      "deriveSchemaValidation.blocks": 1, "deriveSchemaValidation.orphanBlocks": 0,
       "deriveClickDepth.root": 1,
       "deriveClickDepth.rootRedirects": 0,
       "deriveClickDepth.reachable": 1,

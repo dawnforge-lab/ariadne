@@ -2103,7 +2103,13 @@ export interface CsvExportResult {
    * fire". Absent on the views that read no findings.
    */
   disabledRules?: string[];
-  /** Beside `disabledRules`, always together (`ExportResult.notMeasured`). */
+  /**
+   * What the file does not count. Beside `disabledRules` on the four findings
+   * views (`ExportResult.notMeasured`), and ALONE on `structured_data_nodes`,
+   * which reads no findings and names the unresolved references it does not
+   * count on a crawl not wholly at extraction 4 (`[]` otherwise). Absent on the
+   * other views.
+   */
   notMeasured?: NotMeasured;
 }
 
@@ -7039,9 +7045,13 @@ export class ApiService {
   private async assertStructuredDataJudged(reader: SnapshotReader, crawlId: string): Promise<void> {
     const result = await reader.execute<{ judged: boolean; underived: boolean; stale: boolean }>(sql`
       select c.rules_run_at is not null as judged,
+             -- Only blocks whose page exists: an orphan block (persist.ts, flushPages)
+             -- is left unvalidated by design and is read by no surface.
              exists (select 1 from structured_data sd
+                       join pages p on p.crawl_id = sd.crawl_id and p.id = sd.page_id
                       where sd.crawl_id = c.id and sd.validation_jsonb is null) as underived,
              exists (select 1 from structured_data sd
+                       join pages p on p.crawl_id = sd.crawl_id and p.id = sd.page_id
                       where sd.crawl_id = c.id and sd.validation_jsonb is not null
                         and jsonb_typeof(sd.validation_jsonb -> 'nodes') is distinct from 'array') as stale
         from crawls c
