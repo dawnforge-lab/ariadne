@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   MAX_ITEM_DEPTH,
   MAX_ITEM_VALUES,
+  MAX_ITEM_WRITTEN_CHARS,
   MICRODATA_TEXT_MAX,
 } from "../../src/crawl/parse/microdata.js";
 import { analyzeHtml, analyzePage } from "../../src/crawl/parse/page-analyzer.js";
@@ -413,6 +414,31 @@ describe("microdata adversarial size (Review Focus 4)", () => {
     };
     // The top-level node itself is not a value; every other node and string is.
     expect(count(result.structuredData[0]!.raw) - 1).toBe(MAX_ITEM_VALUES);
+    expect(result.structuredDataSkips.valuesCapped).toBeGreaterThan(0);
+  });
+
+  it("a long attribute value under many names cannot multiply past the per-page character cap", () => {
+    const names = Array.from({ length: 300 }, (_, i) => `p${i}`).join(" ");
+    const big = "x".repeat(1_000_000);
+    const result = analyzeHtml(
+      page(`<div itemscope itemtype="https://schema.org/Thing"><meta itemprop="${names}" content="${big}"></div>`),
+      PAGE_URL,
+    );
+    expect(JSON.stringify(result.structuredData).length).toBeLessThan(MAX_ITEM_WRITTEN_CHARS + 10_000);
+    expect(result.structuredDataSkips.valuesCapped).toBeGreaterThan(0);
+  });
+
+  it("a long itemid on a node under many names cannot multiply past the per-page character cap", () => {
+    const names = Array.from({ length: 300 }, (_, i) => `p${i}`).join(" ");
+    const id = `https://example.com/${"y".repeat(1_000_000)}`;
+    const result = analyzeHtml(
+      page(
+        `<div itemscope itemtype="https://schema.org/Thing">` +
+          `<div itemprop="${names}" itemscope itemtype="https://schema.org/Thing" itemid="${id}"></div></div>`,
+      ),
+      PAGE_URL,
+    );
+    expect(JSON.stringify(result.structuredData).length).toBeLessThan(MAX_ITEM_WRITTEN_CHARS + 10_000);
     expect(result.structuredDataSkips.valuesCapped).toBeGreaterThan(0);
   });
 

@@ -15,8 +15,9 @@
  * each text value at most `MICRODATA_TEXT_MAX` (+ one window) characters, and
  * the frame stacks are bounded by the open-element depth. Finalising a node
  * recurses at most `MAX_ITEM_DEPTH` levels and writes at most
- * `MAX_ITEM_VALUES` values per page (`valuesWritten`), so a value held under
- * several names cannot multiply the output.
+ * `MAX_ITEM_VALUES` values and `MAX_ITEM_WRITTEN_CHARS` characters per page
+ * (`valuesWritten`, `charsWritten`), so a value held under several names
+ * cannot multiply the output.
  */
 import { storableCap } from "../storable-text.js";
 import type {
@@ -32,6 +33,14 @@ export const MICRODATA_TEXT_MAX = 500;
 export const MAX_ITEM_VALUES = 1000;
 /** Nested item levels; the top-level item is level 1. */
 export const MAX_ITEM_DEPTH = 32;
+/**
+ * Characters written into finished nodes per page, across microdata and RDFa
+ * (`counts.charsWritten`): 2 Mi, the fetcher's MAX_BODY, so markup written
+ * once always fits and only copies of a value held under several names can
+ * reach it. Attribute values, ids, types and names are not cut to
+ * `MICRODATA_TEXT_MAX`, so the value count alone does not bound the output.
+ */
+export const MAX_ITEM_WRITTEN_CHARS = 2 * 1024 * 1024;
 
 /** Where a finished top-level node goes; the analyzer's sink owns the 50-block cap. */
 export type BlockSink = (block: StructuredDataBlock) => void;
@@ -60,6 +69,8 @@ export interface StructuredDataCounts {
    * when one value is held under several names (see `finalize`).
    */
   valuesWritten: number;
+  /** Characters written with those values, capped at `MAX_ITEM_WRITTEN_CHARS` (see `finalize`). */
+  charsWritten: number;
 }
 
 /** Raw text is collapsed this many characters at a time, so a huge text node is never copied whole. */
@@ -138,11 +149,16 @@ function appendCollapsed(collector: TextCollector, collapsed: string): void {
 
 /**
  * The plain JSON-LD-shaped object for a node; `@context` on the top-level node
- * only. Every value written spends one of `counts.valuesWritten`, capped at
- * `MAX_ITEM_VALUES` per page: a node held under several names is written once
- * per name, so without this cap nested items under K names D levels deep would
- * write K^D nodes from D values of budget. Values past the cap are dropped and
- * counted in `skips.valuesCapped`; a property left with no value is omitted.
+ * only. A value held under several names is written once per name, so
+ * without a cap nested items under K names D levels deep would write K^D
+ * nodes from D values of budget, and one long attribute under K names would be
+ * written K times. So every value written spends one of `counts.valuesWritten`
+ * (capped at `MAX_ITEM_VALUES`) and its characters from `counts.charsWritten`
+ * (capped at `MAX_ITEM_WRITTEN_CHARS`): the property name plus the string, or
+ * plus a nested node's type and id (its own values charge themselves). The
+ * first value that does not fit ends writing for the page: it and every value
+ * after it are dropped and counted in `skips.valuesCapped`. A property left
+ * with no value is omitted.
  */
 function finalize(node: ItemNode, topLevel: boolean, counts: StructuredDataCounts): Record<string, unknown> {
   const entries: [string, unknown][] = [];
@@ -152,12 +168,17 @@ function finalize(node: ItemNode, topLevel: boolean, counts: StructuredDataCount
   for (const [name, values] of node.props) {
     const out: unknown[] = [];
     for (let i = 0; i < values.length; i++) {
-      if (counts.valuesWritten >= MAX_ITEM_VALUES) {
+      const v = values[i]!;
+      const chars =
+        name.length + (typeof v === "string" ? v.length : (v.type?.length ?? 0) + (v.id?.length ?? 0));
+      if (counts.valuesWritten >= MAX_ITEM_VALUES || counts.charsWritten + chars > MAX_ITEM_WRITTEN_CHARS) {
+        // Full: nothing more is written on this page.
+        counts.charsWritten = MAX_ITEM_WRITTEN_CHARS;
         counts.skips.valuesCapped += values.length - i;
         break;
       }
       counts.valuesWritten += 1;
-      const v = values[i]!;
+      counts.charsWritten += chars;
       out.push(typeof v === "string" ? v : finalize(v, false, counts));
     }
     if (out.length > 0) entries.push([name, out.length === 1 ? out[0] : out]);

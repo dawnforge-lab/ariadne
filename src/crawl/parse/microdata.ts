@@ -74,10 +74,12 @@
  *
  * WRITTEN VALUES are capped too: a value under several names is written once
  * per name when the item closes, and those writes spend `counts.valuesWritten`,
- * also `MAX_ITEM_VALUES` per page; writes past it are dropped and counted in
- * `skips.valuesCapped` (item-core.ts `finalize`). So `itemprop="a b"` on 600
- * elements keeps 600 `a` values and 400 `b`, and nested items under many names
- * cannot multiply the output.
+ * also `MAX_ITEM_VALUES` per page, and `counts.charsWritten`,
+ * `MAX_ITEM_WRITTEN_CHARS` per page; writes past either are dropped and
+ * counted in `skips.valuesCapped` (item-core.ts `finalize`). So
+ * `itemprop="a b"` on 600 elements keeps 600 `a` values and 400 `b`, and
+ * neither nested items nor a long attribute under many names can multiply the
+ * output.
  *
  * The stores, budget, bounded text collectors and block emission live in
  * item-core.ts, shared with the RDFa machine (memory bounds are stated there).
@@ -95,6 +97,7 @@ import { schemaOrgName } from "./schema-names.js";
 export {
   MAX_ITEM_DEPTH,
   MAX_ITEM_VALUES,
+  MAX_ITEM_WRITTEN_CHARS,
   MICRODATA_TEXT_MAX,
   type BlockSink,
   type ItemMachine,

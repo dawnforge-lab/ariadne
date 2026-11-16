@@ -1653,13 +1653,14 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
     if (structuredData.length < MAX_STRUCTURED_DATA_BLOCKS) structuredData.push(block);
   };
   // One counts object per page, shared by every item machine: `errors`, the
-  // skips, and `valuesUsed` / `valuesWritten`, the per-page MAX_ITEM_VALUES
+  // skips, and `valuesUsed` / `valuesWritten` / `charsWritten`, the per-page
   // budgets the machines spend from together (src/crawl/parse/microdata.ts).
   const structuredDataCounts: StructuredDataCounts = {
     errors: 0,
     skips: { microdataItemrefSkipped: 0, rdfaUnsupported: 0, valuesCapped: 0 },
     valuesUsed: 0,
     valuesWritten: 0,
+    charsWritten: 0,
   };
   // The streaming item extractors, driven from the hooks below: `open` and
   // `close` below the noscript returns and only while no `<template>` is open,

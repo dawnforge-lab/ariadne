@@ -252,6 +252,7 @@ describe("machine end() with a frame still open", () => {
     skips: { microdataItemrefSkipped: 0, rdfaUnsupported: 0, valuesCapped: 0 },
     valuesUsed: 0,
     valuesWritten: 0,
+    charsWritten: 0,
   });
 
   it("the RDFa machine throws, naming itself and the open frames", () => {
