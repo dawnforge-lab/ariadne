@@ -3374,20 +3374,20 @@ describe("crawl tool descriptions — list mode, scope and credentials (27c)", (
 // Phase 29a T9. Appended at the end so no line the surface document cites
 // moves (the vocabulary table above would otherwise carry these two rows).
 describe("structured_data's description (29a)", () => {
-  it("names every format and every Google feature its two closed filters accept", async () => {
-    const { GOOGLE_FEATURE_IDS, STRUCTURED_DATA_FORMATS } = await import("../../src/api/structured-data.js");
+  it("names every format its closed filter accepts, and no Google feature filter (29a rework)", async () => {
+    const { STRUCTURED_DATA_FORMATS, STRUCTURED_DATA_PROBLEMS } = await import("../../src/api/structured-data.js");
     const listed = await client.listTools();
     const tool = listed.tools.find((t) => t.name === "structured_data");
     const props = (tool?.inputSchema as { properties?: Record<string, { description?: string }> }).properties ?? {};
-    for (const [field, vocabulary] of [
-      ["format", STRUCTURED_DATA_FORMATS],
-      ["feature", GOOGLE_FEATURE_IDS],
-    ] as const) {
-      expect(vocabulary.length).toBeGreaterThan(0);
-      for (const value of vocabulary) {
-        expect(props[field]?.description, `structured_data.${field} does not name '${value}'`).toContain(value);
-      }
+    expect(STRUCTURED_DATA_FORMATS.length).toBeGreaterThan(0);
+    for (const value of STRUCTURED_DATA_FORMATS) {
+      expect(props["format"]?.description, `structured_data.format does not name '${value}'`).toContain(value);
     }
+    expect(Object.keys(props).sort()).toEqual(["crawlId", "cursor", "format", "limit", "pageType"]);
+    const text = tool?.description ?? "";
+    expect(text).not.toMatch(/google|rich result/i);
+    expect(text).toContain("nodes");
+    for (const problem of STRUCTURED_DATA_PROBLEMS) expect(text).toContain(problem);
   });
 
   it("says the listing is refused, not empty, before the rules have run, and that null is not zero", async () => {

@@ -1049,7 +1049,7 @@ export const CSV_VIEW_DEFS: Record<CsvQueryViewName, CsvView> = {
       join pages p on p.crawl_id = ${crawlId} and p.id = sd.page_id
       cross join lateral (
         select case when ${validationReadable(sql`sd.validation_jsonb`)}
-                    then ${blockProblems(sql`sd.validation_jsonb`)}
+                    then ${blockProblems(sql`sd.validation_jsonb`, crawlId, sql`sd.page_id`)}
                     else '[]'::jsonb end as problems
       ) b
       cross join lateral (
@@ -1074,7 +1074,10 @@ export const CSV_VIEW_DEFS: Record<CsvQueryViewName, CsvView> = {
         );
       }
       if (row.readable !== true) {
-        throw new Error(`structured_data_nodes: ${where} holds a validation blob that is not a BlockValidation`);
+        throw new Error(
+          `structured_data_nodes: ${where} holds a validation blob that is not a BlockValidation ` +
+            "(one written before the 29a rework is not): re-run the rules (crawl_rules) and export again",
+        );
       }
       if (!(STRUCTURED_DATA_FORMATS as readonly string[]).includes(row.format)) {
         throw new Error(`structured_data_nodes: ${where} has format '${row.format}', which no writer produces`);

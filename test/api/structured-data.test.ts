@@ -23,8 +23,7 @@ import { runMigrations } from "../../src/db/migrate.js";
 import { crawls, pages, structuredData } from "../../src/db/schema.js";
 import type { StructuredDataFormat } from "../../src/crawl/parse/page-analyzer.js";
 import { validateBlock, type BlockValidation } from "../../src/rules/schema-org/validate.js";
-import { GOOGLE_FEATURES } from "../../src/rules/schema-org/google-features.js";
-import { LABEL_SEPARATOR, problemCells } from "../../src/api/structured-data.js";
+import { problemCells } from "../../src/api/structured-data.js";
 import { mkDiscovery } from "../rules/mk-discovery.js";
 import { mkPage } from "../rules/mk-page.js";
 import { LOCAL_TENANT, parseTenant } from "../../src/tenant.js";
@@ -45,23 +44,31 @@ const unjudgedId = `crawl_sd_listing_unjudged_${runId}`;
 const staleId = `crawl_sd_listing_stale_${runId}`;
 const skipsId = `crawl_sd_listing_skips_${runId}`;
 const malformedId = `crawl_sd_listing_malformed_${runId}`;
-const allCrawls = [crawlId, unjudgedId, staleId, skipsId, malformedId];
+const oldShapeId = `crawl_sd_listing_old_shape_${runId}`;
+const allCrawls = [crawlId, unjudgedId, staleId, skipsId, malformedId, oldShapeId];
 
 const PRODUCT = {
   "@context": C,
   "@type": "Product",
   name: "Widget",
   offers: { "@type": "Offer", price: "9.99", priceCurrency: "EUR" },
+  // An empty value (a warning) and a reference nothing on the page defines (an info).
+  image: "",
+  brand: { "@id": "#brand" },
 };
-const ORGANIZATION = { "@context": C, "@type": "Organization", name: "Acme", url: `${SITE}/` };
+const ORGANIZATION = { "@context": C, "@type": "Organization", "@id": "#org", name: "Acme", url: `${SITE}/` };
 const ARTICLE = {
   "@context": C,
   "@type": ["Article", "Blorpticle"],
   headline: "Hello",
   fooBar: 1,
   author: { "@type": "Offer", price: "1" },
+  // `#org` is defined on /product, not here: references resolve per page.
+  publisher: { "@id": "#org" },
+  // `#ada` is defined by the Person block on this page: resolved across blocks.
+  editor: { "@id": "#ada" },
 };
-const PERSON = { "@context": C, "@type": "Person", name: "Ada" };
+const PERSON = { "@context": C, "@type": "Person", "@id": "#ada", name: "Ada" };
 const FAQ = { "@context": C, "@type": "FAQPage", name: "Q" };
 
 interface BlockSpec {
@@ -131,27 +138,22 @@ async function seedCrawl(id: string): Promise<Map<string, string>> {
   return ids;
 }
 
-/** R0.8, in JS, over what `validateBlock` says — the oracle the SQL must match. */
+/**
+ * R0.8, in JS, over what `validateBlock` says — the oracle the SQL must match.
+ * A reference is an info only when no block of the same page defines its id.
+ */
 function warnings(v: BlockValidation): number {
-  return (
-    v.unknownTypes.length +
-    v.unknownProperties.length +
-    v.typeMismatches.length +
-    v.googleFeatures.filter((f) => f.missingRequired.length > 0).length
-  );
+  return v.unknownTypes.length + v.unknownProperties.length + v.typeMismatches.length + v.emptyValues.length;
 }
-function infos(v: BlockValidation): number {
-  return (
-    v.propertyStatus.length +
-    v.googleFeatures.filter((f) => f.missingRecommended.length > 0).length +
-    v.deprecatedFeatures.length
-  );
+function infos(v: BlockValidation, defined: ReadonlySet<string>): number {
+  return v.propertyStatus.length + v.references.filter((r) => !defined.has(r.id)).length;
 }
 function pageCounts(path: string): { warningCount: number; infoCount: number } {
   const verdicts = BLOCKS.filter((b) => b.path === path).map((b) => validateBlock(b.raw));
+  const defined = new Set(verdicts.flatMap((v) => v.definedIds));
   return {
     warningCount: verdicts.reduce((n, v) => n + warnings(v), 0),
-    infoCount: verdicts.reduce((n, v) => n + infos(v), 0),
+    infoCount: verdicts.reduce((n, v) => n + infos(v, defined), 0),
   };
 }
 
@@ -197,16 +199,26 @@ beforeAll(async () => {
     update pages set structured_data_skips = structured_data_skips || '{"surprise": 1}'::jsonb
      where crawl_id = ${skipsId} and url = ${`${SITE}/product`}`);
 
-  // Judged, then the Product block's first Google feature entry stripped of
-  // `missingRequired`: every list is still an array, so only the entry-level
-  // check can tell this blob from a clean one.
+  // Judged, then the Product block's node entry stripped of `properties`:
+  // every list is still an array, so only the entry-level check can tell this
+  // blob from a clean one.
   await seedCrawl(malformedId);
   await service.runRulesForCrawl(LOCAL_TENANT, malformedId);
   await db.execute(sql`
     update structured_data
-       set validation_jsonb = jsonb_set(validation_jsonb, '{googleFeatures,0}',
-                                        (validation_jsonb #> '{googleFeatures,0}') - 'missingRequired')
+       set validation_jsonb = jsonb_set(validation_jsonb, '{nodes,0}',
+                                        (validation_jsonb #> '{nodes,0}') - 'properties')
      where id = (select min(id) from structured_data where crawl_id = ${malformedId})`);
+
+  // Judged, then the Product block's blob put back in the shape written before
+  // the 29a rework: Google lists in, the standards facts out.
+  await seedCrawl(oldShapeId);
+  await service.runRulesForCrawl(LOCAL_TENANT, oldShapeId);
+  await db.execute(sql`
+    update structured_data
+       set validation_jsonb = (validation_jsonb - 'emptyValues' - 'definedIds' - 'references' - 'nodes')
+                              || '{"googleFeatures": [], "deprecatedFeatures": []}'::jsonb
+     where id = (select min(id) from structured_data where crawl_id = ${oldShapeId})`);
 }, 180_000);
 
 afterAll(async () => {
@@ -240,50 +252,55 @@ describe("listStructuredData — the rows", () => {
   it("answers the Product + microdata Organization page field by field", async () => {
     const page = await service.listStructuredData(LOCAL_TENANT, crawlId, {});
     const product = page.items.find((r) => r.url === `${SITE}/product`);
-    // The Product carries an Offer but no image: merchant-listing's one
-    // required miss, which is a warning, and the recommended misses are info.
-    const verdict = validateBlock(PRODUCT);
-    expect(verdict.googleFeatures.find((f) => f.feature === "merchant-listing")?.missingRequired).toEqual([
-      "image",
-    ]);
     expect(product).toEqual({
       url: `${SITE}/product`,
       pageType: "product",
       indexable: true,
       formats: ["jsonld", "microdata"],
       types: ["Organization", "Product"],
-      googleFeatures: ["merchant-listing", "organization", "product-snippet"],
+      nodes: [
+        {
+          format: "jsonld",
+          path: "$",
+          type: "Product",
+          properties: ["brand", "image", "name", "offers"],
+          propertiesCapped: false,
+        },
+        { format: "microdata", path: "$", type: "Organization", properties: ["name", "url"], propertiesCapped: false },
+      ],
       ...pageCounts("/product"),
       jsonLdParseErrors: 0,
       microdataErrors: 0,
       skips: SKIPS,
     });
+    // The empty image is the one warning; the unresolved #brand the one info.
     expect(product?.warningCount).toBe(1);
-    expect(product?.infoCount).toBe(3);
+    expect(product?.infoCount).toBe(1);
   });
 
   it("names exactly the projected keys, in order (no spread of a row)", async () => {
     const page = await service.listStructuredData(LOCAL_TENANT, crawlId, {});
     expect(Object.keys(page.items[0]!)).toEqual([
-      "url", "pageType", "indexable", "formats", "types", "googleFeatures",
+      "url", "pageType", "indexable", "formats", "types", "nodes",
       "warningCount", "infoCount", "jsonLdParseErrors", "microdataErrors", "skips",
     ]);
+    expect(Object.keys(page.items[0]!.nodes[0]!)).toEqual(["format", "path", "type", "properties", "propertiesCapped"]);
   });
 
-  it("sums every problem kind across a page's blocks", async () => {
+  it("sums every problem kind across a page's blocks, resolving references per page", async () => {
     const page = await service.listStructuredData(LOCAL_TENANT, crawlId, {});
     const article = page.items.find((r) => r.url === `${SITE}/article`);
     // Article: an unknown type, an unknown property and a type mismatch
-    // (warnings) plus Article's recommended misses; FAQPage's withdrawn
-    // feature (info); Person is clean.
+    // (warnings), and `publisher: #org`, defined on another page only (info).
+    // `editor: #ada` is defined by the Person block beside it and resolves.
     expect(article).toMatchObject({
       formats: ["jsonld"],
       types: ["Article", "FAQPage", "Person"],
-      googleFeatures: ["article"],
       ...pageCounts("/article"),
     });
+    expect(article?.nodes.map((n) => n.type)).toEqual(["Article", "Person", "FAQPage"]);
     expect(article?.warningCount).toBe(3);
-    expect(article?.infoCount).toBe(2);
+    expect(article?.infoCount).toBe(1);
   });
 
   it("counts a page's parse and microdata errors as warnings, with no blocks at all", async () => {
@@ -294,7 +311,7 @@ describe("listStructuredData — the rows", () => {
       indexable: true,
       formats: [],
       types: [],
-      googleFeatures: [],
+      nodes: [],
       warningCount: 3,
       infoCount: 0,
       jsonLdParseErrors: 2,
@@ -312,15 +329,6 @@ describe("listStructuredData — filters and paging", () => {
     expect(json.items.map((r) => r.url)).toEqual([`${SITE}/article`, `${SITE}/product`]);
     const rdfa = await service.listStructuredData(LOCAL_TENANT, crawlId, { format: "rdfa" });
     expect(rdfa.items).toEqual([]);
-  });
-
-  it("feature: pages with a block that matched that Google feature", async () => {
-    const merchant = await service.listStructuredData(LOCAL_TENANT, crawlId, { feature: "merchant-listing" });
-    expect(merchant.items.map((r) => r.url)).toEqual([`${SITE}/product`]);
-    const article = await service.listStructuredData(LOCAL_TENANT, crawlId, { feature: "article" });
-    expect(article.items.map((r) => r.url)).toEqual([`${SITE}/article`]);
-    const recipe = await service.listStructuredData(LOCAL_TENANT, crawlId, { feature: "recipe" });
-    expect(recipe.items).toEqual([]);
   });
 
   it("pageType: the cohort, and a cohort the crawl never produced is refused", async () => {
@@ -353,14 +361,6 @@ describe("listStructuredData — filters and paging", () => {
       .catch((e: unknown) => e);
     expect(error).toMatchObject({ code: "VALIDATION" });
     expect(String((error as Error).message)).toContain("jsonld, microdata, rdfa");
-  });
-
-  it("refuses a feature id Google has no profile for, naming the accepted ids", async () => {
-    const error = await service
-      .listStructuredData(LOCAL_TENANT, crawlId, { feature: "carousel" })
-      .catch((e: unknown) => e);
-    expect(error).toMatchObject({ code: "VALIDATION" });
-    expect(String((error as Error).message)).toContain("merchant-listing");
   });
 });
 
@@ -401,33 +401,19 @@ describe("the structured_data_nodes CSV view", () => {
     const A = `${SITE}/article`;
     expect(lines.slice(1)).toEqual(
       [
-        [P, "jsonld", "Product", "$", "Product", "google-required", "merchant-listing: image"],
-        [
-          P, "jsonld", "Product", "$", "Product", "google-recommended",
-          "product-snippet: aggregateRating, review, offers.availability, offers.priceValidUntil",
-        ],
-        [
-          P, "jsonld", "Product", "$", "Product", "google-recommended",
-          "merchant-listing: aggregateRating, brand, brand.name, category, color, description, gtin, " +
-            "material, mpn, pattern, review, size, sku, offers.availability, offers.itemCondition, " +
-            "offers.priceValidUntil",
-        ],
-        [
-          P, "microdata", "Organization", "$", "Organization", "google-recommended",
-          "organization: logo, sameAs, address, contactPoint, telephone, email, description",
-        ],
+        [P, "jsonld", "Product", "$.image", "Product", "empty-value", "image is empty"],
+        [P, "jsonld", "Product", "$.brand", "", "unresolved-reference", "#brand is not defined on this page"],
+        [P, "microdata", "Organization", "", "", "", ""],
         [A, "jsonld", "Article", "$", "Blorpticle", "unknown-type", "Blorpticle is not a schema.org type"],
         [A, "jsonld", "Article", "$", "Article", "unknown-property", "fooBar is not a property of Article"],
         [
           A, "jsonld", "Article", "$.author", "Offer", "type-mismatch",
           "author: Offer (expected Organization|Person)",
         ],
-        [
-          A, "jsonld", "Article", "$", "Article", "google-recommended",
-          "article: author.name, author.url, dateModified, datePublished, image",
-        ],
+        // `#org` is defined on /product only; `#ada` (the Person block below) resolves.
+        [A, "jsonld", "Article", "$.publisher", "", "unresolved-reference", "#org is not defined on this page"],
         [A, "jsonld", "Person", "", "", "", ""],
-        [A, "jsonld", "FAQPage", "$", "FAQPage", "deprecated-feature", "faq"],
+        [A, "jsonld", "FAQPage", "", "", "", ""],
       ].map((cells) => csvRecord(cells)),
     );
   });
@@ -444,7 +430,7 @@ describe("the structured_data_nodes CSV view", () => {
       cursor = def.next(result.rows[result.rows.length - 1]!);
     }
     expect(walked).toEqual((await csvLines(crawlId)).slice(1));
-    expect(walked).toHaveLength(10);
+    expect(walked).toHaveLength(9);
   });
 
   it("refuses the unjudged and the pre-29a crawl before a byte, as the listing does", async () => {
@@ -469,23 +455,31 @@ describe("the structured_data_nodes CSV view", () => {
   });
 });
 
-describe("the google-* Detail keeps AND and OR apart (review I1)", () => {
-  it("no Google requirement label contains the comma the Detail joins labels with", () => {
-    const labels = GOOGLE_FEATURES.flatMap((f) => [...f.required, ...f.recommended].map((r) => r.label));
-    expect(labels.length).toBeGreaterThan(0);
-    expect(LABEL_SEPARATOR.trim()).toBe(",");
-    expect(labels.filter((label) => label.includes(","))).toEqual([]);
+describe("the CSV Detail cells of the standards problems", () => {
+  it("an empty value names its property; a reference names its id", () => {
+    expect(
+      problemCells({ problem: "empty-value", path: "$.offers.price", type: "Offer", property: "price" }, "test"),
+    ).toEqual({ path: "$.offers.price", nodeType: "Offer", problem: "empty-value", detail: "price is empty" });
+    // An empty value under an untyped node has no type to print.
+    expect(
+      problemCells({ problem: "empty-value", path: "$.address.streetAddress", type: null, property: "streetAddress" }, "test"),
+    ).toMatchObject({ nodeType: "" });
+    expect(
+      problemCells({ problem: "unresolved-reference", path: "$.publisher", id: "https://other.example/#org" }, "test"),
+    ).toEqual({
+      path: "$.publisher",
+      nodeType: "",
+      problem: "unresolved-reference",
+      detail: "https://other.example/#org is not defined on this page",
+    });
   });
 
-  it("joins an anyOf label beside a plain one with ', ', leaving the label's own ' | ' readable as OR", () => {
-    // A Product with an Offer that carries no price and no name: product-snippet
-    // misses the plain `name` and the anyOf price label.
-    const verdict = validateBlock({ "@context": C, "@type": "Product", offers: { "@type": "Offer" } });
-    const snippet = verdict.googleFeatures.find((f) => f.feature === "product-snippet");
-    const anyOf = "offers.price | offers.priceSpecification.price | offers.lowPrice";
-    expect(snippet?.missingRequired).toEqual(["name", anyOf]);
-    const cells = problemCells({ ...snippet, problem: "google-required" }, "test entry");
-    expect(cells.detail).toBe(`product-snippet: name, ${anyOf}`);
+  it("refuses an entry that is not the shape its problem names", () => {
+    expect(() => problemCells({ problem: "empty-value", path: "$.x", type: 3, property: "x" }, "row 1")).toThrow(
+      /row 1 .*type/,
+    );
+    expect(() => problemCells({ problem: "unresolved-reference", path: "$.x" }, "row 1")).toThrow(/'id'/);
+    expect(() => problemCells({ problem: "google-required", path: "$" }, "row 1")).toThrow(/unknown problem/);
   });
 });
 
@@ -501,7 +495,7 @@ describe("the stored skips object is projected, not passed through (review I2)",
   });
 });
 
-describe("a Google feature entry without its two lists is unreadable (review I3)", () => {
+describe("a node entry without its property list is unreadable (review I3)", () => {
   it("the listing throws rather than counting the entry as clean", async () => {
     const error = await service.listStructuredData(LOCAL_TENANT, malformedId, {}).catch((e: unknown) => e);
     expect(error).toBeInstanceOf(Error);
@@ -511,5 +505,17 @@ describe("a Google feature entry without its two lists is unreadable (review I3)
   it("the CSV view throws rather than writing the block as clean", async () => {
     // The refusal before the header passes (no blob is null); the row throws.
     await expect(csvLines(malformedId)).rejects.toThrow(/not a BlockValidation/);
+  });
+});
+
+describe("a blob in the shape written before the 29a rework is refused, never read", () => {
+  it("the listing throws and says to re-run the rules", async () => {
+    const error = await service.listStructuredData(LOCAL_TENANT, oldShapeId, {}).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(Error);
+    expect(String((error as Error).message)).toMatch(new RegExp(`${oldShapeId}.*not a BlockValidation.*re-run the rules`));
+  });
+
+  it("the CSV view throws and says to re-run the rules", async () => {
+    await expect(csvLines(oldShapeId)).rejects.toThrow(/not a BlockValidation.*re-run the rules/);
   });
 });

@@ -258,11 +258,12 @@ import { ServiceError, clip, unknownKeysMessage } from "./errors.js";
 import {
   blockInfos,
   blockWarnings,
-  parseGoogleFeature,
   parseStructuredDataFormat,
+  projectNodes,
   projectSkips,
   storedFormat,
   validationReadable,
+  type StructuredDataNode,
 } from "./structured-data.js";
 import type { StructuredDataFormat, StructuredDataSkips } from "../crawl/parse/page-analyzer.js";
 import { decodeCursor, encodeCursor, parseLimit } from "./paging.js";
@@ -2342,15 +2343,14 @@ export interface StructuredDataQuery {
   pageType?: string;
   /** One of `STRUCTURED_DATA_FORMATS`: pages holding at least one block of it. */
   format?: string;
-  /** A `GOOGLE_FEATURES` id: pages with a block whose verdict matched it. */
-  feature?: string;
   limit?: number;
   cursor?: string;
 }
 
 /**
  * One page of the `structured_data` listing (Phase 29a): what the page's blocks
- * are, which Google features they matched, and how many problems they carry.
+ * are, each top-level node with its properties (29a rework), and how many
+ * problems they carry.
  *
  * The counts are ruling R0.8's, named after the registry's two non-critical
  * severities (`src/api/structured-data.ts` lists what each sums).
@@ -2364,7 +2364,8 @@ export interface StructuredDataPageRow {
   indexable: boolean | null;
   formats: StructuredDataFormat[];
   types: string[];
-  googleFeatures: string[];
+  /** Each block's top-level node, in block order: `{format, path, type, properties, propertiesCapped}`. */
+  nodes: StructuredDataNode[];
   warningCount: number;
   infoCount: number;
   jsonLdParseErrors: number;
@@ -6897,7 +6898,6 @@ export class ApiService {
     const limit = parseLimit(opts.limit);
     const cursor = opts.cursor === undefined ? null : decodeCursor(opts.cursor, 1);
     const format = opts.format === undefined ? null : parseStructuredDataFormat(opts.format);
-    const feature = opts.feature === undefined ? null : parseGoogleFeature(opts.feature);
     const cohort = opts.pageType === undefined ? null : await this.pageTypeCondition(crawlId, opts.pageType);
 
     const readable = validationReadable(sql`sd.validation_jsonb`);
@@ -6914,13 +6914,6 @@ export class ApiService {
                               where sd.crawl_id = ${crawlId} and sd.page_id = p.id
                                 and sd.format = ${format})`);
     }
-    if (feature !== null) {
-      where.push(sql`exists (select 1 from structured_data sd
-                              where sd.crawl_id = ${crawlId} and sd.page_id = p.id
-                                and jsonb_path_exists(sd.validation_jsonb,
-                                      '$.googleFeatures[*] ? (@.feature == $f)',
-                                      jsonb_build_object('f', ${feature}::text)))`);
-    }
     if (cursor !== null) where.push(sql`p.url > ${cursor[0]}`);
 
     return await this.db.transaction(
@@ -6935,7 +6928,7 @@ export class ApiService {
           skips: unknown;
           formats: string[];
           types: string[];
-          features: string[];
+          nodes: unknown;
           warning_count: number;
           info_count: number;
           unreadable: number;
@@ -6946,12 +6939,18 @@ export class ApiService {
                  p.structured_data_skips as skips,
                  coalesce(b.formats, '{}'::text[]) as formats,
                  coalesce(b.types, '{}'::text[]) as types,
-                 array(select distinct f.id #>> '{}'
-                         from structured_data sd
-                        cross join lateral jsonb_path_query(sd.validation_jsonb,
-                                                            '$.googleFeatures[*].feature') as f(id)
-                        where sd.crawl_id = ${crawlId} and sd.page_id = p.id and ${readable}
-                        order by 1) as features,
+                 coalesce((select jsonb_agg(jsonb_build_object(
+                                     'format', sd.format,
+                                     'path', n.node -> 'path',
+                                     'type', n.node -> 'type',
+                                     'properties', n.node -> 'properties',
+                                     'propertiesCapped', n.node -> 'propertiesCapped')
+                                   order by sd.id, n.ord)
+                             from structured_data sd
+                            cross join lateral jsonb_array_elements(sd.validation_jsonb -> 'nodes')
+                                  with ordinality as n(node, ord)
+                            where sd.crawl_id = ${crawlId} and sd.page_id = p.id and ${readable}),
+                          '[]'::jsonb) as nodes,
                  (coalesce(b.warnings, 0)
                    + p.structured_data_parse_errors
                    + coalesce(p.structured_data_microdata_errors, 0))::int as warning_count,
@@ -6962,7 +6961,8 @@ export class ApiService {
               select array_agg(distinct sd.format order by sd.format) as formats,
                      array_agg(distinct sd.schema_type order by sd.schema_type) as types,
                      sum(case when ${readable} then ${blockWarnings(sql`sd.validation_jsonb`)} end) as warnings,
-                     sum(case when ${readable} then ${blockInfos(sql`sd.validation_jsonb`)} end) as infos,
+                     sum(case when ${readable}
+                              then ${blockInfos(sql`sd.validation_jsonb`, crawlId, sql`sd.page_id`)} end) as infos,
                      count(*) filter (where ${readable} is not true) as unreadable
                 from structured_data sd
                where sd.crawl_id = ${crawlId} and sd.page_id = p.id
@@ -6979,7 +6979,8 @@ export class ApiService {
           if (row.unreadable > 0) {
             throw new Error(
               `listStructuredData: crawl ${crawlId}, page ${row.url}: ${row.unreadable} ` +
-                "structured_data row(s) hold a validation blob that is not a BlockValidation",
+                "structured_data row(s) hold a validation blob that is not a BlockValidation " +
+                "(one written before the 29a rework is not): re-run the rules (crawl_rules)",
             );
           }
           return {
@@ -6988,7 +6989,7 @@ export class ApiService {
             indexable: row.is_indexable,
             formats: row.formats.map((f) => storedFormat(f, crawlId, row.url)),
             types: row.types,
-            googleFeatures: row.features,
+            nodes: projectNodes(row.nodes, crawlId, row.url),
             warningCount: row.warning_count,
             infoCount: row.info_count,
             jsonLdParseErrors: row.parse_errors,

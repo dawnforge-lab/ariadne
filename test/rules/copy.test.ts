@@ -777,49 +777,20 @@ describe("copy: structured data", () => {
   });
 
   // The self-serving finding states a fact about the markup: an Organization,
-  // or a subtype, carries a rating or reviews of itself. It names no search
-  // engine's policy, and it is not an accusation that the reviews are
-  // fabricated (29a rework).
+  // or a subtype, rates itself. It names no search engine's policy, and it is
+  // not an accusation that the reviews are fabricated (29a rework).
   it("schema.self-serving-reviews states a fact, not a policy, fake reviews or a penalty", () => {
     const c = copy("schema.self-serving-reviews");
-    expect(c.explanation).toMatch(/of itself|about the business itself/);
+    expect(c.explanation, "it states the fact").toMatch(
+      /about the business itself/,
+    );
+    expect(c.explanation, "and names no engine's display").not.toMatch(/does not show|stars/i);
     const overclaim =
-      /fake|fraudulent|fabricat|manual action|penalt|penalis|penaliz|will be penal|policy|does not show|stars/i;
+      /fake|fraudulent|fabricat|manual action|penalt|penalis|penaliz|will be penal|policy/i;
     expect(`${c.explanation} ${c.howToFix}`).not.toMatch(overclaim);
+    // The Organization branch, named by its root and its best-known subtype.
     expect(c.explanation).toMatch(/Organization/);
     expect(c.explanation).toMatch(/LocalBusiness/);
-  });
-
-  // "Google is not a rule" (owner, 29a amendment): no structured-data copy
-  // justifies a finding by one search engine or its rich results. The copy
-  // cites schema.org or the format specifications instead.
-  it("no schema.* copy names Google, rich results or one engine's test", () => {
-    const schemaIds = Object.keys(ISSUE_COPY).filter((id) => id.startsWith("schema."));
-    expect(schemaIds.length).toBeGreaterThan(10);
-    for (const id of schemaIds) {
-      const c = copy(id);
-      expect(`${c.title} ${c.explanation} ${c.howToFix}`, id).not.toMatch(
-        /google|bing|rich result|rich snippet|rich results test/i,
-      );
-    }
-  });
-
-  it("schema.empty-value and schema.unresolved-reference cite the specs they judge by", () => {
-    const empty = copy("schema.empty-value");
-    expect(empty.explanation).toMatch(/JSON-LD/);
-    expect(empty.explanation).toMatch(/microdata/);
-    expect(empty.explanation).toMatch(/RDFa/);
-    const unresolved = copy("schema.unresolved-reference");
-    expect(unresolved.explanation).toMatch(/JSON-LD/);
-    // Linking out to an entity defined elsewhere is legal, and the copy says so.
-    expect(unresolved.explanation).toMatch(/legal|valid/i);
-    expect(unresolved.explanation).toMatch(/another site|elsewhere/);
-  });
-
-  it("schema.property-coverage states counts and leaves the judgement to the reader", () => {
-    const c = copy("schema.property-coverage");
-    expect(c.explanation).toMatch(/schema\.org/);
-    expect(`${c.explanation} ${c.howToFix}`).not.toMatch(/required|recommended/i);
   });
 });
 
@@ -2061,5 +2032,40 @@ describe("copy: hreflang declarations not read in full", () => {
     expect(copy("hreflang.declarations-incomplete").howToFix).toContain(
       copy("sitemap.invalid").title,
     );
+  });
+});
+
+// The 29a rework (2026-11-16), appended so no line the surface document cites
+// moves. "Google is not a rule" (owner, 29a amendment): no structured-data copy
+// justifies a finding by one search engine or its rich results; the copy cites
+// schema.org or the format specifications instead.
+describe("structured-data copy cites web standards (29a rework)", () => {
+  it("no schema.* copy names Google, rich results or one engine's test", () => {
+    const schemaIds = Object.keys(ISSUE_COPY).filter((id) => id.startsWith("schema."));
+    expect(schemaIds.length).toBeGreaterThan(10);
+    for (const id of schemaIds) {
+      const c = copyFor(id);
+      expect(`${c.title} ${c.explanation} ${c.howToFix}`, id).not.toMatch(
+        /google|bing|rich result|rich snippet|rich results test/i,
+      );
+    }
+  });
+
+  it("schema.empty-value and schema.unresolved-reference cite the specs they judge by", () => {
+    const empty = copyFor("schema.empty-value");
+    expect(empty.explanation).toMatch(/JSON-LD/);
+    expect(empty.explanation).toMatch(/microdata/);
+    expect(empty.explanation).toMatch(/RDFa/);
+    const unresolved = copyFor("schema.unresolved-reference");
+    expect(unresolved.explanation).toMatch(/JSON-LD/);
+    // Linking out to an entity defined elsewhere is legal, and the copy says so.
+    expect(unresolved.explanation).toMatch(/legal|valid/i);
+    expect(unresolved.explanation).toMatch(/another site|elsewhere/);
+  });
+
+  it("schema.property-coverage states counts and leaves the judgement to the reader", () => {
+    const c = copyFor("schema.property-coverage");
+    expect(c.explanation).toMatch(/schema\.org/);
+    expect(`${c.explanation} ${c.howToFix}`).not.toMatch(/required|recommended/i);
   });
 });

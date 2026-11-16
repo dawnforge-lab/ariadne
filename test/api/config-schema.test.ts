@@ -133,7 +133,7 @@ describe("the published schema", () => {
       .filter((rule) => rule.kind !== "metric")
       .map((rule) => rule.id);
     expect([...names].sort()).toEqual([...findingRules].sort());
-    expect(names).toHaveLength(183);
+    expect(names).toHaveLength(182); // 72 page + 110 query since the 29a rework
     for (const metric of registry.byKind("metric")) {
       expect(names, metric.id).not.toContain(metric.id);
     }

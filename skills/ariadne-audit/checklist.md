@@ -45,7 +45,7 @@ WHAT CHANGED AFTER IMPORT (the living authority's own change log):
   title, priority, Evaluate criteria or Record list moved.
   - CHECK-43: the `schema.*` validation rules over JSON-LD, microdata and RDFa, and
     the `structured_data` listing.
-  - CHECK-44: `schema.google-required-missing` / `-recommended-missing` replace the
+  - CHECK-44: the `schema.property-coverage` metric (property counts per type) replaces the
     retired Product field-presence rule.
   - CHECK-46: the self-serving match covers the Organization branch, not one type.
 
@@ -2784,7 +2784,7 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
   - `schema.embedded-type-mismatch` (warning): a nested node whose type the property does
     not accept;
   - `schema.empty-value` (warning): a property whose value is empty markup — blank
-    text, `[]`, or `{}` — listed at its own path (`$.offers.price`);
+    text, `[]`, or `{}` — listed at its own path (an empty price inside offers, not offers);
   - `schema.unresolved-reference` (info): a bare `{"@id": …}` that no node in any block
     of the same page defines. Linking to an entity defined elsewhere is legal JSON-LD,
     so read it as a fact to check, not an error;

@@ -174,7 +174,9 @@ export const schemaMetrics: MetricRule[] = [
     "schema.property-coverage",
     ["CHECK-44"],
     STRUCTURED_DATA,
-    expandMap("properties", "Schema Type", "Property", "Nodes With Value", undefined, [
+    // Position 14, last: the fourteen tables before it keep the positions they
+    // already serve (the others sit alphabetically, `site.health` first).
+    expandMap("properties", "Schema Type", "Property", "Nodes With Value", 14, [
       { key: "nodes", label: "Nodes" },
       { key: "propertyListsCapped", label: "Nodes With Property List Capped" },
       { key: "typesNotListed", label: "Types Not Listed" },

@@ -613,7 +613,7 @@ describe("the structured_data listing over both transports (29a)", () => {
     const cases: [string, Record<string, unknown>][] = [
       ["", {}],
       ["?format=jsonld&limit=1", { format: "jsonld", limit: 1 }],
-      ["?feature=product-snippet&pageType=home", { feature: "product-snippet", pageType: "home" }],
+      ["?pageType=home", { pageType: "home" }],
     ];
     for (const [query, args] of cases) {
       const viaHttp = await call("GET", `/crawls/${id}/structured-data${query}`);
@@ -630,5 +630,14 @@ describe("the structured_data listing over both transports (29a)", () => {
     const badMcp = await tool("structured_data", { crawlId: id, format: "xml" });
     expect(badMcp.isError).toBe(true);
     expect(badMcp.body).toEqual(bad.body);
+
+    // The Google `feature` filter is gone (29a rework): an unknown name is
+    // refused on both transports, never ignored into an unfiltered listing.
+    const gone = await call("GET", `/crawls/${id}/structured-data?feature=product-snippet`);
+    expect(gone.status).toBe(400);
+    expect(JSON.stringify(gone.body)).toMatch(/unknown/);
+    const goneMcp = await tool("structured_data", { crawlId: id, feature: "product-snippet" });
+    expect(goneMcp.isError).toBe(true);
+    expect(goneMcp.text).toMatch(/unknown field/);
   });
 });

@@ -61,7 +61,7 @@ describe("validateBlock — the schema.org vocabulary", () => {
       {
         path: "$",
         type: "Product",
-        properties: ["name", "image", "description", "sku", "mpn", "gtin13", "brand", "offers"],
+        properties: ["brand", "description", "gtin13", "image", "mpn", "name", "offers", "sku"],
         emptyProperties: [],
         propertiesCapped: false,
       },
@@ -355,7 +355,7 @@ describe("validateBlock — ids and references (JSON-LD node references)", () =>
 });
 
 describe("validateBlock — the top-level node and its properties", () => {
-  it("lists only the top-level node, its property names without keywords, deduplicated by schema.org name", () => {
+  it("lists only the top-level node, its property names without keywords, deduplicated by schema.org name and sorted", () => {
     const v = validate({
       "@context": CTX,
       "@type": "Product",
@@ -382,8 +382,8 @@ describe("validateBlock — the top-level node and its properties", () => {
     expect(v.nodes[0]).toEqual({
       path: "$",
       type: "Product",
-      properties: ["name", "image", "sameAs", "offers", "weight"],
-      emptyProperties: ["name", "image"],
+      properties: ["image", "name", "offers", "sameAs", "weight"],
+      emptyProperties: ["image", "name"],
       propertiesCapped: false,
     });
   });

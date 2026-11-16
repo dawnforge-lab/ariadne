@@ -58,7 +58,8 @@
  *    its type (the primary known type, else the first stated `@type` as
  *    written, schema.org spellings reduced to the bare name; null when untyped),
  *    its property names (keys without `@` keywords, by schema.org name, each
- *    once, in authored order, capped at `MAX_PROBLEMS_PER_LIST` with
+ *    once, SORTED (the stored block is jsonb, which keeps no key order, so an
+ *    "authored order" would be Postgres's), capped at `MAX_PROBLEMS_PER_LIST` with
  *    `propertiesCapped` and `listsCapped` set), and which of the listed
  *    properties carry no non-empty value (`carriesValue`).
  *
@@ -230,7 +231,7 @@ class Walker {
 
   /**
    * The block's top-level node, as `nodes` lists it: its property names by
-   * schema.org name, each once in authored order, capped, and which of the
+   * schema.org name, each once, sorted, capped, and which of the
    * listed ones carry no non-empty value.
    */
   private topLevel(node: Record<string, unknown>, type: string | null): void {
@@ -240,7 +241,7 @@ class Walker {
       const name = propertyName(key);
       carried.set(name, (carried.get(name) ?? false) || carriesValue(value));
     }
-    const all = [...carried.keys()];
+    const all = [...carried.keys()].sort();
     const properties = all.slice(0, MAX_PROBLEMS_PER_LIST);
     const propertiesCapped = all.length > properties.length;
     if (propertiesCapped) this.capped = true;

@@ -112,8 +112,9 @@
  *   GET  /crawls/:id/pages             the crawled pages, slim and filtered
  *   GET  /crawls/:id/structured-data   one row per page with structured data or
  *                                      a parse/microdata error: formats, types,
- *                                      matched Google features, warningCount /
- *                                      infoCount. `?pageType=&format=&feature=`.
+ *                                      top-level nodes and their properties,
+ *                                      warningCount / infoCount.
+ *                                      `?pageType=&format=`.
  *                                      409 on a crawl no rules run has judged,
  *                                      or one judged before the validation
  *                                      derivation existed (re-run the rules)
@@ -774,13 +775,12 @@ function buildRoutes(): Route[] {
     {
       method: "GET",
       pattern: ["crawls", id, "structured-data"],
-      query: ["pageType", "format", "feature", ...PAGINATION_PARAMS],
+      query: ["pageType", "format", ...PAGINATION_PARAMS],
       handler: async (service, ctx) => ({
         status: 200,
         body: await service.listStructuredData(ctx.tenant, param(ctx, "id"), {
           ...optionalString(ctx.query, "pageType"),
           ...optionalString(ctx.query, "format"),
-          ...optionalString(ctx.query, "feature"),
           ...optionalNumber(ctx.query, "limit"),
           ...optionalString(ctx.query, "cursor"),
         }),

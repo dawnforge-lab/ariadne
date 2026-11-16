@@ -79,7 +79,7 @@ import type { McpServerConfig } from "./config.js";
 import { credentialInputSchemas } from "./config-schema.js";
 import { CSV_VIEWS, EXPORT_FORMATS } from "./csv.js";
 import { strictInput } from "./mcp-input.js";
-import { GOOGLE_FEATURE_IDS, STRUCTURED_DATA_FORMATS, STRUCTURED_DATA_PROBLEMS } from "./structured-data.js";
+import { STRUCTURED_DATA_FORMATS, STRUCTURED_DATA_PROBLEMS } from "./structured-data.js";
 import {
   ApiService,
   COMPARE_SETS,
@@ -1807,18 +1807,24 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
       description:
         "One row per page that carries structured data — a JSON-LD, microdata or " +
         "RDFa block — or a JSON-LD parse error or microdata error: {url, pageType, " +
-        "indexable, formats, types, googleFeatures, warningCount, infoCount, " +
+        "indexable, formats, types, nodes, warningCount, infoCount, " +
         "jsonLdParseErrors, microdataErrors, skips}. A page with neither is not " +
         "listed. Use it to see which templates publish which markup, and where " +
         "the problems are, before reading the schema.* findings.\n\n" +
         "formats are the syntaxes found and types the schema.org types of the " +
-        "page's blocks, both distinct and sorted. googleFeatures are the Google " +
-        "rich-result features a block matched (whatever it was missing).\n\n" +
+        "page's blocks, both distinct and sorted. nodes are the page's top-level " +
+        "nodes (each @graph member is one), in block order: {format, path, type, " +
+        "properties, propertiesCapped} — type as the markup states it (null when " +
+        "untyped), properties the node's property names, capped per node with " +
+        "propertiesCapped true when cut short. Structured data is judged by the " +
+        "schema.org vocabulary and the JSON-LD, Microdata and RDFa specs; which " +
+        "properties a page needs is yours to judge.\n\n" +
         "TWO COUNTS, NAMED AFTER THE SEVERITIES. warningCount is unknown types, " +
-        "unknown properties, type mismatches, matched Google features missing a " +
-        "REQUIRED property, plus jsonLdParseErrors and microdataErrors. infoCount " +
-        "is pending or superseded properties, matched features missing a " +
-        "RECOMMENDED property, and markup for a feature Google has withdrawn. The " +
+        "unknown properties, type mismatches, empty values, plus " +
+        "jsonLdParseErrors and microdataErrors. infoCount is pending or " +
+        "superseded properties and references (a bare @id) that no block of the " +
+        "same page defines — linking to an entity defined elsewhere is legal, so " +
+        "read those as facts to check. The " +
         "problem-by-problem detail is the structured_data_nodes CSV view " +
         "(export_crawl format=csv), one row per block and problem.\n\n" +
         "NULL IS NOT ZERO. microdataErrors and skips are null on a page crawled " +
@@ -1833,9 +1839,7 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "  pageType — a template cohort as this crawl typed it; '(untyped)' for " +
         "the pages it could not type\n" +
         `  format   — ${STRUCTURED_DATA_FORMATS.join(", ")}: pages holding at least ` +
-        "one block of that syntax\n" +
-        `  feature  — a Google feature id (${GOOGLE_FEATURE_IDS.join(", ")}): pages ` +
-        "with a block that matched it\n\n" +
+        "one block of that syntax\n\n" +
         "Ordered by URL. Paginated: {items, nextCursor}; limit defaults to " +
         `${PAGE_SIZE_DEFAULT}, maximum ${PAGE_SIZE_MAX}. The CSV view's Problem ` +
         `column is one of: ${STRUCTURED_DATA_PROBLEMS.join(", ")}.`,
@@ -1849,12 +1853,6 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
           .string()
           .describe(
             `Only pages holding a block of this syntax: ${STRUCTURED_DATA_FORMATS.join(", ")}.`,
-          )
-          .optional(),
-        feature: z
-          .string()
-          .describe(
-            `Only pages with a block that matched this Google feature: ${GOOGLE_FEATURE_IDS.join(", ")}.`,
           )
           .optional(),
         limit: limitField(),
