@@ -423,3 +423,18 @@ export const SOCIAL_IMAGE_MAX_BYTES = 5 * 1024 * 1024;
 
 /** The Open Graph tags a complete set carries. */
 export const OG_REQUIRED = ["title", "type", "image", "url"] as const;
+
+/**
+ * The share of a page type's pages that must carry a schema type before a page
+ * of that type WITHOUT it is a template fault (`schema.template-inconsistent`),
+ * in percent. At 70, a type on 9 of 12 product pages makes the other 3 findings;
+ * on 8 of 12 (66.7%) it reads as a mix, not a template. Overridable per crawl.
+ */
+export const SCHEMA_TEMPLATE_SHARE = 70;
+
+/**
+ * The fewest judged pages a page type needs before its markup is compared. Below
+ * it a "share" is two or three pages and says nothing about a template.
+ * Overridable per crawl.
+ */
+export const SCHEMA_TEMPLATE_MIN_PAGES = 10;

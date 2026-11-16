@@ -1,5 +1,5 @@
 /**
- * The MCP transport: thirty-four tools over the same service layer the HTTP
+ * The MCP transport: thirty-five tools over the same service layer the HTTP
  * routes use. Twelve of them change something (`crawl_start`, `crawl_resume`,
  * `crawl_pause`, `crawl_cancel`, `crawl_delete`, `crawl_render`, `crawl_rules`,
  * `crawl_mark_failed`, `crawl_config_set`, `schedule_create`, `schedule_update`,
@@ -79,6 +79,7 @@ import type { McpServerConfig } from "./config.js";
 import { credentialInputSchemas } from "./config-schema.js";
 import { CSV_VIEWS, EXPORT_FORMATS } from "./csv.js";
 import { strictInput } from "./mcp-input.js";
+import { STRUCTURED_DATA_FORMATS, STRUCTURED_DATA_PROBLEMS } from "./structured-data.js";
 import {
   ApiService,
   COMPARE_SETS,
@@ -138,6 +139,7 @@ export const TOOL_NAMES = [
   "metrics_get",
   "metric_table",
   "pages_query",
+  "structured_data",
   "export_crawl",
   "rules_catalog",
   "crawl_compare",
@@ -1799,6 +1801,77 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
   );
 
   server.registerTool(
+    named("structured_data"),
+    {
+      title: "The crawl's structured data, page by page",
+      description:
+        "One row per page that carries structured data — a JSON-LD, microdata or " +
+        "RDFa block — or a JSON-LD parse error or microdata error: {url, pageType, " +
+        "indexable, formats, types, nodes, warningCount, infoCount, " +
+        "jsonLdParseErrors, microdataErrors, skips, blocksAtCap, problemsCapped}. A page with " +
+        "neither is not listed. Use it to see which templates publish which markup, and where " +
+        "the problems are, before reading the schema.* findings.\n\n" +
+        "formats are the syntaxes found, distinct and sorted. types are every type the " +
+        "page's top-level nodes state, in authored order, each once. nodes are the page's " +
+        "top-level nodes (each @graph member is one; a member holding only an @id is a " +
+        "reference, not a node), in block order: {format, path, type, types, typesCapped, " +
+        "properties, propertiesCapped} — type the primary type as the markup states it " +
+        "(null when untyped), types every type the node states (a microdata or RDFa node " +
+        "lists one: extraction 4 keeps only the first itemtype / typeof token), properties " +
+        "the node's property names; both lists are capped per node, with typesCapped and " +
+        "propertiesCapped true when cut short. Structured data is judged by the " +
+        "schema.org vocabulary and the JSON-LD, Microdata and RDFa specs; which " +
+        "properties a page needs is yours to judge.\n\n" +
+        "TWO COUNTS, NAMED AFTER THE SEVERITIES. warningCount is unknown types, " +
+        "unknown properties, type mismatches, empty values, plus " +
+        "jsonLdParseErrors and microdataErrors. infoCount is pending or " +
+        "superseded properties and references (a bare @id) that no block of the " +
+        "same page defines — linking to an entity defined elsewhere is legal, so " +
+        "read those as facts to check. Ids are resolved against the page URL (or " +
+        "a declared @base). On a crawl not wholly at extraction 4 references are " +
+        "not counted, and notMeasured says so. blocksAtCap: the page's stored " +
+        "blocks reached the per-page limit, so an id may be defined in a block " +
+        "that was not stored. problemsCapped: a block cut one of the lists these counts " +
+        "read at its per-block limit, so the counts may be short. The " +
+        "problem-by-problem detail is the structured_data_nodes CSV view " +
+        "(export_crawl format=csv), one row per block and problem.\n\n" +
+        "NULL IS NOT ZERO. microdataErrors and skips are null on a page crawled " +
+        "before microdata was read (extraction below version 4): nobody looked, " +
+        "so warningCount there has no microdata errors in it. skips counts what " +
+        "the reader dropped — itemref elements it does not follow, full-RDFa " +
+        "constructs RDFa Lite does not interpret, values past the per-page cap.\n\n" +
+        "REFUSED, never answered empty, on a crawl the rules have not judged " +
+        "(the counts are written by crawl_rules) and on a crawl judged before " +
+        "structured data validation existed: run crawl_rules and ask again.\n\n" +
+        "Filters (each selects PAGES; the row is always the whole page):\n" +
+        "  pageType — a template cohort as this crawl typed it; '(untyped)' for " +
+        "the pages it could not type\n" +
+        `  format   — ${STRUCTURED_DATA_FORMATS.join(", ")}: pages holding at least ` +
+        "one block of that syntax\n\n" +
+        "Ordered by URL. Paginated: {items, nextCursor, notMeasured}; limit defaults to " +
+        `${PAGE_SIZE_DEFAULT}, maximum ${PAGE_SIZE_MAX}. The CSV view's Problem ` +
+        `column is one of: ${STRUCTURED_DATA_PROBLEMS.join(", ")}.`,
+      inputSchema: strictInput({
+        crawlId: crawlIdField(),
+        pageType: z
+          .string()
+          .describe("Only pages of this template cohort, e.g. 'product', or '(untyped)'.")
+          .optional(),
+        format: z
+          .string()
+          .describe(
+            `Only pages holding a block of this syntax: ${STRUCTURED_DATA_FORMATS.join(", ")}.`,
+          )
+          .optional(),
+        limit: limitField(),
+        cursor: cursorField(),
+      }),
+    },
+    async ({ crawlId, ...rest }) =>
+      run("structured_data", () => service.listStructuredData(tenant, crawlId, defined(rest))),
+  );
+
+  server.registerTool(
     named("robots_get"),
     {
       title: "The site's robots.txt, as this crawl read it",
@@ -2094,10 +2167,13 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "metric_table is one metric's table and needs a metricId; issues_overview is " +
         "the issues_overview tool's one-row-per-rule table; crawl_overview is the " +
         "crawl_overview tool's sections as Section,Label,Value,Percent rows; the other " +
-        "seven, like the two overviews, refuse both. Answers {format, view, path, rows, " +
+        "eight, like the two overviews, refuse both. Answers {format, view, path, rows, " +
         "bytes}, plus disabledRules on the four views that read findings (issues, " +
         "issue_urls, issues_overview, crawl_overview): the rules the crawl's judgement " +
-        "disables, whose findings the file leaves out, with notMeasured beside it.\n" +
+        "disables, whose findings the file leaves out, with notMeasured beside it. " +
+        "structured_data_nodes answers notMeasured alone: on a crawl not wholly at " +
+        "extraction 4 it writes no unresolved-reference rows and names " +
+        "schema.unresolved-reference there, as {id, reason}; [] otherwise.\n" +
         "  metric_table is the spreadsheet of the metric_table tool's table: the " +
         "header is the column LABELS, one row per table row, and the metric's " +
         "summary scalars lead every row as extra columns — a CSV has no place " +
@@ -2106,6 +2182,11 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "  links_to_4xx and links_to_5xx are the two inlinks worksheets — Source, " +
         "Destination, Anchor, Status Code, one row per internal link whose target " +
         "answered 4xx or 5xx, the same rows issue_inlinks paginates.\n" +
+        "  structured_data_nodes is the structured_data listing's detail — URL, " +
+        "Format, Schema Type, Path, Node Type, Problem, Detail — one row per block " +
+        "and problem, and one row with an empty Problem for a block with none. " +
+        "Refused, as the listing is, on a crawl the rules have not judged or judged " +
+        "before structured data validation existed.\n" +
         "'dataset' is the first format's word and 'view' is the second's; asking " +
         "with both is refused rather than resolved.\n\n" +
         "WHAT THE CSV LOOKS LIKE, because a human opens it and you are the one who " +

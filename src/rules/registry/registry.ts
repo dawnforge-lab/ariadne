@@ -999,7 +999,39 @@ const KINDS = ["page", "query", "metric"] as const satisfies readonly AnyRule["k
 //     `truncation.interrupted` on the evidence it keeps, read the same way
 //     (evidence `interrupted`, a column and a sentence); the next complete
 //     walk clears it, and a crawl without the key reads as false.
-export const RULESET_VERSION = "0.25.1";
+// 0.26.0: Phase 29a — structured data validated, not only counted. Nine new
+//     rules read the verdict `deriveSchemaValidation` stores per block:
+//     `schema.parse-error`, `schema.unknown-type`, `schema.unknown-property`,
+//     `schema.property-pending-or-superseded`, `schema.embedded-type-mismatch`,
+//     `schema.google-required-missing`, `schema.google-recommended-missing`,
+//     `schema.deprecated-feature` and `schema.template-inconsistent` (a page
+//     lacking a type that at least `SCHEMA_TEMPLATE_SHARE`% of its page type's
+//     pages, at least `SCHEMA_TEMPLATE_MIN_PAGES` of them, carry).
+//     `schema.product-incomplete` is retired into the `schema.google-*` rules.
+//     Microdata and RDFa Lite are read since extraction 4, so the rules count
+//     blocks of all three formats. `schema.self-serving-reviews` now walks the
+//     hierarchy: Organization and every subtype (Restaurant, Dentist, ...), not
+//     the two exact names. `schema.none-on-site`, `schema.breadcrumb-absent` and
+//     `schema.template-inconsistent` are silent on a crawl not wholly at
+//     extraction 4 (the marker `extraction.not-recorded` names it). Two
+//     thresholds are overridable: `SCHEMA_TEMPLATE_SHARE` (50-100, default 70)
+//     and `SCHEMA_TEMPLATE_MIN_PAGES` (2-100000, default 10), 22 in all;
+//     migration 0054 adds both to every stored run stamp at their defaults.
+//     197 rules: 72 page / 111 query / 14 metric.
+// 0.26.0, 2026-11-16 rework (unshipped, so the version stands): structured
+//     data is judged by web standards — the schema.org vocabulary and the
+//     JSON-LD, Microdata and RDFa specs — not by one search engine. The Google
+//     profiles go with `schema.google-required-missing`,
+//     `schema.google-recommended-missing` and `schema.deprecated-feature`; the
+//     validation blob loses `googleFeatures` and `deprecatedFeatures` and
+//     records `emptyValues`, `definedIds`, `references` and `nodes`. New:
+//     `schema.empty-value` (warning), `schema.unresolved-reference` (info,
+//     resolved per page across its blocks) and the metric
+//     `schema.property-coverage` (CHECK-44, per schema type, scope
+//     `schema_type`). `schema.self-serving-reviews` copy states the fact, not
+//     a policy. A blob in the old shape is refused (re-run the rules); no
+//     migration. 197 rules: 72 page / 110 query / 15 metric.
+export const RULESET_VERSION = "0.26.0";
 
 /**
  * The 47 crawl-derived checks (sf-audit checklist, Pre-Crawl + sections 1–11):
@@ -1361,7 +1393,7 @@ function validateTable(rule: AnyRule, fail: (msg: string) => never): void {
   // reading the whole list would refuse every table there is.
   const declared =
     table.shape === "expandMap"
-      ? []
+      ? [...(table.scopeColumns ?? [])]
       : [...table.columns, ...(table.shape === "perScopeMeasure" ? table.scopeColumns : [])];
   for (const column of declared) {
     if (RESERVED_TABLE_KEYS.has(column.key))

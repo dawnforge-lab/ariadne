@@ -15,6 +15,7 @@ import { H2_TEXT_MAX } from "../../src/crawl/parse/page-facts.js";
 import { INDEXED_URL_MAX } from "../../src/crawl/parse/url-utils.js";
 import { parseJudgement } from "../../src/rules/judgement.js";
 import { buildRegistry } from "../../src/rules/index.js";
+import { SCHEMA_TEMPLATE_MIN_PAGES, SCHEMA_TEMPLATE_SHARE } from "../../src/rules/thresholds.js";
 import { THRESHOLD_ROWS, type ThresholdName } from "../../src/rules/threshold-table.js";
 
 const CAPPED: readonly (readonly [ThresholdName, string, number])[] = [
@@ -40,4 +41,41 @@ describe("a threshold measured against a capped value stays below the cap", () =
       });
     });
   }
+});
+
+describe("the schema template thresholds (Phase 29a)", () => {
+  it("are overridable with the ranges and defaults the rule is specified with", () => {
+    expect(THRESHOLD_ROWS.SCHEMA_TEMPLATE_SHARE).toEqual({
+      min: 50,
+      max: 100,
+      default: SCHEMA_TEMPLATE_SHARE,
+    });
+    expect(THRESHOLD_ROWS.SCHEMA_TEMPLATE_MIN_PAGES).toEqual({
+      min: 2,
+      max: 100_000,
+      default: SCHEMA_TEMPLATE_MIN_PAGES,
+    });
+    expect([SCHEMA_TEMPLATE_SHARE, SCHEMA_TEMPLATE_MIN_PAGES]).toEqual([70, 10]);
+  });
+
+  it("refuse an override outside the range and accept the bounds", () => {
+    const registry = buildRegistry();
+    for (const [name, lo, hi] of [
+      ["SCHEMA_TEMPLATE_SHARE", 50, 100],
+      ["SCHEMA_TEMPLATE_MIN_PAGES", 2, 100_000],
+    ] as const) {
+      expect(() => parseJudgement({ thresholds: { [name]: lo - 1 } }, registry)).toThrow(
+        `thresholds.${name}`,
+      );
+      expect(() => parseJudgement({ thresholds: { [name]: hi + 1 } }, registry)).toThrow(
+        `thresholds.${name}`,
+      );
+      expect(parseJudgement({ thresholds: { [name]: lo } }, registry)).toEqual({
+        thresholds: { [name]: lo },
+      });
+      expect(parseJudgement({ thresholds: { [name]: hi } }, registry)).toEqual({
+        thresholds: { [name]: hi },
+      });
+    }
+  });
 });

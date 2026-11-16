@@ -149,6 +149,7 @@ describe("thresholds", () => {
         "SLOW_MS", "TITLE_PX_MIN", "TITLE_PX_MAX", "META_PX_MIN", "META_PX_MAX",
         "DEEP_DEPTH", "THIN_WORDS", "SOFT_404_WORDS", "IMAGE_WEIGHT_WARN", "CHAIN_HOPS",
         "HIGH_INTERNAL_OUTLINKS", "HIGH_EXTERNAL_OUTLINKS", "UNAVAILABLE_AFTER_WARN_DAYS",
+        "SCHEMA_TEMPLATE_SHARE", "SCHEMA_TEMPLATE_MIN_PAGES",
       ].sort(),
     );
     for (const [name, row] of Object.entries(OVERRIDABLE_THRESHOLDS)) {

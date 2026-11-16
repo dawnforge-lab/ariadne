@@ -63,3 +63,11 @@ Playwright (Apache-2.0) is a runtime dependency of the render pass
 (src/crawl/render). It downloads a Chromium build on `npx playwright install
 chromium`; that browser is not vendored into this repository and carries its
 own upstream licences.
+
+## schema.org vocabulary
+
+Derived data in `src/rules/schema-org/vocabulary.generated.ts`; release 30.1
+(2026-09-16); CC BY-SA 3.0 (https://creativecommons.org/licenses/by-sa/3.0/);
+© schema.org contributors. Changes as in the file header: attic terms dropped;
+enumeration members dropped; comments/labels dropped. Regenerated only by
+`scripts/derive-schema-org.ts`, never synced automatically.

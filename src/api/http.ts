@@ -110,6 +110,14 @@
  *                                      rows, note?} — the same numbers shaped by
  *                                      the metric's own declaration
  *   GET  /crawls/:id/pages             the crawled pages, slim and filtered
+ *   GET  /crawls/:id/structured-data   one row per page with structured data or
+ *                                      a parse/microdata error: formats, types,
+ *                                      top-level nodes and their properties,
+ *                                      warningCount / infoCount.
+ *                                      `?pageType=&format=`.
+ *                                      409 on a crawl no rules run has judged,
+ *                                      or one judged before the validation
+ *                                      derivation existed (re-run the rules)
  *   GET  /crawls/:id/robots            the site's robots.txt as this crawl read it
  *   GET  /config/schema                the crawl-start body as JSON Schema draft
  *                                      2020-12 — each field's description,
@@ -759,6 +767,20 @@ function buildRoutes(): Route[] {
           ...optionalBoolean(ctx.query, "rendered"),
           ...optionalString(ctx.query, "fetchClass"),
           ...optionalString(ctx.query, "discoveredVia"),
+          ...optionalNumber(ctx.query, "limit"),
+          ...optionalString(ctx.query, "cursor"),
+        }),
+      }),
+    },
+    {
+      method: "GET",
+      pattern: ["crawls", id, "structured-data"],
+      query: ["pageType", "format", ...PAGINATION_PARAMS],
+      handler: async (service, ctx) => ({
+        status: 200,
+        body: await service.listStructuredData(ctx.tenant, param(ctx, "id"), {
+          ...optionalString(ctx.query, "pageType"),
+          ...optionalString(ctx.query, "format"),
           ...optionalNumber(ctx.query, "limit"),
           ...optionalString(ctx.query, "cursor"),
         }),

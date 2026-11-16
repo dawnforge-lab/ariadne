@@ -95,7 +95,14 @@ crawler inside Talos. The intended shape:
    tenant-facing, so engine output must already be tenant-safe (no internal
    hostnames, no stack traces in `evidence`). Since Phase 27a the engine's
    `type` and `priority` on each finding rule are the rule's defaults, and the
-   agent's per-crawl overrides (`crawl_config_set`) are the judgement.
+   agent's per-crawl overrides (`crawl_config_set`) are the judgement. Phase 29a's
+   `structured_data` listing keeps the line: it answers named fields (formats,
+   types, each page's top-level nodes with their property names, two counts named after
+   the severities, the reader's skip counters) and never a stored validation blob, and a
+   stored value outside its closed vocabulary is refused, not coerced. The structured-data
+   findings are facts judged by schema.org and the JSON-LD, Microdata and RDFa
+   specifications, for any consumer of the markup; which properties a type needs, and
+   whether a finding matters, is the agent's judgement.
 
 7. **A stop is a pause, and only an agent's cancel is final.** Since Phase 27b a
    server shutdown leaves its running crawls `paused` (reason `shutdown`) and a restart
@@ -261,6 +268,8 @@ crawler inside Talos. The intended shape:
   (`docs/gates/phase-28a.md`). Obligations 7 and 8 were amended in Phase 28b (workers,
   auto-resume, encrypted credentials; `docs/gates/phase-28b.md`) and again in Phase 28c
   (schedules and their credentials, crawl history; `docs/gates/phase-28c.md`).
+  Phase 29a adds the `structured_data` tool and route, read-only and tenant-scoped like
+  the other per-crawl reads, and touches obligation 6 only (see there).
 - Talos repo pointer to this project: `docs/talos/crawler-engine.md` in the
   talos repo (`github.com/dawnforge-lab/talos`, local `/home/eugen-dev/Documents/Workflows/talos`).
 - Talos deep history: serena memory `talos-rewrite-status` in the talos

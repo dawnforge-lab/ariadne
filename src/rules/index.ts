@@ -1,5 +1,6 @@
 import { Registry } from "./registry/registry.js";
 import { contentMetrics } from "./metric/content-metrics.js";
+import { schemaMetrics } from "./metric/schema-metrics.js";
 import { crawlMetrics } from "./metric/crawl-metrics.js";
 import { healthMetrics } from "./metric/health-metrics.js";
 import { hreflangMetrics } from "./metric/hreflang-metrics.js";
@@ -42,6 +43,7 @@ import { securityRules } from "./query/security.js";
 import { sitemapRules } from "./query/sitemap.js";
 import { sitemapEntryRules } from "./query/sitemap-entries.js";
 import { socialQueryRules } from "./query/social.js";
+import { schemaValidationRules } from "./query/schema-validation.js";
 import { structuredDataRules } from "./query/structured-data.js";
 import { urlHygieneRules } from "./query/url-hygiene.js";
 
@@ -99,6 +101,8 @@ export function buildRegistry(): Registry {
     // across pages, and an og/X image a platform cannot use.
     ...socialQueryRules,
     ...structuredDataRules,
+    // Phase 29a: the per-node verdicts of the schema validator, one rule per list.
+    ...schemaValidationRules,
     // The render pass's query rules: the three diffs between the raw HTML and
     // the rendered DOM, and the JavaScript redirect. Registered here with the
     // other query rules because that is what they are — they read stored
@@ -123,6 +127,8 @@ export function buildRegistry(): Registry {
     // last, after everything that writes evidence.
     ...linkMetrics,
     ...contentMetrics,
+    // The structured-data metric (29a rework): property coverage per schema type.
+    ...schemaMetrics,
     ...hreflangMetrics,
     ...urlMetrics,
     ...crawlMetrics,

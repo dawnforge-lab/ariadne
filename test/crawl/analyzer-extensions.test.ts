@@ -162,6 +162,34 @@ describe("JSON-LD capture", () => {
       "Article",
     ]);
   });
+  it("gives a @graph member without its own @context the container's, leaving the member untouched", () => {
+    const a = analyzePage(
+      `<script type="application/ld+json">
+       {"@context":{"@vocab":"https://example.org/"},"@type":"WebPage","@graph":[
+         {"@type":"Product","name":"P"},
+         {"@context":"https://schema.org","@type":"Article"},
+         [{"@type":"Event"}]
+       ]}
+       </script>`,
+      "https://ex.com/",
+    );
+    expect(a.structuredData.map((b) => b.raw)).toEqual([
+      { "@context": { "@vocab": "https://example.org/" }, "@type": "WebPage", "@graph": expect.any(Array) },
+      { "@context": { "@vocab": "https://example.org/" }, "@type": "Product", name: "P" },
+      { "@context": "https://schema.org", "@type": "Article" },
+      { "@context": { "@vocab": "https://example.org/" }, "@type": "Event" },
+    ]);
+    // The container's own @graph still holds the members as authored.
+    const container = a.structuredData[0]!.raw as { "@graph": unknown[] };
+    expect(container["@graph"][0]).toEqual({ "@type": "Product", name: "P" });
+  });
+  it("a block without @context passes its members on as authored", () => {
+    const a = analyzePage(
+      `<script type="application/ld+json">{"@graph":[{"@type":"Product"}]}</script>`,
+      "https://ex.com/",
+    );
+    expect(a.structuredData.map((b) => b.raw)).toEqual([{ "@type": "Product" }]);
+  });
   it("uses the first entry of a @type array", () => {
     const a = analyzePage(
       `<script type="application/ld+json">{"@type":["Product","Thing"]}</script>`,

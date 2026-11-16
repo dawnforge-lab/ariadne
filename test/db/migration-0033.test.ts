@@ -20,6 +20,10 @@ import { crawls } from "../../src/db/schema.js";
 import { LOCAL_TENANT } from "../../src/tenant.js";
 import { DEFAULT_THRESHOLDS, readStamp } from "../../src/rules/judgement.js";
 
+// 0033 wrote 20 thresholds; the two Phase 29a added after it are 0054's.
+const { SCHEMA_TEMPLATE_SHARE: _share, SCHEMA_TEMPLATE_MIN_PAGES: _min, ...DEFAULTS_AT_0033 } =
+  DEFAULT_THRESHOLDS;
+
 function databaseUrl(): string {
   const url = process.env.DATABASE_URL;
   if (!url) throw new Error("DATABASE_URL must be set for db tests (no fallback)");
@@ -89,18 +93,14 @@ describe("0033 — a stamp holds the effective thresholds", () => {
         // The SQL writes the defaults out literally; today's code agrees.
         expect(stamp.get(ids.plain)).toEqual({
           disabledRules: [],
-          thresholds: { ...DEFAULT_THRESHOLDS },
+          thresholds: { ...DEFAULTS_AT_0033 },
         });
         expect(stamp.get(ids.slow)).toEqual({
           disabledRules: ["title.too-long"],
-          thresholds: { ...DEFAULT_THRESHOLDS, SLOW_MS: 500 },
+          thresholds: { ...DEFAULTS_AT_0033, SLOW_MS: 500 },
           findingCap: 50,
         });
         expect(stamp.get(ids.unjudged)).toBeNull();
-        for (const id of [ids.plain, ids.slow]) {
-          expect(() => readStamp(stamp.get(id), id)).not.toThrow();
-        }
-
         // Idempotent: a second application changes nothing.
         await tx.execute(sql.raw(file));
         const again = await tx
@@ -108,6 +108,23 @@ describe("0033 — a stamp holds the effective thresholds", () => {
           .from(crawls)
           .where(inArray(crawls.id, Object.values(ids)));
         expect(new Map(again.map((r) => [r.id, r.stamp]))).toEqual(stamp);
+
+        // readStamp wants all 22, which is 0054's to complete.
+        await tx.execute(
+          sql.raw(
+            readFileSync(
+              new URL("../../drizzle/0054_schema_template_thresholds.sql", import.meta.url),
+              "utf8",
+            ),
+          ),
+        );
+        const completed = await tx
+          .select({ id: crawls.id, stamp: crawls.rulesJudgedWith })
+          .from(crawls)
+          .where(inArray(crawls.id, [ids.plain, ids.slow]));
+        for (const { id, stamp: after } of completed) {
+          expect(() => readStamp(after, id)).not.toThrow();
+        }
 
         asserted = true;
         throw new RollBack("roll back the unscoped rewrite");

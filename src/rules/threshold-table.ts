@@ -20,6 +20,8 @@ import {
   META_MIN,
   META_PX_MAX,
   META_PX_MIN,
+  SCHEMA_TEMPLATE_MIN_PAGES,
+  SCHEMA_TEMPLATE_SHARE,
   SLOW_MS,
   SOFT_404_WORDS,
   THIN_WORDS,
@@ -65,6 +67,8 @@ export const THRESHOLD_ROWS = {
   HIGH_INTERNAL_OUTLINKS: { min: 1, max: 100_000, default: HIGH_INTERNAL_OUTLINKS },
   HIGH_EXTERNAL_OUTLINKS: { min: 1, max: 100_000, default: HIGH_EXTERNAL_OUTLINKS },
   UNAVAILABLE_AFTER_WARN_DAYS: { min: 0, max: 3650, default: UNAVAILABLE_AFTER_WARN_DAYS },
+  SCHEMA_TEMPLATE_SHARE: { min: 50, max: 100, default: SCHEMA_TEMPLATE_SHARE },
+  SCHEMA_TEMPLATE_MIN_PAGES: { min: 2, max: 100_000, default: SCHEMA_TEMPLATE_MIN_PAGES },
 } as const satisfies Record<string, ThresholdRow>;
 
 /** A threshold an agent may override on a crawl. */

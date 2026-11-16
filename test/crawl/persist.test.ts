@@ -108,8 +108,10 @@ function makeAnalysis(overrides: Partial<PageAnalysis> = {}): PageAnalysis {
       { code: "en", href: "/en/a" },
       { code: "fr", href: "https://s.example/fr/a" },
     ],
-    structuredData: [{ type: "Article", raw: { "@type": "Article", name: "n" } }],
+    structuredData: [{ type: "Article", format: "jsonld", raw: { "@type": "Article", name: "n" } }],
     structuredDataParseErrors: 0,
+    structuredDataMicrodataErrors: 0,
+    structuredDataSkips: { microdataItemrefSkipped: 0, rdfaUnsupported: 0, valuesCapped: 0 },
     resourceRefsCapped: false,
     contentHash: "a".repeat(64),
     simhash: 1234567890123n,
@@ -371,6 +373,44 @@ describe("PageWriter", () => {
     expect(BigInt.asUintN(64, row!.simhash!)).toBe(unsigned);
   });
 
+  it("persists each structured-data block's format, the normalised schema type and the 29a page counts", async () => {
+    const crawlId = await newCrawl();
+    const writer = new PageWriter(db, crawlId);
+    const url = `${SITE}/mixed-sd`;
+    await writer.addPage(
+      item(url),
+      makeFetch(url),
+      makeAnalysis({
+        structuredData: [
+          { type: "https://schema.org/Product", format: "jsonld", raw: { "@type": "https://schema.org/Product" } },
+          { type: "Person", format: "microdata", raw: { "@type": "Person" } },
+          { type: "Organization", format: "rdfa", raw: { "@type": "Organization" } },
+        ],
+      }),
+      { complete: true },
+    );
+    await writer.flush();
+
+    const rows = await db
+      .select({ id: structuredData.id, type: structuredData.schemaType, format: structuredData.format })
+      .from(structuredData)
+      .where(eq(structuredData.crawlId, crawlId));
+    expect(rows.map((r) => r.format).sort()).toEqual(["jsonld", "microdata", "rdfa"]);
+    expect(rows.find((r) => r.format === "jsonld")?.type).toBe("Product");
+    expect(new Set(rows.map((r) => r.id)).size).toBe(3);
+    const [row] = await db
+      .select({
+        v: pages.extractionVersion,
+        errors: pages.structuredDataMicrodataErrors,
+        skips: pages.structuredDataSkips,
+      })
+      .from(pages)
+      .where(eq(pages.crawlId, crawlId));
+    expect(row?.v).toBe(4);
+    expect(row?.errors).toBe(0);
+    expect(row?.skips).toEqual({ microdataItemrefSkipped: 0, rdfaUnsupported: 0, valuesCapped: 0 });
+  });
+
   it("persists the structured-data parse-error count", async () => {
     const crawlId = await newCrawl();
     const writer = new PageWriter(db, crawlId);
@@ -526,7 +566,7 @@ describe("PageWriter", () => {
     expect(row?.h2Count).toBe(2);
   });
 
-  it("stamps the current extraction_version (3) on every row it writes, a robots-blocked row included", async () => {
+  it("stamps the current extraction_version (4) on every row it writes, a robots-blocked row included", async () => {
     const crawlId = await newCrawl();
     const writer = new PageWriter(db, crawlId);
     await writer.addPage(item(`${SITE}/a`), makeFetch(`${SITE}/a`), makeAnalysis(), {
@@ -542,8 +582,8 @@ describe("PageWriter", () => {
 
     const rows = await db.select().from(pages).where(eq(pages.crawlId, crawlId));
     expect(rows).toHaveLength(3);
-    expect(EXTRACTION_VERSION).toBe(3);
-    for (const row of rows) expect(row.extractionVersion, row.url).toBe(3);
+    expect(EXTRACTION_VERSION).toBe(4);
+    for (const row of rows) expect(row.extractionVersion, row.url).toBe(4);
     const blocked = rows.find((r) => r.url === `${SITE}/blocked`);
     expect(blocked?.fetchClass).toBe("disallowed");
     expect(blocked?.responseHeaders).toBeNull();

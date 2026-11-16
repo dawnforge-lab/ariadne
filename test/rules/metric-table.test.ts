@@ -367,7 +367,7 @@ describe("expandMap", () => {
 
 /**
  * THE DECLARATIONS THEMSELVES, checked for the properties `defineRule` cannot
- * see from one rule: that all fourteen metrics have one, and that the header a
+ * see from one rule: that all fifteen metrics have one, and that the header a
  * client draws from the catalog is the header the shaped table serves.
  *
  * Whether a declared KEY names something a metric actually writes is a question
@@ -376,7 +376,7 @@ describe("expandMap", () => {
 describe("the ruleset's own declarations", () => {
   it("gives every metric rule a table whose columns are the catalog's", () => {
     const metrics = registry.byKind("metric");
-    expect(metrics).toHaveLength(14);
+    expect(metrics).toHaveLength(15);
     for (const rule of metrics) {
       expect(rule.table, `${rule.id} declares no table`).toBeDefined();
       const shaped = shapeMetricTable(rule.id, rule.table, []);
@@ -407,5 +407,35 @@ describe("the ruleset's own declarations", () => {
       const start = columns.indexOf("Pages");
       expect(columns.slice(start, start + expected.length), id).toEqual(expected);
     }
+  });
+});
+
+// 29a rework (`schema.property-coverage`): a fact about the scope itself — a
+// type's node count — printed beside each of its entries, and a scope with no
+// entries still a row, so the count is never dropped with the empty map.
+describe("expandMap with scopeColumns (29a rework, appended so no cited line moves)", () => {
+  const table = expandMap("sources", "Destination Template", "Source Template", "Links");
+  const withScope = expandMap("properties", "Schema Type", "Property", "Nodes With Value", undefined, [
+    { key: "nodes", label: "Nodes" },
+  ]);
+
+  it("puts the scope columns after the scope and repeats them on every entry row", () => {
+    const shaped = shapeMetricTable("x.y", withScope, [
+      site({ nodes: 3 }),
+      cohort("Product", { nodes: 2, properties: { sku: 1, name: 2 } }),
+      cohort("Thing", { nodes: 1, properties: {} }),
+    ]);
+    expect(labels(shaped)).toEqual(["Schema Type", "Nodes", "Property", "Nodes With Value"]);
+    expect(shaped.rows).toEqual([
+      { scope: "Site", nodes: 3, key: null, value: null },
+      { scope: "Product", nodes: 2, key: "name", value: 2 },
+      { scope: "Product", nodes: 2, key: "sku", value: 1 },
+      { scope: "Thing", nodes: 1, key: null, value: null },
+    ]);
+  });
+
+  it("a declaration without scope columns carries no scopeColumns key and keeps the old shape", () => {
+    expect("scopeColumns" in table).toBe(false);
+    expect(metricTableColumns(withScope).map((c) => c.key)).toEqual(["scope", "nodes", "key", "value"]);
   });
 });

@@ -49,6 +49,11 @@ export interface Finding {
  *    it as a cohort of pages that does not exist. A scope is a claim about what
  *    a row counts, so a new kind of row gets a new scope rather than a
  *    borrowed one (hard rule 7).
+ *  - `schema_type` — one structured-data type, named as the markup states it
+ *    (the bare schema.org name, or the name as written when it is outside the
+ *    vocabulary). `schema.property-coverage` (29a rework) counts nodes per
+ *    type, and a schema type is not a page type for the same reason a sitemap
+ *    document is not.
  *
  * Closed, like `RuleCategory`, and for the same reason: the runner deletes and
  * rewrites metric rows by (crawl, metric, scope, scope value), so a one-off
@@ -56,10 +61,10 @@ export interface Finding {
  * as a value, because the runner checks a rule's return at the JavaScript
  * boundary where the type system has seen nothing.
  */
-export type MetricScope = "site" | "page_type" | "sitemap_doc";
+export type MetricScope = "site" | "page_type" | "sitemap_doc" | "schema_type";
 
 /** `MetricScope` as a value — what `runRules` validates a returned row against. */
-export const METRIC_SCOPES: readonly MetricScope[] = ["site", "page_type", "sitemap_doc"];
+export const METRIC_SCOPES: readonly MetricScope[] = ["site", "page_type", "sitemap_doc", "schema_type"];
 
 export interface Metric {
   metricId: string;

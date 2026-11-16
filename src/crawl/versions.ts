@@ -12,7 +12,10 @@ import { readFileSync } from "node:fs";
  * (`links.name_hint` / `name_hint_source`), the over-long reference counts
  * (`pages.overlong_urls`), `og:image:secure_url` and `social.imageRefTooLong`,
  * and hreflang read from the full HTTP `Link` header (`hreflang` rows with
- * `source = 'header'`, on every classified response). Bump it whenever the fetch layer or the analyzer
+ * `source = 'header'`, on every classified response).
+ * Version 4 (Phase 29a, migrations 0051–0052) adds microdata and RDFa Lite nodes,
+ * `structured_data.format`, and the pages' microdata error and skip counts.
+ * Bump it whenever the fetch layer or the analyzer
  * changes WHAT it extracts, so a rule reading a fact introduced at version N can
  * tell rows that measured it from rows that could not have
  * (`extractionCoverage`, src/rules/helpers.ts). Null on a row means it was
@@ -26,7 +29,7 @@ import { readFileSync } from "node:fs";
  * first one only. `render.noindex-changed` compares a row only when its two
  * readings have the same definition (both stamps at least 2, or both below).
  */
-export const EXTRACTION_VERSION = 3;
+export const EXTRACTION_VERSION = 4;
 export const RENDER_CAPTURE_VERSION = 2;
 
 const REDACTED_REQUEST_HEADERS = new Set(["authorization", "cookie", "proxy-authorization"]);

@@ -44,7 +44,7 @@ const URLS = "url";
  * image, and comfortably more than `THIN_WORDS` words, so a page that fires
  * `content.thin` here would be a page that was written too short by accident.
  */
-function healthyBody(opts: {
+export function healthyBody(opts: {
   h1: string;
   lede: string;
   what: string;
@@ -651,7 +651,7 @@ const notInSitemap: Fixture = {
 };
 
 // ---------------------------------------------------------------------------
-// Structured data — schema.product-incomplete, schema.self-serving-reviews
+// Structured data — a Product page (a short, valid record: no finding), schema.self-serving-reviews
 //
 // These two pages are the reason `schema.none-on-site` can never fire on this
 // fixture site again: its condition is "no structured data anywhere on the
@@ -670,19 +670,21 @@ function jsonLd(node: Record<string, unknown>): string {
   })}</script>`;
 }
 
-const productIncomplete: Fixture = {
-  path: "/authored3/product-incomplete",
+const productPartial: Fixture = {
+  path: "/authored3/product-partial",
   category: SCHEMA,
-  name: "Product markup missing its image",
-  expectedIssues: ["schema.product-incomplete"],
+  name: "Product markup with a short but valid record",
+  // The engine names no required set, so a Product that carries a name, a
+  // description, a SKU and a priced offer, and no image, is not a finding: every
+  // property it writes is valid and holds a value. It is a control for that
+  // claim, and it gives `schema.property-coverage` a Product to count.
+  expectedIssues: [],
   exact: true,
   handler: (req, res) =>
     serve(req, res, () => ({
       title: "Enamel camp mug, 350ml on the fixture site",
       metaDescription:
         "A product page whose JSON-LD names the product and a priced offer, and never names an image.",
-      // Name and a priced offer are present; `image` is not. The derivation
-      // records that absence and the rule names the field.
       headExtra: jsonLd({
         "@type": "Product",
         name: "Enamel camp mug, 350ml",
@@ -697,10 +699,10 @@ const productIncomplete: Fixture = {
       }),
       bodyHtml: healthyBody({
         h1: "Enamel camp mug, 350 millilitres",
-        lede: "The markup on this page describes a real product and forgets the one field a rich result cannot be built without.",
-        what: "The JSON-LD names the product, gives it a description and a stock keeping unit, and carries an offer with a price and a currency. There is no image field anywhere in the block.",
-        why: "A product result in search is mostly a picture. Without an image field the markup is still valid and still parsed, and the enhanced result it was written for simply never appears, so the work of adding structured data returns nothing. It is a quiet failure: no error is reported to anybody, and the page looks fully marked up to a person reading the source.",
-        fix: "Feed the markup from the same product record the page renders from, so a field cannot be present in the layout and absent in the data. Then validate what a crawl actually finds against the fields the result requires, rather than against what the template was supposed to emit.",
+        lede: "The markup on this page describes a real product with a short record, and every property in it holds a value.",
+        what: "The JSON-LD names the product, gives it a description and a stock keeping unit, and carries an offer with a price and a currency. There is no image field anywhere in the block, and nothing in it is empty or invented.",
+        why: "Which properties a product record ought to carry depends on what the site means its markup to say, and that is a judgement for whoever reads the facts. The engine reports what the block holds: the type, the properties and how many of them carry a value, so a short record shows up as a short count and not as a verdict.",
+        fix: "Nothing to fix on the evidence of the markup itself. If the site means its product records to carry an image, the coverage table shows how many of its Product nodes do, and the reader can compare that against the other Product pages.",
       }),
     })),
 };
@@ -709,6 +711,8 @@ const selfServingReviews: Fixture = {
   path: "/authored3/reviews",
   category: SCHEMA,
   name: "Organization rating itself",
+  // The nested AggregateRating omits bestRating and worstRating, which the
+  // standards-only rules do not judge: only the self-serving rating is a finding.
   expectedIssues: ["schema.self-serving-reviews"],
   exact: true,
   handler: (req, res) =>
@@ -730,7 +734,7 @@ const selfServingReviews: Fixture = {
         h1: "About Estuary Supplies",
         lede: "The markup in this head gives the company a rating, and the company is the one publishing it.",
         what: "An Organization block naming the business and carrying an aggregate rating with a review count. Nothing in the markup is malformed; the block parses and describes exactly what it says it does.",
-        why: "Ratings a business publishes about itself are the case Google's review-snippet policy names outright: they are ignored for rich results, whatever the numbers say. The markup usually arrives with a plugin that offers a star rating widget and writes it into whatever schema type the page already has, so nobody chose this arrangement on purpose.",
+        why: "Ratings a business publishes about itself are the case review guidelines name outright: a rating of the seller by the seller is not a review, whatever the numbers say. The markup usually arrives with a plugin that offers a star rating widget and writes it into whatever schema type the page already has, so nobody chose this arrangement on purpose.",
         fix: "Mark up reviews of the things being sold, where the rating belongs to a product rather than to the seller, and keep the organisation block to what it is for: name, contact details, logo, and the profiles that identify the business elsewhere.",
       }),
     })),
@@ -753,6 +757,6 @@ export const authoredP3Fixtures: Fixture[] = [
   trackedParameterPage,
   sitemapLocVariant,
   notInSitemap,
-  productIncomplete,
+  productPartial,
   selfServingReviews,
 ];

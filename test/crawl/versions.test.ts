@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
-import { engineVersion, redactRequestHeaders } from "../../src/crawl/versions.js";
+import { EXTRACTION_VERSION, engineVersion, redactRequestHeaders } from "../../src/crawl/versions.js";
 
 const pkg = JSON.parse(
   readFileSync(new URL("../../package.json", import.meta.url), "utf8"),
@@ -39,5 +39,11 @@ describe("redactRequestHeaders with a crawl's own credential header names", () =
     expect(
       redactRequestHeaders({ "X-Tenant": "s3cret", "user-agent": "AriadneBot-test" }, ["x-tenant"]),
     ).toEqual({ "X-Tenant": "[redacted]", "user-agent": "AriadneBot-test" });
+  });
+});
+
+describe("EXTRACTION_VERSION", () => {
+  it("is 4 (Phase 29a: microdata, RDFa Lite, structured_data.format)", () => {
+    expect(EXTRACTION_VERSION).toBe(4);
   });
 });

@@ -974,30 +974,87 @@ export const COPY_TEMPLATES: Record<string, IssueCopy> = {
   "schema.breadcrumb-absent": {
     title: "Structured data: No BreadcrumbList markup on the site",
     explanation:
-      "The site has at least 5 indexable, self-canonical pages and no page carries BreadcrumbList JSON-LD. Breadcrumb markup lets search results show the path to a page and tells search engines how sections relate.",
+      "The site has at least 5 indexable, self-canonical pages and no page carries a BreadcrumbList in JSON-LD, microdata or RDFa, the three formats that are read. A schema.org BreadcrumbList states in machine-readable form the path to a page and how the site's sections relate, for every consumer of the markup, search engines and agents alike.",
     howToFix:
       "Add a BreadcrumbList block to every template below the home page, generated from the same navigation data as the visible breadcrumbs.",
   },
   "schema.none-on-site": {
-    title: "Structured data: No JSON-LD on the site",
+    title: "Structured data: No structured data on the site",
     explanation:
-      "No page in the crawl carries JSON-LD. Structured data states in machine-readable form what a page is, and is what search engines and AI assistants read to build rich results and cite sources. Only JSON-LD is read; microdata and RDFa are not detected.",
+      "No page in the crawl carries JSON-LD, microdata or RDFa, the three formats that are read. Structured data states in machine-readable form what a page is, and is what search engines and AI assistants read to understand a page and cite it.",
     howToFix:
-      "Add JSON-LD to the templates that matter most: Organization on the home page, Product on product pages, Article on editorial, FAQPage where questions are answered. Validate with the Rich Results Test.",
-  },
-  "schema.product-incomplete": {
-    title: "Structured data: Product markup missing required fields",
-    explanation:
-      "Indexable, self-canonical pages whose Product markup, taken across all its Product blocks, lacks a field a product rich result needs; each row lists the missing fields. An offers block counts only with a price or priceSpecification; gtin, ean and any GTIN length count as a GTIN, and mpn is counted separately.",
-    howToFix:
-      "Fill in name, image and a priced offers block from the product data the page renders, then add currency, availability, a GTIN and an MPN where they exist, description, SKU and brand. Confirm the page in the Rich Results Test.",
+      "Add JSON-LD to the templates that matter most: Organization on the home page, Product on product pages, Article on editorial, FAQPage where questions are answered. Check each block with the schema.org validator (validator.schema.org).",
   },
   "schema.self-serving-reviews": {
-    title: "Structured data: Self-serving reviews on Organization or LocalBusiness markup",
+    title: "Structured data: Organization or LocalBusiness markup rating itself",
     explanation:
-      "Indexable, self-canonical pages whose markup typed exactly Organization or LocalBusiness carries a rating or reviews about the business itself. Google's review snippet policy treats these as self-serving and does not show the stars.",
+      "Indexable, self-canonical pages whose markup typed Organization or any of its subtypes (LocalBusiness, Restaurant, …) carries a rating or reviews (aggregateRating or review) about the business itself. In schema.org a rating or review on a node is about that node, so the business's own markup rates the business. Because every Organization subtype is matched, a directory, booking or review site that marks up ratings of businesses it does not own is listed too; those ratings are of other businesses, and the finding can be dismissed on such a site.",
     howToFix:
-      "Move the ratings to the type they are about (Product, Service, Course, Recipe) and let independent review platforms carry the business-level rating.",
+      "Check what the ratings are about. If they rate a product or service, move them to the Product, Service or Course node they describe; if they rate the business, decide whether the business's own pages should state them.",
+  },
+
+  "schema.parse-error": {
+    title: "Structured data: Markup that could not be parsed",
+    explanation:
+      "Indexable, self-canonical pages whose structured data could not be parsed: JSON-LD that is not valid JSON, which the JSON-LD syntax requires, or microdata and RDFa Lite with a structural fault such as an itemscope with no type. A block that does not parse states nothing to any consumer of the markup, search engines and agents alike. A page extracted before microdata was read is judged on JSON-LD alone.",
+    howToFix:
+      "Fix the syntax the counts point to: validate the JSON-LD with a JSON linter, and give every top-level itemscope an itemtype. Check the template that outputs it, not just this page.",
+  },
+  "schema.unknown-type": {
+    title: "Structured data: Type name not in the schema.org vocabulary",
+    explanation:
+      "Indexable, self-canonical pages with a node typed with a name that the schema.org vocabulary (release 30.1) does not define, listed per node with its path. A reader of the markup cannot interpret a type the vocabulary does not define, so the node states nothing it can use. Each block's list stops at 50 entries, and Problems Capped says when one did.",
+    howToFix:
+      "Correct the spelling or pick the closest type the vocabulary defines. Names are case-sensitive: Product, not product.",
+  },
+  "schema.unknown-property": {
+    title: "Structured data: Property the node's type does not take",
+    explanation:
+      "Indexable, self-canonical pages with a property that schema.org does not define for the type of the node it sits on, listed per node with its path. Every consumer of the markup, search engines and agents alike, reads it as a property that type does not have. Each block's list stops at 50 entries, and Problems Capped says when one did.",
+    howToFix:
+      "Rename the property to the vocabulary's own name for it, or move it to a node whose type takes it.",
+  },
+  "schema.property-pending-or-superseded": {
+    title: "Structured data: Pending or superseded property",
+    explanation:
+      "Indexable, self-canonical pages using a vocabulary property that is still pending (not yet part of the core vocabulary) or superseded by another, listed per node with its path and the replacement where there is one. Both still parse, but may be read less reliably. Each block's list stops at 50 entries, and Problems Capped says when one did.",
+    howToFix:
+      "Switch to the property named as the replacement. For a pending property, keep it only if no core property says the same thing.",
+  },
+  "schema.embedded-type-mismatch": {
+    title: "Structured data: Embedded node of a type the property does not accept",
+    explanation:
+      "Indexable, self-canonical pages where a nested node has a type that the property it sits under does not accept, such as a Person under a property that takes an Organization. Each row gives the property, the nested type and the types it expects. Each block's list stops at 50 entries, and Problems Capped says when one did.",
+    howToFix:
+      "Use one of the expected types for the nested node, or move it under a property that takes its type.",
+  },
+  "schema.empty-value": {
+    title: "Structured data: Property with an empty value",
+    explanation:
+      "Indexable, self-canonical pages where a property's value is empty in JSON-LD, microdata or RDFa: blank text, an empty list, or an object with no properties and no @id (a zero or false is a value). Each row gives the format, the path to the value, the type of the node holding it and the property; each block's list stops at 50 entries, and Problems Capped says when one did. An empty value states nothing to any reader of the markup; it is usually a template field the page had no data for.",
+    howToFix:
+      "Fill the property from the page's data, or have the template leave it out when there is no data. Check the template that outputs it, not just this page.",
+  },
+  "schema.unresolved-reference": {
+    title: "Structured data: Reference to an id no node on the page defines",
+    explanation:
+      "Indexable, self-canonical pages with a node reference (a JSON-LD object holding only an @id) whose id no node in any of the page's blocks defines, every id resolved against the page URL or a declared @base as JSON-LD 1.1 resolves IRIs; each row gives the format, the path, and the id as written and as resolved. Referring to an entity defined elsewhere, such as an absolute IRI on another site, is legal JSON-LD, so this is a fact to check rather than an error: a reader of this page learns nothing about the referenced node but its id. Where a page's blocks reached the per-page storage limit (Blocks At Cap) or one of them could not be parsed (Page Has Parse Errors), the id may be defined there, in a block that was not stored or not read; each block's list stops at 50 entries, and Problems Capped says when one did.",
+    howToFix:
+      "Where the id was meant to name a node on this page (an Organization in a graph split over two scripts, say), give the reference and the definition the same id, written the same way. Where it deliberately names a node on another page or site, nothing needs to change.",
+  },
+  "schema.template-inconsistent": {
+    title: "Structured data: Page lacks the markup its page type usually carries",
+    explanation:
+      "Within a page type of at least {SCHEMA_TEMPLATE_MIN_PAGES} indexable, self-canonical pages, a structured-data type is carried by at least {SCHEMA_TEMPLATE_SHARE}% of them but not all, and the pages without it are listed. Each row gives the page type, the markup type and how many of the type's pages carry it, out of how many. A gap like that is usually a template that skips the markup under some condition; pages with no page type are not compared.",
+    howToFix:
+      "Find what the template does differently on the listed pages, such as a missing field or a branch that skips the block, and make it output the same markup everywhere.",
+  },
+  "schema.property-coverage": {
+    title: "Structured data: Property coverage by type",
+    explanation:
+      "For each structured-data type on the crawl's indexable, self-canonical pages: how many top-level nodes in the schema.org vocabulary have that type (each @graph member is one, and a node with several types counts under each), and for each property those nodes use, how many carry a non-empty value. Types are as the markup states them, a name schema.org does not define included; untyped nodes count only in the site row, nodes of blocks in other vocabularies are counted there apart, and a node's property list stops at 50 and its type list at 50, the nodes cut short, like any types or properties past the table's limits, being counted. Which properties a type needs depends on what the site means its markup to say, so the counts are left to the reader.",
+    howToFix:
+      "Compare each type's properties with what its pages show, and output a property the template has data for but leaves out. A property many nodes use but few carry a value for is usually a template field left empty.",
   },
 
   // ----------------------------------------------------------------- images

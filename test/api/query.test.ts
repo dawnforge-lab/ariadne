@@ -4282,9 +4282,9 @@ describe("GET /rules — the order of the sections", () => {
       table?: { order?: number };
     }[];
 
-    // THE FOURTEEN, IN THE ORDER A CLIENT DRAWS THEM. `site.health` first
-    // because every other table is a part of that census; the rest
-    // alphabetically, which is what they already were.
+    // THE FIFTEEN, IN THE ORDER A CLIENT DRAWS THEM. `site.health` first, the
+    // rest alphabetically, which is what they already were — and the 29a
+    // rework's `schema.property-coverage` last, so no served position moved.
     expect(rules.filter((rule) => rule.kind === "metric").map((rule) => rule.id)).toEqual([
       "site.health",
       "content.metrics-by-type",
@@ -4299,14 +4299,14 @@ describe("GET /rules — the order of the sections", () => {
       "sitemap.structure",
       "structure.click-depth-distribution",
       "structure.depth-distribution",
-      "url.param-volumes",
+      "url.param-volumes", "schema.property-coverage",
     ]);
 
     // The position is SERVED, so a client that lays the section out itself gets
     // the same order without re-deriving it.
     expect(
       rules.filter((rule) => rule.kind === "metric").map((rule) => rule.table?.order),
-    ).toEqual([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]);
+    ).toEqual([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]);
     // …and it is on the metric rules and on nothing else.
     for (const rule of rules) {
       if (rule.kind === "metric") continue;
@@ -4364,5 +4364,26 @@ describe("a share image on the resources surface", () => {
     ]);
     const detail = await call(`/crawls/${crawlId}`);
     expect(detail.body["resources"]).toMatchObject({ seen: 1, fetched: 1 });
+  });
+});
+
+// Phase 29a T9. Appended at the end so no line the surface document cites
+// moves; a top-level `beforeAll` runs before every test of the file wherever it
+// is written, and after the fixture's own (hooks run in the order registered).
+// The CSV fixture crawl is judged by hand, so the one structured-data block it
+// gets here carries the blob the derivation would have written: without a
+// block, "reads every view through a cursor" would walk `structured_data_nodes`
+// to no rows at all, which proves nothing about its keyset.
+beforeAll(async () => {
+  const { structuredData } = await import("../../src/db/schema.js");
+  const { validateBlock } = await import("../../src/rules/schema-org/validate.js");
+  const raw = { "@context": "https://schema.org", "@type": "Organization", name: "CSV fixture" };
+  await db.insert(structuredData).values({
+    crawlId: crawlF,
+    pageId: `${crawlF}_page_csv-home`,
+    schemaType: "Organization",
+    format: "jsonld",
+    raw,
+    validation: validateBlock(raw, `${SITE}/csv-home`),
   });
 });

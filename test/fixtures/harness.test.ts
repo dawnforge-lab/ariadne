@@ -189,9 +189,10 @@ function databaseUrl(): string {
  *
  * `schema.none-on-site` is the same trade in the structured-data family. Its
  * condition is "this crawl stored no JSON-LD of any type", and
- * `/authored3/product-incomplete` and `/authored3/reviews` had to publish some
- * for `schema.product-incomplete` and `schema.self-serving-reviews` to be
- * claimed at all. One rule out, two in. Its sibling `schema.breadcrumb-absent`
+ * `/authored3/product-partial` and `/authored3/reviews` publish some, for
+ * `schema.self-serving-reviews` to be claimed at all (and for the Product type
+ * to be one `schema.property-coverage` counts). One rule out, the rest in.
+ * Its sibling `schema.breadcrumb-absent`
  * survives and is asserted below: no fixture publishes a `BreadcrumbList`, and
  * none should — it is the only site-scoped structured-data rule a site with
  * markup can still provoke. `test/rules/structured-data-query.test.ts` covers
@@ -489,8 +490,15 @@ const FIXTURE_COLUMN_RULES: readonly string[] = [
   "resources.uncached",
   "robots.blocks-sitemap-urls",
   "schema.breadcrumb-absent",
-  "schema.product-incomplete",
+  "schema.embedded-type-mismatch",
+  "schema.empty-value",
+  "schema.parse-error",
+  "schema.property-pending-or-superseded",
   "schema.self-serving-reviews",
+  "schema.template-inconsistent",
+  "schema.unknown-property",
+  "schema.unknown-type",
+  "schema.unresolved-reference",
   "sitemap.invalid",
   "sitemap.non-200",
   "sitemap.non-indexable",
@@ -873,7 +881,7 @@ describe("the fixture site end to end", () => {
       "h1.duplicate-text", "content.placeholder", "content.thin",
       "content.near-duplicate", "content.exact-duplicate", "images.missing-alt",
       "images.missing-dimensions", "mobile.viewport-missing",
-      "performance.slow-response", "schema.product-incomplete",
+      "performance.slow-response",
       "schema.self-serving-reviews", "links.orphan", "structure.deep-page",
       "pages.not-in-sitemap", "url.parameter-pages-indexable",
     ];
@@ -1867,35 +1875,139 @@ describe("the fixture site end to end", () => {
     ).toEqual({ pageUrl: tracked, url: tracked, params: ["utm_source"] });
   });
 
-  it("the structured-data fixtures name the field that is missing and the rating that is self-serving", () => {
-    // The field names are what a client goes and adds, so they are pinned rather
-    // than counted: the Product block carries a name and a priced offer and no
-    // image, and eight of the twelve recommended fields are absent too. The two
-    // that are NOT absent are the pair read out of the offer — the fixture's
-    // offer carries both a currency and an availability — which is this
-    // collection's proof that the widened CHECK-44 profile reads them from
-    // inside `offers` rather than looking for top-level keys.
-    expect(
-      detailsByPath.get("/authored3/product-incomplete\nschema.product-incomplete"),
-    ).toEqual({
-      pageUrl: `${app.base}/authored3/product-incomplete`,
-      missingRequired: ["image"],
-      missingRecommended: [
-        "brand",
-        "gtin",
-        "mpn",
-        "aggregateRating",
-        "review",
-        "color",
-        "material",
-        "size",
-      ],
-    });
-
+  it("the structured-data fixture names the rating that is self-serving", () => {
     expect(detailsByPath.get("/authored3/reviews\nschema.self-serving-reviews")).toEqual({
       pageUrl: `${app.base}/authored3/reviews`,
       schemaType: "Organization",
       fields: ["aggregateRating"],
+    });
+  });
+
+  it("the Phase 29a fixtures carry the evidence the validator produces", () => {
+    const d = (path: string, rule: string) => detailsByPath.get(`${path}\n${rule}`);
+    const url = (path: string) => `${app.base}${path}`;
+
+    // Each page's one finding names the node's path, its type and the format
+    // it was written in, which is what lets an agent point at the markup.
+    expect(d("/authored29a/parse-error", "schema.parse-error")).toEqual({
+      pageUrl: url("/authored29a/parse-error"),
+      jsonLdParseErrors: 1,
+      microdataErrors: 0,
+    });
+    expect(d("/authored29a/unknown-type", "schema.unknown-type")).toEqual({
+      pageUrl: url("/authored29a/unknown-type"),
+      problems: [{ path: "$", type: "Prodcut", format: "jsonld" }],
+      problemCount: 1, problemsCapped: false,
+    });
+    // The microdata Product is complete, so the one made-up property is the
+    // only thing the page is judged on: it is read from attributes and named.
+    expect(d("/authored29a/unknown-property", "schema.unknown-property")).toEqual({
+      pageUrl: url("/authored29a/unknown-property"),
+      problems: [{ path: "$", type: "Product", format: "microdata", property: "colour" }],
+      problemCount: 1, problemsCapped: false,
+    });
+    expect(d("/authored29a/pending-property", "schema.property-pending-or-superseded")).toEqual({
+      pageUrl: url("/authored29a/pending-property"),
+      problems: [
+        {
+          path: "$",
+          format: "jsonld",
+          status: "pending",
+          property: "authorizedRepresentative",
+          supersededBy: null,
+        },
+      ],
+      problemCount: 1, problemsCapped: false,
+    });
+    expect(d("/authored29a/type-mismatch", "schema.embedded-type-mismatch")).toEqual({
+      pageUrl: url("/authored29a/type-mismatch"),
+      problems: [
+        {
+          path: "$.author",
+          type: "Offer",
+          format: "jsonld",
+          property: "author",
+          expected: ["Organization", "Person"],
+        },
+      ],
+      problemCount: 1, problemsCapped: false,
+    });
+    // Five empties: `brand` is a typed-only node, `offers.price` the nested path.
+    // The list order is the validator's walk, so the paths are compared sorted.
+    const empty = d("/authored29a/empty-value", "schema.empty-value") as {
+      problems: { path: string }[];
+    };
+    expect([...empty.problems].sort((x, y) => x.path.localeCompare(y.path))).toEqual([
+      { format: "jsonld", path: "$.brand", property: "brand", type: "Product" },
+      { format: "jsonld", path: "$.description", property: "description", type: "Product" },
+      { format: "jsonld", path: "$.offers.price", property: "price", type: "Offer" },
+      { format: "jsonld", path: "$.review", property: "review", type: "Product" },
+      { format: "jsonld", path: "$.sku", property: "sku", type: "Product" },
+    ]);
+    expect(d("/authored29a/empty-value", "schema.empty-value")).toMatchObject({
+      pageUrl: url("/authored29a/empty-value"),
+      problemCount: 5, problemsCapped: false,
+    });
+    // Three bare references: `#author` is defined by the page's second block and
+    // is no problem; the relative `#series` and the absolute publisher id are.
+    expect(d("/authored29a/unresolved-reference", "schema.unresolved-reference")).toEqual({
+      pageUrl: url("/authored29a/unresolved-reference"),
+      blocksAtCap: false, pageHasParseErrors: false,
+      problems: [
+        {
+          format: "jsonld",
+          path: "$.isPartOf",
+          id: `${url("/authored29a/unresolved-reference")}#series`,
+          written: "#series",
+        },
+        {
+          format: "jsonld",
+          path: "$.publisher",
+          id: "https://estuary-supplies.example/#org",
+          written: "https://estuary-supplies.example/#org",
+        },
+      ],
+      problemCount: 2, problemsCapped: false,
+    });
+    // Nine of the ten pages of `/authored29a/tpl/:id` carry a Product: the page
+    // that does not is the finding, and the evidence is the census.
+    expect(d("/authored29a/tpl/10", "schema.template-inconsistent")).toEqual({
+      pageUrl: url("/authored29a/tpl/10"),
+      pageType: "/authored29a/tpl/:id",
+      schemaType: "Product",
+      pagesWith: 9,
+      pagesInType: 10,
+    });
+  });
+
+  it("each schema.* rule wrote exactly the findings the fixtures call for (Gate 29a clause 1)", async () => {
+    // `exact` pins each fixture page's own set; this pins the crawl-wide count
+    // per rule, so a finding on a page no fixture names cannot hide. The only
+    // pages carrying markup are the two `/authored3/` structured-data pages and
+    // the nineteen `/authored29a/` pages, every one of them `exact`:
+    //  - one each from the single-rule `/authored29a/` pages (parse-error,
+    //    unknown-type, unknown-property, pending-property, type-mismatch,
+    //    empty-value, unresolved-reference) and tpl/10 for template-inconsistent;
+    //  - self-serving-reviews: `/authored3/reviews`;
+    //  - breadcrumb-absent: the one site-scoped finding (no BreadcrumbList);
+    //  - none-on-site: absent, since the site carries markup.
+    // The clean microdata and RDFa pages, tpl/1–9 and `/authored3/product-partial`
+    // add nothing.
+    const counts = await db.execute<{ rule_id: string; n: number }>(sql`
+      select rule_id, count(*)::int as n from issues
+      where crawl_id = ${summary.crawlId} and rule_id like 'schema.%'
+      group by rule_id order by rule_id`);
+    expect(Object.fromEntries(counts.rows.map((r) => [r.rule_id, Number(r.n)]))).toEqual({
+      "schema.breadcrumb-absent": 1,
+      "schema.embedded-type-mismatch": 1,
+      "schema.empty-value": 1,
+      "schema.parse-error": 1,
+      "schema.property-pending-or-superseded": 1,
+      "schema.self-serving-reviews": 1,
+      "schema.template-inconsistent": 1,
+      "schema.unknown-property": 1,
+      "schema.unknown-type": 1,
+      "schema.unresolved-reference": 1,
     });
   });
 
@@ -2287,8 +2399,9 @@ describe("the fixture site end to end", () => {
       // before, 2.6; 100 x 4 / 160 = 2.5 exactly). Owner call O1's
       // `/p26b/aria-label-link` makes 161: 100 x 4 / 161 = 2.48 -> 2.5.
       // Phase 26c's five `/p26c/` pages make 166: 100 x 4 / 166 = 2.41 -> 2.4.
-      totalPages: 166,
-      ratioPct: 2.4,
+      // Phase 29a's nineteen `/authored29a/` pages make 185: 100 x 4 / 185 = 2.16 -> 2.2.
+      totalPages: 185,
+      ratioPct: 2.2,
       chains: 1,
       loops: 1,
     });
@@ -2347,6 +2460,7 @@ describe("the fixture site end to end", () => {
       "page.weight",
       "redirect.volume",
       "render.coverage",
+      "schema.property-coverage",
       "site.health",
       "sitemap.structure",
       "structure.click-depth-distribution",
@@ -2439,6 +2553,7 @@ describe("the fixture site end to end", () => {
         for (const column of declaration.columns) for (const key of paths(column)) nested.add(key);
       } else {
         top.add(declaration.field);
+        for (const column of declaration.scopeColumns ?? []) for (const key of paths(column)) top.add(key);
       }
 
       const inner = (value: unknown, where: string): void => {
@@ -2475,6 +2590,37 @@ describe("the fixture site end to end", () => {
         "metric measured and no reader can see. Declare a column for each, or stop " +
         "writing it",
     ).toEqual([]);
+  });
+
+  it("schema.property-coverage counts the markup's nodes and the properties that hold a value", () => {
+    // Hand-derived from the fixture markup. Twenty top-level nodes: thirteen
+    // Products (tpl/1-9, the two microdata pages `unknown-property` and
+    // `clean-microdata-product`, `empty-value`, `/authored3/product-partial`),
+    // an Article and a Person on `unresolved-reference`, and one each of
+    // Prodcut (`unknown-type`), Organization x3 (`pending-property`,
+    // `clean-rdfa-organization`, `/authored3/reviews`) and Book. That is
+    // 13 + 2 + 1 + 3 + 1 = 20.
+    expect(siteMetric("schema.property-coverage")).toEqual({
+      nodes: 20,
+      propertyListsCapped: 0,
+      typesNotListed: 0, otherVocabularyNodes: 0, typesCappedNodes: 0,
+    });
+    const product = metricsById.get("schema.property-coverage")?.get("schema_type|Product") as {
+      nodes: number;
+      properties: Record<string, number>;
+    };
+    expect(product.nodes).toBe(13);
+    // `empty-value` lists all five of these and gives `description`, `sku`,
+    // `review` and `brand` nothing, so each is carried by 13 - 1 = 12 nodes
+    // where every other Product has it; `review` and `brand` are absent from
+    // `product-partial` as well (13 - 2 = 11), and `description` and `sku` are on it.
+    expect(product.properties).toMatchObject({
+      name: 13,
+      description: 12,
+      sku: 12,
+      review: 11,
+      brand: 11,
+    });
   });
 
   it("the metric cohorts are this site's templates, not its URLs (P8-T5)", () => {
@@ -2520,6 +2666,8 @@ describe("the fixture site end to end", () => {
         "page_type|/authored11/heavy-image",
         "page_type|/authored26/:slug",
         "page_type|/authored26/shop/shop/x",
+        "page_type|/authored29a/:slug",
+        "page_type|/authored29a/tpl/:id",
         "page_type|/authored3/:slug",
         "page_type|/authored7/:slug",
         "page_type|/content/:slug",
@@ -2650,9 +2798,16 @@ describe("the fixture site end to end", () => {
       // have two and stay literal, so typesBefore 112 -> 116. Five pages under
       // `/p26c/` are a family, so the three literals fold into `/p26c/:slug`:
       // typesAfter 26 -> 27 and pagesRetyped 91 -> 94.
-      typesBefore: 116,
-      typesAfter: 27,
-      pagesRetyped: 94,
+      // Phase 29a adds nineteen `/authored29a/` pages: seven two-word names
+      // (`parse-error`, `unknown-type`, `unknown-property`, `pending-property`,
+      // `type-mismatch`, `empty-value`, `unresolved-reference`) stay literal, the
+      // two three-word `clean-` pages fold into one `/authored29a/:slug`, and the
+      // ten `/tpl/N` are already one type, `/authored29a/tpl/:id`. typesBefore
+      // 116 -> 125, typesAfter 27 -> 29 and pagesRetyped 94 -> 101 (the seven
+      // literals fold into the family; nine pages is under the template minimum).
+      typesBefore: 125,
+      typesAfter: 29,
+      pagesRetyped: 101,
     });
   });
 
@@ -2721,8 +2876,9 @@ describe("the fixture site end to end", () => {
     // indexable 200 whose canonical is itself. 137 with owner call O1's
     // `/p26b/aria-label-link`, the same kind of page. 142 with Phase 26c's
     // five `/p26c/` pages, each a hub-linked, listed, indexable 200 whose
-    // canonical is itself.
-    const COHORT = 142;
+    // canonical is itself. 161 with Phase 29a's nineteen `/authored29a/` pages
+    // (nine single pages and the ten of `/tpl/`), all of the same kind.
+    const COHORT = 161;
 
     // THE LINK GRAPH. Every anchor the site renders, and there are only five
     // kinds: the hub at `/` links the 121 fixtures whose `linkedFromHub` is not
@@ -2847,7 +3003,8 @@ describe("the fixture site end to end", () => {
       // `/p26b/aria-label-link` (declares none).
       // 100 x 17 / 142 = 11.97 -> 12.0 with Phase 26c's five pages: the
       // `/p26c/header-en` / `-de` pair declares, the other three do not.
-      coveragePct: 12.0,
+      // 100 x 17 / 161 = 10.56 -> 10.6 with Phase 29a's nineteen pages (none declares).
+      coveragePct: 10.6,
     });
     // The two counts are read from the tables the harness already holds, so a
     // fixture that stopped declaring hreflang, or a page that stopped being
@@ -2888,24 +3045,25 @@ describe("the fixture site end to end", () => {
     //   O1's `/p26b/aria-label-link` makes thirty-one; and Phase 26c's five
     //   `/p26c/` pages, all listed)
     // + 1 (/private/hidden)
-    // = 145 entries (1 + 143 + 1), all distinct, so the walk's first-source-wins
-    // dedupe drops none of them. (Counted from the fixture collection: 166
-    // fixtures, 23 of them opted out, 143 listed.)
+    // = 164 with Phase 29a's nineteen listed `/authored29a/` pages (145 before),
+    // all distinct, so the walk's first-source-wins dedupe drops none of them.
+    // (Counted from the fixture collection: 185 fixtures, 23 of them opted out,
+    // 162 listed; 166 and 143 before Phase 29a.)
     //
     // `/sitemap-extra.xml` lists one of those URLs, `/p26c/sitemap-twice`,
-    // twice. It is a URL already listed, so `totalUrls` stays 145 (distinct
-    // URLs); it is one more MEMBERSHIP, so `totalMemberships` is 146; and the
+    // twice. It is a URL already listed, so `totalUrls` stays 164 (distinct
+    // URLs); it is one more MEMBERSHIP, so `totalMemberships` is 165; and the
     // repeat inside the extra document is not a second membership of it, so it
-    // is 146 and not 147 (review focus 2, end to end).
+    // is 165 and not 166 (review focus 2, end to end).
     //
-    // 145 is nowhere near `SITEMAP_URL_CAP` (50,000), so no document breaches
+    // 164 is nowhere near `SITEMAP_URL_CAP` (50,000), so no document breaches
     // it; no document was dropped for exceeding the read cap; and the walk
     // stopped at no entry cap — which is what makes every count above exact
     // rather than a floor.
     expect(siteMetric("sitemap.structure")).toEqual({
       docs: 2,
-      totalUrls: 145,
-      totalMemberships: 146,
+      totalUrls: 164,
+      totalMemberships: 165,
       oversizedDocsSkipped: 0,
       urlCapBreaches: 0,
       entryCapReached: false,
@@ -2918,7 +3076,7 @@ describe("the fixture site end to end", () => {
       overlongLocsSkipped: 0, alternatesCapped: 0,
     });
     // The per-document rows beneath it, which is where `docs: 2` is spent: the
-    // main document with its 145 entries, and the extra one with its single
+    // main document with its 164 entries, and the extra one with its single
     // URL, listed twice and counted once. Asserted as the exact key set, so the
     // broken document appearing here — or a good one vanishing — is a failure
     // rather than a number nobody reads.
@@ -2928,7 +3086,7 @@ describe("the fixture site end to end", () => {
       "site|",
     ]);
     expect(metricsById.get("sitemap.structure")?.get(`sitemap_doc|${app.base}/sitemap.xml`)).toEqual(
-      { urls: 145, breaches50k: false },
+      { urls: 164, breaches50k: false },
     );
     expect(
       metricsById.get("sitemap.structure")?.get(`sitemap_doc|${app.base}/sitemap-extra.xml`),
@@ -2984,7 +3142,7 @@ describe("the fixture site end to end", () => {
     // Task 12's four pixel-width pages and Phase 26b Task 6's seven social pages
     // are hub-linked cohort pages: depth 1.)
     expect(siteMetric("structure.click-depth-distribution")).toEqual({
-      count: 142,
+      count: 161,
       nullCount: 4,
       min: 0,
       p25: 1,
@@ -3006,10 +3164,13 @@ describe("the fixture site end to end", () => {
       // 138 pages with a depth, v0 = 0, v1…v130 = 1, then 2,2,3,4,5,6,7.
       // mean = 159/138 = 1.152 -> 1.15; p95 at pos 130.15 interpolates
       // v130 = 1 and v131 = 2 -> 1.15.
+      // Phase 29a's nineteen pages are hub-linked at depth 1 too: 157 pages with a
+      // depth, v0 = 0, v1…v149 = 1, then 2,2,3,4,5,6,7. mean = 178/157 = 1.134 ->
+      // 1.13; p95 at pos 148.2 sits inside the run of 1s -> 1.
       p75: 1,
-      p95: 1.15,
+      p95: 1,
       max: 7,
-      mean: 1.15,
+      mean: 1.13,
     });
 
     // The same two facts read off the pages table rather than out of the metric,
@@ -3025,7 +3186,8 @@ describe("the fixture site end to end", () => {
     // (136 before Task 10's four pages, which are indexable 200s like the rest; 140 before Task 11's four;
     // 145 with owner call O1's `/p26b/aria-label-link`; 150 with Phase 26c's
     // five `/p26c/` pages.)
-    expect(cohort).toHaveLength(150);
+    // 169 with Phase 29a's nineteen `/authored29a/` pages.
+    expect(cohort).toHaveLength(169);
     expect(
       cohort.filter(([, p]) => p.clickDepth === null).map(([path]) => path).sort(),
     ).toEqual([
@@ -3054,7 +3216,7 @@ describe("the fixture site end to end", () => {
     // reached them at. (104 before Phase 26b Task 6's seven listed social pages;
     // 135 with owner call O1's listed `/p26b/aria-label-link`; 140 with Phase
     // 26c's five listed `/p26c/` pages.)
-    expect(cohort.filter(([, p]) => p.depth === 0)).toHaveLength(140);
+    expect(cohort.filter(([, p]) => p.depth === 0)).toHaveLength(159);
     expect(cohort.filter(([, p]) => p.clickDepth === 0).map(([path]) => path)).toEqual(["/"]);
   });
 
@@ -3184,6 +3346,12 @@ describe("the fixture site end to end", () => {
     // sampled 7 -> 8. Pages crawled 161 -> 166, selected 136 -> 141, rendered
     // 135 -> 140.
     //
+    // Phase 29a's nineteen `/authored29a/` pages (Task 10) render no anchor, so
+    // every one is a suspect, bar the page that takes a sample seat instead (the
+    // sample counts a page on the suspect side when it is on both): pages crawled
+    // 166 -> 185, suspects 133 -> 151, sampled 8 -> 9, selected 141 -> 160,
+    // rendered 140 -> 159. The numbers are what the crawl recorded.
+    //
     // selectionSampled = 6, and it MOVED FROM 9 IN P8-T5 — the one number in
     // this file that the template inference changes, and the change is the
     // point of it. The sample takes `renderSamplePerType` (3) pages of every
@@ -3219,7 +3387,7 @@ describe("the fixture site end to end", () => {
     // satisfy, because it was selected once. The one failure is
     // `/render/js-redirect-offsite`, whose row shape the next test pins.
     expect(siteMetric("render.coverage")).toEqual({
-      pagesCrawled: 166,
+      pagesCrawled: 185,
       // P12-T4. The end-to-end crawl really did render, so this is the `ran`
       // side of the field — the whole-site case the unit tests bound from the
       // other end. `pagesRendered: 120` below is evidence enough on its own
@@ -3230,12 +3398,12 @@ describe("the fixture site end to end", () => {
       // and this is the field that says so. The five numbers under it describe
       // that decision and are present only because it was taken.
       selectionMode: "auto",
-      selectionBudget: 166,
-      selectionSuspects: 133,
-      selectionSampled: 8,
-      selectionSelected: 141,
+      selectionBudget: 185,
+      selectionSuspects: 151,
+      selectionSampled: 9,
+      selectionSelected: 160,
       selectionTruncated: false,
-      pagesRendered: 140,
+      pagesRendered: 159,
       renderFailures: 1,
     });
 
@@ -3243,12 +3411,12 @@ describe("the fixture site end to end", () => {
     // the statement that actually promoted the frontier rows. Asserting both
     // is what proves `renderSelectionStats` describes the selection that
     // happened rather than one it would make today.
-    expect(render.selection.budget).toBe(166);
-    expect(render.selection.suspects).toBe(133);
-    expect(render.selection.sampled).toBe(8);
+    expect(render.selection.budget).toBe(185);
+    expect(render.selection.suspects).toBe(151);
+    expect(render.selection.sampled).toBe(9);
     expect(render.selection.truncated).toBe(false);
-    expect(render.selection.selected).toHaveLength(141);
-    expect(render.rendered).toBe(140);
+    expect(render.selection.selected).toHaveLength(160);
+    expect(render.rendered).toBe(159);
     expect(render.failures).toBe(1);
     // No URL left behind: the pass was not aborted, so every leased render was
     // recorded and completed.
@@ -3276,7 +3444,7 @@ describe("the fixture site end to end", () => {
       .select({ count: crawls.renderPassCount })
       .from(crawls)
       .where(eq(crawls.id, summary.crawlId));
-    expect(crawlRow?.count).toBe(140);
+    expect(crawlRow?.count).toBe(159);
   });
 
   it("the health rollup agrees with a page-by-page recount (P10-T2)", () => {
@@ -3362,7 +3530,8 @@ describe("the fixture site end to end", () => {
       // Task 10's four pages, also judged; 161 with Task 11's four; 162 with
       // owner call O1's `/p26b/aria-label-link`, judged; 167 with Phase 26c's
       // five `/p26c/` pages, all judged.)
-      pagesNotAuditable: 167 - judged - canonicalised - noindex,
+      // 186 with Phase 29a's nineteen `/authored29a/` pages, all judged.
+      pagesNotAuditable: 186 - judged - canonicalised - noindex,
       urlsCanonicalised: canonicalised,
       urlsNoindex: noindex,
       // Inside `urlsTotal`, not a partition member: judged pages declaring
@@ -3380,8 +3549,8 @@ describe("the fixture site end to end", () => {
         health["urlsCanonicalised"]! +
         health["urlsNoindex"]! +
         health["pagesNotAuditable"]!,
-    ).toBe(167);
-    expect(pageByPath.size).toBe(167);
+    ).toBe(186);
+    expect(pageByPath.size).toBe(186);
   });
 
   it("the resource findings carry what the asset server actually answered (P11-T3)", () => {
@@ -3478,7 +3647,7 @@ describe("the fixture site end to end", () => {
     expect(weight.atLeast).toBe(true);
     // And the distribution is over the same cohort every other metric uses, so
     // its count is the constant the three quotable metrics are pinned against.
-    expect(weight.pageWeight.count).toBe(142);
+    expect(weight.pageWeight.count).toBe(161);
     // The heavy page is the heaviest thing on this site by a wide margin, so
     // the maximum is at least the image the assertion above pinned. Stated as a
     // floor rather than a sum: the page's own HTML is in there too.
@@ -3848,7 +4017,7 @@ describe("the fixture site end to end", () => {
     // `sitemap.over-50k-urls` twenty-two; Phase 26b's `extraction.not-recorded`
     // made twenty-three, and Phase 26c's `sitemap.oversized` and
     // `social.image-insecure` make twenty-five, and Phase 27c's `crawl.list-mode`
-    // twenty-six — asserted below, so the number cannot go stale again). A
+    // twenty-six; Phase 29a's seven schema rules waited here for their fixtures and left again in T10, which is the number it stands at now — asserted below, so it cannot go stale again). A
     // new rule arrives here with no fixture and fails immediately, which is the
     // point — the alternative is a rule nobody has ever seen speak.
     expect(SKIP_HARNESS_CLAIMS).toHaveLength(26);
@@ -4110,7 +4279,7 @@ describe("the evidence layer on the fixture crawl (Phase 25)", () => {
   });
 
   it("stamps the current extraction version on every row", async () => {
-    expect(EXTRACTION_VERSION).toBe(3);
+    expect(EXTRACTION_VERSION).toBe(4);
     const res = await db.execute<{ url: string; extraction_version: number | null }>(sql`
       select url, extraction_version from pages
       where crawl_id = ${summary.crawlId}

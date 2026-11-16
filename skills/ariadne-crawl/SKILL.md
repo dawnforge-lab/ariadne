@@ -83,6 +83,7 @@ same JSON:
 | `issue_inlinks` | `GET /crawls/:id/issues/:ruleId/inlinks` |
 | `metrics_get` | `GET /crawls/:id/metrics` |
 | `pages_query` | `GET /crawls/:id/pages` |
+| `structured_data` | `GET /crawls/:id/structured-data` |
 | `robots_get` | `GET /crawls/:id/robots` |
 | `export_crawl` | `GET /crawls/:id/export` |
 
@@ -798,7 +799,11 @@ and metrics written. It answers the run summary:
 `findings` is the issue rows this run wrote and `byRule` breaks them down; `metrics`
 is the metric rows and `byMetric` breaks those down, naming **every** metric rule that
 ran, so a zero there means "this rule removed the crawl's previous answer" and an
-absent key means it never ran. `derived` counts what the derivations wrote. There is
+absent key means it never ran. `derived` counts what the derivations wrote, keyed
+`<derivation>.<count>`. Two of them are structured-data counts: deriveSchemaValidation.blocks
+is the blocks validated, and deriveSchemaValidation.orphanBlocks is the structured-data rows
+whose page row lost an insert race, which are left unvalidated and counted (no surface reads
+them, so a nonzero value is not a missing verdict). There is
 **no `elapsedMs`** — time the call yourself if you want to report the duration.
 
 **Keep that summary** for what it alone carries: the per-rule and per-metric
@@ -820,10 +825,10 @@ upgrading the engine rather than re-crawling the site.
 
 `crawl_config_get` answers the crawl's judgement: `{crawlId, judgement, thresholds,
 judgedWith, judgementStale}`. `judgement` is the block, `{}` when nothing is set;
-`thresholds` lists all 20 overridable thresholds as `{value, default, min, max,
+`thresholds` lists all 22 overridable thresholds as `{value, default, min, max,
 overridden}`, where `value` is what the NEXT rules run will use; `judgedWith` is what
 the last completed run used — `{disabledRules, thresholds, findingCap?}`, its
-`thresholds` all 20 at the values that run actually judged with — (`null` if nobody
+`thresholds` all 22 at the values that run actually judged with — (`null` if nobody
 has judged the crawl); and
 `judgementStale` (`{stale, reasons}`) says whether the two differ.
 

@@ -67,6 +67,13 @@ import { indexabilityOf } from "../rules/helpers.js";
 import { MAX_REDIRECT_HOPS } from "../rules/query/redirects.js";
 import type { IssueType, Priority } from "../rules/registry/types.js";
 import { notDisabled } from "./judgement-view.js";
+import {
+  STRUCTURED_DATA_FORMATS,
+  blockProblems,
+  blockTypesCell,
+  problemCells,
+  validationReadable,
+} from "./structured-data.js";
 
 /** The datasets `export_crawl`'s CSV half can write, and the `view` vocabulary. */
 export const CSV_VIEWS = [
@@ -81,6 +88,7 @@ export const CSV_VIEWS = [
   "metric_table",
   "issues_overview",
   "crawl_overview",
+  "structured_data_nodes",
 ] as const;
 export type CsvViewName = (typeof CSV_VIEWS)[number];
 
@@ -88,7 +96,7 @@ export type CsvViewName = (typeof CSV_VIEWS)[number];
 type NonKeysetView = "metric_table" | "issues_overview" | "crawl_overview";
 
 /**
- * THE EIGHT VIEWS THAT ARE A KEYSET READ OF A TABLE — every view but three.
+ * THE NINE VIEWS THAT ARE A KEYSET READ OF A TABLE — every view but three.
  *
  * `metric_table`, `issues_overview` and `crawl_overview` are the exceptions and
  * they are a different KIND of view. `issues_overview` is one `GROUP BY rule_id`
@@ -103,7 +111,7 @@ type NonKeysetView = "metric_table" | "issues_overview" | "crawl_overview";
  * one stored row into three (a measure each), or a stored list into twenty rows,
  * or a stored map into its entries — a transformation no `ORDER BY … LIMIT` can
  * express. So it has no `CsvView` definition, and the properties that make the
- * other eight safe on a 50,000-page crawl (a LIMIT, an order, a cursor
+ * other nine safe on a 50,000-page crawl (a LIMIT, an order, a cursor
  * comparison) are asserted over THIS list rather than over the vocabulary.
  *
  * What bounds `metric_table` instead is the rows themselves: one metric writes
@@ -615,7 +623,7 @@ function linkNext(row: LinkRow): string[] {
 }
 
 /**
- * The eight views.
+ * The nine views.
  *
  * Every one of them answers a question the Ahrefs-style bulk-export block asks,
  * and every one of them is a read the JSON surface could already answer more
@@ -999,6 +1007,95 @@ export const CSV_VIEW_DEFS: Record<CsvQueryViewName, CsvView> = {
       orEmpty(row.fetch_reason),
       String(row.referencing_pages),
     ],
+  }),
+
+  /**
+   * The per-node detail behind the `structured_data` listing and the schema
+   * rules' per-page findings (ruling R0.3): ONE ROW PER (BLOCK, PROBLEM), and
+   * one row for a block with no problem at all, so a clean block is a row that
+   * says so rather than an absence.
+   *
+   * The keyset is `(id, ord)`: the block's `id`, then the problem's position in
+   * `blockProblems`' one array (`with ordinality`, from 1), with `ord` 0 for the
+   * clean block's row. Ordered by the block, so a block's rows are adjacent and
+   * the pages' rows come in the order the crawl stored their blocks.
+   *
+   * Refused before a byte on a crawl the rules have not judged, or judged before
+   * the derivation existed (`ApiService.assertStructuredDataJudged`, read once
+   * before the header). A blob met null or unreadable after that — the batches
+   * are separate reads — throws in `cells` rather than writing the block as
+   * clean: the query turns such a blob into an empty problem list, which is
+   * exactly the row a clean block gets.
+   *
+   * Schema Type is every type the block's node states, `|`-joined. Each of a
+   * block's problem lists holds at most `MAX_PROBLEMS_PER_LIST` entries, so a
+   * block's rows for one problem stop there; the listing's `problemsCapped`
+   * and the findings' Problems Capped say when they did (the cap is per block).
+   */
+  structured_data_nodes: defineCsvView<{
+    id: string;
+    ord: string;
+    url: string;
+    format: string;
+    schema_type: string;
+    validated: boolean;
+    readable: boolean | null;
+    problem: unknown;
+  }>({
+    header: ["URL", "Format", "Schema Type", "Path", "Node Type", "Problem", "Detail"],
+    keyset: ["id", "ord"],
+    // Ids are positive and `ord` is never negative, so (-1, -1) precedes every row.
+    start: ["-1", "-1"],
+    query: (crawlId, cursor, limit) => sql`
+      select sd.id::text as id, x.ord::text as ord, p.url, sd.format,
+             -- Every type the block's node states, '|'-joined (final review I2);
+             -- an unreadable blob throws in cells before this is printed.
+             case when ${validationReadable(sql`sd.validation_jsonb`)}
+                  then ${blockTypesCell(sql`sd.validation_jsonb`)} else '' end as schema_type,
+             sd.validation_jsonb is not null as validated,
+             ${validationReadable(sql`sd.validation_jsonb`)} as readable,
+             x.problem
+      from structured_data sd
+      join pages p on p.crawl_id = ${crawlId} and p.id = sd.page_id
+      cross join lateral (
+        select case when ${validationReadable(sql`sd.validation_jsonb`)}
+                    then ${blockProblems(sql`sd.validation_jsonb`, crawlId, sql`sd.page_id`)}
+                    else '[]'::jsonb end as problems
+      ) b
+      cross join lateral (
+        select e.problem, e.ord
+          from jsonb_array_elements(b.problems) with ordinality as e(problem, ord)
+        union all
+        select null::jsonb, 0::bigint where jsonb_array_length(b.problems) = 0
+      ) x
+      where sd.crawl_id = ${crawlId}
+        and sd.id >= ${cursor[0] ?? "-1"}::bigint
+        and (sd.id, x.ord) > (${cursor[0] ?? "-1"}::bigint, ${cursor[1] ?? "-1"}::bigint)
+      order by sd.id asc, x.ord asc
+      limit ${limit}`,
+    next: (row) => [row.id, row.ord],
+    cells: (row) => {
+      const where = `structured_data row ${row.id} (${row.url})`;
+      if (!row.validated) {
+        throw new Error(
+          `structured_data_nodes: ${where} has no validation blob — the rules were re-run ` +
+            "while this export read, or the crawl was judged before structured data " +
+            "validation existed: re-run the rules (crawl_rules) and export again",
+        );
+      }
+      if (row.readable !== true) {
+        throw new Error(
+          `structured_data_nodes: ${where} holds a validation blob that is not a BlockValidation ` +
+            "(one written before the 29a rework is not): re-run the rules (crawl_rules) and export again",
+        );
+      }
+      if (!(STRUCTURED_DATA_FORMATS as readonly string[]).includes(row.format)) {
+        throw new Error(`structured_data_nodes: ${where} has format '${row.format}', which no writer produces`);
+      }
+      if (row.ord === "0") return [row.url, row.format, row.schema_type, "", "", "", ""];
+      const cells = problemCells(row.problem, where);
+      return [row.url, row.format, row.schema_type, cells.path, cells.nodeType, cells.problem, cells.detail];
+    },
   }),
 };
 

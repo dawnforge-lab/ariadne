@@ -5,15 +5,10 @@
  * under test is what the rules make of the blocks the crawler stored, not the
  * JSON-LD extraction that produced them.
  *
- * Two of the four are site-scoped — "this site publishes no structured data at
+ * Two of the three are site-scoped — "this site publishes no structured data at
  * all" and "no page on it carries a breadcrumb trail" — so their assertions are
  * about a crawl rather than about a page, and the pages inserted beside them
  * exist to make the site big enough to have an opinion about.
- *
- * `schema.product-incomplete` reads `field_presence_jsonb`, which the
- * derivation writes. Every case that drives it calls `deriveFieldPresence`
- * first, exactly as `runRules` does — except the one that deliberately does
- * not, which is how the rule's refusal to guess at a null blob is proved.
  */
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -24,16 +19,13 @@ import { closeDb, createDb, type Db } from "../../src/db/client.js";
 import { runMigrations } from "../../src/db/migrate.js";
 import { crawls, pages, structuredData } from "../../src/db/schema.js";
 import {
-  deriveFieldPresence,
-  SCHEMA_PROFILES,
-} from "../../src/rules/derive/field-presence.js";
-import {
   BREADCRUMB_PAGE_FLOOR,
   SELF_SERVING_FIELDS,
   SELF_SERVING_TYPES,
   structuredDataRules,
 } from "../../src/rules/query/structured-data.js";
 import type { Finding, QueryRule } from "../../src/rules/registry/types.js";
+import { descendants } from "../../src/rules/schema-org/vocabulary.js";
 import { mkDiscovery } from "./mk-discovery.js";
 import { writerIndexable, type IndexabilitySpec } from "./mk-page.js";
 import { LOCAL_TENANT } from "../../src/tenant.js";
@@ -48,20 +40,6 @@ function databaseUrl(): string {
 const SITE = "https://schema-rules.example";
 const url = (path: string): string => `${SITE}${path}`;
 
-const PRICED_OFFER = { "@type": "Offer", price: "129.00", priceCurrency: "EUR" };
-
-/**
- * A `recommended` presence group judging every field of the CURRENT Product
- * profile the same way — derived from the profile rather than listed, so a
- * profile widening (CHECK-44's, and the next one) does not leave a blob here
- * quietly stale and testing a different branch than it claims to.
- */
-function allRecommended(value: boolean): Record<string, boolean> {
-  return Object.fromEntries(
-    SCHEMA_PROFILES["Product"]!.recommended.map((field) => [field, value]),
-  );
-}
-
 const byId = new Map(structuredDataRules.map((r) => [r.id, r]));
 function rule(id: string): QueryRule {
   const r = byId.get(id);
@@ -70,11 +48,10 @@ function rule(id: string): QueryRule {
 }
 
 describe("structuredDataRules metadata", () => {
-  it("defines the four rules of the plan's table", () => {
+  it("defines the three structured-data query rules", () => {
     expect(structuredDataRules.map((r) => r.id).sort()).toEqual([
       "schema.breadcrumb-absent",
       "schema.none-on-site",
-      "schema.product-incomplete",
       "schema.self-serving-reviews",
     ]);
   });
@@ -86,7 +63,6 @@ describe("structuredDataRules metadata", () => {
       ),
     ).toEqual({
       "schema.none-on-site": [["CHECK-43"], "info", "structured-data"],
-      "schema.product-incomplete": [["CHECK-44"], "warning", "structured-data"],
       "schema.breadcrumb-absent": [["CHECK-45"], "info", "structured-data"],
       "schema.self-serving-reviews": [["CHECK-46"], "info", "structured-data"],
     });
@@ -105,7 +81,8 @@ describe("structuredDataRules metadata", () => {
   });
 
   it("names the self-serving types and fields Google's policy is about", () => {
-    expect([...SELF_SERVING_TYPES]).toEqual(["Organization", "LocalBusiness"]);
+    expect(SELF_SERVING_TYPES).toEqual(descendants("Organization"));
+    expect(SELF_SERVING_TYPES).toEqual(expect.arrayContaining(["Organization", "LocalBusiness", "Restaurant"]));
     expect([...SELF_SERVING_FIELDS]).toEqual(["aggregateRating", "review"]);
   });
 });
@@ -116,6 +93,7 @@ describe("the structured-data rules against the database", () => {
 
   interface PageSpec extends IndexabilitySpec {
     path: string;
+    extractionVersion?: number;
   }
 
   async function newCrawl(): Promise<string> {
@@ -150,6 +128,7 @@ describe("the structured-data rules against the database", () => {
         xRobotsTag: s.xRobotsTag ?? null,
         depth: 1,
         discoveredVia: "link",
+        extractionVersion: s.extractionVersion ?? 4,
       };
     });
     await db.insert(pages).values(rows);
@@ -177,6 +156,7 @@ describe("the structured-data rules against the database", () => {
         crawlId,
         pageId: b.pageId,
         schemaType: b.type,
+        format: "jsonld" as const,
         raw: b.raw,
       })),
     );
@@ -247,6 +227,16 @@ describe("the structured-data rules against the database", () => {
       expect(await run(ID, allNoindex)).toHaveLength(1);
     });
 
+    it("is silent on a v3 crawl: no blocks may only mean not read", async () => {
+      const crawlId = await newCrawl();
+      await addPages(crawlId, [
+        { path: "/a", extractionVersion: 3 },
+        { path: "/b", extractionVersion: 3 },
+        { path: "/c", extractionVersion: 3 },
+      ]);
+      expect(await run(ID, crawlId)).toEqual([]);
+    });
+
     it("is silent as soon as one block of any type was stored", async () => {
       // Any type at all: the check is whether the site uses structured data,
       // not whether it uses the two types this engine profiles.
@@ -310,194 +300,16 @@ describe("the structured-data rules against the database", () => {
       expect(await run(ID, crawlId)).toHaveLength(0);
     });
 
-    it("refuses a crawl id nothing knows", async () => {
-      await expect(run(ID, "crawl_nope")).rejects.toThrow(/no such crawl/);
-    });
-  });
-
-  describe("schema.product-incomplete", () => {
-    const ID = "schema.product-incomplete";
-
-    it("names the missing required and recommended fields of a Product", async () => {
-      const crawlId = await crawlOfPages(1);
-      const ids = await addPages(crawlId, [{ path: "/shoe" }]);
-      await addBlocks(crawlId, [
-        {
-          pageId: ids.get("/shoe")!,
-          type: "Product",
-          raw: {
-            "@type": "Product",
-            name: "Trail Runner 3",
-            offers: PRICED_OFFER,
-            description: "A light trail shoe.",
-            sku: "TR-3-42",
-          },
-        },
-      ]);
-      await deriveFieldPresence(db, crawlId);
-
-      const found = await run(ID, crawlId);
-      expect(found).toHaveLength(1);
-      expect(found[0]!).toEqual({
-        ruleId: ID,
-        severity: "warning",
-        pageId: ids.get("/shoe"),
-        pageUrl: url("/shoe"),
-        dedupeKey: url("/shoe"),
-        evidence: {
-          missingRequired: ["image"],
-          // Profile order, and the fields are exactly what this block omits:
-          // it has a description, a sku and a priced offer WITH a currency, so
-          // `offers.priceCurrency` is not among them — the widened CHECK-44
-          // profile reads that field out of the offer rather than looking for a
-          // top-level key that correct markup never carries.
-          missingRecommended: [
-            "brand",
-            "offers.availability",
-            "gtin",
-            "mpn",
-            "aggregateRating",
-            "review",
-            "color",
-            "material",
-            "size",
-          ],
-        },
-      });
-    });
-
-    it("is silent on a Product that carries every required field", async () => {
-      const crawlId = await crawlOfPages(1);
-      const ids = await addPages(crawlId, [{ path: "/complete" }]);
-      await addBlocks(crawlId, [
-        {
-          pageId: ids.get("/complete")!,
-          type: "Product",
-          raw: {
-            "@type": "Product",
-            name: "Trail Runner 3",
-            image: ["https://schema-rules.example/img.jpg"],
-            offers: PRICED_OFFER,
-          },
-        },
-      ]);
-      await deriveFieldPresence(db, crawlId);
-
-      // The recommended fields are all missing, and that is deliberately not a
-      // finding: the rule fires on the required ones.
-      expect(await run(ID, crawlId)).toHaveLength(0);
-    });
-
-    it("fires on a priceless offer, because an offer with no price is not one", async () => {
-      const crawlId = await crawlOfPages(1);
-      const ids = await addPages(crawlId, [{ path: "/priceless" }]);
-      await addBlocks(crawlId, [
-        {
-          pageId: ids.get("/priceless")!,
-          type: "Product",
-          raw: {
-            "@type": "Product",
-            name: "Trail Runner 3",
-            image: ["https://schema-rules.example/img.jpg"],
-            offers: { "@type": "Offer", availability: "InStock" },
-          },
-        },
-      ]);
-      await deriveFieldPresence(db, crawlId);
-
-      const found = await run(ID, crawlId);
-      expect(found).toHaveLength(1);
-      expect(found[0]!.evidence["missingRequired"]).toEqual(["offers"]);
-    });
-
-    it("reports a page once, on the union of what its Product blocks carry", async () => {
-      const crawlId = await crawlOfPages(1);
-      const ids = await addPages(crawlId, [{ path: "/split" }]);
-      await addBlocks(crawlId, [
-        {
-          pageId: ids.get("/split")!,
-          type: "Product",
-          raw: { "@type": "Product", name: "Half", offers: PRICED_OFFER },
-        },
-        {
-          pageId: ids.get("/split")!,
-          type: "Product",
-          raw: { "@type": "Product", image: ["https://schema-rules.example/img.jpg"] },
-        },
-      ]);
-      await deriveFieldPresence(db, crawlId);
-
-      // Between them the two blocks name every required field, so there is
-      // nothing missing from the page — and one finding per page even when
-      // something is.
-      expect(await run(ID, crawlId)).toHaveLength(0);
-    });
-
-    it("ignores a page whose Product-shaped fields sit on another type", async () => {
-      const crawlId = await crawlOfPages(1);
-      const ids = await addPages(crawlId, [{ path: "/article" }]);
-      await addBlocks(crawlId, [
-        { pageId: ids.get("/article")!, type: "Article", raw: { "@type": "Article" } },
-      ]);
-      await deriveFieldPresence(db, crawlId);
-
-      expect(await run(ID, crawlId)).toHaveLength(0);
-    });
-
-    it("refuses every presence blob that is not one the derivation would write", async () => {
-      // The SQL that selects candidates is a pre-filter, and `jsonb_path_exists`
-      // runs in lax mode: it answers *false*, not an error, for a blob that is a
-      // scalar or an array or has no `required` at all, and an all-true blob
-      // derived under an older profile carries no `false` either. Each of these
-      // shapes has to REACH the JavaScript check, or the loud refusal is
-      // decorative and a broken derivation reads as a site with tidy markup.
-      const shapes: Record<string, unknown> = {
-        "/scalar": "not a presence blob",
-        "/array": [{ required: { name: false } }],
-        "/no-required": { recommended: { sku: true } },
-        "/required-not-object": { required: "name", recommended: {} },
-        // Judged under a profile that did not know about `offers`: every field
-        // it does name is true, so nothing here is false.
-        "/stale-profile": {
-          required: { name: true, image: true },
-          recommended: allRecommended(true),
-        },
-        // A value that is not a boolean says nothing about the field. The rest
-        // of the blob is exactly what the CURRENT profile would judge, so this
-        // shape reaches the not-a-boolean branch rather than the stale-profile
-        // one — which is what it is here to test.
-        "/not-boolean": {
-          required: { name: true, image: "yes", offers: true },
-          recommended: allRecommended(true),
-        },
-      };
-
-      for (const [path, blob] of Object.entries(shapes)) {
-        const crawlId = await crawlOfPages(1);
-        const ids = await addPages(crawlId, [{ path }]);
-        await addBlocks(crawlId, [
-          { pageId: ids.get(path)!, type: "Product", raw: { "@type": "Product" } },
-        ]);
-        await db
-          .update(structuredData)
-          .set({ fieldPresence: blob })
-          .where(eq(structuredData.crawlId, crawlId));
-
-        await expect(run(ID, crawlId), path).rejects.toThrow(/field presence/i);
-      }
-    });
-
-    it("refuses to judge a Product whose presence was never derived", async () => {
-      // A null blob is not an empty one. Reading it as "no fields present"
-      // would turn a derivation that failed to run into a page-by-page
-      // accusation about markup nobody looked at (hard rule 7).
-      const crawlId = await crawlOfPages(1);
-      const ids = await addPages(crawlId, [{ path: "/underived" }]);
-      await addBlocks(crawlId, [
-        { pageId: ids.get("/underived")!, type: "Product", raw: { "@type": "Product" } },
-      ]);
-
-      await expect(run(ID, crawlId)).rejects.toThrow(/field presence/i);
+    it("is silent on a v3 crawl, where a breadcrumb in microdata would be invisible", async () => {
+      const crawlId = await newCrawl();
+      await addPages(
+        crawlId,
+        Array.from({ length: BREADCRUMB_PAGE_FLOOR }, (_, i) => ({
+          path: `/v3-${i}`,
+          extractionVersion: 3,
+        })),
+      );
+      expect(await run(ID, crawlId)).toEqual([]);
     });
 
     it("refuses a crawl id nothing knows", async () => {
@@ -535,6 +347,26 @@ describe("the structured-data rules against the database", () => {
       });
     });
 
+    it("fires on a Restaurant (a LocalBusiness subtype) carrying aggregateRating", async () => {
+      const crawlId = await crawlOfPages(1);
+      const ids = await addPages(crawlId, [{ path: "/menu" }]);
+      await addBlocks(crawlId, [
+        {
+          pageId: ids.get("/menu")!,
+          type: "Restaurant",
+          raw: {
+            "@type": "Restaurant",
+            name: "Estuary",
+            aggregateRating: { "@type": "AggregateRating", ratingValue: "4.8" },
+          },
+        },
+      ]);
+      const found = await run(ID, crawlId);
+      expect(found).toHaveLength(1);
+      expect(found[0]!.evidence).toEqual({ schemaType: "Restaurant", fields: ["aggregateRating"] });
+      expect(found[0]!.dedupeKey).toBe(`${url("/menu")}#Restaurant`);
+    });
+
     it("fires on a LocalBusiness carrying reviews, naming both fields when both are there", async () => {
       const crawlId = await crawlOfPages(1);
       const ids = await addPages(crawlId, [{ path: "/shop" }]);
@@ -570,18 +402,14 @@ describe("the structured-data rules against the database", () => {
             "@type": "Product",
             name: "Trail Runner 3",
             image: ["https://schema-rules.example/img.jpg"],
-            offers: PRICED_OFFER,
+            offers: { "@type": "Offer", price: "129.00", priceCurrency: "EUR" },
             aggregateRating: { "@type": "AggregateRating", ratingValue: "4.6" },
             review: [{ "@type": "Review", author: "A runner" }],
           },
         },
       ]);
-      await deriveFieldPresence(db, crawlId);
 
       expect(await run(ID, crawlId)).toHaveLength(0);
-      // And the rating it carries is a recommended field the Product rule is
-      // glad to see, which is the point of keeping the two apart.
-      expect(await run("schema.product-incomplete", crawlId)).toHaveLength(0);
     });
 
     it("is silent on an Organization whose rating key carries nothing", async () => {

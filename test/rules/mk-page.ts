@@ -163,10 +163,12 @@ export function mkPage(overrides: Partial<PageRecord> = {}): PageRecord {
       },
       truncated: [],
     },
-    // Extraction 3 (Phase 26c): a clean page carries a clean value for every
-    // 26b and 26c fact, so no later rule fires on it. A v1 row (every new column
-    // null) is `mkV1Page`.
-    extractionVersion: 3,
+    // Extraction 4 (Phase 29a): a clean page carries a clean value for every
+    // 26b, 26c and 29a fact, so no later rule fires on it. A v1 row (every new
+    // column null) is `mkV1Page`.
+    extractionVersion: 4,
+    structuredDataMicrodataErrors: 0,
+    structuredDataSkips: { microdataItemrefSkipped: 0, rdfaUnsupported: 0, valuesCapped: 0 },
     htmlLang: "en",
     social: {
       og: {
@@ -232,6 +234,8 @@ export function mkV1Page(overrides: Partial<PageRecord> = {}): PageRecord {
     relPrevCount: null,
     htmlStructure: null,
     overlongUrls: null,
+    structuredDataMicrodataErrors: null,
+    structuredDataSkips: null,
     ...overrides,
   });
 }

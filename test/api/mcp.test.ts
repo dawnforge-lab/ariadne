@@ -670,14 +670,14 @@ afterAll(async () => {
 });
 
 describe("the tool surface", () => {
-  it("advertises exactly the thirty-four tools of the agent surface, each described", async () => {
+  it("advertises exactly the thirty-five tools of the agent surface, each described", async () => {
     const listed = await client.listTools();
     expect(listed.tools.map((t) => t.name).sort()).toEqual(
       [
         "compare_urls", "config_schema", "config_validate", "crawl_compare", "crawl_config_get", "crawl_config_set", "crawl_list",
         "crawl_mark_failed", "crawl_overview", "crawl_render", "crawl_resume", "crawl_rules", "crawl_start", "crawl_pause", "crawl_cancel", "crawl_delete",
         "crawl_history", "schedule_create", "schedule_list", "schedule_get", "schedule_update", "schedule_delete", "schedule_history", "crawl_status", "export_crawl", "issue_inlinks", "issue_urls", "issues_list",
-        "issues_overview", "metric_table", "metrics_get", "pages_query", "robots_get", "rules_catalog",
+        "issues_overview", "metric_table", "metrics_get", "pages_query", "robots_get", "rules_catalog", "structured_data",
       ].sort(),
     );
     for (const tool of listed.tools) {
@@ -686,7 +686,7 @@ describe("the tool surface", () => {
       // agent reads one tool's description, not the server's instructions.
       if (
         tool.name.endsWith("_list") ||
-        tool.name === "pages_query" ||
+        tool.name === "pages_query" || tool.name === "structured_data" ||
         tool.name === "issue_urls" ||
         tool.name === "issue_inlinks" ||
         tool.name === "compare_urls" || tool.name === "crawl_history" || tool.name === "schedule_history"
@@ -3368,5 +3368,43 @@ describe("crawl tool descriptions — list mode, scope and credentials (27c)", (
     for (const field of ["exclude", "include", "maxRedirectHops", "requestHeaders", "httpAuth", "cookies", "scopeChangedAt"]) {
       expect(text, field).toContain(field);
     }
+  });
+});
+
+// Phase 29a T9. Appended at the end so no line the surface document cites
+// moves (the vocabulary table above would otherwise carry these two rows).
+describe("structured_data's description (29a)", () => {
+  it("names every format its closed filter accepts, and no Google feature filter (29a rework)", async () => {
+    const { STRUCTURED_DATA_FORMATS, STRUCTURED_DATA_PROBLEMS } = await import("../../src/api/structured-data.js");
+    const listed = await client.listTools();
+    const tool = listed.tools.find((t) => t.name === "structured_data");
+    const props = (tool?.inputSchema as { properties?: Record<string, { description?: string }> }).properties ?? {};
+    expect(STRUCTURED_DATA_FORMATS.length).toBeGreaterThan(0);
+    for (const value of STRUCTURED_DATA_FORMATS) {
+      expect(props["format"]?.description, `structured_data.format does not name '${value}'`).toContain(value);
+    }
+    expect(Object.keys(props).sort()).toEqual(["crawlId", "cursor", "format", "limit", "pageType"]);
+    const text = tool?.description ?? "";
+    expect(text).not.toMatch(/google|rich result/i);
+    expect(text).toContain("nodes");
+    for (const problem of STRUCTURED_DATA_PROBLEMS) expect(text).toContain(problem);
+  });
+
+  it("says the listing is refused, not empty, before the rules have run, and that null is not zero", async () => {
+    const listed = await client.listTools();
+    const text = listed.tools.find((t) => t.name === "structured_data")?.description ?? "";
+    for (const claim of ["REFUSED, never answered empty", "NULL IS NOT ZERO", "structured_data_nodes"]) {
+      expect(text, `structured_data does not say '${claim}'`).toContain(claim);
+    }
+  });
+});
+
+// 29a rework final review I3: the agent's contract names every node key.
+describe("structured_data's description names the node shape (29a final review)", () => {
+  it("lists types and typesCapped beside type, and the page row's problemsCapped", async () => {
+    const listed = await client.listTools();
+    const text = listed.tools.find((t) => t.name === "structured_data")?.description ?? "";
+    expect(text).toContain("{format, path, type, types, typesCapped, properties, propertiesCapped}");
+    expect(text).toContain("problemsCapped");
   });
 });

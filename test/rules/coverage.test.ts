@@ -533,15 +533,34 @@ describe("checklist coverage", () => {
   //   page    72
   //   query   102 + 1 = 103
   //   total   188 + 1 = 189
-  it("pins the ruleset split: 189 rules = 72 page + 103 query + 14 metric", () => {
+  //
+  // Phase 29a Task 6 retires ONE query rule, `schema.product-incomplete`.
+  //
+  //   page    72
+  //   query   103 - 1 = 102
+  //   total   189 - 1 = 188
+  //
+  // Phase 29a Task 7 adds EIGHT query rules, the per-node `schema.*` rules in
+  // `src/rules/query/schema-validation.ts`.
+  //
+  //   page    72
+  //   query   102 + 8 = 110
+  //   total   188 + 8 = 196
+  //
+  // Phase 29a Task 8 adds ONE query rule, `schema.template-inconsistent`.
+  //
+  //   page    72 / query 110 + 1 = 111 / total 196 + 1 = 197; then the 29a rework
+  //   (2026-11-16): query 111 - 3 Google rules + 2 = 110, metric 14 + 1 = 15, total 197.
+  //   The new metric is `schema.property-coverage` (see the end of this file).
+  it("pins the ruleset split: 197 rules = 72 page + 110 query + 15 metric", () => {
     const registry = buildRegistry();
-    expect(registry.all()).toHaveLength(189);
+    expect(registry.all()).toHaveLength(197);
     expect(registry.byKind("page")).toHaveLength(72);
-    expect(registry.byKind("query")).toHaveLength(103);
+    expect(registry.byKind("query")).toHaveLength(110);
     // The link-graph five, the two content metrics and hreflang coverage, plus
     // the URL-parameter, redirect-volume and sitemap-structure metrics, plus
-    // the render pass's coverage, the health rollup, and the page-weight table.
-    expect(registry.byKind("metric")).toHaveLength(14);
+    // the render pass's coverage, the health rollup, the page-weight table, coverage.
+    expect(registry.byKind("metric")).toHaveLength(15);
   });
 
   // The section-12 claims, pinned in both directions the way CHECK-31's move is:
@@ -761,5 +780,30 @@ describe("checklist coverage", () => {
         "the shape `RENDER_CHECKS` and `METRIC_PENDING_CHECKS` had before their " +
         "rules landed",
     ).toEqual([]);
+  });
+});
+
+// The 29a rework (2026-11-16), appended so no line the surface document cites
+// moves: the three Google rules (`schema.google-required-missing`,
+// `schema.google-recommended-missing`, `schema.deprecated-feature`) are gone,
+// `schema.empty-value` and `schema.unresolved-reference` claim CHECK-43, and the
+// metric `schema.property-coverage` claims CHECK-44 with facts.
+describe("the 29a rework's claims", () => {
+  it("CHECK-44 is claimed by the property-coverage metric alone; the Google rules are gone", () => {
+    const registry = buildRegistry();
+    const ids = registry.all().map((r) => r.id);
+    for (const gone of [
+      "schema.google-required-missing",
+      "schema.google-recommended-missing",
+      "schema.deprecated-feature",
+    ]) {
+      expect(ids).not.toContain(gone);
+    }
+    expect(registry.all().filter((r) => r.checkIds.includes("CHECK-44")).map((r) => r.id)).toEqual([
+      "schema.property-coverage",
+    ]);
+    const byId = new Map(registry.all().map((r) => [r.id, r.checkIds]));
+    expect(byId.get("schema.empty-value")).toEqual(["CHECK-43"]);
+    expect(byId.get("schema.unresolved-reference")).toEqual(["CHECK-43"]);
   });
 });

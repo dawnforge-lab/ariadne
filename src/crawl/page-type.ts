@@ -219,7 +219,7 @@ export interface PageTemplateInference {
 
 /**
  * The one row the collapse statement returns. A type alias rather than an
- * interface for the reason `deriveFieldPresence`'s `BlockRow` is one:
+ * interface for the reason `deriveSchemaValidation`'s `BlockRow` is one:
  * `db.execute<T>` constrains T to `Record<string, unknown>`, and only an alias
  * of an object literal carries the implicit index signature that satisfies it.
  */
@@ -247,7 +247,7 @@ type CollapseCountsRow = { types_before: number; types_after: number; pages_rety
  *
  * A crawl id nothing knows throws rather than reporting a clean zero, which
  * would read exactly like a site whose types were all templates already
- * (hard rule 7, and `deriveFieldPresence`'s precedent).
+ * (hard rule 7, and `deriveUrlParams`' precedent).
  *
  * **It writes one column of its own**, since migration 0012:
  * `crawls.template_inference_jsonb`, the record that this pass ran and what it

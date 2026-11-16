@@ -2,7 +2,7 @@ import { and, asc, eq, gt, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import { crawls, issues, metrics, pages } from "../db/schema.js";
 import { deriveClickDepth } from "./derive/click-depth.js";
-import { deriveFieldPresence } from "./derive/field-presence.js";
+import { deriveSchemaValidation } from "./derive/schema-validation.js";
 import { deriveSitemapHreflang } from "./derive/sitemap-hreflang.js";
 import { deriveUrlParams } from "./derive/url-params.js";
 import { effectiveThresholds, judgedWithOf, readStoredJudgement } from "./judgement.js";
@@ -87,7 +87,7 @@ type Derivation = (db: Db, crawlId: string) => Promise<Record<string, number>>;
  * derivation's table would depend on this order, so the order is a list one can
  * read rather than an emergent property of module loading. Every entry is
  * idempotent over the crawl it is given — `deriveUrlParams` rebuilds its
- * inventory table, `deriveFieldPresence` recomputes the column it fills,
+ * inventory table, `deriveSchemaValidation` recomputes the column it fills,
  * `deriveClickDepth` clears its column for the crawl before it searches, and
  * `deriveSitemapHreflang` replaces the crawl's `source = 'sitemap'` hreflang
  * rows in one statement — so a re-run over the same crawl leaves exactly what
@@ -101,7 +101,7 @@ type Derivation = (db: Db, crawlId: string) => Promise<Record<string, number>>;
  */
 const derivations: Derivation[] = [
   deriveUrlParams,
-  deriveFieldPresence,
+  deriveSchemaValidation,
   deriveClickDepth,
   deriveSitemapHreflang,
 ];
@@ -220,8 +220,8 @@ export async function runRules(
   // precedents in schema.ts: a missing index is a slow query, never an error).
   //
   // One statement over every table a rule or a derivation reads —
-  // `structured_data` included, since three of the schema query rules select
-  // from it and `deriveFieldPresence` scans it, and `sitemap_hreflang`, which
+  // `structured_data` included, since the schema query rules select
+  // from it and `deriveSchemaValidation` scans it, and `sitemap_hreflang`, which
   // only `deriveSitemapHreflang` reads. `metrics` is deliberately absent: no
   // rule reads it — the metric phase only writes it.
   //
@@ -406,9 +406,9 @@ export async function runRules(
   // planner is not merely uninformed about that table, it is taught that the
   // table holds nothing and it believes it — and then `deriveUrlParams` writes
   // a row per parameter and the URL-hygiene query rules join it. Same seam for
-  // `structured_data`, whose `field_presence_jsonb` `deriveFieldPresence` has
-  // just rewritten for every block on the crawl, which is what
-  // `schema.product-incomplete` reads. And `hreflang`, whose `source =
+  // `structured_data`, whose `validation_jsonb` `deriveSchemaValidation` has
+  // just rewritten for every block on the crawl, which is what the schema
+  // rules read. And `hreflang`, whose `source =
   // 'sitemap'` rows `deriveSitemapHreflang` has just written: on a first run
   // the table held only the HTML and header rows when it was sampled, and on a
   // site that annotates in its sitemap that is a fraction of what every
