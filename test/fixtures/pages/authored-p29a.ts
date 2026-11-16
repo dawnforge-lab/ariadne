@@ -7,11 +7,11 @@
  * validator reads beside JSON-LD and fire nothing: they prove the other two
  * extractors feed the same validator rather than being skipped.
  *
- * "Complete" is meant literally. Google's profiles (src/rules/schema-org/
- * google-features.ts) carry long recommended lists, and a page that misses one
- * would fire `schema.google-recommended-missing` and fail its `exact` list, so
- * the complete Product and Organization below carry every field their profiles
- * name. A page that is meant to miss ONE thing carries all the others.
+ * The engine names no required or recommended set (the amendment's rule: web
+ * standards, not one search engine), so a page is "complete" only in the sense
+ * that it carries nothing the validator reports. The Product and Organization
+ * below carry plenty of properties so that `schema.property-coverage` has
+ * something to count, and none of them is empty.
  *
  * `/authored29a/tpl/1` to `/10` are one template: ten pages under one URL
  * shape (`/authored29a/tpl/:id`, one page type), nine with a Product block and
@@ -47,7 +47,7 @@ function jsonLd(node: Record<string, unknown>): string {
   })}</script>`;
 }
 
-/** A Product carrying every field the snippet and merchant-listing profiles name. */
+/** A Product with a full set of properties, none of them empty. */
 function completeProduct(p: {
   name: string;
   sku: string;
@@ -97,7 +97,7 @@ function completeProduct(p: {
   };
 }
 
-/** A complete Organization: every field the Organization profile recommends. */
+/** An Organization with a full set of properties, none of them empty. */
 function completeOrganization(): Record<string, unknown> {
   return {
     "@type": "Organization",
@@ -206,7 +206,7 @@ const unknownProperty: Fixture = {
   handler: (req, res) =>
     serve(req, res, () => ({
       title: "Galley kettle listing on the fixture site",
-      metaDescription: "A microdata Product, complete on every field Google reads, plus one property schema.org lacks.",
+      metaDescription: "A microdata Product with a full set of properties, plus one property schema.org lacks.",
       bodyHtml: body({
         h1: "Galley whistling kettle",
         lede: "The microdata here is a full product record with a single invented property tucked in among the real ones.",
@@ -254,15 +254,13 @@ const typeMismatch: Fixture = {
     serve(req, res, () => ({
       title: "Estuary pilot book listing on the fixture site",
       metaDescription: "A Book record whose author field holds a node of a type that an author can never be.",
-      // A Book, not the brief's Recipe: a Recipe matches Google's recipe profile,
-      // whose long recommended list would also fire google-recommended-missing
-      // unless the page carried every field. Book has no Google profile and is
-      // no withdrawn feature, so the mismatch fires alone. (deprecated-feature
-      // matches HowTo exactly since 9c4d222, so a Recipe no longer fires it.)
+      // A Book with an author that is an Offer: the one mismatch, and every
+      // other property is valid for a Book and holds a value.
       headExtra: jsonLd({
         "@type": "Book",
         name: "A pilot book for the Swale and the Medway",
-        author: { "@type": "Offer" },
+        // The Offer holds a property: a typed-only node would also be an empty value.
+        author: { "@type": "Offer", price: "12.00" },
         datePublished: "2026-04-02",
         isbn: "9781234567897",
         inLanguage: "en-GB",
@@ -278,88 +276,71 @@ const typeMismatch: Fixture = {
     })),
 };
 
-const eventNoDate: Fixture = {
-  path: "/authored29a/event-no-date",
+const emptyValue: Fixture = {
+  path: "/authored29a/empty-value",
   category: SCHEMA,
-  name: "Event with every field but its start date",
-  expectedIssues: ["schema.google-required-missing"],
+  name: "Product whose properties are present and say nothing",
+  expectedIssues: ["schema.empty-value"],
   exact: true,
   handler: (req, res) =>
     serve(req, res, () => ({
-      title: "Quayside open evening on the fixture site",
-      metaDescription: "An Event with every field Google recommends, and the one it requires left out.",
+      title: "Harbour lantern listing on the fixture site",
+      metaDescription: "A Product whose markup names five properties and gives each of them an empty value.",
+      // Five empties, one of each kind: blank text (`description`), whitespace
+      // only (`sku`), an empty array (`review`), a typed-only node that states a
+      // thing exists and nothing more (`brand`), and a blank value one level down
+      // (`offers.price`). `name` and `priceCurrency` hold values, so they are fine.
       headExtra: jsonLd({
-        "@type": "Event",
-        name: "Quayside open evening",
-        // startDate is the field left out, on purpose.
-        endDate: "2027-03-12T21:00:00+00:00",
-        description: "An evening of demonstrations at the boatshed on the quay.",
-        eventStatus: "https://schema.org/EventScheduled",
-        image: "https://estuary-supplies.example/img/open-evening.png",
-        location: {
-          "@type": "Place",
-          name: "The Quay Boatshed",
-          address: {
-            "@type": "PostalAddress",
-            streetAddress: "4 Quay Lane",
-            addressLocality: "Faversham",
-            postalCode: "ME13 7AA",
-            addressCountry: "GB",
-          },
-        },
-        offers: {
-          "@type": "Offer",
-          url: "https://estuary-supplies.example/open-evening",
-          price: "0",
-          priceCurrency: "GBP",
-          availability: "https://schema.org/InStock",
-          validFrom: "2027-01-05T09:00:00+00:00",
-        },
-        organizer: { "@type": "Organization", name: "Estuary Supplies", url: "https://estuary-supplies.example/" },
-        performer: { "@type": "Person", name: "Ines Calloway" },
+        "@type": "Product",
+        name: "Harbour lantern",
+        description: "",
+        sku: "   ",
+        review: [],
+        brand: { "@type": "Brand" },
+        offers: { "@type": "Offer", price: "", priceCurrency: "GBP" },
       }),
       bodyHtml: body({
-        h1: "Quayside open evening",
-        lede: "The event markup is detailed in every respect but the one a calendar result cannot do without.",
-        what: "An Event with a name, an end, a venue with a postal address, a free offer, an organiser and a performer. It never says when it begins, and a start is what places an event on a day.",
-        why: "A required field that is absent makes the whole block ineligible, however much else it carries. The page looks thoroughly marked up, and the completeness is the trap, since nobody reads a long block hunting for the one line that is not there.",
-        fix: "Treat the fields a feature requires as the contract of the template and fail the build when one is empty, rather than leaving a field out when the editor leaves a box blank.",
-      }, 'The remaining fields are all there, which is the reason a person scanning the block would pass over it: a long record reads as a finished one.'),
+        h1: "Harbour lantern",
+        lede: "The markup on this page lists the properties a product record has and fills in only two of them.",
+        what: "A Product block naming a description, a stock keeping unit, a review list, a brand and an offer with a price. The description is an empty string, the unit is spaces, the reviews are an empty list, the brand is a typed node with nothing inside it, and the price is blank.",
+        why: "A property that is present and empty reads as a field the page forgot, and a consumer either skips it or, worse, takes the blank as the value. The template wrote the key, so every check for the key passes, and nothing in the page's own text shows that the data behind the key never arrived.",
+        fix: "Leave a property out when there is no value for it, rather than writing it blank, so that absence is visible as absence. Build the block from the record and drop the fields the record leaves empty.",
+      }, 'The visible page reads as a finished listing, which is how markup like this survives: the people who look at the page never see the block, and the block never errors.'),
     })),
 };
 
-const faq: Fixture = {
-  path: "/authored29a/faq",
+const unresolvedReference: Fixture = {
+  path: "/authored29a/unresolved-reference",
   category: SCHEMA,
-  name: "A valid FAQPage, a withdrawn feature",
-  expectedIssues: ["schema.deprecated-feature"],
+  name: "Article with references, one defined elsewhere on the page",
+  expectedIssues: ["schema.unresolved-reference"],
   exact: true,
   handler: (req, res) =>
     serve(req, res, () => ({
-      title: "Ferry timetable questions on the fixture site",
-      metaDescription: "A well-formed FAQPage with two questions and two answers, for a feature that Google no longer shows.",
-      headExtra: jsonLd({
-        "@type": "FAQPage",
-        mainEntity: [
-          {
-            "@type": "Question",
-            name: "Does the ferry run on Sundays?",
-            acceptedAnswer: { "@type": "Answer", text: "Yes, from ten in the morning until six in the evening." },
-          },
-          {
-            "@type": "Question",
-            name: "Can a bicycle be taken aboard?",
-            acceptedAnswer: { "@type": "Answer", text: "Bicycles travel free and are stowed at the stern." },
-          },
-        ],
-      }),
+      title: "Ferry timetable notes on the fixture site",
+      metaDescription: "An Article whose JSON-LD points at three nodes by id, one of them defined in a second block.",
+      // Three bare references. `#author` is defined by the second script block
+      // of the same page, so the page's blocks together resolve it and it is no
+      // finding. `#series` is a relative id no block defines: a finding. The
+      // `publisher` id is an absolute IRI naming a node on another site: also a
+      // finding, because nothing on this page says what it is.
+      headExtra:
+        jsonLd({
+          "@type": "Article",
+          headline: "Ferry timetable notes",
+          datePublished: "2026-10-01",
+          author: { "@id": "#author" },
+          isPartOf: { "@id": "#series" },
+          publisher: { "@id": "https://estuary-supplies.example/#org" },
+        }) +
+        jsonLd({ "@type": "Person", "@id": "#author", name: "Ines Calloway" }),
       bodyHtml: body({
-        h1: "Ferry timetable questions",
-        lede: "The markup on this page is correct in every detail, for a result that search stopped showing.",
-        what: "A FAQPage with two questions and two accepted answers, each one valid. There is nothing malformed anywhere in the block, and the block answers the questions the page already prints.",
-        why: "A feature that has been withdrawn gives nothing back for the markup written for it. It is worth knowing which pages carry it, since the work was real and its payoff is gone, and the question is whether to keep maintaining the block.",
-        fix: "Decide per page whether the markup still earns its upkeep. The answers help readers whatever search does with them, so keep the visible text, and drop the block where nothing else reads it.",
-      }, 'Whether to keep it is a judgement for the page owner, which is why the finding is information about the markup rather than an instruction to remove it.'),
+        h1: "Ferry timetable notes",
+        lede: "The article block points at its author, its series and its publisher by id, and only one of the three is described on the page.",
+        what: "Two JSON-LD blocks. The first is an Article that names three nodes by reference, and the second describes a person with the id the author reference uses. The series reference and the publisher reference have no description anywhere in the page's markup.",
+        why: "A reference says which node is meant and leaves the description to another place. When that place is the same page, the reader joins the two. When it is another document, or nothing, the reader has an id and no node, and cannot tell a deliberate link to a record elsewhere from a node that was dropped.",
+        fix: "Define a referenced node in a block on the same page when the page is where it belongs, and when it lives elsewhere on purpose, keep the id absolute and stable so that whoever reads it can fetch it. Remove references to nodes that no longer exist.",
+      }, 'This is information about the markup, not a defect in it: a reference to a record on another site is legitimate, and the finding only says that the page does not describe it.'),
     })),
 };
 
@@ -376,12 +357,12 @@ const cleanMicrodataProduct: Fixture = {
   handler: (req, res) =>
     serve(req, res, () => ({
       title: "Steel galley kettle on the fixture site",
-      metaDescription: "A Product written as microdata, complete on every required and recommended field.",
+      metaDescription: "A Product written as microdata, with a full set of properties and no empty one.",
       bodyHtml: body({
         h1: "Two-litre steel galley kettle",
         lede: "The record behind this kettle is written into the page as microdata, and it leaves nothing out.",
-        what: "A Product item with an image, a brand, an offer, a rating and a review, each one a nested item with the fields its own profile asks for. It is the same data a script block would carry, in the other notation.",
-        why: "A validator that read only script blocks would call this page unmarked and hold it to nothing. The page is the control for the claim that attribute markup is read, judged against the same profiles, and found complete.",
+        what: "A Product item with an image, a brand, an offer, a rating and a review, each one a nested item with properties of its own. It is the same data a script block would carry, in the other notation.",
+        why: "A validator that read only script blocks would call this page unmarked and hold it to nothing. The page is the control for the claim that attribute markup is read, validated like the others, and found to say nothing wrong.",
         fix: "Nothing to fix. Keep the properties in the template next to the fields they describe, so the markup changes when the product record does and cannot drift from it.",
         extra: microdataProduct(),
       }, 'There is no finding on this page, and that is the whole claim: the validator read a record written into attributes and found it complete.'),
@@ -397,10 +378,10 @@ const cleanRdfaOrganization: Fixture = {
   handler: (req, res) =>
     serve(req, res, () => ({
       title: "Estuary Supplies, who we are, on the fixture site",
-      metaDescription: "An Organization written as RDFa Lite, with every field Google recommends for it.",
+      metaDescription: "An Organization written as RDFa Lite, with a full set of properties and no empty one.",
       bodyHtml: healthyBody({
         h1: "Who Estuary Supplies are",
-        lede: "The company record on this page is written as RDFa, attribute by attribute, and is as full as the profile asks.",
+        lede: "The company record on this page is written as RDFa, attribute by attribute, and is as full as an organization record usually gets.",
         what: "An Organization with a name, a link, a logo, a profile elsewhere, a postal address, a contact point, a phone number, an email and a description. Each one is a property attribute on the element that shows it.",
         why: "RDFa is the notation least likely to be checked, since it hides in ordinary elements. This page shows it is read like the others and found complete, so a site that writes its markup this way is judged on the same terms.",
         fix: "Nothing to fix. Where the markup lives in the visible elements, keep the property attribute on the element that carries the value, so an edit to the text edits the data.",
@@ -484,7 +465,7 @@ const TEMPLATE_PAGES: TemplatePage[] = [
     what: "Another listing from the same template, with its offer, its rating and a customer review given as nested records inside the main one.",
     why: "Nested records are where hand-written markup most often goes wrong, and generated markup is where it most often goes right. A run of identical shape is evidence of the second.",
     fix: "Share one function between all the pages for the nested pieces, so a fix to a rating reaches the whole run.",
-    closing: "The pair is sold as a set, so the record gives one price and one size, and the nested rating and review make the page eligible for the star line, provided every field their profile asks for is present as it is here.",
+    closing: "The pair is sold as a set, so the record gives one price and one size, and the nested rating and review make the page one a shopping surface can show a star line for, provided the fields are present as they are here.",
   },
   {
     name: "Slate cheese board", sku: "TPL-006", gtin13: "5012345000066", mpn: "B-006", colour: "Charcoal", size: "30cm", material: "Welsh slate", pattern: "Bevelled", category: "Tableware",
@@ -556,8 +537,8 @@ export const authoredP29aFixtures: Fixture[] = [
   unknownProperty,
   pendingProperty,
   typeMismatch,
-  eventNoDate,
-  faq,
+  emptyValue,
+  unresolvedReference,
   cleanMicrodataProduct,
   cleanRdfaOrganization,
   ...templateFixtures,

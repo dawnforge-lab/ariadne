@@ -189,9 +189,9 @@ function databaseUrl(): string {
  *
  * `schema.none-on-site` is the same trade in the structured-data family. Its
  * condition is "this crawl stored no JSON-LD of any type", and
- * `/authored3/product-incomplete` and `/authored3/reviews` publish some, for the
- * Google rules (`schema.google-required-missing` and `-recommended-missing`) and
- * `schema.self-serving-reviews` to be claimed at all. One rule out, the rest in.
+ * `/authored3/product-partial` and `/authored3/reviews` publish some, for
+ * `schema.self-serving-reviews` to be claimed at all (and for the Product type
+ * to be one `schema.property-coverage` counts). One rule out, the rest in.
  * Its sibling `schema.breadcrumb-absent`
  * survives and is asserted below: no fixture publishes a `BreadcrumbList`, and
  * none should — it is the only site-scoped structured-data rule a site with
@@ -490,16 +490,15 @@ const FIXTURE_COLUMN_RULES: readonly string[] = [
   "resources.uncached",
   "robots.blocks-sitemap-urls",
   "schema.breadcrumb-absent",
-  "schema.deprecated-feature",
   "schema.embedded-type-mismatch",
-  "schema.google-recommended-missing",
-  "schema.google-required-missing",
+  "schema.empty-value",
   "schema.parse-error",
   "schema.property-pending-or-superseded",
   "schema.self-serving-reviews",
   "schema.template-inconsistent",
   "schema.unknown-property",
   "schema.unknown-type",
+  "schema.unresolved-reference",
   "sitemap.invalid",
   "sitemap.non-200",
   "sitemap.non-indexable",
@@ -1877,7 +1876,6 @@ describe("the fixture site end to end", () => {
   });
 
   it("the structured-data fixture names the rating that is self-serving", () => {
-    // The Product fixture's own details test returns with the Google rules (29a T7).
     expect(detailsByPath.get("/authored3/reviews\nschema.self-serving-reviews")).toEqual({
       pageUrl: `${app.base}/authored3/reviews`,
       schemaType: "Organization",
@@ -1934,19 +1932,42 @@ describe("the fixture site end to end", () => {
       ],
       problemCount: 1,
     });
-    expect(d("/authored29a/event-no-date", "schema.google-required-missing")).toEqual({
-      pageUrl: url("/authored29a/event-no-date"),
-      features: ["event"],
-      problems: [
-        { path: "$", type: "Event", format: "jsonld", feature: "event", missing: ["startDate"] },
-      ],
-      problemCount: 1,
+    // Five empties: `brand` is a typed-only node, `offers.price` the nested path.
+    // The list order is the validator's walk, so the paths are compared sorted.
+    const empty = d("/authored29a/empty-value", "schema.empty-value") as {
+      problems: { path: string }[];
+    };
+    expect([...empty.problems].sort((x, y) => x.path.localeCompare(y.path))).toEqual([
+      { format: "jsonld", path: "$.brand", property: "brand", type: "Product" },
+      { format: "jsonld", path: "$.description", property: "description", type: "Product" },
+      { format: "jsonld", path: "$.offers.price", property: "price", type: "Offer" },
+      { format: "jsonld", path: "$.review", property: "review", type: "Product" },
+      { format: "jsonld", path: "$.sku", property: "sku", type: "Product" },
+    ]);
+    expect(d("/authored29a/empty-value", "schema.empty-value")).toMatchObject({
+      pageUrl: url("/authored29a/empty-value"),
+      problemCount: 5,
     });
-    expect(d("/authored29a/faq", "schema.deprecated-feature")).toEqual({
-      pageUrl: url("/authored29a/faq"),
-      features: ["faq"],
-      restriction: ["Google no longer shows FAQ rich results (since May 7, 2026)"],
-      problemCount: 1,
+    // Three bare references: `#author` is defined by the page's second block and
+    // is no problem; the relative `#series` and the absolute publisher id are.
+    expect(d("/authored29a/unresolved-reference", "schema.unresolved-reference")).toEqual({
+      pageUrl: url("/authored29a/unresolved-reference"),
+      blocksAtCap: false,
+      problems: [
+        {
+          format: "jsonld",
+          path: "$.isPartOf",
+          id: `${url("/authored29a/unresolved-reference")}#series`,
+          written: "#series",
+        },
+        {
+          format: "jsonld",
+          path: "$.publisher",
+          id: "https://estuary-supplies.example/#org",
+          written: "https://estuary-supplies.example/#org",
+        },
+      ],
+      problemCount: 2,
     });
     // Nine of the ten pages of `/authored29a/tpl/:id` carry a Product: the page
     // that does not is the finding, and the evidence is the census.
@@ -1957,44 +1978,6 @@ describe("the fixture site end to end", () => {
       pagesWith: 9,
       pagesInType: 10,
     });
-    // `/authored3/product-incomplete` is the proof of the recommended rule: it
-    // misses its image (required) and, under both Product features, fields
-    // Google recommends. Each feature is its own problem row.
-    expect(d("/authored3/product-incomplete", "schema.google-recommended-missing")).toEqual({
-      pageUrl: url("/authored3/product-incomplete"),
-      features: ["product-snippet", "merchant-listing"],
-      problems: [
-        {
-          path: "$",
-          type: "Product",
-          format: "jsonld",
-          feature: "product-snippet",
-          missing: ["aggregateRating", "review", "offers.priceValidUntil"],
-        },
-        {
-          path: "$",
-          type: "Product",
-          format: "jsonld",
-          feature: "merchant-listing",
-          missing: [
-            "aggregateRating",
-            "brand",
-            "brand.name",
-            "category",
-            "color",
-            "gtin",
-            "material",
-            "mpn",
-            "pattern",
-            "review",
-            "size",
-            "offers.itemCondition",
-            "offers.priceValidUntil",
-          ],
-        },
-      ],
-      problemCount: 2,
-    });
   });
 
   it("each schema.* rule wrote exactly the findings the fixtures call for (Gate 29a clause 1)", async () => {
@@ -2002,34 +1985,29 @@ describe("the fixture site end to end", () => {
     // per rule, so a finding on a page no fixture names cannot hide. The only
     // pages carrying markup are the two `/authored3/` structured-data pages and
     // the nineteen `/authored29a/` pages, every one of them `exact`:
-    //  - one each from the seven single-rule `/authored29a/` pages (parse-error,
-    //    unknown-type, unknown-property, pending-property, type-mismatch, faq,
-    //    and tpl/10 for template-inconsistent);
-    //  - google-required-missing: `/authored29a/event-no-date` (startDate) and
-    //    `/authored3/product-incomplete` (image), so 2;
-    //  - google-recommended-missing: `/authored3/product-incomplete` and
-    //    `/authored3/reviews`, so 2 — every `/authored29a/` page is complete on
-    //    its recommended fields, the template's nine Products included;
+    //  - one each from the single-rule `/authored29a/` pages (parse-error,
+    //    unknown-type, unknown-property, pending-property, type-mismatch,
+    //    empty-value, unresolved-reference) and tpl/10 for template-inconsistent;
     //  - self-serving-reviews: `/authored3/reviews`;
     //  - breadcrumb-absent: the one site-scoped finding (no BreadcrumbList);
     //  - none-on-site: absent, since the site carries markup.
-    // The clean microdata and RDFa pages and tpl/1–9 add nothing.
+    // The clean microdata and RDFa pages, tpl/1–9 and `/authored3/product-partial`
+    // add nothing.
     const counts = await db.execute<{ rule_id: string; n: number }>(sql`
       select rule_id, count(*)::int as n from issues
       where crawl_id = ${summary.crawlId} and rule_id like 'schema.%'
       group by rule_id order by rule_id`);
     expect(Object.fromEntries(counts.rows.map((r) => [r.rule_id, Number(r.n)]))).toEqual({
       "schema.breadcrumb-absent": 1,
-      "schema.deprecated-feature": 1,
       "schema.embedded-type-mismatch": 1,
-      "schema.google-recommended-missing": 2,
-      "schema.google-required-missing": 2,
+      "schema.empty-value": 1,
       "schema.parse-error": 1,
       "schema.property-pending-or-superseded": 1,
       "schema.self-serving-reviews": 1,
       "schema.template-inconsistent": 1,
       "schema.unknown-property": 1,
       "schema.unknown-type": 1,
+      "schema.unresolved-reference": 1,
     });
   });
 
@@ -2482,6 +2460,7 @@ describe("the fixture site end to end", () => {
       "page.weight",
       "redirect.volume",
       "render.coverage",
+      "schema.property-coverage",
       "site.health",
       "sitemap.structure",
       "structure.click-depth-distribution",
@@ -2574,6 +2553,7 @@ describe("the fixture site end to end", () => {
         for (const column of declaration.columns) for (const key of paths(column)) nested.add(key);
       } else {
         top.add(declaration.field);
+        for (const column of declaration.scopeColumns ?? []) for (const key of paths(column)) top.add(key);
       }
 
       const inner = (value: unknown, where: string): void => {
@@ -2610,6 +2590,37 @@ describe("the fixture site end to end", () => {
         "metric measured and no reader can see. Declare a column for each, or stop " +
         "writing it",
     ).toEqual([]);
+  });
+
+  it("schema.property-coverage counts the markup's nodes and the properties that hold a value", () => {
+    // Hand-derived from the fixture markup. Twenty top-level nodes: thirteen
+    // Products (tpl/1-9, the two microdata pages `unknown-property` and
+    // `clean-microdata-product`, `empty-value`, `/authored3/product-partial`),
+    // an Article and a Person on `unresolved-reference`, and one each of
+    // Prodcut (`unknown-type`), Organization x3 (`pending-property`,
+    // `clean-rdfa-organization`, `/authored3/reviews`) and Book. That is
+    // 13 + 2 + 1 + 3 + 1 = 20.
+    expect(siteMetric("schema.property-coverage")).toEqual({
+      nodes: 20,
+      propertyListsCapped: 0,
+      typesNotListed: 0,
+    });
+    const product = metricsById.get("schema.property-coverage")?.get("schema_type|Product") as {
+      nodes: number;
+      properties: Record<string, number>;
+    };
+    expect(product.nodes).toBe(13);
+    // `empty-value` lists all five of these and gives `description`, `sku`,
+    // `review` and `brand` nothing, so each is carried by 13 - 1 = 12 nodes
+    // where every other Product has it; `review` and `brand` are absent from
+    // `product-partial` as well (13 - 2 = 11), and `description` and `sku` are on it.
+    expect(product.properties).toMatchObject({
+      name: 13,
+      description: 12,
+      sku: 12,
+      review: 11,
+      brand: 11,
+    });
   });
 
   it("the metric cohorts are this site's templates, not its URLs (P8-T5)", () => {
@@ -2787,15 +2798,16 @@ describe("the fixture site end to end", () => {
       // have two and stay literal, so typesBefore 112 -> 116. Five pages under
       // `/p26c/` are a family, so the three literals fold into `/p26c/:slug`:
       // typesAfter 26 -> 27 and pagesRetyped 91 -> 94.
-      // Phase 29a adds nineteen `/authored29a/` pages: six single-word-pair names
+      // Phase 29a adds nineteen `/authored29a/` pages: seven two-word names
       // (`parse-error`, `unknown-type`, `unknown-property`, `pending-property`,
-      // `type-mismatch`, `faq`) stay literal, `event-no-date` and the two `clean-`
-      // pages fold into one `/authored29a/:slug`, and the ten `/tpl/N` are already
-      // one type, `/authored29a/tpl/:id`. typesBefore 116 -> 124, typesAfter 27 ->
-      // 29 and pagesRetyped 94 -> 100 (the six literals fold into the family).
-      typesBefore: 124,
+      // `type-mismatch`, `empty-value`, `unresolved-reference`) stay literal, the
+      // two three-word `clean-` pages fold into one `/authored29a/:slug`, and the
+      // ten `/tpl/N` are already one type, `/authored29a/tpl/:id`. typesBefore
+      // 116 -> 125, typesAfter 27 -> 29 and pagesRetyped 94 -> 101 (the seven
+      // literals fold into the family; nine pages is under the template minimum).
+      typesBefore: 125,
       typesAfter: 29,
-      pagesRetyped: 100,
+      pagesRetyped: 101,
     });
   });
 
