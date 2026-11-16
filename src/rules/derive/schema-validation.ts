@@ -7,8 +7,8 @@
  * findings; the schema rules read the blob it fills in. Derivations write their
  * own columns, rules write `issues`.
  *
- * **Why it runs at rules time and not at crawl time.** The vocabulary and the
- * Google profiles are the ruleset's, not the crawler's: a crawl judged again
+ * **Why it runs at rules time and not at crawl time.** The schema.org
+ * vocabulary is the ruleset's, not the crawler's: a crawl judged again
  * under a newer ruleset must be re-validated without being re-fetched. The raw
  * block is stored once; the verdict is recomputed on every run.
  *

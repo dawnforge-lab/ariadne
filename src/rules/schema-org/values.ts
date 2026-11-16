@@ -1,43 +1,16 @@
 /**
  * How a structured-data value is read: whether a JSON value declares
- * something, and whether a dotted path through nested nodes reaches one.
+ * something, whether it is empty, and whether it is a bare node reference.
  *
- * Moved here from `src/rules/derive/field-presence.ts` (29a T5) so the Google
- * profiles (`google-features.ts`) and the query rules share one reading.
+ * `hasValue` was moved here from `src/rules/derive/field-presence.ts` (29a T5)
+ * and is read by `schema.self-serving-reviews`. The rest are the 29a rework's
+ * facts (`validate.ts`): empty values and references, both as the JSON-LD
+ * syntax defines them.
  */
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
-
-/**
- * The spellings of a product's GTIN.
- *
- * `gtin` with the code's length appended is how schema.org spells the same
- * identifier at each length, and the checklist's CHECK-44 names `gtin`, `gtin13`
- * and `ean` in one breath as alternatives ("gtin / gtin13 / ean / mpn —
- * product identifiers for Google Shopping"). A product carrying a `gtin13` has
- * a GTIN, so a profile field called `gtin` that only looked at the key `gtin`
- * would report a missing identifier to a client who supplied one — the false
- * accusation the whole presence blob exists to avoid.
- *
- * `ean` is not a schema.org property (release 30.1); it stays here because the
- * field-presence derivation reads it. The Google merchant-listing profile names
- * only the vocabulary's spellings.
- *
- * `mpn` is deliberately NOT here: it is a different identifier (the
- * manufacturer's own part number, not a GTIN), the checklist names it
- * separately, and a product may honestly have one and not the other. It is its
- * own recommended field.
- */
-export const GTIN_FIELDS: readonly string[] = [
-  "gtin",
-  "gtin8",
-  "gtin12",
-  "gtin13",
-  "gtin14",
-  "ean",
-];
 
 /**
  * Whether a JSON value declares something.
@@ -48,9 +21,7 @@ export const GTIN_FIELDS: readonly string[] = [
  * while every other reader treats the field as missing (hard rule 1).
  *
  * An array counts when at least one member does, so `image: ["", "/a.jpg"]` is
- * an image. An object counts as present whatever it holds: this engine has no
- * profile for an arbitrary nested type, and calling `brand: {}` absent would be
- * a judgement about a shape nothing here checked.
+ * an image. An object counts as present whatever it holds.
  */
 export function hasValue(value: unknown): boolean {
   if (value === null || value === undefined) return false;
@@ -60,88 +31,70 @@ export function hasValue(value: unknown): boolean {
 }
 
 /**
- * Whether any of a Product's offers carries a usable value under `field`.
+ * Whether one property value is EMPTY markup, as `schema.empty-value` reports
+ * it:
+ *  - `""` or whitespace-only text;
+ *  - `[]`;
+ *  - `{}`, an object with no key at all (so no `@id` and no `@type`);
+ *  - a JSON-LD value object whose `@value` is blank text (`{"@value": " "}`,
+ *    with or without `@language` / `@type`), which is `""` written longhand.
  *
- * `offers` may be a single Offer or an array of them (one per variant), and one
- * offer is enough — a rich result needs one complete offer rather than every
- * variant being complete. A product whose in-stock size carries an availability
- * and whose sold-out sizes do not has an availability. A `price` of `0` counts:
- * a free item has a price, and `hasValue` only rejects emptiness, never a falsy
- * number.
+ * `0`, `false`, `null`, `{"@id": "x"}` and any object with a key are not
+ * empty: a zero is a value, JSON-LD defines `null` as "ignore this property",
+ * and a reference or a typed node says something. An array or container is not
+ * empty for holding empty members; the walk visits each member and reports it
+ * at its own index.
  */
-export function offersCarry(value: unknown, field: string): boolean {
-  return carries(value, [field]);
+export function isEmptyValue(value: unknown): boolean {
+  if (typeof value === "string") return value.trim() === "";
+  if (Array.isArray(value)) return value.length === 0;
+  if (!isRecord(value)) return false;
+  if ("@value" in value) {
+    const literal = value["@value"];
+    return typeof literal === "string" && literal.trim() === "";
+  }
+  return Object.keys(value).length === 0;
 }
 
 /**
- * The members of a property value: an array's entries, a JSON-LD `@list` /
- * `@set` container's contents (unwrapped exactly as the validator's walk does),
- * or the value itself. An absent value has none.
+ * Whether a property value carries anything that is not empty — what
+ * `schema.property-coverage` counts. An array or a `@list` / `@set` container
+ * carries when one member does, a value object when its `@value` does; `null`
+ * carries nothing. `["", " "]` carries nothing although no single test of
+ * `isEmptyValue` says so of the array itself.
  */
-export function membersOf(value: unknown): unknown[] {
-  if (value === undefined || value === null) return [];
-  if (Array.isArray(value)) return value.flatMap((entry) => membersOf(entry));
+export function carriesValue(value: unknown): boolean {
+  if (value === null || value === undefined) return false;
+  if (isEmptyValue(value)) return false;
+  if (Array.isArray(value)) return value.some((entry) => carriesValue(entry));
   if (isRecord(value)) {
-    if ("@list" in value) return membersOf(value["@list"]);
-    if ("@set" in value) return membersOf(value["@set"]);
+    if ("@value" in value) return carriesValue(value["@value"]);
+    if ("@list" in value) return carriesValue(value["@list"]);
+    if ("@set" in value) return carriesValue(value["@set"]);
   }
-  return [value];
+  return true;
 }
 
 /**
- * A bare node reference: `{"@id": …}` with a non-empty `@id`, and nothing else
- * that describes the node (no `@type`, no non-`@` key). An empty `@id` points
- * nowhere, so it is no reference. It points at a node described elsewhere — in
- * another block of the `@graph`, or on another page — so nothing can be said
- * here about what that node carries.
+ * The id of a BARE node reference — an object whose only key is `@id`, holding
+ * non-blank text — or null for anything else. JSON-LD reads such an object as
+ * the node of that id, described elsewhere: in another node of the document or
+ * on another site. A blank `@id` names no node here, so it is not a reference.
  */
-export function isBareReference(value: unknown): boolean {
-  return (
-    isRecord(value) &&
-    hasValue(value["@id"]) &&
-    !("@type" in value) &&
-    Object.keys(value).every((key) => key.startsWith("@"))
-  );
+export function bareReferenceId(value: unknown): string | null {
+  if (!isRecord(value)) return null;
+  const keys = Object.keys(value);
+  if (keys.length !== 1 || keys[0] !== "@id") return null;
+  const id = value["@id"];
+  return typeof id === "string" && id.trim() !== "" ? id : null;
 }
 
 /**
- * Whether `value` reaches a usable value along `path`: each step reads the key
- * from every object member of the current value (`membersOf`), and one member
- * that gets all the way is enough — the `offersCarry` reading applied at every
- * level. `carries(node, ["offers", "price"])` is "some member of `offers`
- * carries `price`". An empty path asks `hasValue(value)`.
- *
- * Two members end the walk as satisfied, because nothing here can show they
- * lack the rest of the path and reporting it missing would be a false
- * accusation (29a T5 review; gate clause 2 — when unsure, under-report):
- *  - a bare reference (`isBareReference`) satisfies any deeper step;
- *  - a non-empty string satisfies a final `name` step: `author: "Jane"` names
- *    the author, which is what `author.name` asks. A JSON-LD value object
- *    whose `@value` is a string (`author: {"@value": "Jane"}`) is that string
- *    written longhand, and reads the same way (29a final review).
+ * The id a node DEFINES: its `@id`, when it is non-blank text and the node
+ * carries anything besides it (a `@type` or a property). Null otherwise.
  */
-export function carries(value: unknown, path: readonly string[]): boolean {
-  if (path.length === 0) return hasValue(value);
-  const [head, ...rest] = path;
-  return membersOf(value).some((entry) => {
-    if (isBareReference(entry)) return true;
-    const member = isRecord(entry) && typeof entry["@value"] === "string" ? entry["@value"] : entry;
-    if (typeof member === "string") return rest.length === 0 && head === "name" && hasValue(member);
-    return isRecord(member) && carries(member[head!], rest);
-  });
-}
-
-/**
- * Whether `path` reaches a member that is more than a bare reference — what a
- * conditional requirement ("when `offers` is present") fires on. A value made
- * only of references says nothing about what the referenced nodes carry.
- */
-export function describes(value: unknown, path: readonly string[]): boolean {
-  if (path.length === 0) {
-    return membersOf(value).some((member) => hasValue(member) && !isBareReference(member));
-  }
-  const [head, ...rest] = path;
-  return membersOf(value).some(
-    (member) => isRecord(member) && !isBareReference(member) && describes(member[head!], rest),
-  );
+export function definedId(node: Record<string, unknown>): string | null {
+  const id = node["@id"];
+  if (typeof id !== "string" || id.trim() === "") return null;
+  return Object.keys(node).some((key) => key !== "@id") ? id : null;
 }

@@ -223,7 +223,7 @@ describe("microdata extraction", () => {
     ]);
   });
 
-  it("content is the value on any element that carries it, as Google reads it (29a final review M1)", () => {
+  it("content is the value on any element that carries it (29a final review M1)", () => {
     const blocks = microdata(
       page(
         `<div itemscope itemtype="https://schema.org/Product"><span itemprop="name">Mug</span>` +
@@ -251,15 +251,11 @@ describe("microdata extraction", () => {
         sku: "",
       },
     ]);
-    // The empty elements' values reach the validator as present.
+    // The empty elements' content values reach the validator as values; only
+    // the empty content attribute is an empty value.
     const v = validateBlock(blocks[0]!.raw);
-    const rating = v.googleFeatures.find((f) => f.feature === "aggregate-rating");
-    expect(rating!.missingRequired).toEqual([]);
-    const snippet = v.googleFeatures.find((f) => f.feature === "product-snippet");
-    expect(snippet!.missingRequired).toEqual([]);
-    expect(snippet!.missingRecommended).not.toContain(
-      "offers.priceCurrency | offers.priceSpecification.priceCurrency",
-    );
+    expect(v.emptyValues).toEqual([{ path: "$.sku", type: "Product", property: "sku" }]);
+    expect(v.nodes[0]!.emptyProperties).toEqual(["sku"]);
   });
 
   it("keeps a non-schema.org type as written, and property order is document order", () => {

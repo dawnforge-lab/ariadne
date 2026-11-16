@@ -16,10 +16,6 @@ function validate(raw: unknown): BlockValidation {
   return v;
 }
 
-function feature(v: BlockValidation, id: string) {
-  return v.googleFeatures.find((f) => f.feature === id);
-}
-
 const CTX = "https://schema.org";
 
 function product(extra: Record<string, unknown> = {}): Record<string, unknown> {
@@ -50,451 +46,26 @@ function expectNoProblems(v: BlockValidation): void {
   expect(v.unknownProperties).toEqual([]);
   expect(v.propertyStatus).toEqual([]);
   expect(v.typeMismatches).toEqual([]);
-  expect(v.deprecatedFeatures).toEqual([]);
+  expect(v.emptyValues).toEqual([]);
+  expect(v.references).toEqual([]);
   expect(v.outsideVocabulary).toBe(0);
   expect(v.listsCapped).toBe(false);
 }
 
-describe("validateBlock", () => {
-  it("a valid product with offer has no problems and matches product-snippet and merchant-listing with empty missingRequired", () => {
+describe("validateBlock — the schema.org vocabulary", () => {
+  it("a valid product with offer has no problems and one top-level node", () => {
     const v = validate(product());
     expectNoProblems(v);
     expect(v.topType).toBe("Product");
-    expect(feature(v, "product-snippet")).toMatchObject({ path: "$", type: "Product", missingRequired: [] });
-    expect(feature(v, "merchant-listing")).toMatchObject({ path: "$", type: "Product", missingRequired: [] });
-    // The nested Offer and Brand match no feature.
-    expect(v.googleFeatures.map((f) => f.feature).sort()).toEqual(["merchant-listing", "product-snippet"]);
-  });
-
-  it("merchant listing missing image", () => {
-    const raw = product();
-    delete raw["image"];
-    const v = validate(raw);
-    expect(feature(v, "merchant-listing")!.missingRequired).toContain("image");
-    expect(feature(v, "product-snippet")!.missingRequired).toEqual([]);
-  });
-
-  it("names a missing price by its alternatives", () => {
-    const v = validate(product({ offers: { "@type": "Offer", url: "https://example.com/w" } }));
-    expect(feature(v, "merchant-listing")!.missingRequired).toEqual([
-      "offers.price | offers.priceSpecification.price",
-      "offers.priceCurrency | offers.priceSpecification.priceCurrency",
-    ]);
-    const viaSpec = validate(
-      product({
-        offers: {
-          "@type": "Offer",
-          priceSpecification: { "@type": "UnitPriceSpecification", price: 5, priceCurrency: "EUR" },
-        },
-      }),
-    );
-    expect(feature(viaSpec, "merchant-listing")!.missingRequired).toEqual([]);
-  });
-
-  it("aggregate offer is not a merchant listing", () => {
-    const v = validate(
-      product({
-        offers: { "@type": "AggregateOffer", lowPrice: "5", highPrice: "9", priceCurrency: "GBP", offerCount: 3 },
-      }),
-    );
-    expect(feature(v, "merchant-listing")).toBeUndefined();
-    expect(feature(v, "product-snippet")!.missingRequired).toEqual([]);
-  });
-
-  it("Restaurant matches local-business and not organization", () => {
-    const v = validate({
-      "@context": CTX,
-      "@type": "Restaurant",
-      name: "Luigi's",
-      address: { "@type": "PostalAddress", streetAddress: "1 High St" },
-    });
-    const ids = v.googleFeatures.map((f) => f.feature);
-    expect(ids).toContain("local-business");
-    expect(ids).not.toContain("organization");
-    expect(feature(v, "local-business")).toMatchObject({ type: "Restaurant", missingRequired: [] });
-    // A food establishment is asked for its cuisine; a plumber is not.
-    expect(feature(v, "local-business")!.missingRecommended).toContain("servesCuisine");
-    const plumber = validate({ "@context": CTX, "@type": "Plumber", name: "P", address: "1 High St" });
-    expect(feature(plumber, "local-business")!.missingRecommended).not.toContain("servesCuisine");
-    // A plain Organization still matches organization.
-    const org = validate({ "@context": CTX, "@type": "Organization", name: "Acme" });
-    expect(org.googleFeatures.map((f) => f.feature)).toEqual(["organization"]);
-  });
-
-  it("nested review waives itemReviewed; top-level review requires it", () => {
-    const review = {
-      "@type": "Review",
-      author: { "@type": "Person", name: "Jane" },
-      reviewRating: { "@type": "Rating", ratingValue: 4 },
-    };
-    const nested = validate(product({ review }));
-    expect(nested.googleFeatures.filter((f) => f.feature === "review")).toEqual([
-      expect.objectContaining({ path: "$.review", type: "Review", missingRequired: [] }),
-    ]);
-    const top = validate({ "@context": CTX, ...review });
-    expect(feature(top, "review")!.path).toBe("$");
-    expect(feature(top, "review")!.missingRequired).toEqual(["itemReviewed", "itemReviewed.name"]);
-  });
-
-  it("a review with an author and a date may omit its rating", () => {
-    const dated = validate(
-      product({ review: { "@type": "Review", author: { "@type": "Person", name: "J" }, datePublished: "2026-01-01" } }),
-    );
-    expect(feature(dated, "review")!.missingRequired).toEqual([]);
-    const undated = validate(product({ review: { "@type": "Review", author: "Jane" } }));
-    expect(feature(undated, "review")!.missingRequired).toEqual(["reviewRating", "reviewRating.ratingValue"]);
-  });
-
-  it("I1: a text value names its node, so author.name and itemReviewed.name are met by strings", () => {
-    const v = validate({
-      "@type": "Product",
-      name: "P",
-      review: { "@type": "Review", author: "Jane", reviewRating: { "@type": "Rating", ratingValue: 5 } },
-    });
-    expect(feature(v, "review")!.missingRequired).toEqual([]);
-    const top = validate({
-      "@type": "Review",
-      author: { "@type": "Person", name: "J" },
-      itemReviewed: "Some thing",
-      reviewRating: { "@type": "Rating", ratingValue: 5 },
-    });
-    expect(feature(top, "review")!.missingRequired).toEqual([]);
-    // A recommended `.name` step reads the same way; an empty string names nothing.
-    const event = validate({
-      "@type": "Event",
-      name: "E",
-      startDate: "2026-01-01",
-      location: { "@type": "Place", address: "1 High St", name: "Hall" },
-      organizer: "Acme",
-      performer: "  ",
-    });
-    expect(feature(event, "event")!.missingRecommended).not.toContain("organizer.name");
-    expect(feature(event, "event")!.missingRecommended).toContain("performer.name");
-    // Only a final `name` step: a string author has no url.
-    expect(feature(validate({ "@type": "Article", author: "Jane" }), "article")!.missingRecommended).toContain(
-      "author.url",
-    );
-  });
-
-  it("I2: a bare @id reference satisfies any deeper step and does not trigger whenPresent", () => {
-    const refs = validate({
-      "@type": "Review",
-      author: { "@id": "#p" },
-      itemReviewed: { "@id": "#prod" },
-      reviewRating: { "@type": "Rating", ratingValue: 5 },
-    });
-    expect(feature(refs, "review")!.missingRequired).toEqual([]);
-    const offersRef = validate({ "@type": "Product", name: "P", offers: { "@id": "#offer" } });
-    expect(feature(offersRef, "product-snippet")!.missingRequired).toEqual([]);
-    const venueRef = validate({ "@type": "Event", name: "E", startDate: "2026-01-01", location: { "@id": "#venue" } });
-    expect(feature(venueRef, "event")!.missingRequired).toEqual([]);
-    // One member is enough, so a reference beside an unpriced offer satisfies the price;
-    // an unpriced described offer on its own still fires.
-    const unpriced = validate({ "@type": "Product", name: "P", offers: [{ "@id": "#o" }, { "@type": "Offer" }] });
-    expect(feature(unpriced, "product-snippet")!.missingRequired).toEqual([]);
-    const onlyUnpriced = validate({ "@type": "Product", name: "P", offers: { "@type": "Offer", url: "u" } });
-    expect(feature(onlyUnpriced, "product-snippet")!.missingRequired).toEqual([
-      "offers.price | offers.priceSpecification.price | offers.lowPrice",
-    ]);
-  });
-
-  it("I3: a top-level Review or AggregateRating carrying @id waives itemReviewed", () => {
-    const rating = validate({ "@type": "AggregateRating", "@id": "#r", ratingValue: 4.5, ratingCount: 10 });
-    expect(feature(rating, "aggregate-rating")!.missingRequired).toEqual([]);
-    const noId = validate({ "@type": "AggregateRating", ratingValue: 4.5, ratingCount: 10 });
-    expect(feature(noId, "aggregate-rating")!.missingRequired).toEqual(["itemReviewed", "itemReviewed.name"]);
-  });
-
-  it("I4: a nested rating matches only under a reviewable parent", () => {
-    const inArticle = validate({
-      "@type": "Article",
-      headline: "h",
-      aggregateRating: { "@type": "AggregateRating", ratingValue: 4 },
-    });
-    expect(feature(inArticle, "aggregate-rating")).toBeUndefined();
-    const inRecipe = validate({
-      "@type": "Recipe",
-      name: "R",
-      aggregateRating: { "@type": "AggregateRating", ratingValue: 4 },
-    });
-    expect(feature(inRecipe, "aggregate-rating")!.missingRequired).toEqual(["ratingCount | reviewCount"]);
-    // Under an untyped wrapper the parent is untyped: no match.
-    const wrapped = validate({
-      "@type": "Product",
-      name: "P",
-      subjectOf: { review: { "@type": "Review", author: "J" } },
-    });
-    expect(feature(wrapped, "review")).toBeUndefined();
-  });
-
-  it("I6: breadcrumb waives item on the document-order last crumb and on the highest position", () => {
-    const v = validate({
-      "@type": "BreadcrumbList",
-      itemListElement: [
-        { "@type": "ListItem", position: 1, name: "Home", item: "https://example.com/" },
-        { "@type": "ListItem", position: "3", name: "Here" },
-        { "@type": "ListItem", position: 2, name: "Section", item: "https://example.com/s" },
-      ],
-    });
-    expect(feature(v, "breadcrumb")!.missingRequired).toEqual([]);
-    const middle = validate({
-      "@type": "BreadcrumbList",
-      itemListElement: [
-        { "@type": "ListItem", position: 1, name: "Home" },
-        { "@type": "ListItem", position: 3, name: "Here" },
-        { "@type": "ListItem", position: 2, name: "Section", item: "https://example.com/s" },
-      ],
-    });
-    expect(feature(middle, "breadcrumb")!.missingRequired).toEqual(["itemListElement.item"]);
-  });
-
-  it("N1: a URL item does not stand in for a crumb's name; a named or referenced item node does", () => {
-    const crumbs = (first: Record<string, unknown>) =>
-      validate({
-        "@type": "BreadcrumbList",
-        itemListElement: [first, { "@type": "ListItem", position: 2, name: "Here" }],
-      });
-    const urlItem = crumbs({ "@type": "ListItem", position: 1, item: "https://example.com/" });
-    expect(feature(urlItem, "breadcrumb")!.missingRequired).toEqual(["itemListElement.name"]);
-    const refItem = crumbs({ "@type": "ListItem", position: 1, item: { "@id": "https://example.com/" } });
-    expect(feature(refItem, "breadcrumb")!.missingRequired).toEqual([]);
-    const namedItem = crumbs({ "@type": "ListItem", position: 1, item: { "@id": "https://example.com/", name: "Home" } });
-    expect(feature(namedItem, "breadcrumb")!.missingRequired).toEqual([]);
-    const emptyRef = crumbs({ "@type": "ListItem", position: 1, item: { "@id": "" } });
-    expect(feature(emptyRef, "breadcrumb")!.missingRequired).toEqual(["itemListElement.name"]);
-    const bare = crumbs({ "@type": "ListItem", position: 1 });
-    expect(feature(bare, "breadcrumb")!.missingRequired).toEqual(["itemListElement.name", "itemListElement.item"]);
-  });
-
-  it("N2: an empty @id is no reference", () => {
-    const v = validate({ "@type": "Product", name: "P", offers: { "@id": "" } });
-    expect(feature(v, "product-snippet")!.missingRequired).toEqual([
-      "offers.price | offers.priceSpecification.price | offers.lowPrice",
-    ]);
-  });
-
-  it("I7: an @list-wrapped crumb list reads like an array", () => {
-    const v = validate({
-      "@type": "BreadcrumbList",
-      itemListElement: { "@list": [{ "@type": "ListItem", position: 1, name: "a", item: "u" }] },
-    });
-    expect(feature(v, "breadcrumb")!.missingRequired).toEqual([]);
-    const bad = validate({
-      "@type": "BreadcrumbList",
-      itemListElement: { "@list": [{ "@type": "ListItem", name: "a" }, { "@type": "ListItem", position: 2 }] },
-    });
-    expect(feature(bad, "breadcrumb")!.missingRequired).toContain("itemListElement.position");
-  });
-
-  it("I8: a node typed only outside schema.org is walked as untyped", () => {
-    const v = validate({
-      "@context": CTX,
-      "@type": "http://data-vocabulary.org/Breadcrumb",
-      title: "Home",
-      price: "3",
-      gtin: "1",
-      offers: { "@type": "Person" },
-      child: { "@type": "Prodcut" },
-    });
-    expect(v.topType).toBeNull();
-    expect(v.unknownProperties).toEqual([]);
-    expect(v.propertyStatus).toEqual([]);
-    expect(v.typeMismatches).toEqual([]);
-    expect(v.googleFeatures).toEqual([]);
-    // The foreign type counts; bare keys are schema.org names, so they do not.
-    expect(v.outsideVocabulary).toBe(1);
-    // Descendants are still walked.
-    expect(v.unknownTypes).toEqual([{ path: "$.child", type: "Prodcut" }]);
-  });
-
-  it("I9: product-snippet asks for an offer price only when offers alone qualify it", () => {
-    const rated = validate({
-      "@type": "Product",
-      name: "P",
-      offers: { "@type": "Offer" },
-      aggregateRating: { "@type": "AggregateRating", ratingValue: 4, ratingCount: 3 },
-    });
-    expect(feature(rated, "product-snippet")!.missingRequired).toEqual([]);
-    const software = validate({
-      "@type": "SoftwareApplication",
-      name: "S",
-      offers: { "@type": "Offer", price: 0 },
-      aggregateRating: { "@type": "AggregateRating", ratingValue: 4, ratingCount: 3 },
-    });
-    expect(feature(software, "software-app")!.missingRequired).toEqual([]);
-  });
-
-  it("software-app: a rating or review is recommended, not required (Rich Results Test, 2026-11-16)", () => {
-    const unrated = validate({
-      "@type": "SoftwareApplication",
-      name: "S",
-      offers: { "@type": "Offer", price: 0 },
-      applicationCategory: "BusinessApplication",
-      operatingSystem: "Web",
-    });
-    expect(feature(unrated, "software-app")!.missingRequired).toEqual([]);
-    expect(feature(unrated, "software-app")!.missingRecommended).toContain(
-      "aggregateRating | review",
-    );
-    const noPrice = validate({
-      "@type": "SoftwareApplication",
-      name: "S",
-      offers: { "@type": "Offer" },
-      applicationCategory: "BusinessApplication",
-      operatingSystem: "Web",
-    });
-    expect(feature(noPrice, "software-app")!.missingRequired).toContain("offers.price");
-  });
-
-  /**
-   * Google's product-variants markup, as its Search Central page gives it (read
-   * 2026-11-14 by the 29a final review): the ProductGroup carries `name` and the
-   * grouping, and the offers sit on the `hasVariant` Products.
-   */
-  const VARIANT_GROUP = {
-    "@context": CTX,
-    "@type": "ProductGroup",
-    name: "Wool winter coat",
-    description: "Wool coat, new for this winter",
-    url: "https://www.example.com/coat",
-    brand: { "@type": "Brand", name: "Good brand" },
-    productGroupID: "44E01",
-    variesBy: ["https://schema.org/size", "https://schema.org/color"],
-    hasVariant: [
+    expect(v.nodes).toEqual([
       {
-        "@type": "Product",
-        sku: "44E01-M11000",
-        gtin14: "98766051104214",
-        image: "https://www.example.com/coat_small_green.jpg",
-        name: "Small green coat",
-        description: "Small wool green coat for the winter season",
-        color: "Green",
-        size: "small",
-        offers: {
-          "@type": "Offer",
-          url: "https://www.example.com/coat?size=small&color=green",
-          priceCurrency: "USD",
-          price: 39.99,
-          itemCondition: "https://schema.org/NewCondition",
-          availability: "https://schema.org/InStock",
-        },
+        path: "$",
+        type: "Product",
+        properties: ["name", "image", "description", "sku", "mpn", "gtin13", "brand", "offers"],
+        emptyProperties: [],
+        propertiesCapped: false,
       },
-      {
-        "@type": "Product",
-        sku: "44E01-K11000",
-        gtin14: "98766051104207",
-        image: "https://www.example.com/coat_small_lightblue.jpg",
-        name: "Small light blue coat",
-        description: "Small wool light blue coat for the winter season",
-        color: "light blue",
-        size: "small",
-        offers: {
-          "@type": "Offer",
-          url: "https://www.example.com/coat?size=small&color=lightblue",
-          priceCurrency: "USD",
-          price: 39.99,
-          itemCondition: "https://schema.org/NewCondition",
-          availability: "https://schema.org/InStock",
-        },
-      },
-    ],
-  };
-
-  it("29a final review I1: a ProductGroup (Google's variant markup) matches no Product feature", () => {
-    const v = validate(VARIANT_GROUP);
-    expect(v.unknownTypes).toEqual([]);
-    expect(v.unknownProperties).toEqual([]);
-    expect(feature(v, "product-snippet")).toBeUndefined();
-    expect(feature(v, "merchant-listing")).toBeUndefined();
-    expect(v.googleFeatures.filter((f) => f.missingRequired.length > 0)).toEqual([]);
-    // A group that does carry a single Offer is still not a merchant listing:
-    // Google reads the offers on the variants.
-    const offered = validate({
-      ...VARIANT_GROUP,
-      offers: { "@type": "Offer", price: 39.99, priceCurrency: "USD" },
-    });
-    expect(feature(offered, "product-snippet")).toBeUndefined();
-    expect(feature(offered, "merchant-listing")).toBeUndefined();
-  });
-
-  it("29a final review I1: a variant Product is still judged, and fires without offers, review or rating", () => {
-    // A variant page's own Product, pointing at its group (Google's multi-page form).
-    const variant = validate({
-      "@context": CTX,
-      "@type": "Product",
-      name: "Small green coat",
-      sku: "44E01-M11000",
-      image: "https://www.example.com/coat_small_green.jpg",
-      color: "Green",
-      size: "small",
-      isVariantOf: { "@type": "ProductGroup", productGroupID: "44E01", name: "Wool winter coat" },
-    });
-    expect(feature(variant, "product-snippet")!.missingRequired).toEqual([
-      "review | aggregateRating | offers",
     ]);
-    // The same variant with its offer is a merchant listing with nothing required missing.
-    const sold = validate({
-      ...VARIANT_GROUP.hasVariant[0],
-      "@context": CTX,
-      isVariantOf: { "@id": "https://www.example.com/coat#group" },
-    });
-    expect(feature(sold, "product-snippet")!.missingRequired).toEqual([]);
-    expect(feature(sold, "merchant-listing")!.missingRequired).toEqual([]);
-  });
-
-  it("29a final review: a text author in @value form names the author", () => {
-    const top = (author: unknown) =>
-      validate({
-        "@type": "Review",
-        author,
-        itemReviewed: { "@type": "Product", name: "Mug" },
-        reviewRating: { "@type": "Rating", ratingValue: 5 },
-      });
-    expect(feature(top({ "@value": "Jane" }), "review")!.missingRequired).toEqual([]);
-    expect(feature(top([{ "@value": "Jane", "@language": "en" }]), "review")!.missingRequired).toEqual([]);
-    // Nested under a reviewable parent, read the same way.
-    const nested = validate({
-      "@type": "Product",
-      name: "P",
-      review: { "@type": "Review", author: { "@value": "Jane" }, reviewRating: { "@type": "Rating", ratingValue: 5 } },
-    });
-    expect(feature(nested, "review")!.missingRequired).toEqual([]);
-    // A blank @value names nothing, as a blank string does.
-    expect(feature(top({ "@value": "  " }), "review")!.missingRequired).toEqual(["author.name"]);
-  });
-
-  it("breadcrumb: every crumb needs a position and a name, every crumb but the last an item", () => {
-    const ok = validate({
-      "@context": CTX,
-      "@type": "BreadcrumbList",
-      itemListElement: [
-        { "@type": "ListItem", position: 1, name: "Home", item: "https://example.com/" },
-        // A crumb whose item is a node carrying its own name needs no name.
-        { "@type": "ListItem", position: 2, item: { "@id": "https://example.com/a", name: "A" } },
-        { "@type": "ListItem", position: 3, name: "Here" },
-      ],
-    });
-    expect(feature(ok, "breadcrumb")!.missingRequired).toEqual([]);
-    const bad = validate({
-      "@context": CTX,
-      "@type": "BreadcrumbList",
-      itemListElement: [{ "@type": "ListItem", name: "Home" }, { "@type": "ListItem", position: 2 }],
-    });
-    expect(feature(bad, "breadcrumb")!.missingRequired).toEqual([
-      "itemListElement.position",
-      "itemListElement.name",
-      "itemListElement.item",
-    ]);
-    const empty = validate({ "@context": CTX, "@type": "BreadcrumbList" });
-    expect(feature(empty, "breadcrumb")!.missingRequired).toEqual(["itemListElement"]);
-  });
-
-  it("a nested aggregate rating waives itemReviewed and needs a count", () => {
-    const v = validate(product({ aggregateRating: { "@type": "AggregateRating", ratingValue: 4.5 } }));
-    expect(feature(v, "aggregate-rating")).toMatchObject({
-      path: "$.aggregateRating",
-      missingRequired: ["ratingCount | reviewCount"],
-    });
   });
 
   it("unknown type", () => {
@@ -503,7 +74,6 @@ describe("validateBlock", () => {
     expect(v.topType).toBeNull();
     // A node with no known type has its properties left unjudged.
     expect(v.unknownProperties).toEqual([]);
-    expect(v.googleFeatures).toEqual([]);
   });
 
   it("unknown property", () => {
@@ -550,18 +120,24 @@ describe("validateBlock", () => {
     expect(v.unknownProperties).toEqual([]);
   });
 
-  it("FAQPage gives deprecatedFeatures faq", () => {
-    const v = validate({ "@context": CTX, "@type": "FAQPage", mainEntity: [] });
-    expect(v.deprecatedFeatures).toEqual([{ feature: "faq", path: "$", type: "FAQPage" }]);
-    const howTo = validate({ "@context": CTX, "@type": "HowTo", name: "x" });
-    expect(howTo.deprecatedFeatures).toEqual([{ feature: "how-to", path: "$", type: "HowTo" }]);
-  });
-
-  it("deprecated features match the type exactly: a Recipe (a HowTo subtype) is not withdrawn", () => {
-    const recipe = validate({ "@context": CTX, "@type": "Recipe", name: "Soup" });
-    expect(recipe.deprecatedFeatures).toEqual([]);
-    const both = validate({ "@context": CTX, "@type": ["Recipe", "HowTo"], name: "Soup" });
-    expect(both.deprecatedFeatures).toEqual([{ feature: "how-to", path: "$", type: "HowTo" }]);
+  it("a node typed only outside schema.org is walked as untyped", () => {
+    const v = validate({
+      "@context": CTX,
+      "@type": "http://data-vocabulary.org/Breadcrumb",
+      title: "Home",
+      price: "3",
+      gtin: "1",
+      offers: { "@type": "Person" },
+      child: { "@type": "Prodcut" },
+    });
+    expect(v.topType).toBeNull();
+    expect(v.unknownProperties).toEqual([]);
+    expect(v.propertyStatus).toEqual([]);
+    expect(v.typeMismatches).toEqual([]);
+    // The foreign type counts; bare keys are schema.org names, so they do not.
+    expect(v.outsideVocabulary).toBe(1);
+    // Descendants are still walked.
+    expect(v.unknownTypes).toEqual([{ path: "$.child", type: "Prodcut" }]);
   });
 
   it("an untyped nested object is not judged, but typed nodes inside it are walked", () => {
@@ -579,16 +155,19 @@ describe("validateBlock", () => {
     const v = validate({
       "@context": CTX,
       "@type": "WebPage",
+      name: "Home",
       "@graph": [{ "@type": "Prodcut" }, { "@type": "Product" }],
     });
     expect(v.topType).toBe("WebPage");
     expect(v.unknownTypes).toEqual([]);
-    expect(v.googleFeatures).toEqual([]);
+    // The container is one node; its members are blocks of their own.
+    expect(v.nodes).toEqual([
+      { path: "$", type: "WebPage", properties: ["name"], emptyProperties: [], propertiesCapped: false },
+    ]);
   });
 
-  it("Review Focus 2: every schema.org spelling gives identical googleFeatures", () => {
-    const base = validate(product()).googleFeatures;
-    expect(base.length).toBeGreaterThan(0);
+  it("every schema.org spelling gives the same verdict", () => {
+    const base = validate(product());
     const spellings: unknown[] = [
       product({ "@type": ["Product", "Thing"] }),
       product({ "@type": "schema:Product" }),
@@ -602,10 +181,10 @@ describe("validateBlock", () => {
     const member = product();
     delete member["@context"];
     spellings.push(member);
-    for (const raw of spellings) expect(validate(raw).googleFeatures).toEqual(base);
+    for (const raw of spellings) expect(validate(raw)).toEqual(base);
   });
 
-  it("Review Focus 2: a block in another vocabulary is counted and never judged", () => {
+  it("a block in another vocabulary is counted and never judged", () => {
     const v = validate({
       "@context": { "@vocab": "https://example.org/" },
       "@type": "Product",
@@ -619,30 +198,26 @@ describe("validateBlock", () => {
     expect(v.unknownProperties).toEqual([]);
     expect(v.propertyStatus).toEqual([]);
     expect(v.typeMismatches).toEqual([]);
-    expect(v.googleFeatures).toEqual([]);
-    expect(v.deprecatedFeatures).toEqual([]);
 
     const stringContext = validate({ "@context": "https://example.org/ctx", "@type": "Product" });
     expect(stringContext.outsideVocabulary).toBe(1);
-    expect(stringContext.googleFeatures).toEqual([]);
   });
 
-  it("I5: a @graph member stored by the analyzer keeps its container's vocabulary", () => {
+  it("a @graph member stored by the analyzer keeps its container's vocabulary", () => {
     const outside = analyzePage(
-      `<script type="application/ld+json">{"@context":{"@vocab":"https://example.org/"},"@graph":[{"@type":"Product"}]}</script>`,
+      `<script type="application/ld+json">{"@context":{"@vocab":"https://example.org/"},"@graph":[{"@type":"Product","colour":"red"}]}</script>`,
       "https://ex.com/",
     ).structuredData;
     expect(outside).toHaveLength(1);
     const v = validate(outside[0]!.raw);
-    expect(v.googleFeatures).toEqual([]);
+    expect(v.unknownProperties).toEqual([]);
     expect(v.outsideVocabulary).toBeGreaterThan(0);
     const schema = analyzePage(
-      `<script type="application/ld+json">{"@context":"https://schema.org","@graph":[{"@type":"Product","name":"P","offers":{"@type":"Offer","price":1,"priceCurrency":"EUR"},"image":"i"}]}</script>`,
+      `<script type="application/ld+json">{"@context":"https://schema.org","@graph":[{"@type":"Product","colour":"red"}]}</script>`,
       "https://ex.com/",
     ).structuredData;
-    expect(validate(schema[0]!.raw).googleFeatures.map((f) => f.feature)).toEqual([
-      "product-snippet",
-      "merchant-listing",
+    expect(validate(schema[0]!.raw).unknownProperties).toEqual([
+      { path: "$", type: "Product", property: "colour" },
     ]);
   });
 
@@ -657,13 +232,226 @@ describe("validateBlock", () => {
     expect(v.unknownTypes).toEqual([]);
     expect(v.unknownProperties).toEqual([]);
   });
+});
 
+describe("validateBlock — empty values (JSON-LD, Microdata, RDFa)", () => {
+  it('"", whitespace-only text, [] and {} are empty, each at its own path', () => {
+    const v = validate({
+      "@context": CTX,
+      "@type": "Product",
+      name: "",
+      description: "   ",
+      image: [],
+      brand: {},
+      sku: "S-1",
+    });
+    expect(v.emptyValues).toEqual([
+      { path: "$.name", type: "Product", property: "name" },
+      { path: "$.description", type: "Product", property: "description" },
+      { path: "$.image", type: "Product", property: "image" },
+      { path: "$.brand", type: "Product", property: "brand" },
+    ]);
+  });
+
+  it("0, false, a bare reference, a typed node and a node with a property are not empty", () => {
+    const v = validate({
+      "@context": CTX,
+      "@type": "Product",
+      name: "Widget",
+      weight: 0,
+      isFamilyFriendly: false,
+      manufacturer: { "@id": "https://example.com/#org" },
+      brand: { "@type": "Brand" },
+      offers: { price: "1" },
+    });
+    expect(v.emptyValues).toEqual([]);
+  });
+
+  it("an empty value inside a nested node is reported at the nested path, not at the parent", () => {
+    const v = validate(product({ offers: { "@type": "Offer", price: "", priceCurrency: "EUR" } }));
+    expect(v.emptyValues).toEqual([{ path: "$.offers.price", type: "Offer", property: "price" }]);
+  });
+
+  it("an empty member of an array is reported by its index; an untyped holder has a null type", () => {
+    const v = validate({
+      "@context": CTX,
+      "@type": "Organization",
+      name: "Acme",
+      sameAs: ["", "https://example.com/acme"],
+      address: { streetAddress: " " },
+    });
+    expect(v.emptyValues).toEqual([
+      { path: "$.sameAs[0]", type: "Organization", property: "sameAs" },
+      { path: "$.address.streetAddress", type: null, property: "streetAddress" },
+    ]);
+  });
+
+  it("an empty value object and an empty @list are empty", () => {
+    const v = validate({
+      "@context": CTX,
+      "@type": "Article",
+      headline: { "@value": "  " },
+      keywords: { "@list": [] },
+    });
+    expect(v.emptyValues).toEqual([
+      { path: "$.headline", type: "Article", property: "headline" },
+      { path: "$.keywords", type: "Article", property: "keywords" },
+    ]);
+  });
+
+  it("names the property by its schema.org name in any spelling", () => {
+    const v = validate({ "@context": CTX, "@type": "Product", "schema:name": "" });
+    expect(v.emptyValues).toEqual([{ path: '$["schema:name"]', type: "Product", property: "name" }]);
+  });
+
+  it("is recorded in a block outside the vocabulary too, under the stated names", () => {
+    const v = validate({ "@context": { "@vocab": "https://example.org/" }, "@type": "Widget", label: "" });
+    expect(v.emptyValues).toEqual([{ path: "$.label", type: "Widget", property: "label" }]);
+  });
+});
+
+describe("validateBlock — ids and references (JSON-LD node references)", () => {
+  it("a bare {@id} is a reference; a node with @id and anything else defines its id", () => {
+    const v = validate({
+      "@context": CTX,
+      "@type": "WebPage",
+      "@id": "https://example.com/#webpage",
+      name: "Home",
+      publisher: { "@id": "https://example.com/#org" },
+      author: { "@id": "https://example.com/#jane", "@type": "Person" },
+      about: [{ "@id": "#topic" }, { "@id": "https://example.com/#webpage" }],
+    });
+    expect(v.references).toEqual([
+      { path: "$.publisher", id: "https://example.com/#org" },
+      { path: "$.about[0]", id: "#topic" },
+      { path: "$.about[1]", id: "https://example.com/#webpage" },
+    ]);
+    expect(v.definedIds).toEqual(["https://example.com/#webpage", "https://example.com/#jane"]);
+  });
+
+  it("an empty or whitespace @id is no reference and defines nothing; a defined id is listed once", () => {
+    const v = validate({
+      "@context": CTX,
+      "@type": "Organization",
+      "@id": "#org",
+      name: "Acme",
+      parentOrganization: { "@id": "" },
+      department: [{ "@id": "#org", name: "Again" }, { "@id": "  ", name: "Blank" }],
+    });
+    expect(v.references).toEqual([]);
+    expect(v.definedIds).toEqual(["#org"]);
+  });
+
+  it("references and ids are read in a block outside the vocabulary too", () => {
+    const v = validate({
+      "@context": { "@vocab": "https://example.org/" },
+      "@type": "Widget",
+      "@id": "#w",
+      maker: { "@id": "#m" },
+    });
+    expect(v.definedIds).toEqual(["#w"]);
+    expect(v.references).toEqual([{ path: "$.maker", id: "#m" }]);
+  });
+});
+
+describe("validateBlock — the top-level node and its properties", () => {
+  it("lists only the top-level node, its property names without keywords, deduplicated by schema.org name", () => {
+    const v = validate({
+      "@context": CTX,
+      "@type": "Product",
+      "@id": "#p",
+      name: "Widget",
+      "schema:name": "Widget again",
+      offers: { "@type": "Offer", price: "1" },
+    });
+    expect(v.nodes).toEqual([
+      { path: "$", type: "Product", properties: ["name", "offers"], emptyProperties: [], propertiesCapped: false },
+    ]);
+  });
+
+  it("emptyProperties names the properties that carry no non-empty value", () => {
+    const v = validate({
+      "@context": CTX,
+      "@type": "Product",
+      name: "",
+      image: ["", " "],
+      sameAs: ["", "https://example.com/w"],
+      offers: { "@type": "Offer", price: "" },
+      weight: 0,
+    });
+    expect(v.nodes[0]).toEqual({
+      path: "$",
+      type: "Product",
+      properties: ["name", "image", "sameAs", "offers", "weight"],
+      emptyProperties: ["name", "image"],
+      propertiesCapped: false,
+    });
+  });
+
+  it("states the type as written when it is outside the vocabulary, and the primary type when known", () => {
+    expect(validate({ "@context": CTX, "@type": "Prodcut", name: "x" }).nodes[0]!.type).toBe("Prodcut");
+    expect(
+      validate({ "@context": CTX, "@type": "http://data-vocabulary.org/Breadcrumb", title: "x" }).nodes[0]!.type,
+    ).toBe("http://data-vocabulary.org/Breadcrumb");
+    expect(
+      validate({ "@context": { "@vocab": "https://example.org/" }, "@type": "Widget" }).nodes[0]!.type,
+    ).toBe("Widget");
+    expect(validate({ "@context": CTX, "@type": ["Thing", "Product"], name: "x" }).nodes[0]!.type).toBe("Product");
+    expect(validate({ "@context": CTX, name: "untyped" }).nodes[0]!.type).toBeNull();
+  });
+
+  it("each @graph member is a top-level node of its own block", () => {
+    const blocks = analyzePage(
+      `<script type="application/ld+json">{"@context":"https://schema.org","@graph":[` +
+        `{"@type":"Organization","@id":"#org","name":"Acme"},` +
+        `{"@type":"WebPage","name":"Home","publisher":{"@id":"#org"}}]}</script>`,
+      "https://ex.com/",
+    ).structuredData;
+    expect(blocks).toHaveLength(2);
+    const [org, page] = blocks.map((b) => validate(b.raw));
+    expect(org!.nodes).toEqual([
+      { path: "$", type: "Organization", properties: ["name"], emptyProperties: [], propertiesCapped: false },
+    ]);
+    expect(org!.definedIds).toEqual(["#org"]);
+    expect(page!.nodes).toEqual([
+      { path: "$", type: "WebPage", properties: ["name", "publisher"], emptyProperties: [], propertiesCapped: false },
+    ]);
+    expect(page!.references).toEqual([{ path: "$.publisher", id: "#org" }]);
+  });
+});
+
+describe("validateBlock — caps and refusals", () => {
   it("lists cap at 50 with listsCapped", () => {
     const raw: Record<string, unknown> = { "@type": "Product" };
     for (let i = 0; i < 60; i += 1) raw[`made${i}`] = "x";
     const v = validate(raw);
     expect(MAX_PROBLEMS_PER_LIST).toBe(50);
     expect(v.unknownProperties).toHaveLength(50);
+    expect(v.listsCapped).toBe(true);
+  });
+
+  it("a node's property list caps at 50, says so on the node, and sets listsCapped", () => {
+    const raw: Record<string, unknown> = { "@context": CTX, "@type": "Product" };
+    for (let i = 0; i < 60; i += 1) raw[`made${i}`] = i < 55 ? "x" : "";
+    const v = validate(raw);
+    expect(v.nodes[0]!.properties).toHaveLength(MAX_PROBLEMS_PER_LIST);
+    expect(v.nodes[0]!.properties[0]).toBe("made0");
+    expect(v.nodes[0]!.propertiesCapped).toBe(true);
+    // Only listed properties can be named empty: made55..59 are past the cap.
+    expect(v.nodes[0]!.emptyProperties).toEqual([]);
+    expect(v.listsCapped).toBe(true);
+  });
+
+  it("references cap at 50; defined ids are never capped, so no reference reads as unresolved for want of room", () => {
+    const raw: Record<string, unknown> = {
+      "@context": CTX,
+      "@type": "ItemList",
+      itemListElement: Array.from({ length: 60 }, (_, i) => ({ "@id": `#item${i}` })),
+      hasPart: Array.from({ length: 60 }, (_, i) => ({ "@id": `#part${i}`, "@type": "WebPage" })),
+    };
+    const v = validate(raw);
+    expect(v.references).toHaveLength(MAX_PROBLEMS_PER_LIST);
+    expect(v.definedIds).toHaveLength(60);
     expect(v.listsCapped).toBe(true);
   });
 
@@ -678,9 +466,13 @@ describe("validateBlock", () => {
     expect(() => validateBlock(node)).toThrow(/nest/);
   });
 
-  it("blockValidationSchema is strict", () => {
+  it("blockValidationSchema is strict, and refuses a blob in the shape before the rework", () => {
     const v = validateBlock(product());
     expect(() => blockValidationSchema.parse({ ...v, extra: 1 })).toThrow();
+    const { emptyValues: _e, definedIds: _d, references: _r, nodes: _n, ...rest } = v;
+    expect(() =>
+      blockValidationSchema.parse({ ...rest, googleFeatures: [], deprecatedFeatures: [] }),
+    ).toThrow();
   });
 
   // Runs last (vitest runs a file's tests in order): every case above round-trips.
