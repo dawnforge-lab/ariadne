@@ -2823,7 +2823,8 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
   per page. The `structured_data` listing answers the question the findings cannot:
   which page types publish which formats and types, which top-level nodes a page
   carries with their property names (`nodes`, each with `format`, `path`, `type`,
-  `properties`), and how many problems each page carries; on a crawl not wholly at
+  `types` — every type the node states — and `properties`), and how many problems each
+  page carries; on a crawl not wholly at
   extraction 4 it does not count unresolved references and its `notMeasured` names
   them. Its detail, one row per block and problem, is the structured_data_nodes CSV
   view of `export_crawl`. A crawl the
@@ -2897,7 +2898,10 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
   (metric scope `schema_type`, one row per top-level type as the markup states it, a
   name outside schema.org included), how many top-level nodes carry it and, per
   property, how many of those nodes carry a non-empty value. Each `@graph` member is
-  one node. The engine names no required set: which of the fields below a Product
+  one node, and a node with several types counts once under each of them (a node typed
+  Product and IndividualProduct is in both rows). JSON-LD nodes list every type; a
+  microdata `itemtype` or RDFa `typeof` keeps only its first type at extraction 4, an
+  extraction limit. The engine names no required set: which of the fields below a Product
   needs is the agent's judgement, made from these counts at site scale instead of on
   the one product page a person opened. `schema.empty-value` lists the empty ones per
   page. The table is bounded and says what it left out: types and properties per type

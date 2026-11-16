@@ -8,7 +8,7 @@
  */
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 
 import { closeDb, createDb, type Db } from "../../src/db/client.js";
 import { runMigrations } from "../../src/db/migrate.js";
@@ -303,5 +303,61 @@ describe("schema.property-coverage against the database", () => {
 describe("schema.property-coverage copy names the validator's own cap", () => {
   it("says the property list stops at MAX_PROBLEMS_PER_LIST", () => {
     expect(rule(ID).explanation).toContain(`property list stops at ${MAX_PROBLEMS_PER_LIST}`);
+  });
+});
+
+// 29a rework gate fix: a node with several types counts under each.
+describe("schema.property-coverage counts a multi-type node under each of its types", () => {
+  let db: Db;
+  const createdCrawls: string[] = [];
+  beforeAll(async () => {
+    db = createDb(databaseUrl());
+    await runMigrations(db);
+  });
+  afterAll(async () => {
+    await dropCrawls(db, createdCrawls);
+    await closeDb(db);
+  });
+
+  async function onePageCrawl(raws: Record<string, unknown>[]): Promise<string> {
+    const crawlId = await newMetricCrawl(db, SITE, createdCrawls, { pagesCrawled: 1 });
+    const pageId = `page_${randomUUID()}`;
+    await db.insert(pages).values({
+      id: pageId,
+      crawlId,
+      url: url("/pricing"),
+      urlNormalised: url("/pricing"),
+      fetchClass: "ok",
+      statusCode: 200,
+      isIndexable: writerIndexable({}),
+      depth: 1,
+      discoveredVia: "link",
+      extractionVersion: 4,
+    });
+    for (const raw of raws) {
+      await db.insert(structuredData).values({ crawlId, pageId, schemaType: "x", format: "jsonld", raw });
+    }
+    await deriveSchemaValidation(db, crawlId);
+    return crawlId;
+  }
+
+  it("one SoftwareApplication + FAQPage node is one site node and one node of each type", async () => {
+    const crawlId = await onePageCrawl([
+      { "@context": C, "@type": ["SoftwareApplication", "FAQPage"], name: "App", mainEntity: "" },
+    ]);
+    const rows = await metricRowsByScope(db, rule(ID), crawlId);
+    expect(rows["site|"]).toEqual({ nodes: 1, propertyListsCapped: 0, typesNotListed: 0 });
+    const each = { nodes: 1, propertyListsCapped: 0, propertiesNotListed: 0, properties: { mainEntity: 0, name: 1 } };
+    expect(rows["schema_type|SoftwareApplication"]).toEqual(each);
+    expect(rows["schema_type|FAQPage"]).toEqual(each);
+  });
+
+  it("throws, saying to re-run the rules, on nodes written before types existed", async () => {
+    const crawlId = await onePageCrawl([{ "@context": C, "@type": "Thing", name: "x" }]);
+    await db.execute(sql`
+      update structured_data
+         set validation_jsonb = jsonb_set(validation_jsonb, '{nodes,0}', (validation_jsonb #> '{nodes,0}') - 'types')
+       where crawl_id = ${crawlId}`);
+    await expect(metricRowsByScope(db, rule(ID), crawlId)).rejects.toThrow(/re-run the rules/);
   });
 });

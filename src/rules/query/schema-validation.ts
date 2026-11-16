@@ -199,6 +199,7 @@ async function perPageFindings(
     having bool_or(
       sd.validation_jsonb is null
       or jsonb_typeof(sd.validation_jsonb -> 'nodes') is distinct from 'array'
+      or jsonb_path_exists(sd.validation_jsonb, 'lax $.nodes[*] ? (!exists(@.types))')
       or ${spec.hasProblems(crawlId)}
     )
     order by p.url

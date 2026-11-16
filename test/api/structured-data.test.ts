@@ -50,7 +50,8 @@ const oldShapeId = `crawl_sd_listing_old_shape_${runId}`;
 const preV4Id = `crawl_sd_listing_pre_v4_${runId}`;
 const capId = `crawl_sd_listing_cap_${runId}`;
 const orphanId = `crawl_sd_listing_orphan_${runId}`;
-const allCrawls = [crawlId, unjudgedId, staleId, skipsId, malformedId, oldShapeId, preV4Id, capId, orphanId];
+const typelessId = `crawl_sd_listing_typeless_${runId}`;
+const allCrawls = [crawlId, unjudgedId, staleId, skipsId, malformedId, oldShapeId, preV4Id, capId, orphanId, typelessId];
 
 const PRODUCT = {
   "@context": C,
@@ -249,6 +250,15 @@ beforeAll(async () => {
   });
   await service.runRulesForCrawl(LOCAL_TENANT, orphanId);
 
+  // Judged, then the Product block's node stripped of `types`: the shape a
+  // blob had before the gate fix, which must be refused as old.
+  await seedCrawl(typelessId);
+  await service.runRulesForCrawl(LOCAL_TENANT, typelessId);
+  await db.execute(sql`
+    update structured_data
+       set validation_jsonb = jsonb_set(validation_jsonb, '{nodes,0}', (validation_jsonb #> '{nodes,0}') - 'types')
+     where id = (select min(id) from structured_data where crawl_id = ${typelessId})`);
+
   // Judged, then the Product block's blob put back in the shape written before
   // the 29a rework: Google lists in, the standards facts out.
   await seedCrawl(oldShapeId);
@@ -301,11 +311,11 @@ describe("listStructuredData — the rows", () => {
         {
           format: "jsonld",
           path: "$",
-          type: "Product",
+          type: "Product", types: ["Product"],
           properties: ["brand", "image", "name", "offers"],
           propertiesCapped: false,
         },
-        { format: "microdata", path: "$", type: "Organization", properties: ["name", "url"], propertiesCapped: false },
+        { format: "microdata", path: "$", type: "Organization", types: ["Organization"], properties: ["name", "url"], propertiesCapped: false },
       ],
       ...pageCounts("/product"),
       jsonLdParseErrors: 0,
@@ -324,7 +334,7 @@ describe("listStructuredData — the rows", () => {
       "url", "pageType", "indexable", "formats", "types", "nodes",
       "warningCount", "infoCount", "jsonLdParseErrors", "microdataErrors", "skips", "blocksAtCap",
     ]);
-    expect(Object.keys(page.items[0]!.nodes[0]!)).toEqual(["format", "path", "type", "properties", "propertiesCapped"]);
+    expect(Object.keys(page.items[0]!.nodes[0]!)).toEqual(["format", "path", "type", "types", "properties", "propertiesCapped"]);
   });
 
   it("sums every problem kind across a page's blocks, resolving references per page", async () => {
@@ -635,5 +645,21 @@ describe("a block whose page row does not exist (persist.ts flushPages, by desig
       .from(metrics)
       .where(and(eq(metrics.crawlId, orphanId), eq(metrics.metricId, "schema.property-coverage")));
     expect(coverage.find((m) => m.scope === "site")?.value).toMatchObject({ nodes: BLOCKS.length });
+  });
+});
+
+// 29a rework gate fix: nodes list every stated type.
+describe("the listing's nodes list every stated type", () => {
+  it("an Article also typed Blorpticle lists both, the primary first", async () => {
+    const page = await service.listStructuredData(LOCAL_TENANT, crawlId, {});
+    const article = page.items.find((r) => r.url === `${SITE}/article`);
+    expect(article?.nodes[0]).toMatchObject({ type: "Article", types: ["Article", "Blorpticle"] });
+  });
+
+  it("a blob whose nodes have no types is old: a 409 up front on the listing and the CSV", async () => {
+    const error = await service.listStructuredData(LOCAL_TENANT, typelessId, {}).catch((e: unknown) => e);
+    expect(error).toMatchObject({ code: "CONFLICT" });
+    expect(String((error as Error).message)).toContain("re-run the rules (crawl_rules)");
+    await expect(csvLines(typelessId)).rejects.toMatchObject({ code: "CONFLICT" });
   });
 });

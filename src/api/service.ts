@@ -6963,6 +6963,7 @@ export class ApiService {
                                      'format', sd.format,
                                      'path', n.node -> 'path',
                                      'type', n.node -> 'type',
+                                     'types', n.node -> 'types',
                                      'properties', n.node -> 'properties',
                                      'propertiesCapped', n.node -> 'propertiesCapped')
                                    order by sd.id, n.ord)
@@ -7053,7 +7054,9 @@ export class ApiService {
              exists (select 1 from structured_data sd
                        join pages p on p.crawl_id = sd.crawl_id and p.id = sd.page_id
                       where sd.crawl_id = c.id and sd.validation_jsonb is not null
-                        and jsonb_typeof(sd.validation_jsonb -> 'nodes') is distinct from 'array') as stale
+                        and (jsonb_typeof(sd.validation_jsonb -> 'nodes') is distinct from 'array'
+                             -- nodes written before they listed every type
+                             or jsonb_path_exists(sd.validation_jsonb, 'lax $.nodes[*] ? (!exists(@.types))'))) as stale
         from crawls c
        where c.id = ${crawlId}`);
     const row = result.rows[0];

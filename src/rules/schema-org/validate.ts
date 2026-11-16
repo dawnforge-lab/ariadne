@@ -68,6 +68,9 @@
  *    member as a block of its own, so a member is a top-level node too — with
  *    its type (the primary known type, else the first stated `@type` as
  *    written, schema.org spellings reduced to the bare name; null when untyped),
+ *    every type it states (`types`, authored order, same spellings; `[]` when
+ *    untyped — a microdata or RDFa node states one, since extraction 4 keeps
+ *    only the first itemtype / typeof token),
  *    its property names (keys without `@` keywords, by schema.org name, each
  *    once, SORTED (the stored block is jsonb, which keeps no key order, so an
  *    "authored order" would be Postgres's), capped at `MAX_PROBLEMS_PER_LIST` with
@@ -123,6 +126,7 @@ export const blockValidationSchema = z.strictObject({
     z.strictObject({
       path,
       type: z.string().nullable(),
+      types: z.array(z.string()),
       properties: z.array(z.string()).max(MAX_PROBLEMS_PER_LIST),
       emptyProperties: z.array(z.string()).max(MAX_PROBLEMS_PER_LIST),
       propertiesCapped: z.boolean(),
@@ -184,6 +188,21 @@ function statedType(node: Record<string, unknown>): string | null {
     if (typeof entry === "string" && entry.trim() !== "") return schemaOrgName(entry) ?? entry;
   }
   return null;
+}
+
+/**
+ * Every type a node states, in authored order, each once: a schema.org spelling
+ * reduced to the bare name (`statedType`'s rule), anything else as written.
+ * `[]` for an untyped node. A node typed A and B is an A node and a B node, so
+ * the facts list both (29a rework gate fix); `type` stays the primary one.
+ */
+function statedTypes(node: Record<string, unknown>): string[] {
+  const raw = node["@type"];
+  const out = new Set<string>();
+  for (const entry of Array.isArray(raw) ? raw : [raw]) {
+    if (typeof entry === "string" && entry.trim() !== "") out.add(schemaOrgName(entry) ?? entry);
+  }
+  return [...out];
 }
 
 /** A property key's name: its schema.org name in any spelling, else the key as written. */
@@ -264,6 +283,7 @@ class Walker {
    * listed ones carry no non-empty value.
    */
   private topLevel(node: Record<string, unknown>, type: string | null): void {
+    const types = statedTypes(node);
     const carried = new Map<string, boolean>();
     for (const [key, value] of Object.entries(node)) {
       if (key.startsWith("@")) continue;
@@ -277,6 +297,7 @@ class Walker {
     this.push("nodes", {
       path: "$",
       type,
+      types,
       properties,
       emptyProperties: properties.filter((name) => carried.get(name) !== true),
       propertiesCapped,

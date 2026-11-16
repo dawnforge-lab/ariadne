@@ -144,7 +144,8 @@ function list(blob: SQL, name: (typeof VALIDATION_LISTS)[number]): SQL {
  */
 const MALFORMED_ENTRIES = [
   'lax $.nodes[*] ? (@.type() != "object" || !exists(@.path) || !exists(@."type")' +
-    ' || !exists(@.propertiesCapped) || !exists(@.properties) || @.properties.type() != "array")',
+    ' || !exists(@.propertiesCapped) || !exists(@.properties) || @.properties.type() != "array"' +
+    ' || !exists(@.types) || @.types.type() != "array")',
   'lax $.references[*] ? (@.type() != "object" || !exists(@.id) || @.id.type() != "string"' +
     ' || !exists(@.written) || @.written.type() != "string")',
   'lax $.definedIds[*] ? (@.type() != "string")',
@@ -355,8 +356,14 @@ export function problemCells(entry: unknown, where: string): ProblemCells {
 export interface StructuredDataNode {
   format: StructuredDataFormat;
   path: string;
-  /** As the markup states it; a name outside the schema.org vocabulary included. Null when untyped. */
+  /** The primary type, as the markup states it; a name outside the schema.org vocabulary included. Null when untyped. */
   type: string | null;
+  /**
+   * Every type the node states, in authored order (`[]` when untyped). A
+   * microdata or RDFa node lists one: extraction 4 keeps only the first
+   * itemtype / typeof token.
+   */
+  types: string[];
   /** The node's property names, capped per node (`propertiesCapped`). */
   properties: string[];
   propertiesCapped: boolean;
@@ -379,12 +386,14 @@ export function projectNodes(value: unknown, crawlId: string, url: string): Stru
     const path = typeof e["path"] === "string" ? e["path"] : bad("has no string path");
     const type = e["type"];
     if (type !== null && typeof type !== "string") return bad("has a type that is neither a string nor null");
+    const types = e["types"];
+    if (!Array.isArray(types) || !types.every((t) => typeof t === "string")) return bad("has no string list of types");
     const properties = e["properties"];
     if (!Array.isArray(properties) || !properties.every((p) => typeof p === "string")) {
       return bad("has no string list of properties");
     }
     const capped = e["propertiesCapped"];
     if (typeof capped !== "boolean") return bad("has no boolean propertiesCapped");
-    return { format, path, type, properties: properties as string[], propertiesCapped: capped };
+    return { format, path, type, types: types as string[], properties: properties as string[], propertiesCapped: capped };
   });
 }

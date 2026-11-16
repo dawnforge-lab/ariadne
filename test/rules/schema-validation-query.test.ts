@@ -8,7 +8,7 @@
  */
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 
 import { normalizeUrl } from "../../src/crawl/parse/url-utils.js";
 import { hostKeyOf } from "../../src/crawl/host-key.js";
@@ -637,5 +637,60 @@ describe("the schema validation rules against the database", () => {
     it("declares the Blocks At Cap column beside the problems", () => {
       expect(rule(ID).columns.map((c) => c.key)).toEqual(["problems", "blocksAtCap", "problemCount"]);
     });
+  });
+});
+
+// 29a rework gate fix: a blob whose nodes have no types is old.
+describe("a blob whose nodes lack types (written before the gate fix)", () => {
+  let db: Db;
+  const created: string[] = [];
+  beforeAll(async () => {
+    db = createDb(databaseUrl());
+    await runMigrations(db);
+  });
+  afterAll(async () => {
+    for (const id of created) await db.delete(crawls).where(eq(crawls.id, id));
+    await closeDb(db);
+  });
+
+  it("is refused by every per-node rule, even one with nothing to say about it", async () => {
+    const crawlId = `crawl_${randomUUID()}`;
+    created.push(crawlId);
+    await db.insert(crawls).values({
+      tenantId: LOCAL_TENANT,
+      id: crawlId,
+      siteUrl: SITE,
+      hostKey: hostKeyOf(SITE),
+      config: { userAgent: "AriadneBot-test", maxPages: 5 },
+      rulesetVersion: "test",
+      status: "finished",
+      discovery: mkDiscovery(),
+    });
+    const pageId = `page_${randomUUID()}`;
+    await db.insert(pages).values({
+      id: pageId,
+      crawlId,
+      url: url("/a"),
+      urlNormalised: url("/a"),
+      fetchClass: "ok",
+      statusCode: 200,
+      isIndexable: writerIndexable({}),
+      depth: 1,
+      discoveredVia: "link",
+      extractionVersion: 4,
+    });
+    await db.insert(structuredData).values({
+      crawlId,
+      pageId,
+      schemaType: "Organization",
+      format: "jsonld",
+      raw: { "@context": ctx, "@type": "Organization", name: "Estuary" },
+    });
+    await deriveSchemaValidation(db, crawlId);
+    await db.execute(sql`
+      update structured_data
+         set validation_jsonb = jsonb_set(validation_jsonb, '{nodes,0}', (validation_jsonb #> '{nodes,0}') - 'types')
+       where crawl_id = ${crawlId}`);
+    await expect(rule("schema.empty-value").run(db, crawlId)).rejects.toThrow(/re-run the rules/);
   });
 });

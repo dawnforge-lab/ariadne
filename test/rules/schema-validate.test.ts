@@ -62,7 +62,7 @@ describe("validateBlock — the schema.org vocabulary", () => {
     expect(v.nodes).toEqual([
       {
         path: "$",
-        type: "Product",
+        type: "Product", types: ["Product"],
         properties: ["brand", "description", "gtin13", "image", "mpn", "name", "offers", "sku"],
         emptyProperties: [],
         propertiesCapped: false,
@@ -164,7 +164,7 @@ describe("validateBlock — the schema.org vocabulary", () => {
     expect(v.unknownTypes).toEqual([]);
     // The container is one node; its members are blocks of their own.
     expect(v.nodes).toEqual([
-      { path: "$", type: "WebPage", properties: ["name"], emptyProperties: [], propertiesCapped: false },
+      { path: "$", type: "WebPage", types: ["WebPage"], properties: ["name"], emptyProperties: [], propertiesCapped: false },
     ]);
   });
 
@@ -183,7 +183,7 @@ describe("validateBlock — the schema.org vocabulary", () => {
     const member = product();
     delete member["@context"];
     spellings.push(member);
-    for (const raw of spellings) expect(validate(raw)).toEqual(base);
+    for (const raw of spellings) expect(withoutTypes(validate(raw))).toEqual(withoutTypes(base));
   });
 
   it("a block in another vocabulary is counted and never judged", () => {
@@ -367,7 +367,7 @@ describe("validateBlock — the top-level node and its properties", () => {
       offers: { "@type": "Offer", price: "1" },
     });
     expect(v.nodes).toEqual([
-      { path: "$", type: "Product", properties: ["name", "offers"], emptyProperties: [], propertiesCapped: false },
+      { path: "$", type: "Product", types: ["Product"], properties: ["name", "offers"], emptyProperties: [], propertiesCapped: false },
     ]);
   });
 
@@ -383,7 +383,7 @@ describe("validateBlock — the top-level node and its properties", () => {
     });
     expect(v.nodes[0]).toEqual({
       path: "$",
-      type: "Product",
+      type: "Product", types: ["Product"],
       properties: ["image", "name", "offers", "sameAs", "weight"],
       emptyProperties: ["image", "name"],
       propertiesCapped: false,
@@ -412,11 +412,11 @@ describe("validateBlock — the top-level node and its properties", () => {
     expect(blocks).toHaveLength(2);
     const [org, page] = blocks.map((b) => validate(b.raw, "https://ex.com/"));
     expect(org!.nodes).toEqual([
-      { path: "$", type: "Organization", properties: ["name"], emptyProperties: [], propertiesCapped: false },
+      { path: "$", type: "Organization", types: ["Organization"], properties: ["name"], emptyProperties: [], propertiesCapped: false },
     ]);
     expect(org!.definedIds).toEqual(["https://ex.com/#org"]);
     expect(page!.nodes).toEqual([
-      { path: "$", type: "WebPage", properties: ["name", "publisher"], emptyProperties: [], propertiesCapped: false },
+      { path: "$", type: "WebPage", types: ["WebPage"], properties: ["name", "publisher"], emptyProperties: [], propertiesCapped: false },
     ]);
     expect(page!.references).toEqual([{ path: "$.publisher", id: "https://ex.com/#org", written: "#org" }]);
   });
@@ -634,10 +634,68 @@ describe("validateBlock — a blank @id is no @id, and a null context resets the
   });
 });
 
+// 29a rework gate fix: a node lists every stated type.
+describe("validateBlock — a node lists every type it states", () => {
+  it("two unrelated JSON-LD types: the primary is the first, and both are listed in authored order", () => {
+    const v = validate({ "@context": CTX, "@type": ["SoftwareApplication", "FAQPage"], name: "App" });
+    expect(v.nodes[0]).toMatchObject({ type: "SoftwareApplication", types: ["SoftwareApplication", "FAQPage"] });
+  });
+
+  it("reduces a schema.org spelling to the bare name, keeps any other as written, and lists each once", () => {
+    const v = validate({
+      "@context": CTX,
+      "@type": ["https://schema.org/Product", "http://example.org/Gadget", "schema:Product"],
+      name: "x",
+    });
+    expect(v.nodes[0]!.types).toEqual(["Product", "http://example.org/Gadget"]);
+  });
+
+  it("an untyped node lists no types; a single type lists one", () => {
+    expect(validate({ "@context": CTX, name: "x" }).nodes[0]!.types).toEqual([]);
+    expect(validate({ "@context": CTX, "@type": "Prodcut", name: "x" }).nodes[0]!.types).toEqual(["Prodcut"]);
+  });
+
+  it("the strict schema refuses a node written before types existed", () => {
+    const v = validate({ "@context": CTX, "@type": "Thing", name: "x" });
+    const { types: _t, ...node } = v.nodes[0]!;
+    expect(() => blockValidationSchema.parse({ ...v, nodes: [node] })).toThrow();
+  });
+});
+
 describe("validateBlock — every verdict round-trips", () => {
   // Runs last (vitest runs a file's describes in order): every case above round-trips.
   it("blockValidationSchema.parse(validateBlock(x)) round-trips for every case above", () => {
     expect(produced.length).toBeGreaterThan(20);
     for (const v of produced) expect(blockValidationSchema.parse(v)).toEqual(v);
+  });
+});
+
+/** A verdict without its nodes' `types`: for comparing spellings whose type lists differ by design. */
+function withoutTypes(v: BlockValidation): unknown {
+  return { ...v, nodes: v.nodes.map(({ types: _t, ...node }) => node) };
+}
+
+// 29a rework gate fix, ruling (b): extraction stays at 4, so the microdata and
+// RDFa extractors still store one type (their first itemtype / typeof token).
+// These raws are hand-built in their shape with a `@type` ARRAY, to pin that
+// the validator lists every type any stored block states, whatever its format.
+describe("validateBlock — every type of a microdata- or RDFa-shaped node with a @type array", () => {
+  it("a microdata-shaped item with two itemtype tokens lists both", () => {
+    const v = validate({
+      "@context": "https://schema.org",
+      "@type": ["Product", "IndividualProduct"],
+      "@id": "https://example.com/page#mug",
+      name: "Mug",
+    });
+    expect(v.nodes[0]).toMatchObject({ type: "IndividualProduct", types: ["Product", "IndividualProduct"] });
+  });
+
+  it("an RDFa-shaped item with two typeof terms lists both, full-URL spellings reduced", () => {
+    const v = validate({
+      "@context": "https://schema.org",
+      "@type": ["http://schema.org/LocalBusiness", "https://schema.org/Bakery"],
+      name: "Crumb",
+    });
+    expect(v.nodes[0]).toMatchObject({ type: "Bakery", types: ["LocalBusiness", "Bakery"] });
   });
 });
