@@ -72,6 +72,13 @@
  * values. The values of an item the analyzer's 50-block cap then drops have
  * still been spent.
  *
+ * WRITTEN VALUES are capped too: a value under several names is written once
+ * per name when the item closes, and those writes spend `counts.valuesWritten`,
+ * also `MAX_ITEM_VALUES` per page; writes past it are dropped and counted in
+ * `skips.valuesCapped` (item-core.ts `finalize`). So `itemprop="a b"` on 600
+ * elements keeps 600 `a` values and 400 `b`, and nested items under many names
+ * cannot multiply the output.
+ *
  * The stores, budget, bounded text collectors and block emission live in
  * item-core.ts, shared with the RDFa machine (memory bounds are stated there).
  */

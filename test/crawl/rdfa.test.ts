@@ -205,6 +205,19 @@ describe("RDFa Lite extraction", () => {
     expect((result.structuredData[0]!.raw as Record<string, unknown>)["x"]).toHaveLength(1000);
     expect(result.structuredDataSkips.valuesCapped).toBe(5);
   });
+
+  it("a nested node under several property names cannot multiply past the cap", () => {
+    const levels = 9;
+    const html = page(
+      `<div vocab="https://schema.org/" typeof="Thing">` +
+        `<div property="a b c d e f g h" typeof="Thing">`.repeat(levels) +
+        `<span property="name">x</span>` +
+        "</div>".repeat(levels + 1),
+    );
+    const result = analyzeHtml(html, PAGE_URL);
+    expect(JSON.stringify(result.structuredData).length).toBeLessThan(200_000);
+    expect(result.structuredDataSkips.valuesCapped).toBeGreaterThan(0);
+  });
 });
 
 describe("prefix attribute parsing is linear", () => {
@@ -238,6 +251,7 @@ describe("machine end() with a frame still open", () => {
     errors: 0,
     skips: { microdataItemrefSkipped: 0, rdfaUnsupported: 0, valuesCapped: 0 },
     valuesUsed: 0,
+    valuesWritten: 0,
   });
 
   it("the RDFa machine throws, naming itself and the open frames", () => {

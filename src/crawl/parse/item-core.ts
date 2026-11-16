@@ -14,7 +14,9 @@
  * MEMORY. Bounded by the budget: at most `MAX_ITEM_VALUES` values per page,
  * each text value at most `MICRODATA_TEXT_MAX` (+ one window) characters, and
  * the frame stacks are bounded by the open-element depth. Finalising a node
- * recurses at most `MAX_ITEM_DEPTH` levels.
+ * recurses at most `MAX_ITEM_DEPTH` levels and writes at most
+ * `MAX_ITEM_VALUES` values per page (`valuesWritten`), so a value held under
+ * several names cannot multiply the output.
  */
 import { storableCap } from "../storable-text.js";
 import type {
@@ -52,6 +54,12 @@ export interface StructuredDataCounts {
   errors: number;
   skips: StructuredDataSkips;
   valuesUsed: number;
+  /**
+   * Values written into finished nodes, across both machines, capped at
+   * `MAX_ITEM_VALUES` like `valuesUsed`. It differs from `valuesUsed` only
+   * when one value is held under several names (see `finalize`).
+   */
+  valuesWritten: number;
 }
 
 /** Raw text is collapsed this many characters at a time, so a huge text node is never copied whole. */
@@ -128,15 +136,31 @@ function appendCollapsed(collector: TextCollector, collapsed: string): void {
   if (collector.length > MICRODATA_TEXT_MAX) collector.full = true;
 }
 
-/** The plain JSON-LD-shaped object for a node; `@context` on the top-level node only. */
-function finalize(node: ItemNode, topLevel: boolean): Record<string, unknown> {
+/**
+ * The plain JSON-LD-shaped object for a node; `@context` on the top-level node
+ * only. Every value written spends one of `counts.valuesWritten`, capped at
+ * `MAX_ITEM_VALUES` per page: a node held under several names is written once
+ * per name, so without this cap nested items under K names D levels deep would
+ * write K^D nodes from D values of budget. Values past the cap are dropped and
+ * counted in `skips.valuesCapped`; a property left with no value is omitted.
+ */
+function finalize(node: ItemNode, topLevel: boolean, counts: StructuredDataCounts): Record<string, unknown> {
   const entries: [string, unknown][] = [];
   if (topLevel) entries.push(["@context", SCHEMA_ORG_CONTEXT]);
   if (node.type !== null) entries.push(["@type", node.type]);
   if (node.id !== null) entries.push(["@id", node.id]);
   for (const [name, values] of node.props) {
-    const out = values.map((v) => (typeof v === "string" ? v : finalize(v, false)));
-    entries.push([name, out.length === 1 ? out[0] : out]);
+    const out: unknown[] = [];
+    for (let i = 0; i < values.length; i++) {
+      if (counts.valuesWritten >= MAX_ITEM_VALUES) {
+        counts.skips.valuesCapped += values.length - i;
+        break;
+      }
+      counts.valuesWritten += 1;
+      const v = values[i]!;
+      out.push(typeof v === "string" ? v : finalize(v, false, counts));
+    }
+    if (out.length > 0) entries.push([name, out.length === 1 ? out[0] : out]);
   }
   // Defined, never assigned: a property named `__proto__` stays an own key.
   return Object.fromEntries(entries);
@@ -221,7 +245,7 @@ export function createItemCore(
     const node = frame.node;
     // `topLevel` frames are only ever made with a type (R0.2).
     if (node.type === null) throw new Error(`${format}: a top-level item has no type`);
-    sink({ type: node.type, format: blockFormat, raw: finalize(node, true) });
+    sink({ type: node.type, format: blockFormat, raw: finalize(node, true, counts) });
   };
 
   return {

@@ -392,6 +392,42 @@ describe("microdata adversarial size (Review Focus 4)", () => {
     expect(result.structuredDataSkips.valuesCapped).toBe(3);
   });
 
+  it("a nested item under several names cannot multiply past the per-page cap", () => {
+    // Each level is one value from the budget but is written once per name, so
+    // without an emission cap 8 names x 9 levels would write 8^9 nodes.
+    const names = "a b c d e f g h";
+    const levels = 9;
+    const html = page(
+      `<div itemscope itemtype="https://schema.org/Thing">` +
+        `<div itemprop="${names}" itemscope itemtype="https://schema.org/Thing">`.repeat(levels) +
+        `<span itemprop="leaf">x</span>` +
+        "</div>".repeat(levels + 1),
+    );
+    const result = analyzeHtml(html, PAGE_URL);
+    const count = (v: unknown): number => {
+      if (Array.isArray(v)) return v.reduce((n: number, x) => n + count(x), 0);
+      if (v === null || typeof v !== "object") return 1;
+      return Object.entries(v as Record<string, unknown>)
+        .filter(([k]) => !k.startsWith("@"))
+        .reduce((n, [, x]) => n + count(x), 0) + 1;
+    };
+    // The top-level node itself is not a value; every other node and string is.
+    expect(count(result.structuredData[0]!.raw) - 1).toBe(MAX_ITEM_VALUES);
+    expect(result.structuredDataSkips.valuesCapped).toBeGreaterThan(0);
+  });
+
+  it("a value written under two names costs two of the per-page cap", () => {
+    const metas = `<meta itemprop="a b" content="y">`.repeat(600);
+    const result = analyzeHtml(
+      page(`<div itemscope itemtype="https://schema.org/Thing">${metas}</div>`),
+      PAGE_URL,
+    );
+    const raw = result.structuredData[0]!.raw as Record<string, unknown>;
+    expect(raw["a"]).toHaveLength(600);
+    expect(raw["b"]).toHaveLength(400);
+    expect(result.structuredDataSkips.valuesCapped).toBe(200);
+  });
+
   it("nesting 200 deep returns, with errors counting the levels past 32", () => {
     const levels = 200;
     const open =

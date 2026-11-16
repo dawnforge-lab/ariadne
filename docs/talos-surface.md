@@ -2890,7 +2890,9 @@ problemsCapped
   follow, RDFa it does not model (full-RDFa constructs RDFa Lite does not interpret,
   terms outside schema.org, and a `property` with no enclosing `typeof`, which is
   valid RDFa describing the document itself, so it is a skip and never a
-  `microdataErrors` count), values past the per-page cap.
+  `microdataErrors` count), values past the per-page cap (1,000 values read and
+  1,000 written; a value under several names, `itemprop="a b"`, is written once per
+  name).
 - **Filters** (each selects PAGES; the row stays the whole page): `pageType` (a
   template cohort as this crawl typed it, `(untyped)` for the pages it could not
   type) and `format` (one of the three syntaxes). An unknown `format` is a validation
