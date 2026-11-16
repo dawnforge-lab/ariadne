@@ -37,6 +37,7 @@
  */
 import { sql, type SQL } from "drizzle-orm";
 
+import { MAX_STRUCTURED_DATA_BLOCKS } from "../../crawl/parse/page-analyzer.js";
 import type { Db } from "../../db/client.js";
 import { JUDGED, queryFinding, type RuleIdentity } from "../helpers.js";
 import { copyFor } from "../registry/copy/index.js";
@@ -130,6 +131,14 @@ interface PerPageSpec {
    * would not have.
    */
   needsV4?: true;
+  /**
+   * Evidence about the page itself, and the columns that show it. For
+   * `unresolved-reference`: whether the page's stored blocks reached the
+   * analyzer's cap (`MAX_STRUCTURED_DATA_BLOCKS`), past which blocks were not
+   * stored and the id may be defined (review I3, ruling: the fact is kept and
+   * the uncertainty stated).
+   */
+  pageEvidence?: { columns: QueryRule["columns"]; of: (blockCount: number) => Record<string, unknown> };
 }
 
 const listHas = (key: string) => (): SQL =>
@@ -229,6 +238,7 @@ async function perPageFindings(
         pageId: row.page_id,
         pageUrl: row.url,
         evidence: {
+          ...(spec.pageEvidence?.of(row.blocks.length) ?? {}),
           problems: all.slice(0, MAX_PROBLEMS_IN_EVIDENCE),
           problemCount: all.length,
         },
@@ -381,8 +391,12 @@ const SPECS = {
     problems: (b, format, page) =>
       b.references
         .filter((r) => !page.definedIds.has(r.id))
-        .map((r) => ({ format, path: r.path, id: r.id })),
+        .map((r) => ({ format, path: r.path, id: r.id, written: r.written })),
     needsV4: true,
+    pageEvidence: {
+      columns: [{ key: "blocksAtCap", label: "Blocks At Cap" }],
+      of: (blockCount) => ({ blocksAtCap: blockCount >= MAX_STRUCTURED_DATA_BLOCKS }),
+    },
   },
 } satisfies Record<string, PerPageSpec>;
 
@@ -396,7 +410,7 @@ function perPageRule(spec: PerPageSpec, checkIds: string[]): QueryRule {
     checkIds,
     category: CATEGORY,
     severity: spec.identity.severity,
-    columns: [PROBLEMS_COLUMN, COUNT_COLUMN],
+    columns: [PROBLEMS_COLUMN, ...(spec.pageEvidence?.columns ?? []), COUNT_COLUMN],
     ...copyFor(spec.identity.id),
     rulesetVersion: RULESET_VERSION,
     run: (db, crawlId, caps) => perPageFindings(db, crawlId, capsOr(caps), spec),

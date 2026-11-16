@@ -46,7 +46,7 @@ const V3 = 3;
  * `structured_data.format` and the pages' microdata error and skip counts
  * (Phase 29a). The marker demands it of every page.
  */
-const V4 = 4;
+export const V4 = 4;
 
 const NOT_RECORDED: RuleIdentity = { id: "extraction.not-recorded", severity: "info" };
 

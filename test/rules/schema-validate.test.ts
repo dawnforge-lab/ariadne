@@ -10,8 +10,10 @@ import {
 
 /** Every validation produced in this file, round-tripped through the schema at the end. */
 const produced: BlockValidation[] = [];
-function validate(raw: unknown): BlockValidation {
-  const v = validateBlock(raw);
+/** The page every block here sits on: relative ids resolve against it. */
+const DOC = "https://example.com/page";
+function validate(raw: unknown, documentUrl: string = DOC): BlockValidation {
+  const v = validateBlock(raw, documentUrl);
   produced.push(v);
   return v;
 }
@@ -253,7 +255,7 @@ describe("validateBlock — empty values (JSON-LD, Microdata, RDFa)", () => {
     ]);
   });
 
-  it("0, false, a bare reference, a typed node and a node with a property are not empty", () => {
+  it("0, false, a bare reference and a node with a property are not empty; a typed node with none is", () => {
     const v = validate({
       "@context": CTX,
       "@type": "Product",
@@ -264,7 +266,7 @@ describe("validateBlock — empty values (JSON-LD, Microdata, RDFa)", () => {
       brand: { "@type": "Brand" },
       offers: { price: "1" },
     });
-    expect(v.emptyValues).toEqual([]);
+    expect(v.emptyValues).toEqual([{ path: "$.brand", type: "Product", property: "brand" }]);
   });
 
   it("an empty value inside a nested node is reported at the nested path, not at the parent", () => {
@@ -322,9 +324,9 @@ describe("validateBlock — ids and references (JSON-LD node references)", () =>
       about: [{ "@id": "#topic" }, { "@id": "https://example.com/#webpage" }],
     });
     expect(v.references).toEqual([
-      { path: "$.publisher", id: "https://example.com/#org" },
-      { path: "$.about[0]", id: "#topic" },
-      { path: "$.about[1]", id: "https://example.com/#webpage" },
+      { path: "$.publisher", id: "https://example.com/#org", written: "https://example.com/#org" },
+      { path: "$.about[0]", id: "https://example.com/page#topic", written: "#topic" },
+      { path: "$.about[1]", id: "https://example.com/#webpage", written: "https://example.com/#webpage" },
     ]);
     expect(v.definedIds).toEqual(["https://example.com/#webpage", "https://example.com/#jane"]);
   });
@@ -339,7 +341,7 @@ describe("validateBlock — ids and references (JSON-LD node references)", () =>
       department: [{ "@id": "#org", name: "Again" }, { "@id": "  ", name: "Blank" }],
     });
     expect(v.references).toEqual([]);
-    expect(v.definedIds).toEqual(["#org"]);
+    expect(v.definedIds).toEqual(["https://example.com/page#org"]);
   });
 
   it("references and ids are read in a block outside the vocabulary too", () => {
@@ -349,8 +351,8 @@ describe("validateBlock — ids and references (JSON-LD node references)", () =>
       "@id": "#w",
       maker: { "@id": "#m" },
     });
-    expect(v.definedIds).toEqual(["#w"]);
-    expect(v.references).toEqual([{ path: "$.maker", id: "#m" }]);
+    expect(v.definedIds).toEqual(["https://example.com/page#w"]);
+    expect(v.references).toEqual([{ path: "$.maker", id: "https://example.com/page#m", written: "#m" }]);
   });
 });
 
@@ -408,15 +410,15 @@ describe("validateBlock — the top-level node and its properties", () => {
       "https://ex.com/",
     ).structuredData;
     expect(blocks).toHaveLength(2);
-    const [org, page] = blocks.map((b) => validate(b.raw));
+    const [org, page] = blocks.map((b) => validate(b.raw, "https://ex.com/"));
     expect(org!.nodes).toEqual([
       { path: "$", type: "Organization", properties: ["name"], emptyProperties: [], propertiesCapped: false },
     ]);
-    expect(org!.definedIds).toEqual(["#org"]);
+    expect(org!.definedIds).toEqual(["https://ex.com/#org"]);
     expect(page!.nodes).toEqual([
       { path: "$", type: "WebPage", properties: ["name", "publisher"], emptyProperties: [], propertiesCapped: false },
     ]);
-    expect(page!.references).toEqual([{ path: "$.publisher", id: "#org" }]);
+    expect(page!.references).toEqual([{ path: "$.publisher", id: "https://ex.com/#org", written: "#org" }]);
   });
 });
 
@@ -456,18 +458,18 @@ describe("validateBlock — caps and refusals", () => {
   });
 
   it("refuses a block that is not a JSON object", () => {
-    expect(() => validateBlock([{ "@type": "Product" }])).toThrow(/object/);
-    expect(() => validateBlock("Product")).toThrow(/object/);
+    expect(() => validateBlock([{ "@type": "Product" }], DOC)).toThrow(/object/);
+    expect(() => validateBlock("Product", DOC)).toThrow(/object/);
   });
 
   it("refuses a block nested deeper than the analyzer stores", () => {
     let node: Record<string, unknown> = { "@type": "Thing" };
     for (let i = 0; i < 70; i += 1) node = { "@type": "Thing", subjectOf: node };
-    expect(() => validateBlock(node)).toThrow(/nest/);
+    expect(() => validateBlock(node, DOC)).toThrow(/nest/);
   });
 
   it("blockValidationSchema is strict, and refuses a blob in the shape before the rework", () => {
-    const v = validateBlock(product());
+    const v = validateBlock(product(), DOC);
     expect(() => blockValidationSchema.parse({ ...v, extra: 1 })).toThrow();
     const { emptyValues: _e, definedIds: _d, references: _r, nodes: _n, ...rest } = v;
     expect(() =>
@@ -475,7 +477,131 @@ describe("validateBlock — caps and refusals", () => {
     ).toThrow();
   });
 
-  // Runs last (vitest runs a file's tests in order): every case above round-trips.
+});
+
+// 29a rework, review fix round 1. Appended so no earlier line moves.
+
+describe("validateBlock — ids resolved against the document base (JSON-LD 1.1 IRIs)", () => {
+  it("a relative reference and an absolute definition of the same node resolve to one IRI", () => {
+    const v = validate({
+      "@context": CTX,
+      "@type": "WebPage",
+      "@id": "https://example.com/page#webpage",
+      name: "Home",
+      publisher: { "@id": "#org" },
+      about: { "@id": "/topics/mugs" },
+    });
+    expect(v.definedIds).toEqual(["https://example.com/page#webpage"]);
+    expect(v.references).toEqual([
+      { path: "$.publisher", id: "https://example.com/page#org", written: "#org" },
+      { path: "$.about", id: "https://example.com/topics/mugs", written: "/topics/mugs" },
+    ]);
+    // The relative definition of the page itself resolves to the same IRI as the absolute one.
+    expect(validate({ "@context": CTX, "@type": "WebPage", "@id": "#webpage", name: "x" }).definedIds).toEqual([
+      "https://example.com/page#webpage",
+    ]);
+  });
+
+  it("a @base in the block's @context is the base, itself resolved against the page", () => {
+    const absolute = validate({
+      "@context": [CTX, { "@base": "https://other.example/dir/" }],
+      "@type": "Organization",
+      "@id": "org",
+      name: "Acme",
+      parentOrganization: { "@id": "parent" },
+    });
+    expect(absolute.definedIds).toEqual(["https://other.example/dir/org"]);
+    expect(absolute.references).toEqual([
+      { path: "$.parentOrganization", id: "https://other.example/dir/parent", written: "parent" },
+    ]);
+    const relative = validate({ "@context": { "@vocab": "https://schema.org/", "@base": "/shop/" }, "@id": "x", name: "y" });
+    expect(relative.definedIds).toEqual(["https://example.com/shop/x"]);
+    // A null @base removes the base: a relative id has nothing to resolve against and stays as written.
+    const none = validate({ "@context": [CTX, { "@base": null }], "@id": "#x", name: "y", knows: { "@id": "#y" } });
+    expect(none.definedIds).toEqual(["#x"]);
+    expect(none.references).toEqual([{ path: "$.knows", id: "#y", written: "#y" }]);
+  });
+
+  it("blank-node ids are left as they are", () => {
+    const v = validate({ "@context": CTX, "@type": "Person", "@id": "_:b0", name: "Ada", knows: { "@id": "_:b1" } });
+    expect(v.definedIds).toEqual(["_:b0"]);
+    expect(v.references).toEqual([{ path: "$.knows", id: "_:b1", written: "_:b1" }]);
+  });
+
+  it("an id that is not an IRI reference stays as written, as the microdata extractor stores an itemid", () => {
+    const v = validate({ "@context": CTX, "@type": "Thing", name: "x", sameAs: { "@id": "http://[bad" } });
+    expect(v.references).toEqual([{ path: "$.sameAs", id: "http://[bad", written: "http://[bad" }]);
+  });
+
+  it("a JSON-LD #org reference matches a microdata itemid that resolves to the same IRI", () => {
+    const blocks = analyzePage(
+      `<script type="application/ld+json">{"@context":"https://schema.org","@type":"WebPage","name":"Home","publisher":{"@id":"#org"}}</script>` +
+        `<div itemscope itemtype="https://schema.org/Organization" itemid="#org"><span itemprop="name">Acme</span></div>`,
+      "https://ex.com/about",
+    ).structuredData;
+    const page = blocks.find((b) => b.format === "jsonld")!;
+    const org = blocks.find((b) => b.format === "microdata")!;
+    // The extractor resolves itemid against the page; the validator resolves @id the same way.
+    expect((org.raw as Record<string, unknown>)["@id"]).toBe("https://ex.com/about#org");
+    expect(validate(org.raw, "https://ex.com/about").definedIds).toEqual(["https://ex.com/about#org"]);
+    expect(validate(page.raw, "https://ex.com/about").references).toEqual([
+      { path: "$.publisher", id: "https://ex.com/about#org", written: "#org" },
+    ]);
+  });
+
+  it("refuses a document URL that is not absolute, naming it", () => {
+    expect(() => validateBlock({ "@type": "Thing" }, "/relative")).toThrow(/\/relative/);
+  });
+});
+
+describe("validateBlock — a node with no properties and no @id is empty (spec §29a amendment)", () => {
+  it("a node holding only keywords is empty at its own path, and its type is still judged", () => {
+    const v = validate({
+      "@context": CTX,
+      "@type": "Product",
+      name: "Mug",
+      offers: { "@type": "Offer" },
+      aggregateRating: { "@type": "AggregateRating", "@context": CTX },
+      review: { "@type": "Reveiw" },
+      subjectOf: { "@language": "en" },
+    });
+    expect(v.emptyValues).toEqual([
+      { path: "$.offers", type: "Product", property: "offers" },
+      { path: "$.aggregateRating", type: "Product", property: "aggregateRating" },
+      { path: "$.review", type: "Product", property: "review" },
+      { path: "$.subjectOf", type: "Product", property: "subjectOf" },
+    ]);
+    // The empty node is still a node: its unknown type is reported too.
+    expect(v.unknownTypes).toEqual([{ path: "$.review", type: "Reveiw" }]);
+    expect(v.nodes[0]!.emptyProperties).toEqual(["aggregateRating", "offers", "review", "subjectOf"]);
+  });
+
+  it("an @id, a property, a value object or a list container is not an empty node", () => {
+    const v = validate({
+      "@context": CTX,
+      "@type": "Product",
+      name: "Mug",
+      brand: { "@type": "Brand", "@id": "#brand" },
+      offers: { "@type": "Offer", price: "1" },
+      description: { "@value": "Blue", "@language": "en" },
+      keywords: { "@list": ["a"] },
+    });
+    expect(v.emptyValues).toEqual([]);
+  });
+});
+
+describe("validateBlock — what defines an id (review M1)", () => {
+  it("@context beside an @id is not content: such a node defines nothing", () => {
+    // An @graph member {"@id": "#x"} as the analyzer stores it, with its container's context.
+    expect(validate({ "@context": CTX, "@id": "#x" }).definedIds).toEqual([]);
+    expect(validate({ "@context": CTX, "@id": "#x", "@type": "Thing" }).definedIds).toEqual([
+      "https://example.com/page#x",
+    ]);
+  });
+});
+
+describe("validateBlock — every verdict round-trips", () => {
+  // Runs last (vitest runs a file's describes in order): every case above round-trips.
   it("blockValidationSchema.parse(validateBlock(x)) round-trips for every case above", () => {
     expect(produced.length).toBeGreaterThan(20);
     for (const v of produced) expect(blockValidationSchema.parse(v)).toEqual(v);

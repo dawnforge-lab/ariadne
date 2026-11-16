@@ -16,7 +16,11 @@
  *    empty value (`schema.empty-value`), and every JSON-LD parse error and
  *    microdata error on the page;
  *  - an INFO is a pending or superseded property, and a reference no block of
- *    the same page defines (`schema.unresolved-reference`).
+ *    the same page defines (`schema.unresolved-reference`). On a crawl not
+ *    wholly at extraction 4 references are NOT counted, as the rule does not
+ *    judge them there, and the listing names them in `notMeasured`
+ *    (`UNRESOLVED_NOT_MEASURED`); the CSV view writes no such rows and its
+ *    export answer carries the same `notMeasured`.
  *
  * Structured data is judged by the schema.org vocabulary and the JSON-LD,
  * Microdata and RDFa specs (29a rework); no search engine's profile decides
@@ -25,6 +29,8 @@
 import { sql, type SQL } from "drizzle-orm";
 
 import type { StructuredDataFormat, StructuredDataSkips } from "../crawl/parse/page-analyzer.js";
+import { V4 } from "../rules/query/page-facts.js";
+import type { NotMeasured } from "./overview.js";
 import { ServiceError, clip } from "./errors.js";
 
 /** The keys of `StructuredDataSkips`, which a stored `structured_data_skips` must hold exactly. */
@@ -139,7 +145,8 @@ function list(blob: SQL, name: (typeof VALIDATION_LISTS)[number]): SQL {
 const MALFORMED_ENTRIES = [
   'lax $.nodes[*] ? (@.type() != "object" || !exists(@.path) || !exists(@."type")' +
     ' || !exists(@.propertiesCapped) || !exists(@.properties) || @.properties.type() != "array")',
-  'lax $.references[*] ? (@.type() != "object" || !exists(@.id) || @.id.type() != "string")',
+  'lax $.references[*] ? (@.type() != "object" || !exists(@.id) || @.id.type() != "string"' +
+    ' || !exists(@.written) || @.written.type() != "string")',
   'lax $.definedIds[*] ? (@.type() != "string")',
 ];
 
@@ -165,14 +172,39 @@ export function validationReadable(blob: SQL): SQL {
 }
 
 /**
+ * What a listing or export names when it does not count unresolved references:
+ * the rule's own refusal (ruling R0.7), on a crawl not wholly at extraction 4.
+ */
+export const UNRESOLVED_NOT_MEASURED: NotMeasured[number] = {
+  id: "schema.unresolved-reference",
+  reason:
+    "references are resolved only on a crawl wholly at extraction version 4: below it, " +
+    "microdata and RDFa blocks that may define the id were never read",
+};
+
+/**
+ * True when every page of the crawl was written by extraction 4 or later —
+ * `v4Gate`'s question, asked in SQL so the listing and the CSV answer it in the
+ * statement that counts (an uncorrelated subquery, evaluated once).
+ */
+export function referencesMeasured(crawlId: string): SQL {
+  return sql`not exists (
+    select 1 from pages px
+     where px.crawl_id = ${crawlId}
+       and (px.extraction_version is null or px.extraction_version < ${V4}))`;
+}
+
+/**
  * True for a reference entry `ref` (jsonb) whose id no block of the page
  * `pageId` defines — what makes a reference an `unresolved-reference`. Per PAGE,
  * not per block: a graph split over two scripts is one graph, so a sibling
  * block's definition resolves it. The same test `schema.unresolved-reference`
- * applies.
+ * applies, under the same gate: never true on a crawl not wholly at
+ * extraction 4 (`referencesMeasured`). Ids are stored resolved against the
+ * page (validate.ts), so the comparison is of strings.
  */
 function unresolved(ref: SQL, crawlId: string, pageId: SQL): SQL {
-  return sql`not exists (
+  return sql`${referencesMeasured(crawlId)} and not exists (
     select 1 from structured_data d
      where d.crawl_id = ${crawlId} and d.page_id = ${pageId}
        and d.validation_jsonb -> 'definedIds' @> jsonb_build_array(${ref} -> 'id'))`;
@@ -304,14 +336,18 @@ export function problemCells(entry: unknown, where: string): ProblemCells {
       if (type !== null && typeof type !== "string") return bad("has a type that is neither a string nor null");
       return { path, nodeType: type ?? "", problem: "empty-value", detail: `${text("property")} is empty` };
     }
-    case "unresolved-reference":
-      // A bare reference has no type of its own; the id is the whole of it.
+    case "unresolved-reference": {
+      // A bare reference has no type of its own; the id is the whole of it —
+      // as written, and as resolved against the page when that differs.
+      const id = text("id");
+      const written = text("written");
       return {
         path,
         nodeType: "",
         problem: "unresolved-reference",
-        detail: `${text("id")} is not defined on this page`,
+        detail: `${written === id ? id : `${written} (${id})`} is not defined on this page`,
       };
+    }
   }
 }
 

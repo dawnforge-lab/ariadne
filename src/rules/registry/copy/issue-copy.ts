@@ -974,7 +974,7 @@ export const COPY_TEMPLATES: Record<string, IssueCopy> = {
   "schema.breadcrumb-absent": {
     title: "Structured data: No BreadcrumbList markup on the site",
     explanation:
-      "The site has at least 5 indexable, self-canonical pages and no page carries a BreadcrumbList in JSON-LD, microdata or RDFa, the three formats that are read. Breadcrumb markup lets search results show the path to a page and tells search engines how sections relate.",
+      "The site has at least 5 indexable, self-canonical pages and no page carries a BreadcrumbList in JSON-LD, microdata or RDFa, the three formats that are read. A schema.org BreadcrumbList states in machine-readable form the path to a page and how the site's sections relate, for every consumer of the markup, search engines and agents alike.",
     howToFix:
       "Add a BreadcrumbList block to every template below the home page, generated from the same navigation data as the visible breadcrumbs.",
   },
@@ -996,7 +996,7 @@ export const COPY_TEMPLATES: Record<string, IssueCopy> = {
   "schema.parse-error": {
     title: "Structured data: Markup that could not be parsed",
     explanation:
-      "Indexable, self-canonical pages whose structured data the parser could not read: JSON-LD that is not valid JSON, or microdata and RDFa Lite with a structural fault such as an itemscope with no type. Search engines skip a block they cannot parse, so it earns nothing. A page extracted before microdata was read is judged on JSON-LD alone.",
+      "Indexable, self-canonical pages whose structured data could not be parsed: JSON-LD that is not valid JSON, which the JSON-LD syntax requires, or microdata and RDFa Lite with a structural fault such as an itemscope with no type. A block that does not parse states nothing to any consumer of the markup, search engines and agents alike. A page extracted before microdata was read is judged on JSON-LD alone.",
     howToFix:
       "Fix the syntax the counts point to: validate the JSON-LD with a JSON linter, and give every top-level itemscope an itemtype. Check the template that outputs it, not just this page.",
   },
@@ -1010,7 +1010,7 @@ export const COPY_TEMPLATES: Record<string, IssueCopy> = {
   "schema.unknown-property": {
     title: "Structured data: Property the node's type does not take",
     explanation:
-      "Indexable, self-canonical pages with a property that is not defined for the type of the node it sits on, listed per node with its path. The property is ignored by search engines.",
+      "Indexable, self-canonical pages with a property that schema.org does not define for the type of the node it sits on, listed per node with its path. Every consumer of the markup, search engines and agents alike, reads it as a property that type does not have.",
     howToFix:
       "Rename the property to the vocabulary's own name for it, or move it to a node whose type takes it.",
   },
@@ -1038,7 +1038,7 @@ export const COPY_TEMPLATES: Record<string, IssueCopy> = {
   "schema.unresolved-reference": {
     title: "Structured data: Reference to an id no node on the page defines",
     explanation:
-      "Indexable, self-canonical pages with a node reference (a JSON-LD object holding only an @id) whose id no node in any of the page's blocks defines; ids are compared as written, so a relative #org and the absolute address of the same node do not match. Each row gives the format, the path and the id. Referring to an entity defined elsewhere, such as an absolute IRI on another site, is legal JSON-LD, so this is a fact to check rather than an error: a reader of this page learns nothing about the referenced node but its id.",
+      "Indexable, self-canonical pages with a node reference (a JSON-LD object holding only an @id) whose id no node in any of the page's blocks defines, every id resolved against the page URL or a declared @base as JSON-LD 1.1 resolves IRIs; each row gives the format, the path, and the id as written and as resolved. Referring to an entity defined elsewhere, such as an absolute IRI on another site, is legal JSON-LD, so this is a fact to check rather than an error: a reader of this page learns nothing about the referenced node but its id. Where a page's blocks reached the per-page storage limit (Blocks At Cap), blocks past it were not stored, so the id may be defined there.",
     howToFix:
       "Where the id was meant to name a node on this page (an Organization in a graph split over two scripts, say), give the reference and the definition the same id, written the same way. Where it deliberately names a node on another page or site, nothing needs to change.",
   },

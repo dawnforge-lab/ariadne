@@ -20,6 +20,7 @@ import {
   schemaMetrics,
 } from "../../src/rules/metric/schema-metrics.js";
 import { shapeMetricTable } from "../../src/rules/registry/metric-table.js";
+import { MAX_PROBLEMS_PER_LIST } from "../../src/rules/schema-org/validate.js";
 import {
   databaseUrl,
   dropCrawls,
@@ -295,5 +296,12 @@ describe("schema.property-coverage against the database", () => {
       { ...product, key: "sku", value: 1 },
       { ...product, key: "image", value: 0 },
     ]);
+  });
+});
+
+// 29a rework, review fix round 1 (M3): the copy's per-node cap is the validator's.
+describe("schema.property-coverage copy names the validator's own cap", () => {
+  it("says the property list stops at MAX_PROBLEMS_PER_LIST", () => {
+    expect(rule(ID).explanation).toContain(`property list stops at ${MAX_PROBLEMS_PER_LIST}`);
   });
 });

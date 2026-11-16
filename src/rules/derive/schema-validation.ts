@@ -14,12 +14,15 @@
  *
  * **Memory (hard rule 6).** Rows stream by an `id` cursor, `SCHEMA_VALIDATION_BATCH`
  * at a time (the `sd_crawl_id` index serves exactly that query), so RAM is
- * O(batch) however many blocks the crawl holds.
+ * O(batch) however many blocks the crawl holds. Each block's page is joined in
+ * for its URL, the base its ids resolve against (29a rework): one text per row.
  *
  * **Errors are loud.** `validateBlock` throws on a block it cannot judge (a
  * non-object, or one past the nesting cap). The analyzer never stores such a
  * block, so a row that does throw is one this engine did not write; the error
- * names the crawl and the row id, and the transaction rolls back.
+ * names the crawl and the row id, and the transaction rolls back. A block whose
+ * page row is missing throws too: its ids have no base to resolve against, and
+ * resolving them against anything else would be a guess.
  */
 import { eq, sql, type SQL } from "drizzle-orm";
 
@@ -42,6 +45,8 @@ export interface SchemaValidationDerivation extends Record<string, number> {
 type BlockRow = {
   id: string;
   raw_jsonb: unknown;
+  /** The block's page URL; null only when the page row is missing (refused). */
+  url: string | null;
 };
 
 /**
@@ -73,17 +78,24 @@ export async function deriveSchemaValidation(
       // Qualified on purpose: a bare `order by id` binds to the text alias above
       // and sorts lexically while the cursor advances numerically.
       const batch = await tx.execute<BlockRow>(sql`
-        select sd.id::text as id, sd.raw_jsonb
+        select sd.id::text as id, sd.raw_jsonb, p.url
         from structured_data sd
+        left join pages p on p.crawl_id = sd.crawl_id and p.id = sd.page_id
         where sd.crawl_id = ${crawlId} and sd.id > ${cursor}::bigint
         order by sd.id
         limit ${SCHEMA_VALIDATION_BATCH}`);
       if (batch.rows.length === 0) break;
 
       const values: SQL[] = batch.rows.map((row) => {
+        if (row.url === null) {
+          throw new Error(
+            `deriveSchemaValidation: crawl '${crawlId}' structured_data row ${row.id} has no page row — ` +
+              "the base its ids resolve against is unknown",
+          );
+        }
         let blob;
         try {
-          blob = validateBlock(row.raw_jsonb);
+          blob = validateBlock(row.raw_jsonb, row.url);
         } catch (err) {
           throw new Error(
             `deriveSchemaValidation: crawl '${crawlId}' structured_data row ${row.id} ` +

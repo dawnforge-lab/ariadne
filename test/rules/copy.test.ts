@@ -2069,3 +2069,25 @@ describe("structured-data copy cites web standards (29a rework)", () => {
     expect(`${c.explanation} ${c.howToFix}`).not.toMatch(/required|recommended/i);
   });
 });
+
+// 29a rework, review fix round 1. Appended so no earlier line moves.
+describe("structured-data copy after the review (29a rework)", () => {
+  it("schema.unresolved-reference resolves ids against the page, and names the block cap's doubt", () => {
+    const c = copyFor("schema.unresolved-reference");
+    expect(c.explanation).toMatch(/resolved against the page URL/);
+    expect(c.explanation).toMatch(/@base/);
+    expect(c.explanation).not.toMatch(/compared as written/);
+    expect(c.explanation).toMatch(/Blocks At Cap/);
+    expect(c.explanation).toMatch(/may be defined there/);
+  });
+
+  // M4: the copy argues from the specs, for every consumer — no one reader's behaviour.
+  it("parse-error, unknown-property and breadcrumb-absent cite the specs and every consumer", () => {
+    for (const id of ["schema.parse-error", "schema.unknown-property", "schema.breadcrumb-absent"]) {
+      const text = copyFor(id).explanation;
+      expect(text, id).toMatch(/every consumer|any consumer/i);
+      expect(text, id).toMatch(/schema\.org|JSON-LD/);
+      expect(text, id).not.toMatch(/search engines skip|ignored by search engines|search results show/i);
+    }
+  });
+});

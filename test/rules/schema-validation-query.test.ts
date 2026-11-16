@@ -20,6 +20,7 @@ import {
   MAX_PROBLEMS_IN_EVIDENCE,
   schemaValidationRules,
 } from "../../src/rules/query/schema-validation.js";
+import { MAX_STRUCTURED_DATA_BLOCKS } from "../../src/crawl/parse/page-analyzer.js";
 import type { Finding, QueryRule } from "../../src/rules/registry/types.js";
 import { DEFAULT_THRESHOLDS } from "../../src/rules/judgement.js";
 import type { JudgementContext } from "../../src/rules/registry/types.js";
@@ -344,7 +345,8 @@ describe("the schema validation rules against the database", () => {
       expect(found).toHaveLength(1);
       expect(found[0]!.severity).toBe("info");
       expect(found[0]!.evidence).toEqual({
-        problems: [{ format: "jsonld", path: "$.about[1]", id: "#topic" }],
+        blocksAtCap: false,
+        problems: [{ format: "jsonld", path: "$.about[1]", id: `${url("/a")}#topic`, written: "#topic" }],
         problemCount: 1,
       });
     });
@@ -355,7 +357,15 @@ describe("the schema validation rules against the database", () => {
         await onePage({ ...CLEAN_ORG, parentOrganization: { "@id": "https://parent.example/#org" } }),
       );
       expect(found[0]!.evidence).toEqual({
-        problems: [{ format: "jsonld", path: "$.parentOrganization", id: "https://parent.example/#org" }],
+        blocksAtCap: false,
+        problems: [
+          {
+            format: "jsonld",
+            path: "$.parentOrganization",
+            id: "https://parent.example/#org",
+            written: "https://parent.example/#org",
+          },
+        ],
         problemCount: 1,
       });
     });
@@ -374,7 +384,8 @@ describe("the schema validation rules against the database", () => {
       const crawlId = await newCrawl();
       const ids = await addPages(crawlId, [{ path: "/a" }]);
       await addBlock(crawlId, ids.get("/a")!, PAGE);
-      await addBlock(crawlId, ids.get("/a")!, ORG, "microdata");
+      // As the extractor stores it: itemid="#org" resolved against the page.
+      await addBlock(crawlId, ids.get("/a")!, { ...ORG, "@id": `${url("/a")}#org` }, "microdata");
       await deriveSchemaValidation(db, crawlId);
       expect(await run(ID, crawlId)).toEqual([]);
     });
@@ -591,6 +602,39 @@ describe("the schema validation rules against the database", () => {
       const found = await rule(ID).run(db, await productSite(12, 9), { listing: 2 } as never);
       expect(found).toHaveLength(2);
       expect(found[1]!.evidence).toMatchObject({ truncated: { reported: 2, total: 3 } });
+    });
+  });
+
+  // 29a rework, review fix round 1. Appended so no earlier line moves.
+  describe("schema.unresolved-reference after the review", () => {
+    const ID = "schema.unresolved-reference";
+    const PAGE = { "@context": ctx, "@type": "WebPage", name: "Home", publisher: { "@id": "#org" } };
+
+    it("a relative reference and an absolute definition of the same IRI resolve", async () => {
+      expect(
+        await run(ID, await onePage(PAGE, { ...CLEAN_ORG, "@id": `${url("/a")}#org` })),
+      ).toEqual([]);
+    });
+
+    it(`a page holding MAX_STRUCTURED_DATA_BLOCKS blocks still fires, with blocksAtCap: true`, async () => {
+      const crawlId = await newCrawl();
+      const ids = await addPages(crawlId, [{ path: "/a" }, { path: "/b" }]);
+      await addBlock(crawlId, ids.get("/a")!, PAGE);
+      for (let i = 1; i < MAX_STRUCTURED_DATA_BLOCKS; i += 1) {
+        await addBlock(crawlId, ids.get("/a")!, { "@context": ctx, "@type": "Thing", name: `t${i}` });
+      }
+      // One block short of the cap: the same reference, and no flag.
+      await addBlock(crawlId, ids.get("/b")!, PAGE);
+      await deriveSchemaValidation(db, crawlId);
+      const found = await run(ID, crawlId);
+      expect(found.map((f) => [f.pageUrl, f.evidence["blocksAtCap"]])).toEqual([
+        [url("/a"), true],
+        [url("/b"), false],
+      ]);
+    });
+
+    it("declares the Blocks At Cap column beside the problems", () => {
+      expect(rule(ID).columns.map((c) => c.key)).toEqual(["problems", "blocksAtCap", "problemCount"]);
     });
   });
 });

@@ -46,13 +46,24 @@
  *    values.ts), at its own path — `offers: {price: ""}` is `$.offers.price`,
  *    `sameAs: ["", x]` is `$.sameAs[0]` — with the type of the node holding it
  *    (null when that node is untyped) and the property's name;
- *  - `definedIds`: the `@id` of every node that carries anything besides it,
- *    each once. NEVER capped: a defined id dropped for want of room would turn
- *    every reference to it into a false "unresolved" (the block's stored size,
- *    `MAX_LD_JSON_CHARS` in the analyzer, bounds it);
- *  - `references`: every bare `{"@id": …}` (`bareReferenceId`) with its path.
- *    Whether it resolves is a question about the PAGE — another block may
- *    define the id — so it is answered at rules time, not here;
+ *  - `definedIds`: the `@id` of every node that carries a `@type` or a
+ *    property, each once. NEVER capped: a defined id dropped for want of room
+ *    would turn every reference to it into a false "unresolved" (the block's
+ *    stored size, `MAX_LD_JSON_CHARS` in the analyzer, bounds it);
+ *  - `references`: every bare `{"@id": …}` (`bareReferenceId`) with its path,
+ *    the id resolved (`id`) and as written (`written`). Whether it resolves is
+ *    a question about the PAGE — another block may define the id — so it is
+ *    answered at rules time, not here.
+ *
+ * **Ids are IRIs, resolved against the document base** (JSON-LD 1.1 §IRIs, as
+ * microdata `itemid` and RDFa `resource` already are at extraction): the page
+ * URL, or a `@base` the block's top-level `@context` declares (itself resolved
+ * against the page; `null` removes the base). Both `definedIds` and
+ * `references` hold resolved ids, so `#org` and `https://page#org` are one
+ * node. A blank-node id (`_:b0`) is left as it is; an id that is not an IRI
+ * reference, or a relative id with no base, stays as written — the extractor's
+ * own rule for an unresolvable `itemid`. A `@base` in a nested context is not
+ * read, as a nested `@vocab` is not. `<base href>` is honoured by no format.
  *  - `nodes`: the block's top-level node — the analyzer stores each `@graph`
  *    member as a block of its own, so a member is a top-level node too — with
  *    its type (the primary known type, else the first stated `@type` as
@@ -70,6 +81,7 @@ import { z } from "zod";
 
 import { MAX_LD_JSON_NESTING } from "../../crawl/parse/page-analyzer.js";
 import { schemaOrgName } from "../../crawl/parse/schema-names.js";
+import { resolveUrl } from "../../crawl/parse/item-core.js";
 import { bareReferenceId, carriesValue, definedId, isEmptyValue } from "./values.js";
 import {
   isDataType,
@@ -105,7 +117,8 @@ export const blockValidationSchema = z.strictObject({
   emptyValues: list(z.strictObject({ path, type: z.string().nullable(), property: z.string() })),
   // Not capped, by design: see the header.
   definedIds: z.array(z.string().min(1)),
-  references: list(z.strictObject({ path, id: z.string().min(1) })),
+  // `id` resolved against the document base (the compared value); `written` as authored.
+  references: list(z.strictObject({ path, id: z.string().min(1), written: z.string().min(1) })),
   nodes: list(
     z.strictObject({
       path,
@@ -193,7 +206,23 @@ class Walker {
   outside = 0;
   capped = false;
 
-  constructor(private readonly judged: boolean) {}
+  constructor(
+    private readonly judged: boolean,
+    /** The document base ids resolve against; null when the block's context removed it. */
+    private readonly base: string | null,
+  ) {}
+
+  /** An `@id` as an IRI: resolved against the base, a blank node as it is (see the header). */
+  private resolveId(id: string): string {
+    if (id.startsWith("_:")) return id;
+    if (this.base !== null) return resolveUrl(id, this.base);
+    try {
+      return new URL(id).href;
+    } catch {
+      // Relative, with no base to resolve against: as written.
+      return id;
+    }
+  }
 
   private push<K extends keyof Lists>(key: K, entry: Lists[K][number]): void {
     const target = this.lists[key] as Lists[K][number][];
@@ -272,7 +301,7 @@ class Walker {
       );
     }
     const id = definedId(node);
-    if (id !== null) this.definedIds.add(id);
+    if (id !== null) this.definedIds.add(this.resolveId(id));
 
     if (!this.judged) {
       const type = statedType(node);
@@ -334,11 +363,13 @@ class Walker {
   ): void {
     if (isEmptyValue(value)) {
       this.push("emptyValues", { path, type: site.type, property: site.property });
-      return;
+      // A typed node with no property is empty AND still a node: its type is
+      // judged below like any other's.
+      if (!isRecord(value) || !("@type" in value)) return;
     }
     const reference = bareReferenceId(value);
     if (reference !== null) {
-      this.push("references", { path, id: reference });
+      this.push("references", { path, id: this.resolveId(reference), written: reference });
       return;
     }
     if (Array.isArray(value)) {
@@ -380,14 +411,49 @@ function typesOf(node: Record<string, unknown>): string[] {
     .filter((t): t is string => t !== null);
 }
 
-/** Validate one stored structured-data block. Throws on a block that is not a JSON object. */
-export function validateBlock(raw: unknown): BlockValidation {
+/**
+ * The base the block's ids resolve against: the document URL, then each
+ * `@base` the top-level `@context` declares, in order (a relative one resolved
+ * against the base before it; `null` removes the base). A `@base` that cannot
+ * be resolved removes it too, so ids stay as written rather than resolving
+ * against a base the markup did not mean.
+ */
+function documentBase(context: unknown, documentUrl: string): string | null {
+  let base: string | null = documentUrl;
+  for (const entry of Array.isArray(context) ? context : [context]) {
+    if (!isRecord(entry) || !("@base" in entry)) continue;
+    const declared = entry["@base"];
+    if (typeof declared !== "string") {
+      base = null;
+      continue;
+    }
+    try {
+      base = base === null ? new URL(declared).href : new URL(declared, base).href;
+    } catch {
+      base = null;
+    }
+  }
+  return base;
+}
+
+/**
+ * Validate one stored structured-data block found on the page at
+ * `documentUrl`, the base its ids resolve against. Throws on a block that is
+ * not a JSON object, and on a document URL that is not absolute (the
+ * derivation passes `pages.url`, which always is).
+ */
+export function validateBlock(raw: unknown, documentUrl: string): BlockValidation {
   if (!isRecord(raw)) {
     throw new Error(
       `validateBlock: a stored block must be a JSON object, got ${Array.isArray(raw) ? "an array" : typeof raw}`,
     );
   }
-  const walker = new Walker(judgedContext(raw["@context"]));
+  try {
+    new URL(documentUrl);
+  } catch {
+    throw new Error(`validateBlock: the document URL '${documentUrl}' is not an absolute URL`);
+  }
+  const walker = new Walker(judgedContext(raw["@context"]), documentBase(raw["@context"], documentUrl));
   const topType = walker.node(raw, "$", 1, []);
   return {
     topType,

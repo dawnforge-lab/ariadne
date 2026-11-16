@@ -1808,7 +1808,7 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "One row per page that carries structured data — a JSON-LD, microdata or " +
         "RDFa block — or a JSON-LD parse error or microdata error: {url, pageType, " +
         "indexable, formats, types, nodes, warningCount, infoCount, " +
-        "jsonLdParseErrors, microdataErrors, skips}. A page with neither is not " +
+        "jsonLdParseErrors, microdataErrors, skips, blocksAtCap}. A page with neither is not " +
         "listed. Use it to see which templates publish which markup, and where " +
         "the problems are, before reading the schema.* findings.\n\n" +
         "formats are the syntaxes found and types the schema.org types of the " +
@@ -1824,7 +1824,11 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "jsonLdParseErrors and microdataErrors. infoCount is pending or " +
         "superseded properties and references (a bare @id) that no block of the " +
         "same page defines — linking to an entity defined elsewhere is legal, so " +
-        "read those as facts to check. The " +
+        "read those as facts to check. Ids are resolved against the page URL (or " +
+        "a declared @base). On a crawl not wholly at extraction 4 references are " +
+        "not counted, and notMeasured says so. blocksAtCap: the page's stored " +
+        "blocks reached the per-page limit, so an id may be defined in a block " +
+        "that was not stored. The " +
         "problem-by-problem detail is the structured_data_nodes CSV view " +
         "(export_crawl format=csv), one row per block and problem.\n\n" +
         "NULL IS NOT ZERO. microdataErrors and skips are null on a page crawled " +
@@ -1840,7 +1844,7 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "the pages it could not type\n" +
         `  format   — ${STRUCTURED_DATA_FORMATS.join(", ")}: pages holding at least ` +
         "one block of that syntax\n\n" +
-        "Ordered by URL. Paginated: {items, nextCursor}; limit defaults to " +
+        "Ordered by URL. Paginated: {items, nextCursor, notMeasured}; limit defaults to " +
         `${PAGE_SIZE_DEFAULT}, maximum ${PAGE_SIZE_MAX}. The CSV view's Problem ` +
         `column is one of: ${STRUCTURED_DATA_PROBLEMS.join(", ")}.`,
       inputSchema: strictInput({

@@ -1284,7 +1284,8 @@ const ROBOTS_META_BOT_NAMES: ReadonlySet<string> = new Set(ROBOTS_META_BOTS);
 const MAX_HEADING_ORDER = 500;
 /** Exported (P26c-T6): fetch-page.ts caps the `Link` header's pairs at the same number. */
 export const MAX_HREFLANG_PAIRS = 200;
-const MAX_STRUCTURED_DATA_BLOCKS = 50;
+/** Exported (29a rework): the rules flag a page whose stored blocks reached it. */
+export const MAX_STRUCTURED_DATA_BLOCKS = 50;
 /**
  * Per-block buffer cap for JSON-LD text, in characters. A block over this is
  * never buffered, never parsed, and counted as a failure — the alternative is

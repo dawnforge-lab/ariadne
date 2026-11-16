@@ -31,19 +31,38 @@ export function hasValue(value: unknown): boolean {
 }
 
 /**
+ * The keywords that carry content: a node holding one of them says something
+ * even with no property. `@type`, `@context`, `@language` and the like do not —
+ * they describe a node, they are not its properties.
+ */
+const CONTENT_KEYWORDS: ReadonlySet<string> = new Set([
+  "@id",
+  "@value",
+  "@list",
+  "@set",
+  "@graph",
+  "@reverse",
+  "@included",
+  "@nest",
+]);
+
+/**
  * Whether one property value is EMPTY markup, as `schema.empty-value` reports
- * it:
+ * it (spec §29a amendment):
  *  - `""` or whitespace-only text;
  *  - `[]`;
- *  - `{}`, an object with no key at all (so no `@id` and no `@type`);
+ *  - an object with no properties and no `@id` — `{}`, and also a node holding
+ *    only keywords such as `{"@type": "Offer"}`: keywords are not properties,
+ *    so a typed node with nothing in it states only that a thing exists;
  *  - a JSON-LD value object whose `@value` is blank text (`{"@value": " "}`,
  *    with or without `@language` / `@type`), which is `""` written longhand.
  *
- * `0`, `false`, `null`, `{"@id": "x"}` and any object with a key are not
+ * `0`, `false`, `null`, `{"@id": "x"}` and any object with a property are not
  * empty: a zero is a value, JSON-LD defines `null` as "ignore this property",
- * and a reference or a typed node says something. An array or container is not
- * empty for holding empty members; the walk visits each member and reports it
- * at its own index.
+ * and a reference says which node. A `@list` / `@set` container is not empty
+ * here for holding no members; the walk reads its contents and reports an
+ * empty one at the container's path, as it does each empty array member at its
+ * own index.
  */
 export function isEmptyValue(value: unknown): boolean {
   if (typeof value === "string") return value.trim() === "";
@@ -53,7 +72,7 @@ export function isEmptyValue(value: unknown): boolean {
     const literal = value["@value"];
     return typeof literal === "string" && literal.trim() === "";
   }
-  return Object.keys(value).length === 0;
+  return !Object.keys(value).some((key) => !key.startsWith("@") || CONTENT_KEYWORDS.has(key));
 }
 
 /**
@@ -91,10 +110,12 @@ export function bareReferenceId(value: unknown): string | null {
 
 /**
  * The id a node DEFINES: its `@id`, when it is non-blank text and the node
- * carries anything besides it (a `@type` or a property). Null otherwise.
+ * carries a `@type` or a property. Null otherwise. Other keywords are not
+ * content: an `@graph` member `{"@id": "#x"}` is stored with its container's
+ * `@context` copied on, and is still only a reference (review M1).
  */
 export function definedId(node: Record<string, unknown>): string | null {
   const id = node["@id"];
   if (typeof id !== "string" || id.trim() === "") return null;
-  return Object.keys(node).some((key) => key !== "@id") ? id : null;
+  return Object.keys(node).some((key) => key === "@type" || !key.startsWith("@")) ? id : null;
 }

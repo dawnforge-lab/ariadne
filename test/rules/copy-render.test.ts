@@ -79,11 +79,17 @@ const CHANGED_SINCE_0_22: Record<string, Partial<Entry>> = {
     ),
   },
   // 0.26.0, 29a final review: breadcrumb-absent names all three formats it reads, like none-on-site.
+  // 0.26.0, 29a rework review M4: the second sentence cites schema.org, for every consumer.
   "schema.breadcrumb-absent": {
-    explanation: FIXTURE["schema.breadcrumb-absent"]!.explanation.replace(
-      "no page carries BreadcrumbList JSON-LD.",
-      "no page carries a BreadcrumbList in JSON-LD, microdata or RDFa, the three formats that are read.",
-    ),
+    explanation: FIXTURE["schema.breadcrumb-absent"]!.explanation
+      .replace(
+        "no page carries BreadcrumbList JSON-LD.",
+        "no page carries a BreadcrumbList in JSON-LD, microdata or RDFa, the three formats that are read.",
+      )
+      .replace(
+        "Breadcrumb markup lets search results show the path to a page and tells search engines how sections relate.",
+        "A schema.org BreadcrumbList states in machine-readable form the path to a page and how the site's sections relate, for every consumer of the markup, search engines and agents alike.",
+      ),
   },
   // 0.26.0, 29a final review M7: the Organization branch includes directory and booking sites.
   // 0.26.0, 29a rework: the fact, not a search engine's policy — title, policy sentence and fix.

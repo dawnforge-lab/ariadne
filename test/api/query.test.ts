@@ -4384,6 +4384,6 @@ beforeAll(async () => {
     schemaType: "Organization",
     format: "jsonld",
     raw,
-    validation: validateBlock(raw),
+    validation: validateBlock(raw, `${SITE}/csv-home`),
   });
 });

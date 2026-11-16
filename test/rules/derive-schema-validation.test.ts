@@ -12,13 +12,14 @@ import { asc, eq } from "drizzle-orm";
 
 import { closeDb, createDb, type Db } from "../../src/db/client.js";
 import { runMigrations } from "../../src/db/migrate.js";
-import { crawls, structuredData } from "../../src/db/schema.js";
+import { crawls, pages, structuredData } from "../../src/db/schema.js";
 import {
   SCHEMA_VALIDATION_BATCH,
   deriveSchemaValidation,
 } from "../../src/rules/derive/schema-validation.js";
 import { blockValidationSchema } from "../../src/rules/schema-org/validate.js";
 import { mkDiscovery } from "./mk-discovery.js";
+import { mkPage } from "./mk-page.js";
 import { LOCAL_TENANT } from "../../src/tenant.js";
 import { hostKeyOf } from "../../src/crawl/host-key.js";
 
@@ -50,12 +51,19 @@ describe("deriveSchemaValidation against the database", () => {
     return id;
   }
 
+  /** The one page every block of a crawl here sits on: its URL is the ids' base. */
+  const pageOf = (crawlId: string): string => `${crawlId}_page`;
+  async function addPage(crawlId: string, url = `${SITE}/`): Promise<void> {
+    await db.insert(pages).values(mkPage({ id: pageOf(crawlId), crawlId, url }));
+  }
+
   async function addBlocks(crawlId: string, raws: Record<string, unknown>[]): Promise<void> {
+    await addPage(crawlId);
     for (let i = 0; i < raws.length; i += 1000) {
       await db.insert(structuredData).values(
-        raws.slice(i, i + 1000).map((raw, j) => ({
+        raws.slice(i, i + 1000).map((raw) => ({
           crawlId,
-          pageId: `page_${i + j}`,
+          pageId: pageOf(crawlId),
           schemaType: String(raw["@type"]),
           format: "jsonld" as const,
           raw,
@@ -144,12 +152,13 @@ describe("deriveSchemaValidation against the database", () => {
     const crawlId = await newCrawl();
     const first = 99_999_999_700;
     const total = SCHEMA_VALIDATION_BATCH + 100;
+    await addPage(crawlId);
     for (let i = 0; i < total; i += 300) {
       await db.insert(structuredData).values(
         Array.from({ length: Math.min(300, total - i) }, (_, j) => ({
           id: first + i + j,
           crawlId,
-          pageId: `page_${i + j}`,
+          pageId: pageOf(crawlId),
           schemaType: "Organization",
           format: "jsonld" as const,
           raw: { "@type": "Organization", name: `Org ${i + j}` },
@@ -161,5 +170,76 @@ describe("deriveSchemaValidation against the database", () => {
     const rows = await stored(crawlId);
     expect(rows).toHaveLength(total);
     expect(rows.filter((r) => r.validation === null).map((r) => r.id)).toEqual([]);
+  });
+});
+
+// 29a rework, review fix round 1: ids resolve against the page each block sits on.
+describe("deriveSchemaValidation resolves ids against the page", () => {
+  let db: Db;
+  const createdCrawls: string[] = [];
+
+  beforeAll(async () => {
+    db = createDb(databaseUrl());
+    await runMigrations(db);
+  });
+
+  afterAll(async () => {
+    for (const id of createdCrawls) await db.delete(crawls).where(eq(crawls.id, id));
+    await closeDb(db);
+  });
+
+  async function newCrawl(): Promise<string> {
+    const id = `crawl_${randomUUID()}`;
+    await db.insert(crawls).values({
+      tenantId: LOCAL_TENANT,
+      id,
+      siteUrl: SITE,
+      hostKey: hostKeyOf(SITE),
+      config: { userAgent: "AriadneBot-test", maxPages: 500 },
+      rulesetVersion: "test",
+      status: "finished",
+      discovery: mkDiscovery(),
+    });
+    createdCrawls.push(id);
+    return id;
+  }
+
+  it("stores a relative @id resolved against the URL of the block's own page", async () => {
+    const crawlId = await newCrawl();
+    const ids = { a: `${crawlId}_a`, b: `${crawlId}_b` };
+    await db.insert(pages).values([
+      mkPage({ id: ids.a, crawlId, url: `${SITE}/a` }),
+      mkPage({ id: ids.b, crawlId, url: `${SITE}/shop/b` }),
+    ]);
+    const raw = { "@context": "https://schema.org", "@type": "WebPage", "@id": "#page", name: "x", about: { "@id": "#org" } };
+    await db.insert(structuredData).values([
+      { crawlId, pageId: ids.a, schemaType: "WebPage", format: "jsonld", raw },
+      { crawlId, pageId: ids.b, schemaType: "WebPage", format: "jsonld", raw },
+    ]);
+    await deriveSchemaValidation(db, crawlId);
+    const rows = await db
+      .select({ v: structuredData.validation })
+      .from(structuredData)
+      .where(eq(structuredData.crawlId, crawlId))
+      .orderBy(asc(structuredData.id));
+    expect(rows.map((r) => r.v!.definedIds)).toEqual([[`${SITE}/a#page`], [`${SITE}/shop/b#page`]]);
+    expect(rows.map((r) => r.v!.references)).toEqual([
+      [{ path: "$.about", id: `${SITE}/a#org`, written: "#org" }],
+      [{ path: "$.about", id: `${SITE}/shop/b#org`, written: "#org" }],
+    ]);
+  });
+
+  it("throws, naming the row, for a block whose page row is missing: its base is unknown", async () => {
+    const crawlId = await newCrawl();
+    await db.insert(structuredData).values({
+      crawlId,
+      pageId: `${crawlId}_ghost`,
+      schemaType: "Thing",
+      format: "jsonld",
+      raw: { "@type": "Thing", name: "x" },
+    });
+    await expect(deriveSchemaValidation(db, crawlId)).rejects.toThrow(
+      new RegExp(`crawl '${crawlId}' structured_data row \\d+ has no page row`),
+    );
   });
 });

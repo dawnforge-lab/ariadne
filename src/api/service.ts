@@ -259,12 +259,15 @@ import {
   blockInfos,
   blockWarnings,
   parseStructuredDataFormat,
+  referencesMeasured,
+  UNRESOLVED_NOT_MEASURED,
   projectNodes,
   projectSkips,
   storedFormat,
   validationReadable,
   type StructuredDataNode,
 } from "./structured-data.js";
+import { MAX_STRUCTURED_DATA_BLOCKS } from "../crawl/parse/page-analyzer.js";
 import type { StructuredDataFormat, StructuredDataSkips } from "../crawl/parse/page-analyzer.js";
 import { decodeCursor, encodeCursor, parseLimit } from "./paging.js";
 import { listEvents, type CrawlEvent } from "../events/events.js";
@@ -2117,7 +2120,11 @@ export interface CsvStream {
    * null on a view that reads no findings (`CsvExportResult.disabledRules`).
    */
   disabledRules: string[] | null;
-  /** Beside `disabledRules`, null with it (`ExportResult.notMeasured`). */
+  /**
+   * Beside `disabledRules`, null with it (`ExportResult.notMeasured`) — except
+   * on `structured_data_nodes`, which reads no findings and still names what it
+   * does not count (unresolved references below extraction 4).
+   */
   notMeasured: NotMeasured | null;
   /**
    * The file, record by record, header first.
@@ -2371,6 +2378,12 @@ export interface StructuredDataPageRow {
   jsonLdParseErrors: number;
   microdataErrors: number | null;
   skips: StructuredDataSkips | null;
+  /**
+   * The page's stored blocks reached the analyzer's cap
+   * (`MAX_STRUCTURED_DATA_BLOCKS`): blocks past it were not stored, so an id a
+   * reference names may be defined there (review I3).
+   */
+  blocksAtCap: boolean;
 }
 
 /**
@@ -6893,7 +6906,7 @@ export class ApiService {
     tenant: TenantId,
     crawlId: string,
     opts: StructuredDataQuery = {},
-  ): Promise<Page<StructuredDataPageRow>> {
+  ): Promise<Page<StructuredDataPageRow> & { notMeasured: NotMeasured }> {
     await this.assertCrawl(tenant, crawlId);
     const limit = parseLimit(opts.limit);
     const cursor = opts.cursor === undefined ? null : decodeCursor(opts.cursor, 1);
@@ -6932,6 +6945,7 @@ export class ApiService {
           warning_count: number;
           info_count: number;
           unreadable: number;
+          blocks_at_cap: boolean;
         }>(sql`
           select p.url, p.page_type, p.is_indexable,
                  p.structured_data_parse_errors as parse_errors,
@@ -6955,7 +6969,8 @@ export class ApiService {
                    + p.structured_data_parse_errors
                    + coalesce(p.structured_data_microdata_errors, 0))::int as warning_count,
                  coalesce(b.infos, 0)::int as info_count,
-                 coalesce(b.unreadable, 0)::int as unreadable
+                 coalesce(b.unreadable, 0)::int as unreadable,
+                 coalesce(b.blocks >= ${MAX_STRUCTURED_DATA_BLOCKS}, false) as blocks_at_cap
             from pages p
             left join lateral (
               select array_agg(distinct sd.format order by sd.format) as formats,
@@ -6963,7 +6978,8 @@ export class ApiService {
                      sum(case when ${readable} then ${blockWarnings(sql`sd.validation_jsonb`)} end) as warnings,
                      sum(case when ${readable}
                               then ${blockInfos(sql`sd.validation_jsonb`, crawlId, sql`sd.page_id`)} end) as infos,
-                     count(*) filter (where ${readable} is not true) as unreadable
+                     count(*) filter (where ${readable} is not true) as unreadable,
+                     count(*) as blocks
                 from structured_data sd
                where sd.crawl_id = ${crawlId} and sd.page_id = p.id
             ) b on true
@@ -6995,10 +7011,15 @@ export class ApiService {
             jsonLdParseErrors: row.parse_errors,
             microdataErrors: row.microdata_errors,
             skips: projectSkips(row.skips, crawlId, row.url),
+            blocksAtCap: row.blocks_at_cap,
           };
         });
         const last = rows.length > limit ? rows[limit - 1] : undefined;
-        return { items, nextCursor: last === undefined ? null : encodeCursor(last.url) };
+        return {
+          items,
+          nextCursor: last === undefined ? null : encodeCursor(last.url),
+          notMeasured: await this.structuredDataNotMeasured(tx, crawlId),
+        };
       },
       { isolationLevel: "repeatable read", accessMode: "read only" },
     );
@@ -7016,10 +7037,13 @@ export class ApiService {
    *    re-run the rules, never an empty page.
    */
   private async assertStructuredDataJudged(reader: SnapshotReader, crawlId: string): Promise<void> {
-    const result = await reader.execute<{ judged: boolean; underived: boolean }>(sql`
+    const result = await reader.execute<{ judged: boolean; underived: boolean; stale: boolean }>(sql`
       select c.rules_run_at is not null as judged,
              exists (select 1 from structured_data sd
-                      where sd.crawl_id = c.id and sd.validation_jsonb is null) as underived
+                      where sd.crawl_id = c.id and sd.validation_jsonb is null) as underived,
+             exists (select 1 from structured_data sd
+                      where sd.crawl_id = c.id and sd.validation_jsonb is not null
+                        and jsonb_typeof(sd.validation_jsonb -> 'nodes') is distinct from 'array') as stale
         from crawls c
        where c.id = ${crawlId}`);
     const row = result.rows[0];
@@ -7040,6 +7064,27 @@ export class ApiService {
           "rules (crawl_rules)",
       );
     }
+    // A blob in the shape written before the 29a rework (no `nodes` list):
+    // refused here as a 409, before a row or a byte, not met mid-read (review M2).
+    if (row.stale) {
+      throw new ServiceError(
+        "CONFLICT",
+        `crawl ${crawlId} holds structured data validated by an earlier ruleset — re-run the ` +
+          "rules (crawl_rules)",
+      );
+    }
+  }
+
+  /**
+   * What the structured-data surfaces do not count on this crawl: unresolved
+   * references, on a crawl not wholly at extraction 4 (`referencesMeasured`,
+   * the rule's own gate). `[]` otherwise.
+   */
+  private async structuredDataNotMeasured(reader: SnapshotReader, crawlId: string): Promise<NotMeasured> {
+    const result = await reader.execute<{ measured: boolean }>(
+      sql`select ${referencesMeasured(crawlId)} as measured`,
+    );
+    return result.rows[0]!.measured ? [] : [UNRESOLVED_NOT_MEASURED];
   }
 
   /**
@@ -7329,8 +7374,14 @@ export class ApiService {
     const copy = judged === null ? null : copyRenderer(judged.copyThresholds);
     await this.assertViewAnswerable(crawlId, view, disabledRules);
     // The structured-data view reads blobs the rules run writes: refused before
-    // the header, as the listing is, on a crawl with none to read.
-    if (view === "structured_data_nodes") await this.assertStructuredDataJudged(this.db, crawlId);
+    // the header, as the listing is, on a crawl with none to read. What it does
+    // not count (unresolved references below extraction 4) is named in the
+    // export answer's `notMeasured`, as the listing names it.
+    let notMeasured: NotMeasured | null = judged === null ? null : judged.notMeasured;
+    if (view === "structured_data_nodes") {
+      await this.assertStructuredDataJudged(this.db, crawlId);
+      notMeasured = await this.structuredDataNotMeasured(this.db, crawlId);
+    }
     const def = CSV_VIEW_DEFS[view];
     const ctx: CsvViewContext = {
       // `columnsFor` rather than the rule's own `columns`: the four standard
@@ -7362,7 +7413,7 @@ export class ApiService {
       metricId: null,
       filename: csvFilename(slug(crawlId), view, ruleId === null ? null : slug(ruleId)),
       disabledRules: judged === null ? null : judged.disabledRules,
-      notMeasured: judged === null ? null : judged.notMeasured,
+      notMeasured,
       async *records(): AsyncGenerator<string> {
         // THE HEADER IS UNCONDITIONAL. A zero-row CSV with no header is a file
         // that cannot say what it failed to contain, and a reader would have to

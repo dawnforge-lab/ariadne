@@ -253,7 +253,7 @@ describe("microdata extraction", () => {
     ]);
     // The empty elements' content values reach the validator as values; only
     // the empty content attribute is an empty value.
-    const v = validateBlock(blocks[0]!.raw);
+    const v = validateBlock(blocks[0]!.raw, PAGE_URL);
     expect(v.emptyValues).toEqual([{ path: "$.sku", type: "Product", property: "sku" }]);
     expect(v.nodes[0]!.emptyProperties).toEqual(["sku"]);
   });
