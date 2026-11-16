@@ -177,6 +177,79 @@ rules claim CHECK-43 unless noted; severities are mine.
 and Google eligibility, and CHECK-44's to cover the profile it now reads. Ids are added before
 rules claim them (hard rule 10).
 
+#### 29a amendment (2026-11-16, owner): web standards, not one search engine
+
+The owner's words, after the 29a gate: "Stop with Google, is not about one search engine is
+about a websites health, crawlability, understanding, indexability, agents. Google is not a
+rule". Then: "the benchmark is web standards not google". The crawler reports, and the agent
+analyses.
+
+This **supersedes** the "Google rich-result profiles" block above, the three Google rows of the
+rules table, the "matched Google features" in the listing, and the Google half of the Checklist
+paragraph. Structured data is judged against its own standards only:
+
+- the schema.org vocabulary;
+- the JSON-LD, Microdata and RDFa specifications.
+
+Industry conventions such as title length are untouched; this amendment is about structured
+data only.
+
+**Removed.** These go, with their tests, copy, triage rows, listing field and filter, CSV
+problems and docs:
+
+- the Google feature profiles (`src/rules/schema-org/google-features.ts`);
+- `schema.google-required-missing`, `schema.google-recommended-missing` and
+  `schema.deprecated-feature`.
+
+The validation blob loses `googleFeatures` and `deprecatedFeatures`. No profile decides whether
+a fact is reported.
+
+**Kept, unchanged in meaning:**
+
+| Rule | Severity |
+|---|---|
+| `schema.parse-error` | warning |
+| `schema.unknown-type` | warning |
+| `schema.unknown-property` | warning |
+| `schema.property-pending-or-superseded` | info |
+| `schema.embedded-type-mismatch` | warning |
+| `schema.template-inconsistent` | warning |
+| `schema.none-on-site` | as before |
+| `schema.breadcrumb-absent` | as before |
+
+**Changed:**
+
+- **`schema.self-serving-reviews`** is reworded as a fact: an Organization, or any of its
+  subtypes, carries a review or rating of itself. The policy wording goes.
+
+**New facts.** Severities are my calls, marked for the owner to check.
+
+| Rule / metric | Severity | Fires when |
+|---|---|---|
+| `schema.empty-value` | warning | a property's value is empty: `""` or whitespace-only text, `[]` or `{}` (an object with no properties and no `@id`). Empty markup is broken for every consumer. |
+| `schema.unresolved-reference` | info | a bare reference (`{"@id": X}` and nothing else) names an id that no node on the same page defines. Linking to an entity defined elsewhere is legal JSON-LD, so this is a fact, not an error. |
+| `schema.property-coverage` (metric) | — | per schema type on the crawl: how many top-level nodes carry it, and for each property how many of those nodes carry a non-empty value. This answers CHECK-44 ("Product schema completeness") with facts. The agent judges what is missing for its purpose. |
+
+**Surface.**
+
+- The `structured_data` listing replaces `googleFeatures` and the `feature` filter with each
+  page's top-level nodes: `{format, path, type, properties[]}`. The property lists are capped and
+  the truncation is noted.
+- The CSV view's Problem vocabulary loses the Google problems and gains `empty-value` and
+  `unresolved-reference`.
+
+**Gate 29a, clause 2, restated.** The live crawl (simpleerb.com) is re-judged; no re-fetch is
+needed, since the rules read the database. Then 20 pages are sampled across its page types.
+For each, the items, types and properties Ariadne reports are compared with:
+
+- the page source;
+- the schema.org validator, validator.schema.org, which checks the schema.org vocabulary only.
+
+The clause passes at **0 mismatches**. Every `schema.empty-value` and
+`schema.unresolved-reference` finding on the crawl is also checked against the source.
+
+Clauses 1, 3 and 4 are re-run on the changed code.
+
 ### 29b — Render-pass checks
 
 All of these run only on the rendered set: suspects plus three pages per template, at 5% and at
