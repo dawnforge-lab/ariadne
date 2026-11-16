@@ -257,6 +257,7 @@ import {
 import { ServiceError, clip, unknownKeysMessage } from "./errors.js";
 import {
   blockInfos,
+  blockProblemsCapped,
   blockWarnings,
   parseStructuredDataFormat,
   referencesMeasured,
@@ -270,6 +271,7 @@ import {
 import { MAX_STRUCTURED_DATA_BLOCKS } from "../crawl/parse/page-analyzer.js";
 import type { StructuredDataFormat, StructuredDataSkips } from "../crawl/parse/page-analyzer.js";
 import { decodeCursor, encodeCursor, parseLimit } from "./paging.js";
+import { staleBlob } from "../rules/schema-org/blob-sql.js";
 import { listEvents, type CrawlEvent } from "../events/events.js";
 import { parseScheduleBody } from "../schedule/body.js";
 import { NoCronSlotError, nextSlot, parseCron } from "../schedule/cron.js";
@@ -2377,7 +2379,12 @@ export interface StructuredDataPageRow {
   indexable: boolean | null;
   formats: StructuredDataFormat[];
   types: string[];
-  /** Each block's top-level node, in block order: `{format, path, type, properties, propertiesCapped}`. */
+  /**
+   * Each block's top-level node, in block order:
+   * `{format, path, type, types, typesCapped, properties, propertiesCapped}` —
+   * `type` the primary type, `types` every type the node states (one for a
+   * microdata or RDFa node at extraction 4), both lists capped per node.
+   */
   nodes: StructuredDataNode[];
   warningCount: number;
   infoCount: number;
@@ -2390,6 +2397,12 @@ export interface StructuredDataPageRow {
    * reference names may be defined there (review I3).
    */
   blocksAtCap: boolean;
+  /**
+   * A block on the page cut one of the lists the counts read at
+   * `MAX_PROBLEMS_PER_LIST`: `warningCount` / `infoCount` are short (final
+   * review I1).
+   */
+  problemsCapped: boolean;
 }
 
 /**
@@ -6952,13 +6965,26 @@ export class ApiService {
           info_count: number;
           unreadable: number;
           blocks_at_cap: boolean;
+          problems_capped: boolean;
         }>(sql`
           select p.url, p.page_type, p.is_indexable,
                  p.structured_data_parse_errors as parse_errors,
                  p.structured_data_microdata_errors as microdata_errors,
                  p.structured_data_skips as skips,
                  coalesce(b.formats, '{}'::text[]) as formats,
-                 coalesce(b.types, '{}'::text[]) as types,
+                 -- Every type the page's top-level nodes state, in authored
+                 -- order (block, then the node's own order), each once (final
+                 -- review I2) — not the first-stated schema_type column.
+                 coalesce((select array_agg(x.type order by x.sid, x.nord, x.tord)
+                             from (select distinct on (t.type) t.type, sd.id as sid, n.ord as nord, t.ord as tord
+                                     from structured_data sd
+                                    cross join lateral jsonb_array_elements(sd.validation_jsonb -> 'nodes')
+                                          with ordinality as n(node, ord)
+                                    cross join lateral jsonb_array_elements_text(n.node -> 'types')
+                                          with ordinality as t(type, ord)
+                                    where sd.crawl_id = ${crawlId} and sd.page_id = p.id and ${readable}
+                                    order by t.type, sd.id, n.ord, t.ord) x),
+                          '{}'::text[]) as types,
                  coalesce((select jsonb_agg(jsonb_build_object(
                                      'format', sd.format,
                                      'path', n.node -> 'path',
@@ -6978,11 +7004,13 @@ export class ApiService {
                    + coalesce(p.structured_data_microdata_errors, 0))::int as warning_count,
                  coalesce(b.infos, 0)::int as info_count,
                  coalesce(b.unreadable, 0)::int as unreadable,
-                 coalesce(b.blocks >= ${MAX_STRUCTURED_DATA_BLOCKS}, false) as blocks_at_cap
+                 coalesce(b.blocks >= ${MAX_STRUCTURED_DATA_BLOCKS}, false) as blocks_at_cap,
+                 coalesce(b.problems_capped, false) as problems_capped
             from pages p
             left join lateral (
               select array_agg(distinct sd.format order by sd.format) as formats,
-                     array_agg(distinct sd.schema_type order by sd.schema_type) as types,
+                     bool_or(case when ${readable}
+                                  then ${blockProblemsCapped(sql`sd.validation_jsonb`, crawlId)} end) as problems_capped,
                      sum(case when ${readable} then ${blockWarnings(sql`sd.validation_jsonb`)} end) as warnings,
                      sum(case when ${readable}
                               then ${blockInfos(sql`sd.validation_jsonb`, crawlId, sql`sd.page_id`)} end) as infos,
@@ -7020,6 +7048,7 @@ export class ApiService {
             microdataErrors: row.microdata_errors,
             skips: projectSkips(row.skips, crawlId, row.url),
             blocksAtCap: row.blocks_at_cap,
+            problemsCapped: row.problems_capped,
           };
         });
         const last = rows.length > limit ? rows[limit - 1] : undefined;
@@ -7055,9 +7084,7 @@ export class ApiService {
              exists (select 1 from structured_data sd
                        join pages p on p.crawl_id = sd.crawl_id and p.id = sd.page_id
                       where sd.crawl_id = c.id and sd.validation_jsonb is not null
-                        and (jsonb_typeof(sd.validation_jsonb -> 'nodes') is distinct from 'array'
-                             -- nodes written before they listed every type
-                             or jsonb_path_exists(sd.validation_jsonb, 'lax $.nodes[*] ? (!exists(@.types) || !exists(@.typesCapped))'))) as stale
+                        and ${staleBlob(sql`sd.validation_jsonb`)}) as stale
         from crawls c
        where c.id = ${crawlId}`);
     const row = result.rows[0];

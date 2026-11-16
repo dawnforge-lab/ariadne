@@ -46,15 +46,27 @@ validated before it is refused (409, "re-run the rules"), never read.
     legal and is reported at info. The evidence carries `blocksAtCap` (the rule's `Blocks At
     Cap` column in `issue_urls`): the page is at the
     analyzer's per-page limit of structured-data blocks (50), so blocks past it were not
-    stored and the id may be defined there. The rule is gated: silent on a crawl not
-    wholly at extraction 4.
+    stored and the id may be defined there. It also carries `pageHasParseErrors` (`Page
+    Has Parse Errors`): a block on the page could not be parsed, so the id may be defined
+    in a block that was not read. The rule is gated: silent on a crawl not wholly at
+    extraction 4. A `@graph` member that is only `{"@id": …}` is a reference at `$`,
+    checked as one, and not a node.
+  - **`problemsCapped`** (column `Problems Capped`) is on the evidence of every per-node
+    rule (`unknown-type`, `unknown-property`, `property-pending-or-superseded`,
+    `embedded-type-mismatch`, `empty-value`, `unresolved-reference`): each block's list
+    of a kind stops at 50 entries, and when one the rule reads did, `problemCount` is
+    short.
   - **`schema.property-coverage`** (metric, CHECK-44) writes one row per top-level type,
     under the new public metric scope **`schema_type`** (the scopes are now `site |
     page_type | sitemap_doc | schema_type`): the type as the markup states it, an
     out-of-vocabulary name included, with the node count and per-property counts of nodes
     carrying a non-empty value. A node counts once under EACH type it states, its
     properties included: a node typed `SoftwareApplication` and `FAQPage` is both, so it
-    is one node in each row (and one node in the site row). JSON-LD lists every type a node states, up to 50 per node (`typesCapped` when cut; the coverage metric counts only the listed types); a microdata `itemtype` or RDFa `typeof` keeps only its first type at extraction 4 — an extraction limit — so a node from those formats lists one. It is bounded: types (100) and properties per type (100)
+    is one node in each row (and one node in the site row). Only nodes of blocks judged
+    against schema.org are counted; nodes of blocks in another vocabulary are counted
+    apart, as `otherVocabularyNodes` on the site row (a misspelt type in a schema.org
+    block is still counted, under its stated name), and `typesCappedNodes` counts the
+    nodes whose type list was cut. JSON-LD lists every type a node states, up to 50 per node (`typesCapped` when cut; the coverage metric counts only the listed types); a microdata `itemtype` or RDFa `typeof` keeps only its first type at extraction 4 — an extraction limit — so a node from those formats lists one. It is bounded: types (100) and properties per type (100)
     are capped, and `typesNotListed`, `propertiesNotListed` and `propertyListsCapped` are
     counted, never dropped. The engine names no required set of properties; which a type
     needs is the agent's judgement.
@@ -2648,8 +2660,8 @@ which one is visible in the header rather than in the payload:
   template / links, ordered by the count descending; and by
   `schema.property-coverage`, whose rows are schema type / property / nodes with a
   value, with the node count and the bound counters (`propertyListsCapped`,
-  `typesNotListed`, `propertiesNotListed`) as columns repeated on every row of the
-  scope, null where that row does not carry one.
+  `typesNotListed`, `propertiesNotListed`, `otherVocabularyNodes`, `typesCappedNodes`)
+  as columns repeated on every row of the scope, null where that row does not carry one.
 
 **A null cell is a value this metric did not write for that row — an empty cell,
 never a zero** (§5, at table level). `sitemap.structure` is the table where that
@@ -2830,15 +2842,17 @@ with none of them is not listed.
 
 ```
 url, pageType, indexable, formats, types, nodes,
-warningCount, infoCount, jsonLdParseErrors, microdataErrors, skips, blocksAtCap
+warningCount, infoCount, jsonLdParseErrors, microdataErrors, skips, blocksAtCap,
+problemsCapped
 ```
 
-- **`formats`** are the syntaxes found (`jsonld`, `microdata`, `rdfa`) and **`types`**
-  the schema.org types of the page's blocks, both distinct and sorted. `types` names
-  each block's top-level node only: a Product nested inside a block (a WebPage's
-  `mainEntity`, say) is not listed.
+- **`formats`** are the syntaxes found (`jsonld`, `microdata`, `rdfa`), distinct and
+  sorted. **`types`** are every type the page's top-level nodes state (`nodes[].types`),
+  in authored order, each once: a node typed WebPage and FAQPage puts both on the row.
+  `types` names each block's top-level node only: a Product nested inside a block (a
+  WebPage's `mainEntity`, say) is not listed.
 - **`nodes`** are the page's top-level nodes in block order (each `@graph` member is
-  one): `{format, path, type, types, typesCapped, properties, propertiesCapped}`. `type` is the
+  one, unless it holds only an `@id`, which makes it a reference, not a node): `{format, path, type, types, typesCapped, properties, propertiesCapped}`. `type` is the
   primary type as the markup states it, a name outside schema.org included, and null
   when the node is untyped; `types` is every type the node states, in authored order
   (`[]` when untyped). JSON-LD lists every type a node states, up to 50 per node (`typesCapped` when cut; the coverage metric counts only the listed types); a microdata `itemtype` or RDFa `typeof` keeps only its first type at extraction 4 — an extraction limit — so a node from those formats lists one. A blob whose nodes lack `types` was written
@@ -2856,6 +2870,10 @@ warningCount, infoCount, jsonLdParseErrors, microdataErrors, skips, blocksAtCap
 - **`blocksAtCap`** is true when the page's stored blocks reached the analyzer's
   per-page limit (50): blocks past it were not stored, so an id may be defined in a
   block that was not stored.
+- **`problemsCapped`** is true when a block on the page cut one of the lists the two
+  counts read at its per-block limit (50): `warningCount` / `infoCount` are short.
+  The `structured_data_nodes` CSV holds the same lists, so its rows for one problem
+  stop at 50 per block too; the cap is per block.
 - **`notMeasured`** is `{id, reason}[]`. On a crawl not wholly at extraction 4 the
   unresolved-reference count is not measured and `notMeasured` names
   `schema.unresolved-reference`; `infoCount` then holds no references. It is `[]`
@@ -4333,7 +4351,7 @@ rest, except that `structured_data_nodes` answers `notMeasured` alone (below).
 | `metric_table` (needs `metricId`) | **the metric's own** — its `summary` labels, then its `columns` labels | one row of one metric's table | 40 rows (`inlinks.extremes`) |
 | `issues_overview` (Phase 27a) | Issue Name, Issue Type, Issue Priority, Severity, URLs, % of Judged, Description, How To Fix, Rule Id, Check Ids | one rule, as `issues_overview` (§4.3a) answers it | 46 rows / 27,040 B on the gate crawl `crawl_4dd32709` |
 | `crawl_overview` (Phase 27a) | Section, Label, Value, Percent | one entry of one `crawl_overview` section (§4.3b), then one row per `notMeasured` item | 75 rows / 2,332 B on the gate crawl `crawl_4dd32709` |
-| `structured_data_nodes` (Phase 29a) | URL, Format, Schema Type, Path, Node Type, Problem, Detail | one problem of one structured-data block; a block with none is one row with an empty Problem | — (added P29a-T9) |
+| `structured_data_nodes` (Phase 29a) | URL, Format, Schema Type, Path, Node Type, Problem, Detail | one problem of one structured-data block; a block with none is one row with an empty Problem. Schema Type is every type the block's node states, `\|`-joined; each problem list stops at 50 per block | — (added P29a-T9) |
 
 Semantics a consumer must repeat to its own users:
 

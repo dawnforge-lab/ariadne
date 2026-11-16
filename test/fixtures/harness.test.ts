@@ -1897,14 +1897,14 @@ describe("the fixture site end to end", () => {
     expect(d("/authored29a/unknown-type", "schema.unknown-type")).toEqual({
       pageUrl: url("/authored29a/unknown-type"),
       problems: [{ path: "$", type: "Prodcut", format: "jsonld" }],
-      problemCount: 1,
+      problemCount: 1, problemsCapped: false,
     });
     // The microdata Product is complete, so the one made-up property is the
     // only thing the page is judged on: it is read from attributes and named.
     expect(d("/authored29a/unknown-property", "schema.unknown-property")).toEqual({
       pageUrl: url("/authored29a/unknown-property"),
       problems: [{ path: "$", type: "Product", format: "microdata", property: "colour" }],
-      problemCount: 1,
+      problemCount: 1, problemsCapped: false,
     });
     expect(d("/authored29a/pending-property", "schema.property-pending-or-superseded")).toEqual({
       pageUrl: url("/authored29a/pending-property"),
@@ -1917,7 +1917,7 @@ describe("the fixture site end to end", () => {
           supersededBy: null,
         },
       ],
-      problemCount: 1,
+      problemCount: 1, problemsCapped: false,
     });
     expect(d("/authored29a/type-mismatch", "schema.embedded-type-mismatch")).toEqual({
       pageUrl: url("/authored29a/type-mismatch"),
@@ -1930,7 +1930,7 @@ describe("the fixture site end to end", () => {
           expected: ["Organization", "Person"],
         },
       ],
-      problemCount: 1,
+      problemCount: 1, problemsCapped: false,
     });
     // Five empties: `brand` is a typed-only node, `offers.price` the nested path.
     // The list order is the validator's walk, so the paths are compared sorted.
@@ -1946,13 +1946,13 @@ describe("the fixture site end to end", () => {
     ]);
     expect(d("/authored29a/empty-value", "schema.empty-value")).toMatchObject({
       pageUrl: url("/authored29a/empty-value"),
-      problemCount: 5,
+      problemCount: 5, problemsCapped: false,
     });
     // Three bare references: `#author` is defined by the page's second block and
     // is no problem; the relative `#series` and the absolute publisher id are.
     expect(d("/authored29a/unresolved-reference", "schema.unresolved-reference")).toEqual({
       pageUrl: url("/authored29a/unresolved-reference"),
-      blocksAtCap: false,
+      blocksAtCap: false, pageHasParseErrors: false,
       problems: [
         {
           format: "jsonld",
@@ -1967,7 +1967,7 @@ describe("the fixture site end to end", () => {
           written: "https://estuary-supplies.example/#org",
         },
       ],
-      problemCount: 2,
+      problemCount: 2, problemsCapped: false,
     });
     // Nine of the ten pages of `/authored29a/tpl/:id` carry a Product: the page
     // that does not is the finding, and the evidence is the census.
@@ -2603,7 +2603,7 @@ describe("the fixture site end to end", () => {
     expect(siteMetric("schema.property-coverage")).toEqual({
       nodes: 20,
       propertyListsCapped: 0,
-      typesNotListed: 0,
+      typesNotListed: 0, otherVocabularyNodes: 0, typesCappedNodes: 0,
     });
     const product = metricsById.get("schema.property-coverage")?.get("schema_type|Product") as {
       nodes: number;

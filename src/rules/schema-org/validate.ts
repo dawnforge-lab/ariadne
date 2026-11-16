@@ -65,7 +65,9 @@
  * own rule for an unresolvable `itemid`. A `@base` in a nested context is not
  * read, as a nested `@vocab` is not. `<base href>` is honoured by no format.
  *  - `nodes`: the block's top-level node — the analyzer stores each `@graph`
- *    member as a block of its own, so a member is a top-level node too — with
+ *    member as a block of its own, so a member is a top-level node too, unless
+ *    it holds only an `@id`, which makes the block a bare reference at `$`, not a
+ *    node (final review M2) — with
  *    its type (the primary known type, else the first stated `@type` as
  *    written, schema.org spellings reduced to the bare name; null when untyped),
  *    every type it states (`types`, authored order, same spellings; `[]` when
@@ -100,6 +102,18 @@ import {
 export const MAX_PROBLEMS_PER_LIST = 50;
 
 const path = z.string().min(1);
+
+/** The problem and fact lists of a verdict, by name — what `cappedLists` may hold. */
+const LIST_NAMES = [
+  "unknownTypes",
+  "unknownProperties",
+  "propertyStatus",
+  "typeMismatches",
+  "emptyValues",
+  "references",
+  "nodes",
+] as const;
+export type ListName = (typeof LIST_NAMES)[number];
 const list = <T extends z.ZodType>(entry: T) => z.array(entry).max(MAX_PROBLEMS_PER_LIST);
 
 /** What readers parse a stored `validation_jsonb` blob with. */
@@ -136,11 +150,23 @@ export const blockValidationSchema = z.strictObject({
   ),
   outsideVocabulary: z.number().int().nonnegative(),
   listsCapped: z.boolean(),
+  /**
+   * The lists that stopped at `MAX_PROBLEMS_PER_LIST`, each once, in the order
+   * they were cut — so a reader of one list knows ITS count is short
+   * (`problemsCapped`), not only that something on the block was cut.
+   */
+  cappedLists: z.array(z.enum(LIST_NAMES)),
+  /**
+   * Whether the block was judged against schema.org: its top-level `@context`
+   * makes bare names schema.org names. False for a block wholly in another
+   * vocabulary, whose names are counted in `outsideVocabulary`.
+   */
+  judged: z.boolean(),
 });
 
 export type BlockValidation = z.infer<typeof blockValidationSchema>;
 
-type Lists = Omit<BlockValidation, "topType" | "definedIds" | "outsideVocabulary" | "listsCapped">;
+type Lists = Pick<BlockValidation, ListName>;
 
 const SCHEMA_ORG_VOCAB =
   /^https?:\/\/(?:www\.)?schema\.org(?:\/|\/docs\/jsonldcontext\.jsonld?)?$/i;
@@ -224,11 +250,13 @@ class Walker {
   };
   /** Insertion-ordered and deduplicated; never capped (see the header). */
   readonly definedIds = new Set<string>();
+  /** The lists that were cut, in the order they were (`cappedLists`). */
+  readonly cappedLists = new Set<ListName>();
   outside = 0;
   capped = false;
 
   constructor(
-    private readonly judged: boolean,
+    readonly judged: boolean,
     /** The document base ids resolve against; null when the block's context removed it. */
     private readonly base: string | null,
   ) {}
@@ -249,9 +277,19 @@ class Walker {
     const target = this.lists[key] as Lists[K][number][];
     if (target.length >= MAX_PROBLEMS_PER_LIST) {
       this.capped = true;
+      this.cappedLists.add(key);
       return;
     }
     target.push(entry);
+  }
+
+  /**
+   * A block that is only a reference (`{"@id": …}`, its `@context` aside): an
+   * `@graph` member the analyzer stored as a block of its own. It is checked
+   * as the bare reference it is, at `$`, and is not a node (final review M2).
+   */
+  rootReference(id: string): void {
+    this.push("references", { path: "$", id: this.resolveId(id), written: id });
   }
 
   /**
@@ -491,7 +529,11 @@ export function validateBlock(raw: unknown, documentUrl: string): BlockValidatio
     throw new Error(`validateBlock: the document URL '${documentUrl}' is not an absolute URL`);
   }
   const walker = new Walker(judgedContext(raw["@context"]), documentBase(raw["@context"], documentUrl));
-  const topType = walker.node(raw, "$", 1, []);
+  const ownKeys = Object.keys(raw).filter((key) => key !== "@context");
+  const onlyId = ownKeys.length === 1 && ownKeys[0] === "@id" ? bareReferenceId({ "@id": raw["@id"] }) : null;
+  let topType: string | null = null;
+  if (onlyId !== null) walker.rootReference(onlyId);
+  else topType = walker.node(raw, "$", 1, []);
   return {
     topType,
     unknownTypes: walker.lists.unknownTypes,
@@ -504,5 +546,7 @@ export function validateBlock(raw: unknown, documentUrl: string): BlockValidatio
     nodes: walker.lists.nodes,
     outsideVocabulary: walker.outside,
     listsCapped: walker.capped,
+    cappedLists: [...walker.cappedLists],
+    judged: walker.judged,
   };
 }

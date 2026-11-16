@@ -2091,3 +2091,33 @@ describe("structured-data copy after the review (29a rework)", () => {
     }
   });
 });
+
+// 29a rework final review: the per-page structured-data copy says where its counts stop.
+describe("structured-data copy after the final review", () => {
+  it("each per-node rule's copy says a block's list stops at MAX_PROBLEMS_PER_LIST and Problems Capped says so", async () => {
+    // Imported here, not at the top, so no line the surface document cites moves.
+    const { MAX_PROBLEMS_PER_LIST } = await import("../../src/rules/schema-org/validate.js");
+    for (const id of [
+      "schema.unknown-type",
+      "schema.unknown-property",
+      "schema.property-pending-or-superseded",
+      "schema.embedded-type-mismatch",
+      "schema.empty-value",
+      "schema.unresolved-reference",
+    ]) {
+      const text = copyFor(id).explanation;
+      expect(text, id).toContain(`stops at ${MAX_PROBLEMS_PER_LIST}`);
+      expect(text, id).toContain("Problems Capped");
+    }
+  });
+
+  it("unresolved-reference names the page's parse errors as a place the id may be", () => {
+    expect(copyFor("schema.unresolved-reference").explanation).toMatch(/Page Has Parse Errors/);
+  });
+
+  it("property-coverage counts schema.org nodes, and names the other vocabularies and the cut type lists", () => {
+    const text = copyFor("schema.property-coverage").explanation;
+    expect(text).toMatch(/other vocabular/);
+    expect(text).toMatch(/type list/);
+  });
+});

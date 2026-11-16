@@ -153,7 +153,7 @@ describe("schema.property-coverage against the database", () => {
   it("counts top-level nodes per stated type and, per property, the nodes carrying a non-empty value", async () => {
     expect(await run(await site())).toEqual({
       // 6 = p1 + p2 + p3 (two, one untyped) + p4 (two); /n is not judged.
-      "site|": { nodes: 6, propertyListsCapped: 0, typesNotListed: 0 },
+      "site|": { nodes: 6, propertyListsCapped: 0, typesNotListed: 0, otherVocabularyNodes: 0, typesCappedNodes: 0 },
       // name: p1 only (p2's is ""); image: on p1 but empty, so 0; offers p1; sku p2.
       "schema_type|Product": {
         nodes: 2,
@@ -185,7 +185,7 @@ describe("schema.property-coverage against the database", () => {
     await addBlock(crawlId, ids.get("/a")!, { "@context": C, "@type": "Thing" });
     await deriveSchemaValidation(db, crawlId);
     expect(await run(crawlId)).toEqual({
-      "site|": { nodes: 1, propertyListsCapped: 0, typesNotListed: 0 },
+      "site|": { nodes: 1, propertyListsCapped: 0, typesNotListed: 0, otherVocabularyNodes: 0, typesCappedNodes: 0 },
       "schema_type|Thing": { nodes: 1, propertyListsCapped: 0, propertiesNotListed: 0, properties: {} },
     });
   });
@@ -198,7 +198,7 @@ describe("schema.property-coverage against the database", () => {
     await addBlock(crawlId, ids.get("/a")!, big);
     await deriveSchemaValidation(db, crawlId);
     const rows = await run(crawlId);
-    expect(rows["site|"]).toEqual({ nodes: 1, propertyListsCapped: 1, typesNotListed: 0 });
+    expect(rows["site|"]).toEqual({ nodes: 1, propertyListsCapped: 1, typesNotListed: 0, otherVocabularyNodes: 0, typesCappedNodes: 0 });
     const product = rows["schema_type|Product"] as { propertyListsCapped: number; properties: Record<string, number> };
     expect(product.propertyListsCapped).toBe(1);
     expect(Object.keys(product.properties)).toHaveLength(50);
@@ -236,7 +236,7 @@ describe("schema.property-coverage against the database", () => {
   it("answers a crawl with no structured data with a zero site row rather than silence", async () => {
     const crawlId = await newCrawl();
     await addPages(crawlId, [{ path: "/a" }]);
-    expect(await run(crawlId)).toEqual({ "site|": { nodes: 0, propertyListsCapped: 0, typesNotListed: 0 } });
+    expect(await run(crawlId)).toEqual({ "site|": { nodes: 0, propertyListsCapped: 0, typesNotListed: 0, otherVocabularyNodes: 0, typesCappedNodes: 0 } });
   });
 
   it("is silent on a crawl not wholly at extraction 4: microdata and RDFa nodes were not read", async () => {
@@ -284,13 +284,15 @@ describe("schema.property-coverage against the database", () => {
       "Nodes With Property List Capped",
       "Types Not Listed",
       "Properties Not Listed",
+      "Nodes In Other Vocabularies",
+      "Nodes With Type List Capped",
       "Property",
       "Nodes With Value",
     ]);
     const facts = { propertyListsCapped: 0 };
-    const product = { scope: "Product", nodes: 2, ...facts, typesNotListed: null, propertiesNotListed: 0 };
+    const product = { scope: "Product", nodes: 2, ...facts, typesNotListed: null, propertiesNotListed: 0, otherVocabularyNodes: null, typesCappedNodes: null };
     expect(shaped.rows.filter((r) => r["scope"] === "Site" || r["scope"] === "Product")).toEqual([
-      { scope: "Site", nodes: 6, ...facts, typesNotListed: 0, propertiesNotListed: null, key: null, value: null },
+      { scope: "Site", nodes: 6, ...facts, typesNotListed: 0, propertiesNotListed: null, otherVocabularyNodes: 0, typesCappedNodes: 0, key: null, value: null },
       { ...product, key: "name", value: 1 },
       { ...product, key: "offers", value: 1 },
       { ...product, key: "sku", value: 1 },
@@ -346,7 +348,7 @@ describe("schema.property-coverage counts a multi-type node under each of its ty
       { "@context": C, "@type": ["SoftwareApplication", "FAQPage"], name: "App", mainEntity: "" },
     ]);
     const rows = await metricRowsByScope(db, rule(ID), crawlId);
-    expect(rows["site|"]).toEqual({ nodes: 1, propertyListsCapped: 0, typesNotListed: 0 });
+    expect(rows["site|"]).toEqual({ nodes: 1, propertyListsCapped: 0, typesNotListed: 0, otherVocabularyNodes: 0, typesCappedNodes: 0 });
     const each = { nodes: 1, propertyListsCapped: 0, propertiesNotListed: 0, properties: { mainEntity: 0, name: 1 } };
     expect(rows["schema_type|SoftwareApplication"]).toEqual(each);
     expect(rows["schema_type|FAQPage"]).toEqual(each);
@@ -357,6 +359,88 @@ describe("schema.property-coverage counts a multi-type node under each of its ty
     await db.execute(sql`
       update structured_data
          set validation_jsonb = jsonb_set(validation_jsonb, '{nodes,0}', (validation_jsonb #> '{nodes,0}') - 'types')
+       where crawl_id = ${crawlId}`);
+    await expect(metricRowsByScope(db, rule(ID), crawlId)).rejects.toThrow(/re-run the rules/);
+  });
+});
+
+// 29a rework final review fix wave.
+describe("schema.property-coverage after the final review", () => {
+  let db: Db;
+  const createdCrawls: string[] = [];
+  beforeAll(async () => {
+    db = createDb(databaseUrl());
+    await runMigrations(db);
+  });
+  afterAll(async () => {
+    await dropCrawls(db, createdCrawls);
+    await closeDb(db);
+  });
+
+  async function onePage(raws: Record<string, unknown>[]): Promise<string> {
+    const crawlId = await newMetricCrawl(db, SITE, createdCrawls, { pagesCrawled: 1 });
+    const pageId = `page_${randomUUID()}`;
+    await db.insert(pages).values({
+      id: pageId,
+      crawlId,
+      url: url("/a"),
+      urlNormalised: url("/a"),
+      fetchClass: "ok",
+      statusCode: 200,
+      isIndexable: writerIndexable({}),
+      depth: 1,
+      discoveredVia: "link",
+      extractionVersion: 4,
+    });
+    for (const raw of raws) {
+      await db.insert(structuredData).values({ crawlId, pageId, schemaType: "x", format: "jsonld", raw });
+    }
+    await deriveSchemaValidation(db, crawlId);
+    return crawlId;
+  }
+
+  it("M3: counts only schema.org nodes; another vocabulary's are counted apart, a typo type still under its name", async () => {
+    const crawlId = await onePage([
+      { "@context": "https://example.org/vocab/", "@type": "Product", name: "elsewhere" },
+      { "@context": C, "@type": "Prodcut", name: "typo" },
+    ]);
+    const rows = await metricRowsByScope(db, rule(ID), crawlId);
+    expect(rows["site|"]).toEqual({
+      nodes: 1,
+      propertyListsCapped: 0,
+      typesNotListed: 0,
+      otherVocabularyNodes: 1,
+      typesCappedNodes: 0,
+    });
+    expect(Object.keys(rows).sort()).toEqual(["schema_type|Prodcut", "site|"]);
+  });
+
+  it("M6: a node whose type list was cut is counted as typesCappedNodes", async () => {
+    const crawlId = await onePage([
+      {
+        "@context": C,
+        "@type": Array.from({ length: MAX_PROBLEMS_PER_LIST + 1 }, (_, i) => `T${String(i).padStart(3, "0")}`),
+        name: "x",
+      },
+    ]);
+    const rows = await metricRowsByScope(db, rule(ID), crawlId);
+    expect(rows["site|"]).toMatchObject({ nodes: 1, typesCappedNodes: 1 });
+  });
+
+  it("M2: an @graph member that is only a reference is not a node", async () => {
+    const crawlId = await onePage([
+      { "@context": C, "@id": "#org" },
+      { "@context": C, "@type": "WebPage", name: "Home" },
+    ]);
+    const rows = await metricRowsByScope(db, rule(ID), crawlId);
+    expect(rows["site|"]).toMatchObject({ nodes: 1 });
+  });
+
+  it("refuses a node whose typesCapped is not a boolean, saying to re-run the rules", async () => {
+    const crawlId = await onePage([{ "@context": C, "@type": "Thing", name: "x" }]);
+    await db.execute(sql`
+      update structured_data
+         set validation_jsonb = jsonb_set(validation_jsonb, '{nodes,0,typesCapped}', '"no"'::jsonb)
        where crawl_id = ${crawlId}`);
     await expect(metricRowsByScope(db, rule(ID), crawlId)).rejects.toThrow(/re-run the rules/);
   });

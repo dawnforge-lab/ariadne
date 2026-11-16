@@ -25,6 +25,7 @@ import type { StructuredDataFormat } from "../../src/crawl/parse/page-analyzer.j
 import { validateBlock, type BlockValidation } from "../../src/rules/schema-org/validate.js";
 import { UNRESOLVED_NOT_MEASURED, problemCells } from "../../src/api/structured-data.js";
 import { MAX_STRUCTURED_DATA_BLOCKS } from "../../src/crawl/parse/page-analyzer.js";
+import { MAX_PROBLEMS_PER_LIST } from "../../src/rules/schema-org/validate.js";
 import { issues, metrics } from "../../src/db/schema.js";
 import { mkDiscovery } from "../rules/mk-discovery.js";
 import { mkPage } from "../rules/mk-page.js";
@@ -51,7 +52,8 @@ const preV4Id = `crawl_sd_listing_pre_v4_${runId}`;
 const capId = `crawl_sd_listing_cap_${runId}`;
 const orphanId = `crawl_sd_listing_orphan_${runId}`;
 const typelessId = `crawl_sd_listing_typeless_${runId}`;
-const allCrawls = [crawlId, unjudgedId, staleId, skipsId, malformedId, oldShapeId, preV4Id, capId, orphanId, typelessId];
+const multiId = `crawl_sd_listing_multi_${runId}`;
+const allCrawls = [crawlId, unjudgedId, staleId, skipsId, malformedId, oldShapeId, preV4Id, capId, orphanId, typelessId, multiId];
 
 const PRODUCT = {
   "@context": C,
@@ -250,6 +252,31 @@ beforeAll(async () => {
   });
   await service.runRulesForCrawl(LOCAL_TENANT, orphanId);
 
+  // A page whose one node is typed WebPage and FAQPage, and a block with 51
+  // empty values (its list stops at the cap).
+  const multiPages = await seedCrawl(multiId);
+  await db.insert(structuredData).values([
+    {
+      crawlId: multiId,
+      pageId: multiPages.get("/")!,
+      schemaType: "WebPage",
+      format: "jsonld",
+      raw: { "@context": C, "@type": ["WebPage", "FAQPage"], name: "Home" },
+    },
+    {
+      crawlId: multiId,
+      pageId: multiPages.get("/")!,
+      schemaType: "ItemList",
+      format: "jsonld",
+      raw: {
+        "@context": C,
+        "@type": "ItemList",
+        itemListElement: Array.from({ length: MAX_PROBLEMS_PER_LIST + 1 }, () => ""),
+      },
+    },
+  ]);
+  await service.runRulesForCrawl(LOCAL_TENANT, multiId);
+
   // Judged, then the Product block's node stripped of `types`: the shape a
   // blob had before the gate fix, which must be refused as old.
   await seedCrawl(typelessId);
@@ -306,7 +333,7 @@ describe("listStructuredData — the rows", () => {
       pageType: "product",
       indexable: true,
       formats: ["jsonld", "microdata"],
-      types: ["Organization", "Product"],
+      types: ["Product", "Organization"],
       nodes: [
         {
           format: "jsonld",
@@ -321,7 +348,7 @@ describe("listStructuredData — the rows", () => {
       jsonLdParseErrors: 0,
       microdataErrors: 0,
       skips: SKIPS,
-      blocksAtCap: false,
+      blocksAtCap: false, problemsCapped: false,
     });
     // The empty image is the one warning; the unresolved #brand the one info.
     expect(product?.warningCount).toBe(1);
@@ -332,7 +359,7 @@ describe("listStructuredData — the rows", () => {
     const page = await service.listStructuredData(LOCAL_TENANT, crawlId, {});
     expect(Object.keys(page.items[0]!)).toEqual([
       "url", "pageType", "indexable", "formats", "types", "nodes",
-      "warningCount", "infoCount", "jsonLdParseErrors", "microdataErrors", "skips", "blocksAtCap",
+      "warningCount", "infoCount", "jsonLdParseErrors", "microdataErrors", "skips", "blocksAtCap", "problemsCapped",
     ]);
     expect(Object.keys(page.items[0]!.nodes[0]!)).toEqual(["format", "path", "type", "types", "typesCapped", "properties", "propertiesCapped"]);
   });
@@ -345,7 +372,7 @@ describe("listStructuredData — the rows", () => {
     // `editor: #ada` is defined by the Person block beside it and resolves.
     expect(article).toMatchObject({
       formats: ["jsonld"],
-      types: ["Article", "FAQPage", "Person"],
+      types: ["Article", "Blorpticle", "Person", "FAQPage"],
       ...pageCounts("/article"),
     });
     expect(article?.nodes.map((n) => n.type)).toEqual(["Article", "Person", "FAQPage"]);
@@ -367,7 +394,7 @@ describe("listStructuredData — the rows", () => {
       jsonLdParseErrors: 2,
       microdataErrors: 1,
       skips: { microdataItemrefSkipped: 0, rdfaUnsupported: 0, valuesCapped: 0 },
-      blocksAtCap: false,
+      blocksAtCap: false, problemsCapped: false,
     });
   });
 });
@@ -455,14 +482,14 @@ describe("the structured_data_nodes CSV view", () => {
         [P, "jsonld", "Product", "$.image", "Product", "empty-value", "image is empty"],
         [P, "jsonld", "Product", "$.brand", "", "unresolved-reference", `#brand (${P}#brand) is not defined on this page`],
         [P, "microdata", "Organization", "", "", "", ""],
-        [A, "jsonld", "Article", "$", "Blorpticle", "unknown-type", "Blorpticle is not a schema.org type"],
-        [A, "jsonld", "Article", "$", "Article", "unknown-property", "fooBar is not a property of Article"],
+        [A, "jsonld", "Article|Blorpticle", "$", "Blorpticle", "unknown-type", "Blorpticle is not a schema.org type"],
+        [A, "jsonld", "Article|Blorpticle", "$", "Article", "unknown-property", "fooBar is not a property of Article"],
         [
-          A, "jsonld", "Article", "$.author", "Offer", "type-mismatch",
+          A, "jsonld", "Article|Blorpticle", "$.author", "Offer", "type-mismatch",
           "author: Offer (expected Organization|Person)",
         ],
         // `#org` is defined on /product only; `#ada` (the Person block below) resolves.
-        [A, "jsonld", "Article", "$.publisher", "", "unresolved-reference", `#org (${A}#org) is not defined on this page`],
+        [A, "jsonld", "Article|Blorpticle", "$.publisher", "", "unresolved-reference", `#org (${A}#org) is not defined on this page`],
         [A, "jsonld", "Person", "", "", "", ""],
         [A, "jsonld", "FAQPage", "", "", "", ""],
       ].map((cells) => csvRecord(cells)),
@@ -550,15 +577,16 @@ describe("the stored skips object is projected, not passed through (review I2)",
 });
 
 describe("a node entry without its property list is unreadable (review I3)", () => {
-  it("the listing throws rather than counting the entry as clean", async () => {
+  // Refused up front since the final review: the shared shape check (staleBlob)
+  // covers node entries, so the 409 comes before a row or a byte.
+  it("the listing refuses it (409, re-run the rules) rather than counting the entry as clean", async () => {
     const error = await service.listStructuredData(LOCAL_TENANT, malformedId, {}).catch((e: unknown) => e);
-    expect(error).toBeInstanceOf(Error);
-    expect(String((error as Error).message)).toMatch(new RegExp(`${malformedId}.*not a BlockValidation`));
+    expect(error).toMatchObject({ code: "CONFLICT" });
+    expect(String((error as Error).message)).toMatch(new RegExp(`${malformedId}.*re-run the rules`));
   });
 
-  it("the CSV view throws rather than writing the block as clean", async () => {
-    // The refusal before the header passes (no blob is null); the row throws.
-    await expect(csvLines(malformedId)).rejects.toThrow(/not a BlockValidation/);
+  it("the CSV view refuses it before a byte rather than writing the block as clean", async () => {
+    await expect(csvLines(malformedId)).rejects.toMatchObject({ code: "CONFLICT" });
   });
 });
 
@@ -661,5 +689,26 @@ describe("the listing's nodes list every stated type", () => {
     expect(error).toMatchObject({ code: "CONFLICT" });
     expect(String((error as Error).message)).toContain("re-run the rules (crawl_rules)");
     await expect(csvLines(typelessId)).rejects.toMatchObject({ code: "CONFLICT" });
+  });
+});
+
+// 29a rework final review fix wave.
+describe("the listing and CSV after the final review", () => {
+  it("I2: a page row lists every type its nodes state, in authored order; the CSV Schema Type joins a block's", async () => {
+    const page = await service.listStructuredData(LOCAL_TENANT, multiId, {});
+    const home = page.items.find((r) => r.url === `${SITE}/`);
+    expect(home?.types).toEqual(["WebPage", "FAQPage", "ItemList"]);
+    const lines = await csvLines(multiId);
+    const homeRows = lines.filter((l) => l.startsWith(`${SITE}/,`));
+    expect(homeRows[0]).toBe(csvRecord([`${SITE}/`, "jsonld", "WebPage|FAQPage", "", "", "", ""]));
+  });
+
+  it("I1: a page whose block cut a list it counts says problemsCapped; the CSV holds the first MAX per list per block", async () => {
+    const page = await service.listStructuredData(LOCAL_TENANT, multiId, {});
+    const home = page.items.find((r) => r.url === `${SITE}/`);
+    expect(home?.problemsCapped).toBe(true);
+    expect(home?.warningCount).toBe(MAX_PROBLEMS_PER_LIST);
+    const empties = (await csvLines(multiId)).filter((l) => l.startsWith(`${SITE}/,`) && l.includes(",empty-value,"));
+    expect(empties).toHaveLength(MAX_PROBLEMS_PER_LIST);
   });
 });

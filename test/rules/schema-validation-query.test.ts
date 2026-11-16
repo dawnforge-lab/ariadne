@@ -21,6 +21,7 @@ import {
   schemaValidationRules,
 } from "../../src/rules/query/schema-validation.js";
 import { MAX_STRUCTURED_DATA_BLOCKS } from "../../src/crawl/parse/page-analyzer.js";
+import { MAX_PROBLEMS_PER_LIST } from "../../src/rules/schema-org/validate.js";
 import type { Finding, QueryRule } from "../../src/rules/registry/types.js";
 import { DEFAULT_THRESHOLDS } from "../../src/rules/judgement.js";
 import type { JudgementContext } from "../../src/rules/registry/types.js";
@@ -224,7 +225,7 @@ describe("the schema validation rules against the database", () => {
       expect(found).toHaveLength(1);
       expect(found[0]!.evidence).toEqual({
         problems: [{ format: "jsonld", path: "$", type: "Prodcut" }],
-        problemCount: 1,
+        problemCount: 1, problemsCapped: false,
       });
       expect(await run(ID, await onePage(CLEAN_ORG))).toEqual([]);
     });
@@ -237,7 +238,7 @@ describe("the schema validation rules against the database", () => {
       expect(found).toHaveLength(1);
       expect(found[0]!.evidence).toEqual({
         problems: [{ format: "jsonld", path: "$", type: "Organization", property: "flavour" }],
-        problemCount: 1,
+        problemCount: 1, problemsCapped: false,
       });
       expect(await run(ID, await onePage(CLEAN_ORG))).toEqual([]);
     });
@@ -257,7 +258,7 @@ describe("the schema validation rules against the database", () => {
         problems: [
           { format: "jsonld", path: "$", property: "gtin", status: "pending", supersededBy: null },
         ],
-        problemCount: 1,
+        problemCount: 1, problemsCapped: false,
       });
     });
     it("is silent on a clean page", async () => {
@@ -297,7 +298,7 @@ describe("the schema validation rules against the database", () => {
           { format: "jsonld", path: "$.name", type: "Product", property: "name" },
           { format: "jsonld", path: "$.offers.price", type: "Offer", property: "price" },
         ],
-        problemCount: 2,
+        problemCount: 2, problemsCapped: false,
       });
     });
 
@@ -345,9 +346,9 @@ describe("the schema validation rules against the database", () => {
       expect(found).toHaveLength(1);
       expect(found[0]!.severity).toBe("info");
       expect(found[0]!.evidence).toEqual({
-        blocksAtCap: false,
+        blocksAtCap: false, pageHasParseErrors: false,
         problems: [{ format: "jsonld", path: "$.about[1]", id: `${url("/a")}#topic`, written: "#topic" }],
-        problemCount: 1,
+        problemCount: 1, problemsCapped: false,
       });
     });
 
@@ -357,7 +358,7 @@ describe("the schema validation rules against the database", () => {
         await onePage({ ...CLEAN_ORG, parentOrganization: { "@id": "https://parent.example/#org" } }),
       );
       expect(found[0]!.evidence).toEqual({
-        blocksAtCap: false,
+        blocksAtCap: false, pageHasParseErrors: false,
         problems: [
           {
             format: "jsonld",
@@ -366,7 +367,7 @@ describe("the schema validation rules against the database", () => {
             written: "https://parent.example/#org",
           },
         ],
-        problemCount: 1,
+        problemCount: 1, problemsCapped: false,
       });
     });
 
@@ -473,6 +474,12 @@ describe("the schema validation rules against the database", () => {
   describe("schema.template-inconsistent", () => {
     const ID = "schema.template-inconsistent";
     const PRODUCT = { "@context": ctx, "@type": "Product", name: "Mug" };
+    // The rule reads the verdicts' node types (final review I2), so the blocks
+    // a test adds are derived before the rule runs.
+    const run = async (id: string, crawlId: string): Promise<Finding[]> => {
+      await deriveSchemaValidation(db, crawlId);
+      return rule(id).run(db, crawlId);
+    };
 
     /** `total` product pages `/p0..`; the first `with` carry a Product block. */
     async function productSite(
@@ -490,6 +497,7 @@ describe("the schema validation rules against the database", () => {
       for (let i = 0; i < withProduct; i += 1) {
         await addBlock(crawlId, ids.get(specs[i]!.path)!, PRODUCT);
       }
+      await deriveSchemaValidation(db, crawlId);
       return crawlId;
     }
 
@@ -635,7 +643,7 @@ describe("the schema validation rules against the database", () => {
     });
 
     it("declares the Blocks At Cap column beside the problems", () => {
-      expect(rule(ID).columns.map((c) => c.key)).toEqual(["problems", "blocksAtCap", "problemCount"]);
+      expect(rule(ID).columns.map((c) => c.key)).toEqual(["problems", "blocksAtCap", "pageHasParseErrors", "problemCount", "problemsCapped"]);
     });
   });
 });
@@ -691,6 +699,127 @@ describe("a blob whose nodes lack types (written before the gate fix)", () => {
       update structured_data
          set validation_jsonb = jsonb_set(validation_jsonb, '{nodes,0}', (validation_jsonb #> '{nodes,0}') - 'types')
        where crawl_id = ${crawlId}`);
+    await expect(rule("schema.empty-value").run(db, crawlId)).rejects.toThrow(/re-run the rules/);
+  });
+});
+
+// 29a rework final review fix wave. Appended so no earlier line moves.
+describe("the per-page schema rules after the final review", () => {
+  let db: Db;
+  const created: string[] = [];
+  beforeAll(async () => {
+    db = createDb(databaseUrl());
+    await runMigrations(db);
+  });
+  afterAll(async () => {
+    for (const id of created) await db.delete(crawls).where(eq(crawls.id, id));
+    await closeDb(db);
+  });
+
+  async function crawlWith(
+    pagesSpec: { path: string; pageType?: string; parseErrors?: number; raws: Record<string, unknown>[] }[],
+  ): Promise<string> {
+    const crawlId = `crawl_${randomUUID()}`;
+    created.push(crawlId);
+    await db.insert(crawls).values({
+      tenantId: LOCAL_TENANT,
+      id: crawlId,
+      siteUrl: SITE,
+      hostKey: hostKeyOf(SITE),
+      config: { userAgent: "AriadneBot-test", maxPages: 500 },
+      rulesetVersion: "test",
+      status: "finished",
+      discovery: mkDiscovery(),
+    });
+    for (const spec of pagesSpec) {
+      const pageId = `page_${randomUUID()}`;
+      await db.insert(pages).values({
+        id: pageId,
+        crawlId,
+        url: url(spec.path),
+        urlNormalised: url(spec.path),
+        fetchClass: "ok",
+        statusCode: 200,
+        isIndexable: writerIndexable({}),
+        depth: 1,
+        discoveredVia: "link",
+        pageType: spec.pageType ?? null,
+        structuredDataParseErrors: spec.parseErrors ?? 0,
+        structuredDataMicrodataErrors: 0,
+        extractionVersion: 4,
+      });
+      for (const raw of spec.raws) {
+        await db.insert(structuredData).values({ crawlId, pageId, schemaType: "x", format: "jsonld", raw });
+      }
+    }
+    await deriveSchemaValidation(db, crawlId);
+    return crawlId;
+  }
+
+  it("I1: a list cut at MAX_PROBLEMS_PER_LIST says so: problemCount stops there and problemsCapped is true", async () => {
+    const crawlId = await crawlWith([
+      {
+        path: "/a",
+        raws: [
+          {
+            "@context": ctx,
+            "@type": "ItemList",
+            name: "List",
+            keywords: Array.from({ length: MAX_PROBLEMS_PER_LIST + 1 }, () => ""),
+            itemListElement: Array.from({ length: MAX_PROBLEMS_PER_LIST + 1 }, (_, i) => ({ "@id": `/gone/${i}` })),
+          },
+        ],
+      },
+    ]);
+    const empty = await rule("schema.empty-value").run(db, crawlId);
+    expect(empty[0]!.evidence).toMatchObject({ problemCount: MAX_PROBLEMS_PER_LIST, problemsCapped: true });
+    const unresolved = await rule("schema.unresolved-reference").run(db, crawlId);
+    expect(unresolved[0]!.evidence).toMatchObject({ problemCount: MAX_PROBLEMS_PER_LIST, problemsCapped: true });
+    // A list the rule does not read was not cut, whatever the others did.
+    expect(await rule("schema.unknown-type").run(db, crawlId)).toEqual([]);
+  });
+
+  it("M1: an unresolved reference on a page with a block that did not parse says so", async () => {
+    const page = { "@context": ctx, "@type": "WebPage", name: "Home", publisher: { "@id": "#org" } };
+    const crawlId = await crawlWith([
+      { path: "/broken", parseErrors: 1, raws: [page] },
+      { path: "/clean", raws: [page] },
+    ]);
+    const found = await rule("schema.unresolved-reference").run(db, crawlId);
+    expect(found.map((f) => [f.pageUrl, f.evidence["pageHasParseErrors"]])).toEqual([
+      [url("/broken"), true],
+      [url("/clean"), false],
+    ]);
+  });
+
+  it("I2: template-inconsistent reads every stated type: a WebPage+FAQPage page does not lack FAQPage", async () => {
+    const faq = { "@context": ctx, "@type": "FAQPage", name: "Q" };
+    const crawlId = await crawlWith([
+      ...Array.from({ length: 9 }, (_, i) => ({ path: `/faq/${i}`, pageType: "faq", raws: [faq] })),
+      { path: "/faq/9", pageType: "faq", raws: [{ "@context": ctx, "@type": ["WebPage", "FAQPage"], name: "Q" }] },
+    ]);
+    expect(await rule("schema.template-inconsistent").run(db, crawlId)).toEqual([]);
+    // The second type counts as much as the first: nine FAQPage-only pages and
+    // one WebPage+FAQPage page do not make the nine lack WebPage (9 of 10 lack it).
+    const lacking = await rule("schema.template-inconsistent").run(db, crawlId, undefined, {
+      thresholds: { ...DEFAULT_THRESHOLDS, SCHEMA_TEMPLATE_SHARE: 50 },
+      disabledRules: new Set(),
+    });
+    expect(lacking).toEqual([]);
+  });
+
+  it("I2: template-inconsistent refuses a judged block with no verdict, saying to re-run the rules", async () => {
+    const crawlId = await crawlWith(
+      Array.from({ length: 10 }, (_, i) => ({ path: `/p/${i}`, pageType: "product", raws: [{ "@context": ctx, "@type": "Product", name: "x" }] })),
+    );
+    await db.execute(sql`update structured_data set validation_jsonb = null where crawl_id = ${crawlId}`);
+    await expect(rule("schema.template-inconsistent").run(db, crawlId)).rejects.toThrow(/re-run the rules/);
+  });
+
+  it("M7: a rule that does not read definedIds still refuses a blob without them", async () => {
+    const crawlId = await crawlWith([{ path: "/a", raws: [{ "@context": ctx, "@type": "Organization", name: "" }] }]);
+    await db.execute(sql`
+      update structured_data set validation_jsonb = validation_jsonb - 'definedIds' where crawl_id = ${crawlId}`);
     await expect(rule("schema.empty-value").run(db, crawlId)).rejects.toThrow(/re-run the rules/);
   });
 });

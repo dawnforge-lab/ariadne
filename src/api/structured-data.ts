@@ -30,6 +30,7 @@ import { sql, type SQL } from "drizzle-orm";
 
 import type { StructuredDataFormat, StructuredDataSkips } from "../crawl/parse/page-analyzer.js";
 import { V4 } from "../rules/query/page-facts.js";
+import { staleBlob } from "../rules/schema-org/blob-sql.js";
 import type { NotMeasured } from "./overview.js";
 import { ServiceError, clip } from "./errors.js";
 
@@ -89,8 +90,9 @@ export const STRUCTURED_DATA_PROBLEMS = [
 ] as const;
 export type StructuredDataProblem = (typeof STRUCTURED_DATA_PROBLEMS)[number];
 
-/** The `BlockValidation` lists the surface reads. A blob without all eight is unreadable. */
+/** The `BlockValidation` lists the surface reads. A blob without all nine is unreadable. */
 const VALIDATION_LISTS = [
+  "cappedLists",
   "unknownTypes",
   "unknownProperties",
   "propertyStatus",
@@ -163,7 +165,7 @@ const MALFORMED_ENTRIES = [
  * the readers throw.
  */
 export function validationReadable(blob: SQL): SQL {
-  return sql`(jsonb_typeof(${blob}) = 'object' and ${sql.join(
+  return sql`(jsonb_typeof(${blob}) = 'object' and not ${staleBlob(blob)} and ${sql.join(
     VALIDATION_LISTS.map((name) => sql`jsonb_typeof(${list(blob, name)}) = 'array'`),
     sql` and `,
   )} and ${sql.join(
@@ -209,6 +211,28 @@ function unresolved(ref: SQL, crawlId: string, pageId: SQL): SQL {
     select 1 from structured_data d
      where d.crawl_id = ${crawlId} and d.page_id = ${pageId}
        and d.validation_jsonb -> 'definedIds' @> jsonb_build_array(${ref} -> 'id'))`;
+}
+
+/**
+ * Whether one block cut a list the counts read (`cappedLists`, final review
+ * I1): the page's counts are then short, and the row says so
+ * (`problemsCapped`). `references` counts only where references are measured.
+ */
+export function blockProblemsCapped(blob: SQL, crawlId: string): SQL {
+  return sql`exists (
+    select 1 from jsonb_array_elements_text(${list(blob, "cappedLists")}) as c(name)
+     where c.name in ('unknownTypes', 'unknownProperties', 'propertyStatus', 'typeMismatches', 'emptyValues')
+        or (c.name = 'references' and ${referencesMeasured(crawlId)}))`;
+}
+
+/**
+ * Every type a block's top-level node states (`nodes[].types`), joined with
+ * the CSV list separator — the CSV view's Schema Type (final review I2).
+ */
+export function blockTypesCell(blob: SQL): SQL {
+  return sql`(select coalesce(string_agg(t.type, '|' order by n.ord, t.ord), '')
+      from jsonb_array_elements(${list(blob, "nodes")}) with ordinality as n(node, ord)
+      cross join lateral jsonb_array_elements_text(n.node -> 'types') with ordinality as t(type, ord))`;
 }
 
 /** One block's warnings (R0.8), null when the blob is unreadable. */

@@ -28,10 +28,14 @@
  * mid-item is closed by the tokenizer's own end-of-input closes; `end()` then
  * throws if a frame is still open, which would be depth drift.
  *
- * VALUES (spec §29a, the HTML microdata list, widened as Google reads it):
+ * VALUES (spec §29a: the WHATWG HTML Microdata spec's "property value" list,
+ * widened by one reading):
  *  - any element carrying `content`: that attribute, as written (29a final
- *    review M1 — Google and schema.org's own guide honour it beyond `meta`,
- *    e.g. `<span itemprop="price" content="10.00">$10</span>`);
+ *    review M1). The WHATWG spec reads `content` on `meta` only; schema.org's
+ *    own markup guide puts it on other elements too, e.g.
+ *    `<span itemprop="price" content="10.00">$10</span>`, and that reading is
+ *    kept. So an `empty-value` from `content=""` on an element with visible
+ *    text is a fact about the attribute as read (a v5 question);
  *  - `meta` without `content`: "";
  *  - `a`, `link`: `href`; `img`, `audio`, `video`, `source`, `iframe`,
  *    `embed`, `track`: `src`. Resolved with `new URL(v, pageUrl).href`, the raw
@@ -115,8 +119,9 @@ function attributeValue(
   attribs: Record<string, string>,
   pageUrl: string,
 ): string | undefined {
-  // `content` wins on ANY element, as Google's parser and schema.org's own
-  // guide read it (`<span itemprop="price" content="10.00">$10</span>`): an
+  // `content` wins on ANY element: a widening of the WHATWG Microdata
+  // property-value rules (which read it on `meta` only), as schema.org's own
+  // guide writes it (`<span itemprop="price" content="10.00">$10</span>`). An
   // empty element carrying it is not an empty value (29a final review M1).
   if ("content" in attribs) return attribs["content"];
   if (name === "meta") return "";

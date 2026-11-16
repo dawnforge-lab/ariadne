@@ -724,3 +724,56 @@ describe("validateBlock — a node's type list caps at MAX_PROBLEMS_PER_LIST", (
     expect(v.listsCapped).toBe(true);
   });
 });
+
+// 29a rework final review fix wave.
+describe("validateBlock — which lists were cut (final review I1)", () => {
+  it("cappedLists names each list that stopped at MAX_PROBLEMS_PER_LIST, and only those", () => {
+    const fiftyOne = MAX_PROBLEMS_PER_LIST + 1;
+    const v = validate({
+      "@context": CTX,
+      "@type": "ItemList",
+      name: "List",
+      itemListElement: Array.from({ length: fiftyOne }, (_, i) => ({ "@id": `/p/${i}` })),
+      keywords: Array.from({ length: fiftyOne }, () => ""),
+    });
+    expect(v.references).toHaveLength(MAX_PROBLEMS_PER_LIST);
+    expect(v.emptyValues).toHaveLength(MAX_PROBLEMS_PER_LIST);
+    expect([...v.cappedLists].sort()).toEqual(["emptyValues", "references"]);
+    expect(v.listsCapped).toBe(true);
+  });
+
+  it("is empty when nothing was cut, at exactly MAX entries too", () => {
+    const v = validate({
+      "@context": CTX,
+      "@type": "ItemList",
+      name: "List",
+      keywords: Array.from({ length: MAX_PROBLEMS_PER_LIST }, () => ""),
+    });
+    expect(v.emptyValues).toHaveLength(MAX_PROBLEMS_PER_LIST);
+    expect(v.cappedLists).toEqual([]);
+  });
+});
+
+describe("validateBlock — a block that is only a reference (final review M2)", () => {
+  it("an @graph member holding only @id is a bare reference at $, not a node", () => {
+    const blocks = analyzePage(
+      `<script type="application/ld+json">{"@context":"https://schema.org","@graph":[` +
+        `{"@id":"#org"},{"@type":"WebPage","name":"Home"}]}</script>`,
+      "https://ex.com/",
+    ).structuredData;
+    expect(blocks).toHaveLength(2);
+    const ref = validate(blocks[0]!.raw, "https://ex.com/");
+    expect(ref.references).toEqual([{ path: "$", id: "https://ex.com/#org", written: "#org" }]);
+    expect(ref.nodes).toEqual([]);
+    expect(ref.definedIds).toEqual([]);
+    expect(ref.topType).toBeNull();
+  });
+});
+
+describe("validateBlock — whether the block was judged against schema.org (final review M3)", () => {
+  it("a schema.org block is judged, a typo type included; a block in another vocabulary is not", () => {
+    expect(validate({ "@context": CTX, "@type": "Prodcut", name: "x" }).judged).toBe(true);
+    expect(validate({ "@type": "Thing", name: "x" }).judged).toBe(true);
+    expect(validate({ "@context": "https://example.org/vocab/", "@type": "Product", name: "x" }).judged).toBe(false);
+  });
+});

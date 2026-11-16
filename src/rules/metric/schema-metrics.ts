@@ -38,6 +38,7 @@ import { JUDGED, metricRow, metricRule, type MetricIdentity } from "../helpers.j
 import { assertCrawl } from "../query/crawl-evidence.js";
 import { v4Gate } from "../query/page-facts.js";
 import { expandMap } from "../registry/metric-table.js";
+import { staleBlob } from "../schema-org/blob-sql.js";
 import type { Metric, MetricRule } from "../registry/registry.js";
 import { num, text } from "./cohort.js";
 
@@ -49,22 +50,14 @@ export const COVERAGE_MAX_TYPES = 100;
 /** The most properties one type's row lists, by the count of nodes carrying a value. */
 export const COVERAGE_MAX_PROPERTIES = 100;
 
-/**
- * A node entry the validator did not write: not an object, or missing its
- * type key or either property list.
- */
-const MALFORMED_NODE =
-  'lax $.nodes[*] ? (@.type() != "object" || !exists(@."type") || !exists(@.propertiesCapped)' +
-  ' || !exists(@.properties) || !exists(@.emptyProperties) || !exists(@.types) || !exists(@.typesCapped)' +
-  ' || @.types.type() != "array"' +
-  ' || @.properties.type() != "array" || @.emptyProperties.type() != "array")';
-
 type CoverageRow = {
   scope: string;
   scope_value: string;
   nodes: number;
   capped: number;
   not_listed: number;
+  other_vocabulary: number;
+  types_capped: number;
   properties: Record<string, unknown> | null;
 };
 
@@ -76,8 +69,7 @@ async function propertyCoverage(db: Db, crawlId: string, self: MetricIdentity): 
     select count(*) filter (where sd.validation_jsonb is null)::int as underived,
            count(*) filter (
              where sd.validation_jsonb is not null
-               and (jsonb_typeof(sd.validation_jsonb -> 'nodes') is distinct from 'array'
-                    or jsonb_path_exists(sd.validation_jsonb, ${sql.raw(`'${MALFORMED_NODE}'`)}))
+               and ${staleBlob(sql`sd.validation_jsonb`)}
            )::int as unreadable
     from pages p
     join structured_data sd on sd.crawl_id = ${crawlId} and sd.page_id = p.id
@@ -97,12 +89,21 @@ async function propertyCoverage(db: Db, crawlId: string, self: MetricIdentity): 
   }
 
   const result = await db.execute<CoverageRow>(sql`
-    with nodes as (
-      select n.node
+    with every_node as (
+      select n.node, (sd.validation_jsonb ->> 'judged')::boolean as judged
       from pages p
       join structured_data sd on sd.crawl_id = ${crawlId} and sd.page_id = p.id
       cross join lateral jsonb_array_elements(sd.validation_jsonb -> 'nodes') as n(node)
       where p.crawl_id = ${crawlId} and ${JUDGED("p")}
+    ),
+    -- Only nodes of blocks judged against schema.org are counted (final review
+    -- M3): a block in another vocabulary names its types in THAT vocabulary,
+    -- and filing its "Product" beside schema.org's would merge two things. Such
+    -- nodes are counted apart, as otherVocabularyNodes on the site row. A
+    -- misspelt type in a schema.org block is still a schema.org-context node,
+    -- counted under the name it states.
+    nodes as (
+      select node from every_node where judged
     ),
     -- A node counts once under EACH type it lists: a node typed A and B is an
     -- A node and a B node. Only the listed types count (the list is capped per
@@ -135,10 +136,13 @@ async function propertyCoverage(db: Db, crawlId: string, self: MetricIdentity): 
            (select count(*) from nodes)::int as nodes,
            (select count(*) filter (where (node ->> 'propertiesCapped')::boolean) from nodes)::int as capped,
            (select count(*) from types where rank > ${COVERAGE_MAX_TYPES})::int as not_listed,
+           (select count(*) from every_node where not judged)::int as other_vocabulary,
+           (select count(*) filter (where (node ->> 'typesCapped')::boolean) from nodes)::int as types_capped,
            null::jsonb as properties
     union all
     select 'schema_type', ty.type, ty.nodes, ty.capped,
            (select count(*) from ranked r where r.type = ty.type and r.rank > ${COVERAGE_MAX_PROPERTIES})::int,
+           0, 0,
            coalesce(
              (select jsonb_object_agg(r.name, r.carried) from ranked r
                where r.type = ty.type and r.rank <= ${COVERAGE_MAX_PROPERTIES}),
@@ -153,7 +157,15 @@ async function propertyCoverage(db: Db, crawlId: string, self: MetricIdentity): 
     if (row.scope === "site") {
       return metricRow(self, {
         scope: "site",
-        value: { nodes, propertyListsCapped, typesNotListed: notListed },
+        value: {
+          nodes,
+          propertyListsCapped,
+          typesNotListed: notListed,
+          otherVocabularyNodes: num(row.other_vocabulary, "other_vocabulary", self.id),
+          // Nodes whose type list stopped at MAX_PROBLEMS_PER_LIST: only their
+          // listed types were counted (final review M6).
+          typesCappedNodes: num(row.types_capped, "types_capped", self.id),
+        },
       });
     }
     const properties = row.properties;
@@ -187,6 +199,8 @@ export const schemaMetrics: MetricRule[] = [
       { key: "propertyListsCapped", label: "Nodes With Property List Capped" },
       { key: "typesNotListed", label: "Types Not Listed" },
       { key: "propertiesNotListed", label: "Properties Not Listed" },
+      { key: "otherVocabularyNodes", label: "Nodes In Other Vocabularies" },
+      { key: "typesCappedNodes", label: "Nodes With Type List Capped" },
     ]),
     async (db, crawlId, self) => propertyCoverage(db, crawlId, self),
   ),

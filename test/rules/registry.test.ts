@@ -863,3 +863,12 @@ describe("a metric table's declared order", () => {
     );
   });
 });
+
+// 29a rework final review: the severity split, pinned from the registry itself.
+describe("the registry's severity totals", () => {
+  it("197 rules are 33 critical, 71 warning and 93 info", () => {
+    const counts: Record<string, number> = {};
+    for (const rule of buildRegistry().all()) counts[rule.severity] = (counts[rule.severity] ?? 0) + 1;
+    expect(counts).toEqual({ critical: 33, warning: 71, info: 93 });
+  });
+});

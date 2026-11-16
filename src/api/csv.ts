@@ -70,6 +70,7 @@ import { notDisabled } from "./judgement-view.js";
 import {
   STRUCTURED_DATA_FORMATS,
   blockProblems,
+  blockTypesCell,
   problemCells,
   validationReadable,
 } from "./structured-data.js";
@@ -1025,6 +1026,11 @@ export const CSV_VIEW_DEFS: Record<CsvQueryViewName, CsvView> = {
    * are separate reads — throws in `cells` rather than writing the block as
    * clean: the query turns such a blob into an empty problem list, which is
    * exactly the row a clean block gets.
+   *
+   * Schema Type is every type the block's node states, `|`-joined. Each of a
+   * block's problem lists holds at most `MAX_PROBLEMS_PER_LIST` entries, so a
+   * block's rows for one problem stop there; the listing's `problemsCapped`
+   * and the findings' Problems Capped say when they did (the cap is per block).
    */
   structured_data_nodes: defineCsvView<{
     id: string;
@@ -1041,7 +1047,11 @@ export const CSV_VIEW_DEFS: Record<CsvQueryViewName, CsvView> = {
     // Ids are positive and `ord` is never negative, so (-1, -1) precedes every row.
     start: ["-1", "-1"],
     query: (crawlId, cursor, limit) => sql`
-      select sd.id::text as id, x.ord::text as ord, p.url, sd.format, sd.schema_type,
+      select sd.id::text as id, x.ord::text as ord, p.url, sd.format,
+             -- Every type the block's node states, '|'-joined (final review I2);
+             -- an unreadable blob throws in cells before this is printed.
+             case when ${validationReadable(sql`sd.validation_jsonb`)}
+                  then ${blockTypesCell(sql`sd.validation_jsonb`)} else '' end as schema_type,
              sd.validation_jsonb is not null as validated,
              ${validationReadable(sql`sd.validation_jsonb`)} as readable,
              x.problem

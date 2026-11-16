@@ -41,8 +41,10 @@ WHAT CHANGED AFTER IMPORT (the living authority's own change log):
   - CHECK-01: the five `render.*-changed` rules, each also claiming its element's
     check.
 
-  Phase 29a (ruleset 0.26.0, 2026-11-13) — engine paragraphs only; no check's id,
-  title, priority, Evaluate criteria or Record list moved.
+  Phase 29a (ruleset 0.26.0, 2026-11-13; reworked 2026-11-16) — engine paragraphs,
+  plus reworded Evaluate rationale and DevTools text where they cited one search
+  engine: Evaluate verdict conditions unchanged; Google wording removed. No check's
+  id, title, priority or Record list moved.
   - CHECK-43: the `schema.*` validation rules over JSON-LD, microdata and RDFa, judged
     by the schema.org vocabulary and the JSON-LD, Microdata and RDFa specifications
     (no one search engine's profile), and the `structured_data` listing with each
@@ -2806,31 +2808,38 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
     JSON-LD, so read it as a fact to check, not an error. The evidence carries
     `blocksAtCap`: the page is at the analyzer's per-page limit of structured-data
     blocks, so blocks past it were not stored and the id may be defined in one of them.
+    The evidence also carries `pageHasParseErrors`: a block on the page could not be
+    parsed, so the id may be defined in a block that was not read.
     The rule needs extraction version 4 across the whole crawl and is silent below it;
   - `schema.template-inconsistent` (warning): a page type with at least
     `SCHEMA_TEMPLATE_MIN_PAGES` judged pages (default 10; the floor is on the page
     type's size, not on how many carry the schema type) where a schema type is on
     `SCHEMA_TEMPLATE_SHARE` (default 70 percent) or more of them and missing from the
-    rest;
+    rest. A page carries every type its top-level nodes state, so a node typed WebPage
+    and FAQPage carries FAQPage;
   - `schema.none-on-site` (info): the crawl stored no structured data of any format
     anywhere. A site with markup fires nothing here;
   - `schema.breadcrumb-absent` and `schema.self-serving-reviews` are the two sibling
     rules. They claim CHECK-45 and CHECK-46 respectively, not CHECK-43, so
     `issues_list` with `checkId: "CHECK-43"` does not return them: ask for those
     checks by their own ids.
-  `schema.none-on-site`, `schema.breadcrumb-absent` and `schema.template-inconsistent`
-  also need extraction version 4 across the whole crawl. `issue_urls` names the problems
-  per page. The `structured_data` listing answers the question the findings cannot:
-  which page types publish which formats and types, which top-level nodes a page
-  carries with their property names (`nodes`, each with `format`, `path`, `type`,
-  `types` — every type the node states — and `properties`), and how many problems each
-  page carries; on a crawl not wholly at
-  extraction 4 it does not count unresolved references and its `notMeasured` names
-  them. Its detail, one row per block and problem, is the structured_data_nodes CSV
-  view of `export_crawl`. A crawl the
-  rules have not judged, judged before this validation existed, or validated by an
-  earlier ruleset (re-run the rules), is refused, never answered empty. There is no "validation was not enabled"
-  case: if `schema.none-on-site` did not fire, the site published markup.
+  The per-node rules' evidence carries `problemsCapped` (column Problems Capped): each
+  block's list of a kind stops at 50 entries, and when one did, `problemCount` is
+  short. `schema.none-on-site`, `schema.breadcrumb-absent` and
+  `schema.template-inconsistent` also need extraction version 4 across the whole
+  crawl. `issue_urls` names the problems per page. The `structured_data` listing
+  answers the question the findings cannot: which page types publish which formats and
+  types (`types` is every type the page's top-level nodes state), which top-level nodes
+  a page carries with their property names (`nodes`, each with `format`, `path`,
+  `type`, `types` — every type the node states — and `properties`), and how many
+  problems each page carries (`problemsCapped` when a block's list was cut, so the
+  counts are short). On a crawl not wholly at extraction 4 it does not count
+  unresolved references, and its `notMeasured` names them. Its detail, one row per
+  block and problem, is the structured_data_nodes CSV view of `export_crawl`. A crawl
+  the rules have not judged, judged before this validation existed, or validated by an
+  earlier ruleset (re-run the rules) is refused, never answered empty. There is no
+  "validation was not enabled" case: if `schema.none-on-site` did not fire, the site
+  published markup.
 - **DevTools** (the per-page-type matrix and the opportunity assessment below need the
   documents themselves, which the query surface does not expose):
   - Execute on one page per page type: `JSON.stringify(Array.from(document.querySelectorAll('script[type="application/ld+json"]')).map(s => JSON.parse(s.textContent)['@type']))`
@@ -2902,7 +2911,10 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
   Product and IndividualProduct is in both rows). JSON-LD nodes list every type; a
   microdata `itemtype` or RDFa `typeof` keeps only its first type at extraction 4, an
   extraction limit. A node's type list is capped like its property list, and the
-  metric counts only the listed types. The engine names no required set: which of the fields below a Product
+  metric counts only the listed types, and nodes whose type list was cut
+  (`typesCappedNodes`). Only nodes of blocks in the schema.org vocabulary are
+  counted; nodes of blocks in another vocabulary are counted apart, as
+  `otherVocabularyNodes` on the site row. The engine names no required set: which of the fields below a Product
   needs is the agent's judgement, made from these counts at site scale instead of on
   the one product page a person opened. `schema.empty-value` lists the empty ones per
   page. The table is bounded and says what it left out: types and properties per type
@@ -2914,9 +2926,9 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
   cannot answer it.** A rule that found nothing is simply absent from `issues_list`,
   and "every product's markup is complete" and "no product page carries Product markup
   at all" look the same there. The `structured_data` listing closes it: filter
-  `pageType: "product"` and read `types` and `nodes` per page; a product page
-  that is missing from the listing, or listed without `Product` in `types`, carries no
-  top-level Product markup. `types` and `nodes` name each block's top-level node only,
+  `pageType: "product"` and read `types` (every type the page's top-level nodes state)
+  and `nodes` per page; a product page that is missing from the listing, or listed
+  without `Product` in `types`, carries no top-level Product markup. `types` and `nodes` name each block's top-level node only,
   so a Product nested inside another node (a WebPage's `mainEntity`, or a microdata
   item under a `body` itemscope) is not listed there and is not a row of the coverage
   table; open such a page in DevTools before calling it unmarked. Compare that

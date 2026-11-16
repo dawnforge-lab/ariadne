@@ -1808,14 +1808,17 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "One row per page that carries structured data — a JSON-LD, microdata or " +
         "RDFa block — or a JSON-LD parse error or microdata error: {url, pageType, " +
         "indexable, formats, types, nodes, warningCount, infoCount, " +
-        "jsonLdParseErrors, microdataErrors, skips, blocksAtCap}. A page with neither is not " +
-        "listed. Use it to see which templates publish which markup, and where " +
+        "jsonLdParseErrors, microdataErrors, skips, blocksAtCap, problemsCapped}. A page with " +
+        "neither is not listed. Use it to see which templates publish which markup, and where " +
         "the problems are, before reading the schema.* findings.\n\n" +
-        "formats are the syntaxes found and types the schema.org types of the " +
-        "page's blocks, both distinct and sorted. nodes are the page's top-level " +
-        "nodes (each @graph member is one), in block order: {format, path, type, " +
-        "properties, propertiesCapped} — type as the markup states it (null when " +
-        "untyped), properties the node's property names, capped per node with " +
+        "formats are the syntaxes found, distinct and sorted. types are every type the " +
+        "page's top-level nodes state, in authored order, each once. nodes are the page's " +
+        "top-level nodes (each @graph member is one; a member holding only an @id is a " +
+        "reference, not a node), in block order: {format, path, type, types, typesCapped, " +
+        "properties, propertiesCapped} — type the primary type as the markup states it " +
+        "(null when untyped), types every type the node states (a microdata or RDFa node " +
+        "lists one: extraction 4 keeps only the first itemtype / typeof token), properties " +
+        "the node's property names; both lists are capped per node, with typesCapped and " +
         "propertiesCapped true when cut short. Structured data is judged by the " +
         "schema.org vocabulary and the JSON-LD, Microdata and RDFa specs; which " +
         "properties a page needs is yours to judge.\n\n" +
@@ -1828,7 +1831,8 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "a declared @base). On a crawl not wholly at extraction 4 references are " +
         "not counted, and notMeasured says so. blocksAtCap: the page's stored " +
         "blocks reached the per-page limit, so an id may be defined in a block " +
-        "that was not stored. The " +
+        "that was not stored. problemsCapped: a block cut one of the lists these counts " +
+        "read at its per-block limit, so the counts are short. The " +
         "problem-by-problem detail is the structured_data_nodes CSV view " +
         "(export_crawl format=csv), one row per block and problem.\n\n" +
         "NULL IS NOT ZERO. microdataErrors and skips are null on a page crawled " +

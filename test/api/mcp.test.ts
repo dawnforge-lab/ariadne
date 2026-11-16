@@ -3398,3 +3398,13 @@ describe("structured_data's description (29a)", () => {
     }
   });
 });
+
+// 29a rework final review I3: the agent's contract names every node key.
+describe("structured_data's description names the node shape (29a final review)", () => {
+  it("lists types and typesCapped beside type, and the page row's problemsCapped", async () => {
+    const listed = await client.listTools();
+    const text = listed.tools.find((t) => t.name === "structured_data")?.description ?? "";
+    expect(text).toContain("{format, path, type, types, typesCapped, properties, propertiesCapped}");
+    expect(text).toContain("problemsCapped");
+  });
+});
