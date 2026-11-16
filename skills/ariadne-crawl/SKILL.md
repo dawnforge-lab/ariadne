@@ -799,7 +799,11 @@ and metrics written. It answers the run summary:
 `findings` is the issue rows this run wrote and `byRule` breaks them down; `metrics`
 is the metric rows and `byMetric` breaks those down, naming **every** metric rule that
 ran, so a zero there means "this rule removed the crawl's previous answer" and an
-absent key means it never ran. `derived` counts what the derivations wrote. There is
+absent key means it never ran. `derived` counts what the derivations wrote, keyed
+`<derivation>.<count>`. Two of them are structured-data counts: deriveSchemaValidation.blocks
+is the blocks validated, and deriveSchemaValidation.orphanBlocks is the structured-data rows
+whose page row lost an insert race, which are left unvalidated and counted (no surface reads
+them, so a nonzero value is not a missing verdict). There is
 **no `elapsedMs`** — time the call yourself if you want to report the duration.
 
 **Keep that summary** for what it alone carries: the per-rule and per-metric

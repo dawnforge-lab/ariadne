@@ -43,11 +43,17 @@ WHAT CHANGED AFTER IMPORT (the living authority's own change log):
 
   Phase 29a (ruleset 0.26.0, 2026-11-13) — engine paragraphs only; no check's id,
   title, priority, Evaluate criteria or Record list moved.
-  - CHECK-43: the `schema.*` validation rules over JSON-LD, microdata and RDFa, and
-    the `structured_data` listing.
-  - CHECK-44: the `schema.property-coverage` metric (property counts per type) replaces the
-    retired Product field-presence rule.
-  - CHECK-46: the self-serving match covers the Organization branch, not one type.
+  - CHECK-43: the `schema.*` validation rules over JSON-LD, microdata and RDFa, judged
+    by the schema.org vocabulary and the JSON-LD, Microdata and RDFa specifications
+    (no one search engine's profile), and the `structured_data` listing with each
+    page's top-level nodes and their properties. The 2026-11-16 rework added
+    `schema.empty-value` and `schema.unresolved-reference` and the engine paragraph
+    now says what each reads.
+  - CHECK-44: the `schema.property-coverage` metric (property counts per type, scope
+    `schema_type`) replaces the retired Product field-presence rule. The engine names
+    no required set; which properties a type needs is the agent's judgement.
+  - CHECK-46: the self-serving match covers the Organization branch, not one type, and
+    the finding states a fact about the markup, not a search engine's policy.
 
 WHAT DID NOT CHANGE, and must not: every CHECK id, every check's title, priority,
 `**Evaluate**` criteria and `**Record**` list. The rule registry's `checkIds`
@@ -2769,8 +2775,11 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
   read JSON-LD, microdata and RDFa (extraction version 4; a crawl below it is named by
   `extraction.not-recorded`, and the rules that depend on microdata or RDFa refuse it
   rather than read it as clean). Every block's types and properties are checked against
-  the schema.org vocabulary (release 30.1) and, for the rich-result features Google
-  documents, against Google's own required and recommended lists. The rules:
+  the schema.org vocabulary (release 30.1), and the markup is read as the JSON-LD,
+  Microdata and RDFa specifications define it. No search engine's profile decides
+  what a finding is: the findings are facts about the markup for every consumer of it,
+  engines and agents alike, and whether a fact matters is the agent's judgement. The
+  rules:
   - `schema.parse-error` (warning): a JSON-LD block that is not parseable JSON, or a
     microdata or RDFa Lite structural error. The two share one per-page count
     (`microdataErrors` in the listing): a microdata `itemprop` outside any item, a
@@ -2783,11 +2792,21 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
     or superseded;
   - `schema.embedded-type-mismatch` (warning): a nested node whose type the property does
     not accept;
-  - `schema.empty-value` (warning): a property whose value is empty markup — blank
-    text, `[]`, or `{}` — listed at its own path (an empty price inside offers, not offers);
-  - `schema.unresolved-reference` (info): a bare `{"@id": …}` that no node in any block
-    of the same page defines. Linking to an entity defined elsewhere is legal JSON-LD,
-    so read it as a fact to check, not an error;
+  - `schema.empty-value` (warning): a property whose value is empty markup — `""`,
+    whitespace-only text, `[]`, or an object with no properties and no `@id` (keywords
+    such as `@type` are not properties, and a blank `@id` is no `@id`) — listed at the
+    dotted path of the property itself (an empty price inside offers, not offers). A
+    zero or `false` is a value;
+  - `schema.unresolved-reference` (info): a bare `{"@id": …}` that no block on the same
+    page defines. Ids are resolved against the document base (the page URL, or a
+    declared JSON-LD `@base`) as JSON-LD 1.1 resolves IRIs before they are compared, so
+    JSON-LD, microdata `itemid` and RDFa `resource` agree; blank nodes are left as they
+    are. Each reference keeps its `path`, the `id` as resolved and the id `written`.
+    Linking to an entity defined elsewhere, another site's IRI included, is legal
+    JSON-LD, so read it as a fact to check, not an error. The evidence carries
+    `blocksAtCap`: the page is at the analyzer's per-page limit of structured-data
+    blocks, so blocks past it were not stored and the id may be defined in one of them.
+    The rule needs extraction version 4 across the whole crawl and is silent below it;
   - `schema.template-inconsistent` (warning): a page type with at least
     `SCHEMA_TEMPLATE_MIN_PAGES` judged pages (default 10; the floor is on the page
     type's size, not on how many carry the schema type) where a schema type is on
@@ -2799,13 +2818,17 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
     rules. They claim CHECK-45 and CHECK-46 respectively, not CHECK-43, so
     `issues_list` with `checkId: "CHECK-43"` does not return them: ask for those
     checks by their own ids.
-  `schema.none-on-site` and `schema.breadcrumb-absent` need extraction version 4 across
-  the whole crawl. `issue_urls` names the problems per page. The `structured_data`
-  listing answers the question the findings cannot: which page types publish which
-  formats, types and Google features, and how many problems each page carries; its
-  detail, one row per block and problem, is the structured_data_nodes CSV view of
-  `export_crawl`. A crawl the rules have not judged, or judged before this validation
-  existed, is refused, never answered empty. There is no "validation was not enabled"
+  `schema.none-on-site`, `schema.breadcrumb-absent` and `schema.template-inconsistent`
+  also need extraction version 4 across the whole crawl. `issue_urls` names the problems
+  per page. The `structured_data` listing answers the question the findings cannot:
+  which page types publish which formats and types, which top-level nodes a page
+  carries with their property names (`nodes`, each with `format`, `path`, `type`,
+  `properties`), and how many problems each page carries; on a crawl not wholly at
+  extraction 4 it does not count unresolved references and its `notMeasured` names
+  them. Its detail, one row per block and problem, is the structured_data_nodes CSV
+  view of `export_crawl`. A crawl the
+  rules have not judged, judged before this validation existed, or validated by an
+  earlier ruleset (re-run the rules), is refused, never answered empty. There is no "validation was not enabled"
   case: if `schema.none-on-site` did not fire, the site published markup.
 - **DevTools** (the per-page-type matrix and the opportunity assessment below need the
   documents themselves, which the query surface does not expose):
@@ -2833,20 +2856,20 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
      table based on site type:
 
      **E-commerce (fashion/retail):**
-     | Page Type | Expected Schema | Rich Result Eligible |
-     |-----------|----------------|---------------------|
-     | Homepage | Organization (NOT LocalBusiness unless physical stores) | Sitelinks search box, logo |
-     | Product pages | Product + Offers + AggregateRating + BreadcrumbList | Product rich results, star ratings, price |
-     | Collection pages | ItemList (listing products with position) + BreadcrumbList | Carousel/list results |
-     | Blog/articles | Article or BlogPosting + BreadcrumbList | Article rich results |
-     | FAQ/policy pages | FAQPage | FAQ accordion in SERPs |
-     | Size guide | FAQPage or HowTo | Rich snippet |
+     | Page Type | Expected Schema | What the markup states |
+     |-----------|----------------|------------------------|
+     | Homepage | Organization (NOT LocalBusiness unless physical stores) | who publishes the site: name, logo, profiles |
+     | Product pages | Product + Offers + AggregateRating + BreadcrumbList | what is sold, its price and availability, how it is rated |
+     | Collection pages | ItemList (listing products with position) + BreadcrumbList | which products the page lists, in what order |
+     | Blog/articles | Article or BlogPosting + BreadcrumbList | headline, author, dates |
+     | FAQ/policy pages | FAQPage | the questions and answers on the page |
+     | Size guide | FAQPage or HowTo | the question and answer, or the steps |
 
      **Common mistakes to flag:**
      - LocalBusiness on every page (should be Organization unless physical retail)
      - LocalBusiness without `geo` property (causes validation errors on every page)
-     - Product schema without GTIN/EAN (blocks Google Shopping eligibility)
-     - Product without aggregateRating (misses star ratings in SERPs)
+     - Product schema without GTIN/EAN (no standard identifier for a shopping consumer to match on)
+     - Product without aggregateRating (no rating stated)
      - Collection pages with NO product-level schema (no ItemList)
      - BreadcrumbList with only 2 levels (should include category/collection level)
      - Article schema with non-ISO 8601 dates
@@ -2855,8 +2878,8 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
   4. For **collection/category pages** specifically: check if there's an `ItemList` schema
      listing the products. This is a commonly missed opportunity — collection pages often
      have zero product schema even though they're the primary category landing pages.
-     `ItemList` with `ListItem` elements (position, name, url, image) tells Google this
-     is a product listing and can produce carousel results.
+     `ItemList` with `ListItem` elements (position, name, url, image) states that this
+     is a product listing, and in what order, to any consumer of the markup.
 
   5. Present findings as two sections:
      - **Issues**: Validation errors and incorrect schema (what needs fixing)
@@ -2870,40 +2893,46 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
 
 ### CHECK-44: Product schema completeness
 - **Priority**: High | **Requires**: Engine + DevTools
-- **Engine**: `metric_table` for `schema.property-coverage` (CHECK-44): per schema type,
-  how many top-level nodes carry it and, per property, how many of those nodes carry a
-  non-empty value. The engine names no required set: which of the fields below a
-  Product needs is the agent's judgement, made from these counts at site scale instead
-  of on the one product page a person opened. `schema.empty-value` lists the empty
-  ones per page.
+- **Engine**: `metric_table` for `schema.property-coverage` (CHECK-44): per schema type
+  (metric scope `schema_type`, one row per top-level type as the markup states it, a
+  name outside schema.org included), how many top-level nodes carry it and, per
+  property, how many of those nodes carry a non-empty value. Each `@graph` member is
+  one node. The engine names no required set: which of the fields below a Product
+  needs is the agent's judgement, made from these counts at site scale instead of on
+  the one product page a person opened. `schema.empty-value` lists the empty ones per
+  page. The table is bounded and says what it left out: types and properties per type
+  are capped, and `typesNotListed`, `propertiesNotListed` and `propertyListsCapped`
+  (nodes whose property list was cut at the validator's limit) are counted, never
+  dropped. A crawl not wholly at extraction 4 writes no rows and
+  `extraction.not-recorded` speaks.
   A product page with NO Product markup at all is the other half, **and the findings
   cannot answer it.** A rule that found nothing is simply absent from `issues_list`,
   and "every product's markup is complete" and "no product page carries Product markup
   at all" look the same there. The `structured_data` listing closes it: filter
   `pageType: "product"` and read `types` and `nodes` per page; a product page
   that is missing from the listing, or listed without `Product` in `types`, carries no
-  top-level Product markup. `types` names each block's top-level node only, so a
-  Product nested inside another node (a WebPage's `mainEntity`, or a microdata item
-  under a `body` itemscope) is not listed there, and is not judged against the Product
-  features either; open such a page in DevTools before calling it unmarked. Compare
-  that against the product cohort's size from `pages_query` (`pageType=product`).
-  A `ProductGroup` (Google's product-variant markup) matches neither Product feature,
-  since Google reads the offers on its variants; a variant page's own top-level
-  `Product` is judged as usual. The listing is refused on a crawl the rules have not judged or
-  judged before structured data validation existed: run `crawl_rules` first.
+  top-level Product markup. `types` and `nodes` name each block's top-level node only,
+  so a Product nested inside another node (a WebPage's `mainEntity`, or a microdata
+  item under a `body` itemscope) is not listed there and is not a row of the coverage
+  table; open such a page in DevTools before calling it unmarked. Compare that
+  against the product cohort's size from `pages_query` (`pageType=product`). The
+  listing is refused on a crawl the rules have not judged, judged before structured
+  data validation existed, or validated by an earlier ruleset: run `crawl_rules`
+  first.
 - **DevTools** (only for the structure the rule does not judge — the `offers` shape and
   the price format):
   1. Navigate to a product page the engine flagged
   2. Execute: `JSON.stringify(Array.from(document.querySelectorAll('script[type="application/ld+json"]')).map(s => JSON.parse(s.textContent)).filter(d => d['@type'] === 'Product')[0], null, 2)`
-  3. The fields the engine checks for, so you can read its evidence against them:
+  3. The fields to read the engine's coverage counts against. These are the agent's
+     judgement, not an engine check:
 
      **Required fields** (must have):
      - name, description, image, url, sku, brand
      - offers: price, priceCurrency, availability, url
 
      **Recommended fields** (high impact if missing):
-     - gtin / gtin13 / ean / mpn — product identifiers for Google Shopping
-     - aggregateRating — enables star ratings in SERPs
+     - gtin / gtin13 / ean / mpn — product identifiers shopping consumers match on
+     - aggregateRating — states how the product is rated
      - review — individual reviews supporting the rating
      - color — critical for fashion/apparel (high-volume colour queries)
      - material — important for fashion (lace, satin, sequin = search terms)
@@ -2912,14 +2941,14 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
      **Nice-to-have fields**:
      - weight, width, height — shipping-relevant
      - itemCondition — new/used
-     - category — Google product taxonomy
+     - category — product taxonomy
 
   4. Check the `offers` structure: is it a single Offer or array of Offers (one per
      variant/size)? An array with per-size availability is richer than a single offer.
   5. Check price format: must use decimal point (225.95) not comma (225,95)
 - **Evaluate**:
   - FAIL if Product schema missing on product pages
-  - FAIL if missing GTIN/identifiers (blocks Google Shopping features)
+  - FAIL if missing GTIN/identifiers (no standard identifier stated)
   - WARN if missing aggregateRating, color, material
   - Record: fields present/absent as a checklist, **specific field-level opportunities
     ranked by impact**
@@ -2942,8 +2971,10 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
 ### CHECK-46: Review & rating markup
 - **Priority**: Medium | **Requires**: Engine + DevTools
 - **Engine**: `issues_list` with `checkId: "CHECK-46"` — `schema.self-serving-reviews`
-  (info): pages publishing review or rating markup the site wrote about itself, which
-  Google's guidelines exclude from rich results. The match covers the whole
+  (info): pages whose Organization-typed markup carries a rating or reviews about that
+  same node. In schema.org a rating or review on a node is about that node, so the
+  business's own markup rates the business; whether that is wanted is the agent's
+  judgement. The match covers the whole
   `Organization` branch of the schema.org hierarchy, so `LocalBusiness`, `Restaurant`,
   `Dentist` and every other subtype are reported, not only `Organization` itself.
   `issue_urls` for the pages. On an independent directory, booking or review site,

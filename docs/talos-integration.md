@@ -97,9 +97,12 @@ crawler inside Talos. The intended shape:
    `type` and `priority` on each finding rule are the rule's defaults, and the
    agent's per-crawl overrides (`crawl_config_set`) are the judgement. Phase 29a's
    `structured_data` listing keeps the line: it answers named fields (formats,
-   types, matched Google features, two counts named after the severities, the
-   reader's skip counters) and never a stored validation blob, and a stored value
-   outside its closed vocabulary is refused, not coerced.
+   types, each page's top-level nodes with their property names, two counts named after
+   the severities, the reader's skip counters) and never a stored validation blob, and a
+   stored value outside its closed vocabulary is refused, not coerced. The structured-data
+   findings are facts judged by schema.org and the JSON-LD, Microdata and RDFa
+   specifications, for any consumer of the markup; which properties a type needs, and
+   whether a finding matters, is the agent's judgement.
 
 7. **A stop is a pause, and only an agent's cancel is final.** Since Phase 27b a
    server shutdown leaves its running crawls `paused` (reason `shutdown`) and a restart
