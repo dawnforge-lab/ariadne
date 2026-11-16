@@ -55,7 +55,7 @@ export const COVERAGE_MAX_PROPERTIES = 100;
  */
 const MALFORMED_NODE =
   'lax $.nodes[*] ? (@.type() != "object" || !exists(@."type") || !exists(@.propertiesCapped)' +
-  ' || !exists(@.properties) || !exists(@.emptyProperties) || !exists(@.types)' +
+  ' || !exists(@.properties) || !exists(@.emptyProperties) || !exists(@.types) || !exists(@.typesCapped)' +
   ' || @.types.type() != "array"' +
   ' || @.properties.type() != "array" || @.emptyProperties.type() != "array")';
 
@@ -104,8 +104,9 @@ async function propertyCoverage(db: Db, crawlId: string, self: MetricIdentity): 
       cross join lateral jsonb_array_elements(sd.validation_jsonb -> 'nodes') as n(node)
       where p.crawl_id = ${crawlId} and ${JUDGED("p")}
     ),
-    -- A node counts once under EACH type it states: a node typed A and B is an
-    -- A node and a B node. Untyped nodes (no types) count in the site row only.
+    -- A node counts once under EACH type it lists: a node typed A and B is an
+    -- A node and a B node. Only the listed types count (the list is capped per
+    -- node: typesCapped). Untyped nodes (no types) count in the site row only.
     typed as (
       select t.type, n.node
       from nodes n

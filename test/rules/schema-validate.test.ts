@@ -62,7 +62,7 @@ describe("validateBlock — the schema.org vocabulary", () => {
     expect(v.nodes).toEqual([
       {
         path: "$",
-        type: "Product", types: ["Product"],
+        type: "Product", types: ["Product"], typesCapped: false,
         properties: ["brand", "description", "gtin13", "image", "mpn", "name", "offers", "sku"],
         emptyProperties: [],
         propertiesCapped: false,
@@ -164,7 +164,7 @@ describe("validateBlock — the schema.org vocabulary", () => {
     expect(v.unknownTypes).toEqual([]);
     // The container is one node; its members are blocks of their own.
     expect(v.nodes).toEqual([
-      { path: "$", type: "WebPage", types: ["WebPage"], properties: ["name"], emptyProperties: [], propertiesCapped: false },
+      { path: "$", type: "WebPage", types: ["WebPage"], typesCapped: false, properties: ["name"], emptyProperties: [], propertiesCapped: false },
     ]);
   });
 
@@ -367,7 +367,7 @@ describe("validateBlock — the top-level node and its properties", () => {
       offers: { "@type": "Offer", price: "1" },
     });
     expect(v.nodes).toEqual([
-      { path: "$", type: "Product", types: ["Product"], properties: ["name", "offers"], emptyProperties: [], propertiesCapped: false },
+      { path: "$", type: "Product", types: ["Product"], typesCapped: false, properties: ["name", "offers"], emptyProperties: [], propertiesCapped: false },
     ]);
   });
 
@@ -383,7 +383,7 @@ describe("validateBlock — the top-level node and its properties", () => {
     });
     expect(v.nodes[0]).toEqual({
       path: "$",
-      type: "Product", types: ["Product"],
+      type: "Product", types: ["Product"], typesCapped: false,
       properties: ["image", "name", "offers", "sameAs", "weight"],
       emptyProperties: ["image", "name"],
       propertiesCapped: false,
@@ -412,11 +412,11 @@ describe("validateBlock — the top-level node and its properties", () => {
     expect(blocks).toHaveLength(2);
     const [org, page] = blocks.map((b) => validate(b.raw, "https://ex.com/"));
     expect(org!.nodes).toEqual([
-      { path: "$", type: "Organization", types: ["Organization"], properties: ["name"], emptyProperties: [], propertiesCapped: false },
+      { path: "$", type: "Organization", types: ["Organization"], typesCapped: false, properties: ["name"], emptyProperties: [], propertiesCapped: false },
     ]);
     expect(org!.definedIds).toEqual(["https://ex.com/#org"]);
     expect(page!.nodes).toEqual([
-      { path: "$", type: "WebPage", types: ["WebPage"], properties: ["name", "publisher"], emptyProperties: [], propertiesCapped: false },
+      { path: "$", type: "WebPage", types: ["WebPage"], typesCapped: false, properties: ["name", "publisher"], emptyProperties: [], propertiesCapped: false },
     ]);
     expect(page!.references).toEqual([{ path: "$.publisher", id: "https://ex.com/#org", written: "#org" }]);
   });
@@ -697,5 +697,30 @@ describe("validateBlock — every type of a microdata- or RDFa-shaped node with 
       name: "Crumb",
     });
     expect(v.nodes[0]).toMatchObject({ type: "Bakery", types: ["LocalBusiness", "Bakery"] });
+  });
+});
+
+// 29a rework gate fix, security review: a node's type list is capped like its property list.
+describe("validateBlock — a node's type list caps at MAX_PROBLEMS_PER_LIST", () => {
+  const typed = (n: number): Record<string, unknown> => ({
+    // Outside the vocabulary, so no unknown-type list fills up beside it.
+    "@context": { "@vocab": "https://example.org/" },
+    "@type": Array.from({ length: n }, (_, i) => `T${String(i).padStart(3, "0")}`),
+    name: "x",
+  });
+
+  it("MAX types are listed whole, with no flag", () => {
+    const v = validate(typed(MAX_PROBLEMS_PER_LIST));
+    expect(v.nodes[0]!.types).toHaveLength(MAX_PROBLEMS_PER_LIST);
+    expect(v.nodes[0]!.typesCapped).toBe(false);
+    expect(v.listsCapped).toBe(false);
+  });
+
+  it("MAX + 1 types are cut to MAX, flagged on the node and on the block", () => {
+    const v = validate(typed(MAX_PROBLEMS_PER_LIST + 1));
+    expect(v.nodes[0]!.types).toHaveLength(MAX_PROBLEMS_PER_LIST);
+    expect(v.nodes[0]!.types.at(-1)).toBe(`T${String(MAX_PROBLEMS_PER_LIST - 1).padStart(3, "0")}`);
+    expect(v.nodes[0]!.typesCapped).toBe(true);
+    expect(v.listsCapped).toBe(true);
   });
 });

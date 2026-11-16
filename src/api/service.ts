@@ -6964,6 +6964,7 @@ export class ApiService {
                                      'path', n.node -> 'path',
                                      'type', n.node -> 'type',
                                      'types', n.node -> 'types',
+                                     'typesCapped', n.node -> 'typesCapped',
                                      'properties', n.node -> 'properties',
                                      'propertiesCapped', n.node -> 'propertiesCapped')
                                    order by sd.id, n.ord)
@@ -7056,7 +7057,7 @@ export class ApiService {
                       where sd.crawl_id = c.id and sd.validation_jsonb is not null
                         and (jsonb_typeof(sd.validation_jsonb -> 'nodes') is distinct from 'array'
                              -- nodes written before they listed every type
-                             or jsonb_path_exists(sd.validation_jsonb, 'lax $.nodes[*] ? (!exists(@.types))'))) as stale
+                             or jsonb_path_exists(sd.validation_jsonb, 'lax $.nodes[*] ? (!exists(@.types) || !exists(@.typesCapped))'))) as stale
         from crawls c
        where c.id = ${crawlId}`);
     const row = result.rows[0];

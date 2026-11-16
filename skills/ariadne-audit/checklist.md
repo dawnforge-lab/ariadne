@@ -2901,7 +2901,8 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
   one node, and a node with several types counts once under each of them (a node typed
   Product and IndividualProduct is in both rows). JSON-LD nodes list every type; a
   microdata `itemtype` or RDFa `typeof` keeps only its first type at extraction 4, an
-  extraction limit. The engine names no required set: which of the fields below a Product
+  extraction limit. A node's type list is capped like its property list, and the
+  metric counts only the listed types. The engine names no required set: which of the fields below a Product
   needs is the agent's judgement, made from these counts at site scale instead of on
   the one product page a person opened. `schema.empty-value` lists the empty ones per
   page. The table is bounded and says what it left out: types and properties per type

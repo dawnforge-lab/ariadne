@@ -54,7 +54,7 @@ validated before it is refused (409, "re-run the rules"), never read.
     out-of-vocabulary name included, with the node count and per-property counts of nodes
     carrying a non-empty value. A node counts once under EACH type it states, its
     properties included: a node typed `SoftwareApplication` and `FAQPage` is both, so it
-    is one node in each row (and one node in the site row). JSON-LD lists every type a node states; a microdata `itemtype` or RDFa `typeof` keeps only its first type at extraction 4 — an extraction limit — so a node from those formats lists one. It is bounded: types (100) and properties per type (100)
+    is one node in each row (and one node in the site row). JSON-LD lists every type a node states, up to 50 per node (`typesCapped` when cut; the coverage metric counts only the listed types); a microdata `itemtype` or RDFa `typeof` keeps only its first type at extraction 4 — an extraction limit — so a node from those formats lists one. It is bounded: types (100) and properties per type (100)
     are capped, and `typesNotListed`, `propertiesNotListed` and `propertyListsCapped` are
     counted, never dropped. The engine names no required set of properties; which a type
     needs is the agent's judgement.
@@ -2838,10 +2838,10 @@ warningCount, infoCount, jsonLdParseErrors, microdataErrors, skips, blocksAtCap
   each block's top-level node only: a Product nested inside a block (a WebPage's
   `mainEntity`, say) is not listed.
 - **`nodes`** are the page's top-level nodes in block order (each `@graph` member is
-  one): `{format, path, type, types, properties, propertiesCapped}`. `type` is the
+  one): `{format, path, type, types, typesCapped, properties, propertiesCapped}`. `type` is the
   primary type as the markup states it, a name outside schema.org included, and null
   when the node is untyped; `types` is every type the node states, in authored order
-  (`[]` when untyped). JSON-LD lists every type a node states; a microdata `itemtype` or RDFa `typeof` keeps only its first type at extraction 4 — an extraction limit — so a node from those formats lists one. A blob whose nodes lack `types` was written
+  (`[]` when untyped). JSON-LD lists every type a node states, up to 50 per node (`typesCapped` when cut; the coverage metric counts only the listed types); a microdata `itemtype` or RDFa `typeof` keeps only its first type at extraction 4 — an extraction limit — so a node from those formats lists one. A blob whose nodes lack `types` was written
   before they listed every type and is refused like any old one (409, re-run the rules);
   `properties` are the node's property names, capped per node at 50, with
   `propertiesCapped` true when the list was cut short. Structured data is judged by the

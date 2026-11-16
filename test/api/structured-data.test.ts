@@ -311,11 +311,11 @@ describe("listStructuredData — the rows", () => {
         {
           format: "jsonld",
           path: "$",
-          type: "Product", types: ["Product"],
+          type: "Product", types: ["Product"], typesCapped: false,
           properties: ["brand", "image", "name", "offers"],
           propertiesCapped: false,
         },
-        { format: "microdata", path: "$", type: "Organization", types: ["Organization"], properties: ["name", "url"], propertiesCapped: false },
+        { format: "microdata", path: "$", type: "Organization", types: ["Organization"], typesCapped: false, properties: ["name", "url"], propertiesCapped: false },
       ],
       ...pageCounts("/product"),
       jsonLdParseErrors: 0,
@@ -334,7 +334,7 @@ describe("listStructuredData — the rows", () => {
       "url", "pageType", "indexable", "formats", "types", "nodes",
       "warningCount", "infoCount", "jsonLdParseErrors", "microdataErrors", "skips", "blocksAtCap",
     ]);
-    expect(Object.keys(page.items[0]!.nodes[0]!)).toEqual(["format", "path", "type", "types", "properties", "propertiesCapped"]);
+    expect(Object.keys(page.items[0]!.nodes[0]!)).toEqual(["format", "path", "type", "types", "typesCapped", "properties", "propertiesCapped"]);
   });
 
   it("sums every problem kind across a page's blocks, resolving references per page", async () => {

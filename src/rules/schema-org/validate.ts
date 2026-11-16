@@ -70,7 +70,8 @@
  *    written, schema.org spellings reduced to the bare name; null when untyped),
  *    every type it states (`types`, authored order, same spellings; `[]` when
  *    untyped — a microdata or RDFa node states one, since extraction 4 keeps
- *    only the first itemtype / typeof token),
+ *    only the first itemtype / typeof token; capped at `MAX_PROBLEMS_PER_LIST`
+ *    with `typesCapped` and `listsCapped` set),
  *    its property names (keys without `@` keywords, by schema.org name, each
  *    once, SORTED (the stored block is jsonb, which keeps no key order, so an
  *    "authored order" would be Postgres's), capped at `MAX_PROBLEMS_PER_LIST` with
@@ -126,7 +127,8 @@ export const blockValidationSchema = z.strictObject({
     z.strictObject({
       path,
       type: z.string().nullable(),
-      types: z.array(z.string()),
+      types: z.array(z.string()).max(MAX_PROBLEMS_PER_LIST),
+      typesCapped: z.boolean(),
       properties: z.array(z.string()).max(MAX_PROBLEMS_PER_LIST),
       emptyProperties: z.array(z.string()).max(MAX_PROBLEMS_PER_LIST),
       propertiesCapped: z.boolean(),
@@ -283,7 +285,13 @@ class Walker {
    * listed ones carry no non-empty value.
    */
   private topLevel(node: Record<string, unknown>, type: string | null): void {
-    const types = statedTypes(node);
+    // Capped like the property list (Review Focus 5), the cut recorded. No
+    // per-string cap: each name is a string of the stored block, whose size
+    // the analyzer bounds (`MAX_LD_JSON_CHARS`), as it bounds property names.
+    const stated = statedTypes(node);
+    const types = stated.slice(0, MAX_PROBLEMS_PER_LIST);
+    const typesCapped = stated.length > types.length;
+    if (typesCapped) this.capped = true;
     const carried = new Map<string, boolean>();
     for (const [key, value] of Object.entries(node)) {
       if (key.startsWith("@")) continue;
@@ -298,6 +306,7 @@ class Walker {
       path: "$",
       type,
       types,
+      typesCapped,
       properties,
       emptyProperties: properties.filter((name) => carried.get(name) !== true),
       propertiesCapped,

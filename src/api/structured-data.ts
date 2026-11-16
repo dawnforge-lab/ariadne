@@ -145,7 +145,7 @@ function list(blob: SQL, name: (typeof VALIDATION_LISTS)[number]): SQL {
 const MALFORMED_ENTRIES = [
   'lax $.nodes[*] ? (@.type() != "object" || !exists(@.path) || !exists(@."type")' +
     ' || !exists(@.propertiesCapped) || !exists(@.properties) || @.properties.type() != "array"' +
-    ' || !exists(@.types) || @.types.type() != "array")',
+    ' || !exists(@.types) || @.types.type() != "array" || !exists(@.typesCapped))',
   'lax $.references[*] ? (@.type() != "object" || !exists(@.id) || @.id.type() != "string"' +
     ' || !exists(@.written) || @.written.type() != "string")',
   'lax $.definedIds[*] ? (@.type() != "string")',
@@ -361,9 +361,10 @@ export interface StructuredDataNode {
   /**
    * Every type the node states, in authored order (`[]` when untyped). A
    * microdata or RDFa node lists one: extraction 4 keeps only the first
-   * itemtype / typeof token.
+   * itemtype / typeof token. Capped per node (`typesCapped`).
    */
   types: string[];
+  typesCapped: boolean;
   /** The node's property names, capped per node (`propertiesCapped`). */
   properties: string[];
   propertiesCapped: boolean;
@@ -388,12 +389,22 @@ export function projectNodes(value: unknown, crawlId: string, url: string): Stru
     if (type !== null && typeof type !== "string") return bad("has a type that is neither a string nor null");
     const types = e["types"];
     if (!Array.isArray(types) || !types.every((t) => typeof t === "string")) return bad("has no string list of types");
+    const typesCapped = e["typesCapped"];
+    if (typeof typesCapped !== "boolean") return bad("has no boolean typesCapped");
     const properties = e["properties"];
     if (!Array.isArray(properties) || !properties.every((p) => typeof p === "string")) {
       return bad("has no string list of properties");
     }
     const capped = e["propertiesCapped"];
     if (typeof capped !== "boolean") return bad("has no boolean propertiesCapped");
-    return { format, path, type, types: types as string[], properties: properties as string[], propertiesCapped: capped };
+    return {
+      format,
+      path,
+      type,
+      types: types as string[],
+      typesCapped,
+      properties: properties as string[],
+      propertiesCapped: capped,
+    };
   });
 }
