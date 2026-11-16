@@ -324,6 +324,28 @@ describe("validateBlock", () => {
     expect(feature(software, "software-app")!.missingRequired).toEqual([]);
   });
 
+  it("software-app: a rating or review is recommended, not required (Rich Results Test, 2026-11-16)", () => {
+    const unrated = validate({
+      "@type": "SoftwareApplication",
+      name: "S",
+      offers: { "@type": "Offer", price: 0 },
+      applicationCategory: "BusinessApplication",
+      operatingSystem: "Web",
+    });
+    expect(feature(unrated, "software-app")!.missingRequired).toEqual([]);
+    expect(feature(unrated, "software-app")!.missingRecommended).toContain(
+      "aggregateRating | review",
+    );
+    const noPrice = validate({
+      "@type": "SoftwareApplication",
+      name: "S",
+      offers: { "@type": "Offer" },
+      applicationCategory: "BusinessApplication",
+      operatingSystem: "Web",
+    });
+    expect(feature(noPrice, "software-app")!.missingRequired).toContain("offers.price");
+  });
+
   /**
    * Google's product-variants markup, as its Search Central page gives it (read
    * 2026-11-14 by the 29a final review): the ProductGroup carries `name` and the

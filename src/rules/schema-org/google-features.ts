@@ -523,12 +523,15 @@ export const GOOGLE_FEATURES: readonly GoogleFeature[] = [
     docUrl: `${DOCS}software-app`,
     appliesTo: ["SoftwareApplication"],
     depth: "top",
-    required: [
-      has("name"),
-      has("offers.price"),
+    // Google's docs page lists aggregateRating | review as required, but the Rich
+    // Results Test (checked 2026-11-16) judges such an item a valid Software app
+    // and flags the missing rating only as optional. The Test is the gate's
+    // authority, so the rating/review is recommended here.
+    required: [has("name"), has("offers.price")],
+    recommended: [
       anyOf("aggregateRating | review", ...each("aggregateRating", "review")),
+      ...each("applicationCategory", "operatingSystem"),
     ],
-    recommended: each("applicationCategory", "operatingSystem"),
   },
 ];
 
