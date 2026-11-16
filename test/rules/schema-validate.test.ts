@@ -88,6 +88,41 @@ describe("validateBlock — the schema.org vocabulary", () => {
     expect(v.unknownProperties).toEqual([{ path: "$", type: "Person", property: "price" }]);
   });
 
+  it("a Role repeating the property that holds it is schema.org's Role pattern, not an unknown property", () => {
+    const movie = validate({
+      "@context": CTX,
+      "@type": "Movie",
+      name: "M",
+      actor: {
+        "@type": "PerformanceRole",
+        actor: { "@type": "Person", name: "B" },
+        characterName: "C",
+      },
+    });
+    expectNoProblems(movie);
+    const person = validate({
+      "@context": CTX,
+      "@type": "Person",
+      name: "A",
+      memberOf: {
+        "@type": "OrganizationRole",
+        memberOf: { "@type": "Organization", name: "O" },
+        roleName: "Chair",
+      },
+    });
+    expectNoProblems(person);
+  });
+
+  it("a Role still has other properties judged against its own types", () => {
+    const v = validate({
+      "@context": CTX,
+      "@type": "Person",
+      name: "A",
+      memberOf: { "@type": "OrganizationRole", memberOf: { "@type": "Organization", name: "O" }, price: "3" },
+    });
+    expect(v.unknownProperties).toEqual([{ path: "$.memberOf", type: "OrganizationRole", property: "price" }]);
+  });
+
   it("pending property goes to propertyStatus, not unknownProperties", () => {
     // `gtin` is pending in schema.org 30.1.
     const v = validate({ "@type": "Product", name: "x", gtin: "0123456789012" });

@@ -354,13 +354,17 @@ class Walker {
   /**
    * Walks a node; returns its primary known type. `parentKnown` is the known
    * types of the node whose property holds this one (empty at the root and
-   * under an untyped node).
+   * under an untyped node). `heldBy` is the schema.org property that holds
+   * this node (null at the root, or when that property is not in the
+   * vocabulary): a Role may repeat it, which is schema.org's Role pattern
+   * (https://schema.org/Role), so it is not an unknown property there.
    */
   node(
     node: Record<string, unknown>,
     path: string,
     depth: number,
     parentKnown: readonly string[],
+    heldBy: string | null = null,
   ): string | null {
     if (depth > MAX_LD_JSON_NESTING) {
       throw new Error(
@@ -387,6 +391,7 @@ class Walker {
     const typed = known !== null;
     const primary = typed ? primaryType(known) : null;
     const type = primary ?? statedType(node);
+    const isRole = typed && known.some((t) => isSubtypeOf(t, "Role"));
     if (path === "$") this.topLevel(node, type);
 
     for (const [key, value] of Object.entries(node)) {
@@ -400,7 +405,8 @@ class Walker {
         continue;
       }
       const def = propertyDef(name);
-      if (primary !== null && (def === undefined || !propertyAppliesTo(name, known))) {
+      const roleRepeat = isRole && def !== undefined && name === heldBy;
+      if (primary !== null && !roleRepeat && (def === undefined || !propertyAppliesTo(name, known))) {
         this.push("unknownProperties", { path, type: primary, property: name });
       }
       if (def?.status !== undefined) {
@@ -456,7 +462,7 @@ class Walker {
         return;
       }
     }
-    const nestedType = this.node(value, path, depth + 1, parentKnown);
+    const nestedType = this.node(value, path, depth + 1, parentKnown, rangeOf);
     if (rangeOf !== null && nestedType !== null) {
       const types = typesOf(value);
       if (!rangeAccepts(rangeOf, types)) {

@@ -2789,7 +2789,9 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
     levels. An RDFa `property` with no enclosing `typeof` is valid RDFa that describes
     the document; it is counted among the listing's RDFa `skips`, never as an error;
   - `schema.unknown-type` (warning) and `schema.unknown-property` (warning): a type or a
-    property the vocabulary does not define on that type;
+    property the vocabulary does not define on that type. A Role node repeating the
+    property that holds it (`memberOf: {"@type": "OrganizationRole", memberOf: …}`) is
+    schema.org's Role pattern and is not flagged;
   - `schema.property-pending-or-superseded` (info): a property schema.org marks pending
     or superseded;
   - `schema.embedded-type-mismatch` (warning): a nested node whose type the property does
