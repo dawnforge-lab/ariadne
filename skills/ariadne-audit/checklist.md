@@ -2783,11 +2783,11 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
     or superseded;
   - `schema.embedded-type-mismatch` (warning): a nested node whose type the property does
     not accept;
-  - `schema.google-required-missing` (warning) and `schema.google-recommended-missing`
-    (info): a block that matched a Google feature and lacks a required or a recommended
-    property (CHECK-44 too, for the Product features);
-  - `schema.deprecated-feature` (info): markup for a feature Google has withdrawn
-    (`FAQPage`, `HowTo`, matched on exactly that type, not on its subtypes);
+  - `schema.empty-value` (warning): a property whose value is empty markup — blank
+    text, `[]`, or `{}` — listed at its own path (`$.offers.price`);
+  - `schema.unresolved-reference` (info): a bare `{"@id": …}` that no node in any block
+    of the same page defines. Linking to an entity defined elsewhere is legal JSON-LD,
+    so read it as a fact to check, not an error;
   - `schema.template-inconsistent` (warning): a page type with at least
     `SCHEMA_TEMPLATE_MIN_PAGES` judged pages (default 10; the floor is on the page
     type's size, not on how many carry the schema type) where a schema type is on
@@ -2870,19 +2870,17 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
 
 ### CHECK-44: Product schema completeness
 - **Priority**: High | **Requires**: Engine + DevTools
-- **Engine**: `issues_list` with `checkId: "CHECK-44"` — `schema.google-required-missing`
-  (warning) and `schema.google-recommended-missing` (info), naming the feature in the
-  `Features` column: `merchant-listing` or `product-snippet` for a product page (the
-  same two rules also cover Google's other features, so read the column).
-  A product page whose markup matched a Product feature and lacks a required or a
-  recommended property fires them, and `issue_urls` names the missing properties PER
-  PAGE across every product page the crawl reached — the field checklist below,
-  answered at site scale instead of on the one product page a person opened.
+- **Engine**: `metric_table` for `schema.property-coverage` (CHECK-44): per schema type,
+  how many top-level nodes carry it and, per property, how many of those nodes carry a
+  non-empty value. The engine names no required set: which of the fields below a
+  Product needs is the agent's judgement, made from these counts at site scale instead
+  of on the one product page a person opened. `schema.empty-value` lists the empty
+  ones per page.
   A product page with NO Product markup at all is the other half, **and the findings
   cannot answer it.** A rule that found nothing is simply absent from `issues_list`,
   and "every product's markup is complete" and "no product page carries Product markup
   at all" look the same there. The `structured_data` listing closes it: filter
-  `pageType: "product"` and read `types` and `googleFeatures` per page; a product page
+  `pageType: "product"` and read `types` and `nodes` per page; a product page
   that is missing from the listing, or listed without `Product` in `types`, carries no
   top-level Product markup. `types` names each block's top-level node only, so a
   Product nested inside another node (a WebPage's `mainEntity`, or a microdata item

@@ -58,12 +58,13 @@ export {
 
 
 /**
- * The types Google's review-snippet policy calls self-serving when they carry
- * their own rating, and the two fields that carry it.
+ * The types whose own markup can rate themselves, and the two fields that
+ * carry the rating.
  *
- * Reviews of a PRODUCT are exactly what the markup is for; reviews an
- * organisation publishes about itself are the case the policy names, and
- * Google ignores them for rich results.
+ * The finding is a fact about the markup: in schema.org a rating or review on
+ * a node is about that node, so an Organization (or a subtype) carrying
+ * `aggregateRating` or `review` is the business rating itself. Reviews of a
+ * PRODUCT on a Product node are a different fact and are not read here.
  *
  * Matched against the whole Organization branch of the schema.org hierarchy
  * (`descendants`, which includes the type itself), so `LocalBusiness`,
@@ -119,7 +120,7 @@ async function siteShape(
 /**
  * A site whose crawl stored no structured data of any type (CHECK-43).
  *
- * Any type at all, not just the profiled ones: the question is whether the site
+ * Any type at all: the question is whether the site
  * describes itself in a machine-readable way, and an `Article` or an
  * `FAQPage` answers it as well as a `Product` does.
  *
@@ -132,7 +133,7 @@ async function siteShape(
  * read. That floor is `indexablePages`, not "pages fetched", so it conflates two
  * situations — a crawl that reached nothing at all, and a crawl that reached a
  * site whose every page is noindexed or non-200. The second goes unreported
- * here, deliberately: a site with nothing to index has no rich result to earn,
+ * here, deliberately: a site with nothing to index has no page to describe,
  * and its real problem is the noindex, which the indexability rules report by
  * name. The number the finding carries is the same one the floor is drawn on,
  * so a reader is never told a threshold was applied to a figure they cannot see.

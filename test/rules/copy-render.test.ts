@@ -51,16 +51,19 @@ const ADDED_SINCE_0_22 = [
   "schema.unknown-property",
   "schema.property-pending-or-superseded",
   "schema.embedded-type-mismatch",
-  "schema.google-required-missing",
-  "schema.google-recommended-missing",
-  "schema.deprecated-feature",
   "schema.template-inconsistent", // 0.26.0, Phase 29a T8
+  // 0.26.0, 29a rework (2026-11-16): two standards rules and the coverage metric;
+  // the three Google rules of T7 are gone.
+  "schema.empty-value",
+  "schema.unresolved-reference",
+  "schema.property-coverage",
 ];
 // Entries whose text was deliberately changed after 0.22.0: the fields that
 // differ from the fixture, spelled out so any other drift still fails.
 const CHANGED_SINCE_0_22: Record<string, Partial<Entry>> = {
   // 0.26.0, Phase 29a T8: microdata and RDFa are read, and self-serving reviews walk the Organization hierarchy.
   // 0.26.0, 29a final review M3: the none-on-site title and opening name all three formats.
+  // 0.26.0, 29a rework: no rich results; validate against schema.org, not one engine's test.
   "schema.none-on-site": {
     title: "Structured data: No structured data on the site",
     explanation: FIXTURE["schema.none-on-site"]!.explanation
@@ -68,7 +71,12 @@ const CHANGED_SINCE_0_22: Record<string, Partial<Entry>> = {
         "No page in the crawl carries JSON-LD.",
         "No page in the crawl carries JSON-LD, microdata or RDFa, the three formats that are read.",
       )
-      .replace(" Only JSON-LD is read; microdata and RDFa are not detected.", ""),
+      .replace(" Only JSON-LD is read; microdata and RDFa are not detected.", "")
+      .replace("read to build rich results and cite sources.", "read to understand a page and cite it."),
+    howToFix: FIXTURE["schema.none-on-site"]!.howToFix.replace(
+      "Validate with the Rich Results Test.",
+      "Check each block with the schema.org validator (validator.schema.org).",
+    ),
   },
   // 0.26.0, 29a final review: breadcrumb-absent names all three formats it reads, like none-on-site.
   "schema.breadcrumb-absent": {
@@ -78,15 +86,23 @@ const CHANGED_SINCE_0_22: Record<string, Partial<Entry>> = {
     ),
   },
   // 0.26.0, 29a final review M7: the Organization branch includes directory and booking sites.
+  // 0.26.0, 29a rework: the fact, not a search engine's policy — title, policy sentence and fix.
   "schema.self-serving-reviews": {
+    title: "Structured data: Organization or LocalBusiness markup rating itself",
     explanation: FIXTURE["schema.self-serving-reviews"]!.explanation
       .replace(
-        "typed exactly Organization or LocalBusiness carries",
-        "typed Organization or any of its subtypes (LocalBusiness, Restaurant, …) carries",
+        "typed exactly Organization or LocalBusiness carries a rating or reviews about the business itself.",
+        "typed Organization or any of its subtypes (LocalBusiness, Restaurant, …) carries a rating or reviews (aggregateRating or review) about the business itself.",
+      )
+      .replace(
+        " Google's review snippet policy treats these as self-serving and does not show the stars.",
+        " In schema.org a rating or review on a node is about that node, so the business's own markup rates the business.",
       )
       .concat(
-        " Because every Organization subtype is matched, a directory, booking or review site that marks up ratings of businesses it does not own is listed too; those ratings are not self-serving, and the finding can be dismissed on such a site.",
+        " Because every Organization subtype is matched, a directory, booking or review site that marks up ratings of businesses it does not own is listed too; those ratings are of other businesses, and the finding can be dismissed on such a site.",
       ),
+    howToFix:
+      "Check what the ratings are about. If they rate a product or service, move them to the Product, Service or Course node they describe; if they rate the business, decide whether the business's own pages should state them.",
   },
   // 0.25.0, Phase 27d: the sitemap walk's time budget, and a stop during a re-walk, are causes of "partly read".
   "hreflang.declarations-incomplete": {

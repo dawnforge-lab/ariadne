@@ -552,15 +552,26 @@ describe("checklist coverage", () => {
   //   page    72
   //   query   110 + 1 = 111
   //   total   196 + 1 = 197
-  it("pins the ruleset split: 197 rules = 72 page + 111 query + 14 metric", () => {
+  //
+  // The 29a rework (2026-11-16) removes THREE query rules
+  // (`schema.google-required-missing`, `schema.google-recommended-missing`,
+  // `schema.deprecated-feature`), adds TWO (`schema.empty-value`,
+  // `schema.unresolved-reference`) and ONE metric (`schema.property-coverage`).
+  //
+  //   page    72
+  //   query   111 - 3 + 2 = 110
+  //   metric  14 + 1 = 15
+  //   total   197 - 3 + 3 = 197
+  it("pins the ruleset split: 197 rules = 72 page + 110 query + 15 metric", () => {
     const registry = buildRegistry();
     expect(registry.all()).toHaveLength(197);
     expect(registry.byKind("page")).toHaveLength(72);
-    expect(registry.byKind("query")).toHaveLength(111);
+    expect(registry.byKind("query")).toHaveLength(110);
     // The link-graph five, the two content metrics and hreflang coverage, plus
     // the URL-parameter, redirect-volume and sitemap-structure metrics, plus
-    // the render pass's coverage, the health rollup, and the page-weight table.
-    expect(registry.byKind("metric")).toHaveLength(14);
+    // the render pass's coverage, the health rollup, the page-weight table and
+    // the structured-data property coverage.
+    expect(registry.byKind("metric")).toHaveLength(15);
   });
 
   // The section-12 claims, pinned in both directions the way CHECK-31's move is:

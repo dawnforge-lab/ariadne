@@ -776,21 +776,50 @@ describe("copy: structured data", () => {
     }
   });
 
-  // The self-serving finding is a statement about which snippets Google shows.
-  // It is not an accusation that the reviews are fabricated, and there is no
-  // penalty attached to publishing them.
-  it("schema.self-serving-reviews claims a policy, not fake reviews or a penalty", () => {
+  // The self-serving finding states a fact about the markup: an Organization,
+  // or a subtype, carries a rating or reviews of itself. It names no search
+  // engine's policy, and it is not an accusation that the reviews are
+  // fabricated (29a rework).
+  it("schema.self-serving-reviews states a fact, not a policy, fake reviews or a penalty", () => {
     const c = copy("schema.self-serving-reviews");
-    expect(`${c.title} ${c.explanation}`, "it names the policy").toMatch(
-      /policy|self-serving/i,
-    );
-    expect(c.explanation, "and what actually happens").toMatch(/does not show|not shown|no stars/i);
+    expect(c.explanation).toMatch(/of itself|about the business itself/);
     const overclaim =
-      /fake|fraudulent|fabricat|manual action|penalt|penalis|penaliz|will be penal/i;
+      /fake|fraudulent|fabricat|manual action|penalt|penalis|penaliz|will be penal|policy|does not show|stars/i;
     expect(`${c.explanation} ${c.howToFix}`).not.toMatch(overclaim);
-    // The two types it reads, and only those two.
     expect(c.explanation).toMatch(/Organization/);
     expect(c.explanation).toMatch(/LocalBusiness/);
+  });
+
+  // "Google is not a rule" (owner, 29a amendment): no structured-data copy
+  // justifies a finding by one search engine or its rich results. The copy
+  // cites schema.org or the format specifications instead.
+  it("no schema.* copy names Google, rich results or one engine's test", () => {
+    const schemaIds = Object.keys(ISSUE_COPY).filter((id) => id.startsWith("schema."));
+    expect(schemaIds.length).toBeGreaterThan(10);
+    for (const id of schemaIds) {
+      const c = copy(id);
+      expect(`${c.title} ${c.explanation} ${c.howToFix}`, id).not.toMatch(
+        /google|bing|rich result|rich snippet|rich results test/i,
+      );
+    }
+  });
+
+  it("schema.empty-value and schema.unresolved-reference cite the specs they judge by", () => {
+    const empty = copy("schema.empty-value");
+    expect(empty.explanation).toMatch(/JSON-LD/);
+    expect(empty.explanation).toMatch(/microdata/);
+    expect(empty.explanation).toMatch(/RDFa/);
+    const unresolved = copy("schema.unresolved-reference");
+    expect(unresolved.explanation).toMatch(/JSON-LD/);
+    // Linking out to an entity defined elsewhere is legal, and the copy says so.
+    expect(unresolved.explanation).toMatch(/legal|valid/i);
+    expect(unresolved.explanation).toMatch(/another site|elsewhere/);
+  });
+
+  it("schema.property-coverage states counts and leaves the judgement to the reader", () => {
+    const c = copy("schema.property-coverage");
+    expect(c.explanation).toMatch(/schema\.org/);
+    expect(`${c.explanation} ${c.howToFix}`).not.toMatch(/required|recommended/i);
   });
 });
 
@@ -1634,7 +1663,7 @@ describe("copy: metric tables", () => {
  *  - "fingerprint" — it is what the number IS, and the alternative is either
  *    "simhash" (ours) or a paragraph.
  */
-const BANNED_WORDS: { word: string; why: string }[] = [
+const BANNED_WORDS: { word: string; why: string; except?: RegExp }[] = [
   // Engine parts a client has never heard of and cannot act on.
   { word: "marker", why: "our name for a rule that reports a check we could not answer" },
   { word: "markers", why: "as above" },
@@ -1645,7 +1674,13 @@ const BANNED_WORDS: { word: string; why: string }[] = [
   { word: "hamming", why: "the distance measure; say how many bits differ" },
   { word: "jsonb", why: "a Postgres column type" },
   { word: "cursor", why: "a pagination token in our API" },
-  { word: "schema", why: "our database, which a reader will read as schema.org markup" },
+  {
+    word: "schema",
+    why: "our database, which a reader will read as schema.org markup",
+    // The vocabulary's own name is what the reader should read: structured
+    // data is judged against schema.org, and the copy cites it (29a rework).
+    except: /\bschema\.org\b/gi,
+  },
   { word: "cohort", why: "our name for the set of pages a metric measured" },
   { word: "blob", why: "how evidence is stored" },
   { word: "dedupe", why: "jargon for consolidating duplicates" },
@@ -1775,7 +1810,8 @@ describe("client-facing copy rubric", () => {
       if (rule.marker !== undefined) fields.push(["marker", rule.marker]);
       for (const [field, text] of fields) {
         for (const banned of BANNED_WORDS) {
-          if (new RegExp(`\\b${banned.word}\\b`, "i").test(text)) {
+          const checked = banned.except === undefined ? text : text.replace(banned.except, "");
+          if (new RegExp(`\\b${banned.word}\\b`, "i").test(checked)) {
             offences.push(`${rule.id}.${field}: "${banned.word}" — ${banned.why}`);
           }
         }
@@ -1801,9 +1837,11 @@ describe("client-facing copy rubric", () => {
       expect(title.endsWith("."), `${rule.id} title ends with a full stop: ${title}`).toBe(false);
       // A rule id — "content.near-duplicate" — in a title is this engine's
       // filing system on a client's screen. `robots.txt` is a file on their own
-      // site and is allowed by name.
+      // site and is allowed by name, as is schema.org, the vocabulary the
+      // structured-data rules judge by (29a rework).
       const dotted = title
         .replace(/robots\.txt/gi, "")
+        .replace(/schema\.org/gi, "")
         .match(/\b[a-z][a-z0-9]*\.[a-z][a-z0-9-]+\b/);
       expect(dotted, `${rule.id} title carries an engine id: ${String(dotted)}`).toBeNull();
     }

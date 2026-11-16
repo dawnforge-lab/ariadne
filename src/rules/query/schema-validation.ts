@@ -1,6 +1,7 @@
 /**
  * The per-node schema rules: what the node validator said about each stored
- * structured-data block (CHECK-43, and CHECK-44 for the two Google rules).
+ * structured-data block (CHECK-43), judged by the schema.org vocabulary and the
+ * JSON-LD, Microdata and RDFa specs.
  *
  * These rules read, they do not judge. `deriveSchemaValidation`
  * (src/rules/derive/schema-validation.ts) ran every block through the validator
@@ -12,16 +13,18 @@
  *  - `schema.unknown-property`                 a property the node's type does not take
  *  - `schema.property-pending-or-superseded`   a property schema.org has not settled or has replaced
  *  - `schema.embedded-type-mismatch`           a nested node of a type the property refuses
- *  - `schema.google-required-missing`          a Google rich-result feature missing a required field
- *  - `schema.google-recommended-missing`       the same, for a recommended field
- *  - `schema.deprecated-feature`               markup for a feature Google has withdrawn
+ *  - `schema.empty-value`                      a property whose value is empty markup
+ *  - `schema.unresolved-reference`             a bare `{"@id"}` no node on the page defines
  *  - `schema.template-inconsistent`            a page lacking the type most pages of its kind carry
  *
  * **One finding per page (ruling R0.3).** A page's problems ride in one
  * finding's evidence, up to `MAX_PROBLEMS_IN_EVIDENCE` of them plus the full
- * count; the per-node detail is the `structured_data_nodes` CSV view. The Google
- * rules judge each node on its own, so a page with one complete and one
- * incomplete Product fires.
+ * count; the per-node detail is the `structured_data_nodes` CSV view.
+ *
+ * **References resolve per page.** A bare reference is resolved when ANY block
+ * of the same page defines its id — a graph split over two scripts is one
+ * graph — so `schema.unresolved-reference` reads the page's blocks together
+ * (`PageContext`), in SQL for the selection and in the reader for the list.
  *
  * **Memory (hard rules 3 and 6).** The SQL groups the blocks of each page and
  * returns the first `caps.listing` pages, so RAM is O(listing cap x blocks per
@@ -44,7 +47,6 @@ import {
   type QueryRule,
 } from "../registry/registry.js";
 import type { RuleCaps } from "../registry/types.js";
-import { DEPRECATED_FEATURES } from "../schema-org/google-features.js";
 import { blockValidationSchema, type BlockValidation } from "../schema-org/validate.js";
 import { assertCrawl, capsOr, limitTo, noteTruncation } from "./crawl-evidence.js";
 import { v4Gate } from "./page-facts.js";
@@ -60,9 +62,8 @@ const UNKNOWN_TYPE: RuleIdentity = { id: "schema.unknown-type", severity: "warni
 const UNKNOWN_PROPERTY: RuleIdentity = { id: "schema.unknown-property", severity: "warning" };
 const PENDING: RuleIdentity = { id: "schema.property-pending-or-superseded", severity: "info" };
 const MISMATCH: RuleIdentity = { id: "schema.embedded-type-mismatch", severity: "warning" };
-const GOOGLE_REQUIRED: RuleIdentity = { id: "schema.google-required-missing", severity: "warning" };
-const GOOGLE_RECOMMENDED: RuleIdentity = { id: "schema.google-recommended-missing", severity: "info" };
-const DEPRECATED: RuleIdentity = { id: "schema.deprecated-feature", severity: "info" };
+const EMPTY_VALUE: RuleIdentity = { id: "schema.empty-value", severity: "warning" };
+const UNRESOLVED: RuleIdentity = { id: "schema.unresolved-reference", severity: "info" };
 const TEMPLATE: RuleIdentity = { id: "schema.template-inconsistent", severity: "warning" };
 
 type Problem = Record<string, unknown>;
@@ -108,26 +109,51 @@ async function parseErrorFindings(db: Db, crawlId: string, caps: RuleCaps): Prom
   return noteTruncation(findings, result.rows[0]?.total_matches ?? 0);
 }
 
-interface PerPageSpec {
-  identity: RuleIdentity;
-  /** SQL over `sd` that is true when the block's verdict has something for this rule. */
-  hasProblems: SQL;
-  /** The problems one block contributes, in list order. */
-  problems: (block: BlockValidation, format: string) => Problem[];
-  /** Extra evidence computed from all of a page's problems. */
-  extra?: (problems: Problem[]) => Record<string, unknown>;
-  /** Whether `problems` itself is listed in the evidence. */
-  listProblems: boolean;
+/** What a page's blocks say together: every id any of them defines. */
+interface PageContext {
+  definedIds: ReadonlySet<string>;
 }
 
-const listHas = (key: string): SQL =>
+interface PerPageSpec {
+  identity: RuleIdentity;
+  /**
+   * SQL over `sd` (and the page `p`) that is true when the block's verdict has
+   * something for this rule. `crawlId` is for a check that reads the page's
+   * other blocks.
+   */
+  hasProblems: (crawlId: string) => SQL;
+  /** The problems one block contributes, in list order. */
+  problems: (block: BlockValidation, format: string, page: PageContext) => Problem[];
+  /**
+   * Silent on a crawl not wholly at extraction 4 (ruling R0.7): the answer
+   * depends on blocks a page read before microdata and RDFa were extracted
+   * would not have.
+   */
+  needsV4?: true;
+}
+
+const listHas = (key: string) => (): SQL =>
   sql`coalesce(jsonb_array_length(sd.validation_jsonb -> ${sql.raw(`'${key}'`)}), 0) > 0`;
 
-const googleHas = (missing: "missingRequired" | "missingRecommended"): SQL =>
+/**
+ * A reference of block `sd` that no block of page `p` defines. A sibling block
+ * whose verdict is null defines nothing here; the page is then selected and
+ * the reader throws on that block, so the null is never read as "undefined".
+ */
+const unresolvedHas = (crawlId: string): SQL =>
   sql`exists (
-    select 1 from jsonb_array_elements(sd.validation_jsonb -> 'googleFeatures') g
-    where jsonb_array_length(g -> ${sql.raw(`'${missing}'`)}) > 0
+    select 1 from jsonb_array_elements(sd.validation_jsonb -> 'references') r(ref)
+    where not exists (
+      select 1 from structured_data d
+      where d.crawl_id = ${crawlId} and d.page_id = p.id
+        and d.validation_jsonb -> 'definedIds' @> jsonb_build_array(r.ref -> 'id')
+    )
   )`;
+
+/** Every id the page's blocks define, as one set (`PageContext`). */
+function pageContext(blocks: readonly BlockValidation[]): PageContext {
+  return { definedIds: new Set(blocks.flatMap((b) => b.definedIds)) };
+}
 
 async function perPageFindings(
   db: Db,
@@ -137,10 +163,13 @@ async function perPageFindings(
 ): Promise<Finding[]> {
   const ruleId = spec.identity.id;
   await assertCrawl(db, crawlId, ruleId);
+  if (spec.needsV4 === true && !(await v4Gate(db, crawlId)).recorded) return [];
 
-  // A page is selected when any block has something to say OR has no verdict
-  // at all (the latter throws below). All of a selected page's blocks come back,
-  // in id order, so the problems order is block id then list order.
+  // A page is selected when any block has something to say, has no verdict at
+  // all, or has one in a shape this ruleset does not write (no `nodes` list:
+  // written before the 29a rework); the latter two throw below. All of a
+  // selected page's blocks come back, in id order, so the problems order is
+  // block id then list order.
   const result = await db.execute<{
     page_id: string;
     url: string;
@@ -158,27 +187,36 @@ async function perPageFindings(
     where p.crawl_id = ${crawlId}
       and ${JUDGED("p")}
     group by p.id, p.url
-    having bool_or(sd.validation_jsonb is null or ${spec.hasProblems})
+    having bool_or(
+      sd.validation_jsonb is null
+      or jsonb_typeof(sd.validation_jsonb -> 'nodes') is distinct from 'array'
+      or ${spec.hasProblems(crawlId)}
+    )
     order by p.url
     ${limitTo(caps.listing)}`);
 
   const findings: Finding[] = [];
   for (const row of result.rows) {
-    const all: Problem[] = [];
+    const parsed: { format: string; validation: BlockValidation }[] = [];
     for (const block of row.blocks) {
       if (block.validation === null || block.validation === undefined) {
         throw new Error(
           `${ruleId}: ${row.url} structured data has no validation — re-run the rules`,
         );
       }
-      const parsed = blockValidationSchema.safeParse(block.validation);
-      if (!parsed.success) {
+      const checked = blockValidationSchema.safeParse(block.validation);
+      if (!checked.success) {
+        // A blob in a shape this ruleset does not write — one from before the
+        // 29a rework among them — is refused, never read.
         throw new Error(
-          `${ruleId}: structured_data row ${block.id} of ${row.url} has a malformed validation blob: ${parsed.error.message}`,
+          `${ruleId}: structured_data row ${block.id} of ${row.url} has a malformed validation blob ` +
+            `(re-run the rules): ${checked.error.message}`,
         );
       }
-      all.push(...spec.problems(parsed.data, block.format));
+      parsed.push({ format: block.format, validation: checked.data });
     }
+    const page = pageContext(parsed.map((b) => b.validation));
+    const all: Problem[] = parsed.flatMap((b) => spec.problems(b.validation, b.format, page));
     // The SQL selected the page on the strength of some block, so an empty
     // list here means the SQL pre-filter and the reader disagree.
     if (all.length === 0) {
@@ -191,8 +229,7 @@ async function perPageFindings(
         pageId: row.page_id,
         pageUrl: row.url,
         evidence: {
-          ...(spec.extra?.(all) ?? {}),
-          ...(spec.listProblems ? { problems: all.slice(0, MAX_PROBLEMS_IN_EVIDENCE) } : {}),
+          problems: all.slice(0, MAX_PROBLEMS_IN_EVIDENCE),
           problemCount: all.length,
         },
         dedupeKey: row.url,
@@ -291,36 +328,11 @@ async function templateFindings(
   return noteTruncation(findings, result.rows[0]?.total_matches ?? 0);
 }
 
-const distinct = (problems: Problem[]): string[] => [
-  ...new Set(problems.map((p) => p["feature"] as string)),
-];
-
-const googleSpec = (
-  identity: RuleIdentity,
-  missing: "missingRequired" | "missingRecommended",
-): PerPageSpec => ({
-  identity,
-  hasProblems: googleHas(missing),
-  problems: (b, format) =>
-    b.googleFeatures
-      .filter((g) => g[missing].length > 0)
-      .map((g) => ({
-        format,
-        feature: g.feature,
-        path: g.path,
-        type: g.type,
-        missing: g[missing],
-      })),
-  extra: (problems) => ({ features: distinct(problems) }),
-  listProblems: true,
-});
-
 const SPECS = {
   unknownType: {
     identity: UNKNOWN_TYPE,
     hasProblems: listHas("unknownTypes"),
     problems: (b, format) => b.unknownTypes.map((t) => ({ format, path: t.path, type: t.type })),
-    listProblems: true,
   },
   unknownProperty: {
     identity: UNKNOWN_PROPERTY,
@@ -332,7 +344,6 @@ const SPECS = {
         type: u.type,
         property: u.property,
       })),
-    listProblems: true,
   },
   pending: {
     identity: PENDING,
@@ -345,7 +356,6 @@ const SPECS = {
         status: s.status,
         supersededBy: s.supersededBy,
       })),
-    listProblems: true,
   },
   mismatch: {
     identity: MISMATCH,
@@ -358,49 +368,35 @@ const SPECS = {
         type: m.type,
         expected: m.expected,
       })),
-    listProblems: true,
   },
-  googleRequired: googleSpec(GOOGLE_REQUIRED, "missingRequired"),
-  googleRecommended: googleSpec(GOOGLE_RECOMMENDED, "missingRecommended"),
-  deprecated: {
-    identity: DEPRECATED,
-    hasProblems: listHas("deprecatedFeatures"),
+  emptyValue: {
+    identity: EMPTY_VALUE,
+    hasProblems: listHas("emptyValues"),
     problems: (b, format) =>
-      b.deprecatedFeatures.map((d) => ({ format, feature: d.feature, path: d.path, type: d.type })),
-    extra: (problems) => {
-      const features = distinct(problems);
-      return {
-        features,
-        // The sentence for each feature, in the order `features` names them.
-        restriction: features.map((id) => {
-          const def = DEPRECATED_FEATURES.find((f) => f.id === id);
-          if (def === undefined) {
-            throw new Error(`${DEPRECATED.id}: feature '${id}' is not in DEPRECATED_FEATURES`);
-          }
-          return def.restriction;
-        }),
-      };
-    },
-    listProblems: false,
+      b.emptyValues.map((e) => ({ format, path: e.path, type: e.type, property: e.property })),
+  },
+  unresolved: {
+    identity: UNRESOLVED,
+    hasProblems: unresolvedHas,
+    problems: (b, format, page) =>
+      b.references
+        .filter((r) => !page.definedIds.has(r.id))
+        .map((r) => ({ format, path: r.path, id: r.id })),
+    needsV4: true,
   },
 } satisfies Record<string, PerPageSpec>;
 
 const PROBLEMS_COLUMN = { key: "problems", label: "Problems" };
-const FEATURES_COLUMN = { key: "features", label: "Features" };
 const COUNT_COLUMN = { key: "problemCount", label: "Problem Count" };
 
-function perPageRule(
-  spec: PerPageSpec,
-  checkIds: string[],
-  columns: QueryRule["columns"],
-): QueryRule {
+function perPageRule(spec: PerPageSpec, checkIds: string[]): QueryRule {
   return defineRule<QueryRule>({
     kind: "query",
     id: spec.identity.id,
     checkIds,
     category: CATEGORY,
     severity: spec.identity.severity,
-    columns,
+    columns: [PROBLEMS_COLUMN, COUNT_COLUMN],
     ...copyFor(spec.identity.id),
     rulesetVersion: RULESET_VERSION,
     run: (db, crawlId, caps) => perPageFindings(db, crawlId, capsOr(caps), spec),
@@ -448,16 +444,11 @@ export const schemaValidationRules: QueryRule[] = [
     rulesetVersion: RULESET_VERSION,
     run: (db, crawlId, caps) => parseErrorFindings(db, crawlId, capsOr(caps)),
   }),
-  perPageRule(SPECS.unknownType, ["CHECK-43"], [PROBLEMS_COLUMN, COUNT_COLUMN]),
-  perPageRule(SPECS.unknownProperty, ["CHECK-43"], [PROBLEMS_COLUMN, COUNT_COLUMN]),
-  perPageRule(SPECS.pending, ["CHECK-43"], [PROBLEMS_COLUMN, COUNT_COLUMN]),
-  perPageRule(SPECS.mismatch, ["CHECK-43"], [PROBLEMS_COLUMN, COUNT_COLUMN]),
-  perPageRule(SPECS.googleRequired, ["CHECK-43", "CHECK-44"], [PROBLEMS_COLUMN, FEATURES_COLUMN, COUNT_COLUMN]),
-  perPageRule(SPECS.googleRecommended, ["CHECK-43", "CHECK-44"], [PROBLEMS_COLUMN, FEATURES_COLUMN, COUNT_COLUMN]),
-  perPageRule(
-    SPECS.deprecated,
-    ["CHECK-43"],
-    [FEATURES_COLUMN, { key: "restriction", label: "Restriction" }, COUNT_COLUMN],
-  ),
+  perPageRule(SPECS.unknownType, ["CHECK-43"]),
+  perPageRule(SPECS.unknownProperty, ["CHECK-43"]),
+  perPageRule(SPECS.pending, ["CHECK-43"]),
+  perPageRule(SPECS.mismatch, ["CHECK-43"]),
+  perPageRule(SPECS.emptyValue, ["CHECK-43"]),
+  perPageRule(SPECS.unresolved, ["CHECK-43"]),
   templateRule,
 ];

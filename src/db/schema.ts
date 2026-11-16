@@ -1459,7 +1459,7 @@ export const issues = pgTable("issues", {
 export const metrics = pgTable("metrics", {
   crawlId: text("crawl_id").notNull().references(() => crawls.id, { onDelete: "cascade" }),
   metricId: text("metric_id").notNull(),
-  // site|page_type|sitemap_doc — `MetricScope` in src/rules/registry/types.ts,
+  // site|page_type|sitemap_doc|schema_type — `MetricScope` in src/rules/registry/types.ts,
   // which is what the runner validates a metric rule's rows against. A free
   // text column here; the closed set lives there.
   scope: text("scope").notNull(),

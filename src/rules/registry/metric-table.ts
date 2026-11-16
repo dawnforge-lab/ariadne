@@ -229,6 +229,15 @@ export interface ExpandListTable extends MetricTableCommon {
  * open-ended map whose keys are data (`inlinks.sources-by-type`, whose keys are
  * the site's own templates). A column per key is impossible — the keys differ
  * per crawl — so the entry itself is two columns.
+ *
+ * `scopeColumns` are paths into the stored `value` itself — a fact about the
+ * scope, not about one entry (`schema.property-coverage`'s node count per
+ * type) — printed after the scope column and repeated on every entry row, as
+ * `PerScopeMeasureTable.scopeColumns` are. A table that declares them prints a
+ * scope whose map is empty or absent as ONE row with empty key and value, so
+ * its scope facts are never dropped with the map. A table without them keeps
+ * the original shape (no row for an empty map) and carries no `scopeColumns`
+ * key.
  */
 export interface ExpandMapTable extends MetricTableCommon {
   shape: "expandMap";
@@ -236,6 +245,7 @@ export interface ExpandMapTable extends MetricTableCommon {
   scopeLabel: string;
   keyLabel: string;
   valueLabel: string;
+  scopeColumns?: readonly MetricColumn[];
 }
 
 export type MetricTable =
@@ -310,15 +320,25 @@ export function expandList(
   };
 }
 
-/** `expandMap(field, scopeLabel, keyLabel, valueLabel, order?)` — see `ExpandMapTable`. */
+/** `expandMap(field, scopeLabel, keyLabel, valueLabel, order?, scopeColumns?)` — see `ExpandMapTable`. */
 export function expandMap(
   field: string,
   scopeLabel: string,
   keyLabel: string,
   valueLabel: string,
   order?: number,
+  scopeColumns: readonly MetricColumn[] = [],
 ): ExpandMapTable {
-  return { shape: "expandMap", field, scopeLabel, keyLabel, valueLabel, ...orderOf(order) };
+  return {
+    shape: "expandMap",
+    field,
+    scopeLabel,
+    keyLabel,
+    valueLabel,
+    ...orderOf(order),
+    // Spread, for `orderOf`'s reason: a table without them has no key at all.
+    ...(scopeColumns.length === 0 ? {} : { scopeColumns }),
+  };
 }
 
 // ----------------------------------------------------------------- shaping
@@ -347,6 +367,7 @@ export function metricTableColumns(table: MetricTable): MetricColumn[] {
     case "expandMap":
       return [
         { key: SCOPE_KEY, label: table.scopeLabel },
+        ...(table.scopeColumns ?? []),
         { key: MAP_KEY, label: table.keyLabel },
         { key: MAP_VALUE_KEY, label: table.valueLabel },
       ];
@@ -591,10 +612,23 @@ export function shapeExpandMap(
   rows: readonly StoredMetricRow[],
 ): ShapedMetricTable {
   const out: Record<string, MetricCell>[] = [];
+  const scopeColumns = table.scopeColumns ?? [];
   for (const row of rows) {
     const value = valueOf(metricId, row);
+    const scopeCells: Record<string, MetricCell> = {};
+    for (const column of scopeColumns) scopeCells[column.key] = cellOf(metricId, value, column);
+    // The row a scope with no entries prints, when the table has scope facts to show.
+    const bare = (): Record<string, MetricCell> => ({
+      [SCOPE_KEY]: scopeCell(row),
+      ...scopeCells,
+      [MAP_KEY]: null,
+      [MAP_VALUE_KEY]: null,
+    });
     const map = value[table.field];
-    if (map === undefined) continue;
+    if (map === undefined) {
+      if (scopeColumns.length > 0) out.push(bare());
+      continue;
+    }
     if (map === null || typeof map !== "object" || Array.isArray(map)) {
       throw new Error(
         `${metricId}: '${table.field}' on scope '${row.scope}/${row.scopeValue}' is not the ` +
@@ -630,9 +664,11 @@ export function shapeExpandMap(
       if ((left === null) !== (right === null)) return left === null ? 1 : -1;
       return a.key < b.key ? -1 : a.key > b.key ? 1 : 0;
     });
+    if (entries.length === 0 && scopeColumns.length > 0) out.push(bare());
     for (const entry of entries) {
       out.push({
         [SCOPE_KEY]: scopeCell(row),
+        ...scopeCells,
         [MAP_KEY]: entry.key,
         [MAP_VALUE_KEY]: entry.cell,
       });

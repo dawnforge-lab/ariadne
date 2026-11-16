@@ -164,8 +164,9 @@ describe("buildRegistry", () => {
     expect(ids).toContain("hreflang.source-conflict");
     // PR #24 review: hreflang declarations not read in full.
     expect(ids).toContain("hreflang.declarations-incomplete");
-    // Phase 29a Task 7: the eight per-node schema rules.
-    expect(ids).toContain("schema.google-required-missing");
+    // Phase 29a Task 7 and the 29a rework: the per-node schema rules and the coverage metric.
+    expect(ids).toContain("schema.empty-value");
+    expect(ids).toContain("schema.property-coverage");
     expect(ids).toContain("schema.template-inconsistent");
     expect(ids.length).toBe(197);
   });

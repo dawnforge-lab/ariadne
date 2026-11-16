@@ -1018,6 +1018,19 @@ const KINDS = ["page", "query", "metric"] as const satisfies readonly AnyRule["k
 //     and `SCHEMA_TEMPLATE_MIN_PAGES` (2-100000, default 10), 22 in all;
 //     migration 0054 adds both to every stored run stamp at their defaults.
 //     197 rules: 72 page / 111 query / 14 metric.
+// 0.26.0, 2026-11-16 rework (unshipped, so the version stands): structured
+//     data is judged by web standards — the schema.org vocabulary and the
+//     JSON-LD, Microdata and RDFa specs — not by one search engine. The Google
+//     profiles go with `schema.google-required-missing`,
+//     `schema.google-recommended-missing` and `schema.deprecated-feature`; the
+//     validation blob loses `googleFeatures` and `deprecatedFeatures` and
+//     records `emptyValues`, `definedIds`, `references` and `nodes`. New:
+//     `schema.empty-value` (warning), `schema.unresolved-reference` (info,
+//     resolved per page across its blocks) and the metric
+//     `schema.property-coverage` (CHECK-44, per schema type, scope
+//     `schema_type`). `schema.self-serving-reviews` copy states the fact, not
+//     a policy. A blob in the old shape is refused (re-run the rules); no
+//     migration. 197 rules: 72 page / 110 query / 15 metric.
 export const RULESET_VERSION = "0.26.0";
 
 /**
@@ -1380,7 +1393,7 @@ function validateTable(rule: AnyRule, fail: (msg: string) => never): void {
   // reading the whole list would refuse every table there is.
   const declared =
     table.shape === "expandMap"
-      ? []
+      ? [...(table.scopeColumns ?? [])]
       : [...table.columns, ...(table.shape === "perScopeMeasure" ? table.scopeColumns : [])];
   for (const column of declared) {
     if (RESERVED_TABLE_KEYS.has(column.key))

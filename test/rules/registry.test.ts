@@ -534,6 +534,8 @@ describe("check universe", () => {
     // unreachable robots.txt (docsFetched > 0), where it was silent; no copy or other rule moved.
     // 0.26.0: Phase 29a — structured data validated: nine new schema.* rules, microdata and
     // RDFa read since extraction 4, two thresholds; registry.ts carries the grounds.
+    // 0.26.0, 2026-11-16 rework: judged by web standards, not Google — three rules out, two
+    // rules and one metric in; registry.ts carries the grounds.
     expect(RULESET_VERSION).toBe("0.26.0");
   });
   it("every listed check id is a well-formed CHECK-NN and unique", () => {

@@ -1,5 +1,6 @@
 import { Registry } from "./registry/registry.js";
 import { contentMetrics } from "./metric/content-metrics.js";
+import { schemaMetrics } from "./metric/schema-metrics.js";
 import { crawlMetrics } from "./metric/crawl-metrics.js";
 import { healthMetrics } from "./metric/health-metrics.js";
 import { hreflangMetrics } from "./metric/hreflang-metrics.js";
@@ -126,6 +127,8 @@ export function buildRegistry(): Registry {
     // last, after everything that writes evidence.
     ...linkMetrics,
     ...contentMetrics,
+    // The structured-data metric (29a rework): property coverage per schema type.
+    ...schemaMetrics,
     ...hreflangMetrics,
     ...urlMetrics,
     ...crawlMetrics,

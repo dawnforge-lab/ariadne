@@ -51,8 +51,9 @@ const COMPLETE_PRODUCT = {
   image: "https://schema-validation.example/mug.jpg",
   offers: { "@type": "Offer", price: "14.00", priceCurrency: "GBP" },
 };
-const IMAGELESS_PRODUCT = { ...COMPLETE_PRODUCT, image: undefined };
 const CLEAN_ORG = { "@context": ctx, "@type": "Organization", name: "Estuary" };
+/** One empty value: `$.name`. */
+const EMPTY_NAMED_ORG = { ...CLEAN_ORG, name: "" };
 
 describe("schemaValidationRules metadata", () => {
   it("defines the per-node rules and the template rule with the severities and checks the table assigns", () => {
@@ -66,9 +67,8 @@ describe("schemaValidationRules metadata", () => {
       "schema.unknown-property": [["CHECK-43"], "warning", "structured-data"],
       "schema.property-pending-or-superseded": [["CHECK-43"], "info", "structured-data"],
       "schema.embedded-type-mismatch": [["CHECK-43"], "warning", "structured-data"],
-      "schema.google-required-missing": [["CHECK-43", "CHECK-44"], "warning", "structured-data"],
-      "schema.google-recommended-missing": [["CHECK-43", "CHECK-44"], "info", "structured-data"],
-      "schema.deprecated-feature": [["CHECK-43"], "info", "structured-data"],
+      "schema.empty-value": [["CHECK-43"], "warning", "structured-data"],
+      "schema.unresolved-reference": [["CHECK-43"], "info", "structured-data"],
       "schema.template-inconsistent": [["CHECK-43"], "warning", "structured-data"],
     });
   });
@@ -282,44 +282,39 @@ describe("the schema validation rules against the database", () => {
     });
   });
 
-  describe("Google rules", () => {
-    it("google-required-missing judges per node: one complete and one image-less Product is one finding", async () => {
-      const crawlId = await onePage(COMPLETE_PRODUCT, IMAGELESS_PRODUCT);
-      const found = await run("schema.google-required-missing", crawlId);
+  describe("schema.empty-value", () => {
+    const ID = "schema.empty-value";
+    it("fires as a warning, listing each empty value at its own path with the format, type and property", async () => {
+      const found = await run(
+        ID,
+        await onePage({ ...COMPLETE_PRODUCT, name: "", offers: { "@type": "Offer", price: "", priceCurrency: "GBP" } }),
+      );
       expect(found).toHaveLength(1);
-      expect(found[0]!.evidence).toMatchObject({
-        features: ["merchant-listing"],
-        problemCount: 1,
+      expect(found[0]!.severity).toBe("warning");
+      expect(found[0]!.evidence).toEqual({
+        problems: [
+          { format: "jsonld", path: "$.name", type: "Product", property: "name" },
+          { format: "jsonld", path: "$.offers.price", type: "Offer", property: "price" },
+        ],
+        problemCount: 2,
       });
-      expect(found[0]!.evidence["problems"]).toMatchObject([
-        { format: "jsonld", feature: "merchant-listing", type: "Product", missing: ["image"] },
-      ]);
     });
 
-    it("google-required-missing is silent when every node is complete", async () => {
+    it("is silent on a clean page, and on zero, false and a bare reference", async () => {
+      expect(await run(ID, await onePage(COMPLETE_PRODUCT))).toEqual([]);
       expect(
-        await run("schema.google-required-missing", await onePage(COMPLETE_PRODUCT)),
+        await run(ID, await onePage({ ...CLEAN_ORG, numberOfEmployees: 0, publishingPrinciples: { "@id": "#p" } })),
       ).toEqual([]);
-    });
-
-    it("google-recommended-missing fires on a missing recommended field with the recommended list", async () => {
-      const crawlId = await onePage(IMAGELESS_PRODUCT);
-      const found = await run("schema.google-recommended-missing", crawlId);
-      expect(found).toHaveLength(1);
-      expect(found[0]!.severity).toBe("info");
-      const problems = found[0]!.evidence["problems"] as { missing: string[] }[];
-      expect(problems.length).toBeGreaterThan(0);
-      expect(found[0]!.evidence["problemCount"]).toBe(problems.length);
     });
 
     it("problems are capped at 20 with the full count beside them, and carry the block format", async () => {
       const crawlId = await newCrawl();
       const ids = await addPages(crawlId, [{ path: "/a" }]);
       for (let i = 0; i < MAX_PROBLEMS_IN_EVIDENCE + 5; i += 1) {
-        await addBlock(crawlId, ids.get("/a")!, IMAGELESS_PRODUCT, i === 0 ? "microdata" : "jsonld");
+        await addBlock(crawlId, ids.get("/a")!, EMPTY_NAMED_ORG, i === 0 ? "microdata" : "jsonld");
       }
       await deriveSchemaValidation(db, crawlId);
-      const found = await run("schema.google-required-missing", crawlId);
+      const found = await run(ID, crawlId);
       expect(found).toHaveLength(1);
       const problems = found[0]!.evidence["problems"] as { format: string }[];
       expect(problems).toHaveLength(MAX_PROBLEMS_IN_EVIDENCE);
@@ -330,30 +325,66 @@ describe("the schema validation rules against the database", () => {
     });
   });
 
-  describe("schema.deprecated-feature", () => {
-    const ID = "schema.deprecated-feature";
-    it("fires on FAQPage with the withdrawn-feature sentence", async () => {
+  describe("schema.unresolved-reference", () => {
+    const ID = "schema.unresolved-reference";
+    const ORG = { "@context": ctx, "@type": "Organization", "@id": "#org", name: "Estuary" };
+    const PAGE = { "@context": ctx, "@type": "WebPage", name: "Home", publisher: { "@id": "#org" } };
+
+    it("a reference another block on the same page defines is resolved (a graph split over two scripts)", async () => {
+      expect(await run(ID, await onePage(ORG, PAGE))).toEqual([]);
+      // Order does not matter: the definition may come after the reference.
+      expect(await run(ID, await onePage(PAGE, ORG))).toEqual([]);
+    });
+
+    it("fires as info on a reference no block of the page defines, listing only the unresolved ones", async () => {
       const found = await run(
         ID,
-        await onePage({
-          "@context": ctx,
-          "@type": "FAQPage",
-          mainEntity: [
-            {
-              "@type": "Question",
-              name: "Q?",
-              acceptedAnswer: { "@type": "Answer", text: "A." },
-            },
-          ],
-        }),
+        await onePage(ORG, { ...PAGE, about: [{ "@id": "#org" }, { "@id": "#topic" }] }),
       );
       expect(found).toHaveLength(1);
+      expect(found[0]!.severity).toBe("info");
       expect(found[0]!.evidence).toEqual({
-        features: ["faq"],
-        restriction: ["Google no longer shows FAQ rich results (since May 7, 2026)"],
+        problems: [{ format: "jsonld", path: "$.about[1]", id: "#topic" }],
         problemCount: 1,
       });
-      expect(await run(ID, await onePage(CLEAN_ORG))).toEqual([]);
+    });
+
+    it("reports an absolute IRI on another site with the IRI", async () => {
+      const found = await run(
+        ID,
+        await onePage({ ...CLEAN_ORG, parentOrganization: { "@id": "https://parent.example/#org" } }),
+      );
+      expect(found[0]!.evidence).toEqual({
+        problems: [{ format: "jsonld", path: "$.parentOrganization", id: "https://parent.example/#org" }],
+        problemCount: 1,
+      });
+    });
+
+    it("resolves per page: an id defined on another page does not resolve this page's reference", async () => {
+      const crawlId = await newCrawl();
+      const ids = await addPages(crawlId, [{ path: "/a" }, { path: "/b" }]);
+      await addBlock(crawlId, ids.get("/a")!, PAGE);
+      await addBlock(crawlId, ids.get("/b")!, ORG);
+      await deriveSchemaValidation(db, crawlId);
+      const found = await run(ID, crawlId);
+      expect(found.map((f) => f.pageUrl)).toEqual([url("/a")]);
+    });
+
+    it("a definition in a microdata block resolves a JSON-LD reference on the same page", async () => {
+      const crawlId = await newCrawl();
+      const ids = await addPages(crawlId, [{ path: "/a" }]);
+      await addBlock(crawlId, ids.get("/a")!, PAGE);
+      await addBlock(crawlId, ids.get("/a")!, ORG, "microdata");
+      await deriveSchemaValidation(db, crawlId);
+      expect(await run(ID, crawlId)).toEqual([]);
+    });
+
+    it("is silent on a crawl not wholly at extraction 4, where other blocks may not have been read", async () => {
+      const crawlId = await newCrawl();
+      const ids = await addPages(crawlId, [{ path: "/a", extractionVersion: 3 }]);
+      await addBlock(crawlId, ids.get("/a")!, PAGE);
+      await deriveSchemaValidation(db, crawlId);
+      expect(await run(ID, crawlId)).toEqual([]);
     });
   });
 
@@ -361,9 +392,9 @@ describe("the schema validation rules against the database", () => {
     it("non-JUDGED pages are silent", async () => {
       const crawlId = await newCrawl();
       const ids = await addPages(crawlId, [{ path: "/n", robotsMeta: "noindex" }]);
-      await addBlock(crawlId, ids.get("/n")!, IMAGELESS_PRODUCT);
+      await addBlock(crawlId, ids.get("/n")!, EMPTY_NAMED_ORG);
       await deriveSchemaValidation(db, crawlId);
-      expect(await run("schema.google-required-missing", crawlId)).toEqual([]);
+      expect(await run("schema.empty-value", crawlId)).toEqual([]);
     });
 
     it("a null validation on a judged page throws and says to re-run the rules", async () => {
@@ -375,8 +406,8 @@ describe("the schema validation rules against the database", () => {
       );
     });
 
-    it("a malformed validation blob throws naming the row id", async () => {
-      const crawlId = await onePage(IMAGELESS_PRODUCT);
+    it("a malformed validation blob throws naming the row id and saying to re-run the rules", async () => {
+      const crawlId = await onePage(EMPTY_NAMED_ORG);
       const [row] = await db
         .select({ id: structuredData.id })
         .from(structuredData)
@@ -391,20 +422,37 @@ describe("the schema validation rules against the database", () => {
         .update(structuredData)
         .set({ validation: { ...stored[0]!.v!, nonsense: true } as never })
         .where(eq(structuredData.id, row!.id));
-      await expect(run("schema.google-required-missing", crawlId)).rejects.toThrow(
-        new RegExp(`row ${row!.id} `),
+      await expect(run("schema.empty-value", crawlId)).rejects.toThrow(
+        new RegExp(`row ${row!.id} .*re-run the rules`),
       );
+    });
+
+    it("a blob in the shape written before the rework is refused, never read", async () => {
+      const crawlId = await onePage({ "@context": ctx, "@type": "Prodcut", name: "x" });
+      const [row] = await db
+        .select({ id: structuredData.id, v: structuredData.validation })
+        .from(structuredData)
+        .where(eq(structuredData.crawlId, crawlId));
+      const { emptyValues: _e, definedIds: _d, references: _r, nodes: _n, ...rest } = row!.v!;
+      await db
+        .update(structuredData)
+        .set({ validation: { ...rest, googleFeatures: [], deprecatedFeatures: [] } as never })
+        .where(eq(structuredData.id, row!.id));
+      await expect(run("schema.unknown-type", crawlId)).rejects.toThrow(/re-run the rules/);
+      // A rule with nothing to say about the block refuses it too, rather than
+      // reading the page as clean.
+      await expect(run("schema.empty-value", crawlId)).rejects.toThrow(/re-run the rules/);
     });
 
     it("orders by URL and notes truncation at caps.listing", async () => {
       const crawlId = await newCrawl();
       const ids = await addPages(crawlId, [{ path: "/c" }, { path: "/a" }, { path: "/b" }]);
-      for (const id of ids.values()) await addBlock(crawlId, id, IMAGELESS_PRODUCT);
+      for (const id of ids.values()) await addBlock(crawlId, id, EMPTY_NAMED_ORG);
       // `/c` carries a second block: the total counts PAGES (3), so a regression
       // to counting blocks (4) would fail here.
-      await addBlock(crawlId, ids.get("/c")!, IMAGELESS_PRODUCT);
+      await addBlock(crawlId, ids.get("/c")!, EMPTY_NAMED_ORG);
       await deriveSchemaValidation(db, crawlId);
-      const found = await rule("schema.google-required-missing").run(db, crawlId, {
+      const found = await rule("schema.empty-value").run(db, crawlId, {
         listing: 2,
       } as never);
       expect(found.map((f) => f.pageUrl)).toEqual([url("/a"), url("/b")]);

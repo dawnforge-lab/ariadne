@@ -981,16 +981,16 @@ export const COPY_TEMPLATES: Record<string, IssueCopy> = {
   "schema.none-on-site": {
     title: "Structured data: No structured data on the site",
     explanation:
-      "No page in the crawl carries JSON-LD, microdata or RDFa, the three formats that are read. Structured data states in machine-readable form what a page is, and is what search engines and AI assistants read to build rich results and cite sources.",
+      "No page in the crawl carries JSON-LD, microdata or RDFa, the three formats that are read. Structured data states in machine-readable form what a page is, and is what search engines and AI assistants read to understand a page and cite it.",
     howToFix:
-      "Add JSON-LD to the templates that matter most: Organization on the home page, Product on product pages, Article on editorial, FAQPage where questions are answered. Validate with the Rich Results Test.",
+      "Add JSON-LD to the templates that matter most: Organization on the home page, Product on product pages, Article on editorial, FAQPage where questions are answered. Check each block with the schema.org validator (validator.schema.org).",
   },
   "schema.self-serving-reviews": {
-    title: "Structured data: Self-serving reviews on Organization or LocalBusiness markup",
+    title: "Structured data: Organization or LocalBusiness markup rating itself",
     explanation:
-      "Indexable, self-canonical pages whose markup typed Organization or any of its subtypes (LocalBusiness, Restaurant, …) carries a rating or reviews about the business itself. Google's review snippet policy treats these as self-serving and does not show the stars. Because every Organization subtype is matched, a directory, booking or review site that marks up ratings of businesses it does not own is listed too; those ratings are not self-serving, and the finding can be dismissed on such a site.",
+      "Indexable, self-canonical pages whose markup typed Organization or any of its subtypes (LocalBusiness, Restaurant, …) carries a rating or reviews (aggregateRating or review) about the business itself. In schema.org a rating or review on a node is about that node, so the business's own markup rates the business. Because every Organization subtype is matched, a directory, booking or review site that marks up ratings of businesses it does not own is listed too; those ratings are of other businesses, and the finding can be dismissed on such a site.",
     howToFix:
-      "Move the ratings to the type they are about (Product, Service, Course, Recipe) and let independent review platforms carry the business-level rating.",
+      "Check what the ratings are about. If they rate a product or service, move them to the Product, Service or Course node they describe; if they rate the business, decide whether the business's own pages should state them.",
   },
 
   "schema.parse-error": {
@@ -1001,9 +1001,9 @@ export const COPY_TEMPLATES: Record<string, IssueCopy> = {
       "Fix the syntax the counts point to: validate the JSON-LD with a JSON linter, and give every top-level itemscope an itemtype. Check the template that outputs it, not just this page.",
   },
   "schema.unknown-type": {
-    title: "Structured data: Type name not in the shared vocabulary",
+    title: "Structured data: Type name not in the schema.org vocabulary",
     explanation:
-      "Indexable, self-canonical pages with a node typed with a name that is not in the shared structured-data vocabulary (the one Google and Bing read), listed per node with its path. Search engines cannot interpret a type they do not know, so the node earns no rich result.",
+      "Indexable, self-canonical pages with a node typed with a name that the schema.org vocabulary (release 30.1) does not define, listed per node with its path. A reader of the markup cannot interpret a type the vocabulary does not define, so the node states nothing it can use.",
     howToFix:
       "Correct the spelling or pick the closest type the vocabulary defines. Names are case-sensitive: Product, not product.",
   },
@@ -1028,19 +1028,19 @@ export const COPY_TEMPLATES: Record<string, IssueCopy> = {
     howToFix:
       "Use one of the expected types for the nested node, or move it under a property that takes its type.",
   },
-  "schema.google-required-missing": {
-    title: "Structured data: Required field missing for a Google rich result",
+  "schema.empty-value": {
+    title: "Structured data: Property with an empty value",
     explanation:
-      "Indexable, self-canonical pages with a node of a type Google offers a rich result for, that lacks a field Google requires for it. Each node is judged on its own, as the Rich Results Test does, so a page with one complete and one incomplete Product is reported. The row names the feature, the node and the missing fields.",
+      "Indexable, self-canonical pages where a property's value is empty in JSON-LD, microdata or RDFa: blank text, an empty list, or an object with no properties and no @id (a zero or false is a value). Each row gives the format, the path to the value, the type of the node holding it and the property. An empty value states nothing to any reader of the markup; it is usually a template field the page had no data for.",
     howToFix:
-      "Add the missing fields to the node, populated from the same data as the visible page. Re-test with the Rich Results Test.",
+      "Fill the property from the page's data, or have the template leave it out when there is no data. Check the template that outputs it, not just this page.",
   },
-  "schema.google-recommended-missing": {
-    title: "Structured data: Recommended field missing for a Google rich result",
+  "schema.unresolved-reference": {
+    title: "Structured data: Reference to an id no node on the page defines",
     explanation:
-      "Indexable, self-canonical pages with a node of a type Google offers a rich result for, that lacks a field Google recommends but does not require. The node stays eligible; the fields give Google more to show. The row names the feature, the node and the missing fields.",
+      "Indexable, self-canonical pages with a node reference (a JSON-LD object holding only an @id) whose id no node in any of the page's blocks defines; ids are compared as written, so a relative #org and the absolute address of the same node do not match. Each row gives the format, the path and the id. Referring to an entity defined elsewhere, such as an absolute IRI on another site, is legal JSON-LD, so this is a fact to check rather than an error: a reader of this page learns nothing about the referenced node but its id.",
     howToFix:
-      "Add the recommended fields where the page has the data. Skip any the page cannot truthfully fill.",
+      "Where the id was meant to name a node on this page (an Organization in a graph split over two scripts, say), give the reference and the definition the same id, written the same way. Where it deliberately names a node on another page or site, nothing needs to change.",
   },
   "schema.template-inconsistent": {
     title: "Structured data: Page lacks the markup its page type usually carries",
@@ -1049,12 +1049,12 @@ export const COPY_TEMPLATES: Record<string, IssueCopy> = {
     howToFix:
       "Find what the template does differently on the listed pages, such as a missing field or a branch that skips the block, and make it output the same markup everywhere.",
   },
-  "schema.deprecated-feature": {
-    title: "Structured data: Markup for a Google feature that is withdrawn",
+  "schema.property-coverage": {
+    title: "Structured data: Property coverage by type",
     explanation:
-      "Indexable, self-canonical pages carrying markup for a rich result Google no longer shows, such as FAQPage or HowTo. The row gives the feature and the date Google withdrew it.",
+      "For each structured-data type on the crawl's indexable, self-canonical pages: how many top-level nodes have that type (each @graph member is one), and for each property those nodes use, how many carry a non-empty value. Types are as the markup states them, names outside the schema.org vocabulary included, and untyped nodes count only in the site row; a node's property list stops at 50, and the nodes cut short, like any types or properties past the table's limits, are counted. Which properties a type needs depends on what the site means its markup to say, so the counts are left to the reader.",
     howToFix:
-      "The markup is harmless but earns no rich result. Keep it if other consumers read it, or remove it to cut template weight.",
+      "Compare each type's properties with what its pages show, and output a property the template has data for but leaves out. A property many nodes use but few carry a value for is usually a template field left empty.",
   },
 
   // ----------------------------------------------------------------- images
