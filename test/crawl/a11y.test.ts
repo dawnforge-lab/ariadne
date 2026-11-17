@@ -7,6 +7,7 @@
  * this subset names and the package does not is a failing test, never a rule
  * that silently runs nothing.
  */
+import { Session } from "node:inspector/promises";
 import { createRequire } from "node:module";
 import { chromium, type Browser } from "playwright";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -17,6 +18,7 @@ import {
   A11Y_TARGET_CHARS,
   AXE_RUN_OPTIONS,
   AXE_TIMEOUT_MS,
+  axeRunExpression,
   axeSource,
   shapeAxeResults,
 } from "../../src/crawl/render/a11y.js";
@@ -34,6 +36,53 @@ describe("the pinned axe-core", () => {
     expect(first).toContain("axe");
     // The same string object, not a second read of the file.
     expect(axeSource()).toBe(first);
+  });
+
+  /*
+   * THE PER-PAGE SEND COST (Phase 29b memory diagnosis). Every render sends
+   * this expression, and Playwright `JSON.stringify`s it. The source is
+   * two-byte in V8 (it holds non-Latin-1 characters), so the JSON text alone
+   * is about 2 bytes × its length; an expression concatenated per call is a
+   * lazy string that each stringify must first flatten into ANOTHER copy of
+   * that size — measured at about 2.5 MB per send against about 1.3 MB with
+   * the expression built once. Asserted on what the heap actually allocated
+   * (V8's sampling heap profiler, collected objects included), so a return to
+   * a per-call concatenation fails here and not only in the 50k gate.
+   */
+  it("builds the production expression once, so a send copies it once", async () => {
+    expect(axeRunExpression()).toBe(axeRunExpression());
+    expect(axeRunExpression().startsWith(axeSource())).toBe(true);
+    const sends = 20;
+    const jsonBytes = 2 * JSON.stringify(axeRunExpression()).length;
+    JSON.stringify({ expression: axeRunExpression() }); // flattened before the window
+    const session = new Session();
+    session.connect();
+    try {
+      await session.post("HeapProfiler.startSampling", {
+        samplingInterval: 4096,
+        includeObjectsCollectedByMajorGC: true,
+        includeObjectsCollectedByMinorGC: true,
+      });
+      for (let i = 0; i < sends; i++) JSON.stringify({ expression: axeRunExpression() });
+      const { profile } = await session.post("HeapProfiler.stopSampling");
+      let allocated = 0;
+      const walk = (node: typeof profile.head): void => {
+        allocated += node.selfSize;
+        node.children.forEach(walk);
+      };
+      walk(profile.head);
+      // One JSON text per send, and not a flattened copy of the source besides.
+      expect(allocated / sends).toBeLessThan(1.5 * jsonBytes);
+    } finally {
+      session.disconnect();
+    }
+  });
+
+  it("builds a test fault's expression with the source and the fault in place of the run", () => {
+    const faulted = axeRunExpression({ error: "boom" });
+    expect(faulted.startsWith(axeSource())).toBe(true);
+    expect(faulted.endsWith(`Promise.reject(new Error("boom"))`)).toBe(true);
+    expect(axeRunExpression()).toContain("axe.run(document,");
   });
 
   it("pins the time budget and the target caps", () => {

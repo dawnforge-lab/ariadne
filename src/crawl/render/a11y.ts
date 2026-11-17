@@ -181,8 +181,33 @@ export function axeSource(): string {
  * axe the page made throw. `{error: m}` rejects with `new Error(m)`;
  * `{value: v}` rejects with the bare value `v` (a page can make a library
  * reject with a string as easily as with an Error).
+ *
+ * BUILT ONCE PER PROCESS (the production expression; a test fault's is built
+ * per call). The source still crosses the protocol once per rendered page —
+ * every render is a fresh page, and CDP has no script registration that
+ * outlives one: `Page.addScriptToEvaluateOnNewDocument` is per target,
+ * `Runtime.compileScript` per execution context — but the Node side pays
+ * for that crossing only once. axe 4.14.0's source holds non-Latin-1
+ * characters, so V8 stores it two bytes per character (about 1.3 MB); a
+ * concatenation made per page is a lazy string that each send had to flatten
+ * into a new 1.3 MB copy before Playwright's `JSON.stringify` made another,
+ * about 2.5 MB of garbage per page against about 1.3 MB with one string kept
+ * (measured in the Phase 29b memory diagnosis). At the render pass's
+ * concurrency that per-page garbage, not axe's run, was the RSS growth the
+ * accessibility run added to the render phase; one kept string removes most
+ * of it.
  */
 export function axeRunExpression(fault: AxeFault | null = null): string {
+  if (fault === null) {
+    memoisedExpression ??= buildAxeRunExpression(null);
+    return memoisedExpression;
+  }
+  return buildAxeRunExpression(fault);
+}
+
+let memoisedExpression: string | null = null;
+
+function buildAxeRunExpression(fault: AxeFault | null): string {
   const run =
     fault === null
       ? `axe.run(document, ${JSON.stringify(AXE_RUN_OPTIONS)}).then(function (r) {
