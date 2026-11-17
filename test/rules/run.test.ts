@@ -168,7 +168,7 @@ describe("buildRegistry", () => {
     expect(ids).toContain("schema.empty-value");
     expect(ids).toContain("schema.property-coverage");
     expect(ids).toContain("schema.template-inconsistent");
-    expect(ids.length).toBe(200);
+    expect(ids.length).toBe(202);
   });
 
   it("registers every kind the runner drives", () => {

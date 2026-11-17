@@ -1044,6 +1044,18 @@ const KINDS = ["page", "query", "metric"] as const satisfies readonly AnyRule["k
 //        (warning; the page's own failed requests, third-party ones not
 //        measured). A `render_console` that is not a RenderConsole throws.
 //        200 rules: 72 page / 113 query / 15 metric.
+//     2. Task 6: `images.larger-than-displayed` (warning; CHECK-49) reads the
+//        render pass's image measurement (`pages.render_images`, capture 3) and
+//        fires on a page where some kept image is wider than
+//        `IMAGE_OVERSIZE_PERCENT` percent of its displayed box (default 200,
+//        overridable 101-1000, so 23 thresholds in all; migration 0058 adds it
+//        to every stored run stamp). Judged from the rendered sample at a fixed
+//        1280x900 viewport, device-pixel ratio 1; `atLeast` when the capture's
+//        kept list was truncated. The metric `render.image-measurement` (crawl
+//        and per template) counts measured, hidden, lazy, never-requested,
+//        size-unknown and broken images and a `measuredShare`. A
+//        `render_images` that is not a RenderImages throws.
+//        202 rules: 72 page / 114 query / 16 metric.
 export const RULESET_VERSION = "0.27.0";
 
 /**

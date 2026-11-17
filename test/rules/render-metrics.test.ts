@@ -32,7 +32,10 @@ const rule = metricLookup(renderMetrics, "renderMetrics");
 
 describe("renderMetrics metadata", () => {
   it("defines the coverage metric, scoped to the site and evidencing CHECK-01", () => {
-    expect(renderMetrics.map((r) => r.id)).toEqual(["render.coverage"]);
+    expect(renderMetrics.map((r) => r.id)).toEqual([
+      "render.coverage",
+      "render.image-measurement",
+    ]);
     const r = rule("render.coverage");
     expect(r.kind).toBe("metric");
     // A metric states what was counted and accuses nobody, so `metricRule`

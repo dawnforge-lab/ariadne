@@ -640,11 +640,11 @@ describe("check annotations", () => {
 describe("severity shape of the ruleset", () => {
   const all = buildRegistry().all();
 
-  it("holds 33 critical, 71 warning and 93 info rules", () => {
+  it("holds 33 critical, 74 warning and 95 info rules", () => {
     const counts = { critical: 0, warning: 0, info: 0 };
     for (const r of all) counts[r.severity] += 1;
-    expect(counts).toEqual({ critical: 33, warning: 73, info: 94 });
-    expect(all).toHaveLength(200);
+    expect(counts).toEqual({ critical: 33, warning: 74, info: 95 });
+    expect(all).toHaveLength(202);
   });
 
   it("names exactly the rules that are critical", () => {
@@ -867,9 +867,9 @@ describe("a metric table's declared order", () => {
 
 // 29a rework final review: the severity split, pinned from the registry itself.
 describe("the registry's severity totals", () => {
-  it("200 rules are 33 critical, 73 warning and 94 info", () => {
+  it("202 rules are 33 critical, 74 warning and 95 info", () => {
     const counts: Record<string, number> = {};
     for (const rule of buildRegistry().all()) counts[rule.severity] = (counts[rule.severity] ?? 0) + 1;
-    expect(counts).toEqual({ critical: 33, warning: 73, info: 94 });
+    expect(counts).toEqual({ critical: 33, warning: 74, info: 95 });
   });
 });

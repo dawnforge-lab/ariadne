@@ -438,3 +438,14 @@ export const SCHEMA_TEMPLATE_SHARE = 70;
  * Overridable per crawl.
  */
 export const SCHEMA_TEMPLATE_MIN_PAGES = 10;
+
+/**
+ * How much wider than its displayed box an image's intrinsic width may be, in
+ * percent, before `images.larger-than-displayed` reports it (Phase 29b,
+ * CHECK-49). 200 means a file up to twice as wide as the space it is shown in
+ * is allowed, which leaves room for high-density screens that can use the
+ * extra pixels. The render pass measures at a fixed 1280x900 viewport with a
+ * device-pixel ratio of 1, so the box compared against is a 1x box.
+ * Overridable per crawl.
+ */
+export const IMAGE_OVERSIZE_PERCENT = 200;

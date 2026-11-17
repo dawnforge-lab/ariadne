@@ -553,15 +553,17 @@ describe("checklist coverage", () => {
   //   (2026-11-16): query 111 - 3 Google rules + 2 = 110, metric 14 + 1 = 15, total 197.
   //   The new metric is `schema.property-coverage` (see the end of this file).
   //   Phase 29b T5 adds three query rules (the render console rules): query 113, total 200.
-  it("pins the ruleset split: 200 rules = 72 page + 113 query + 15 metric", () => {
+  //   Phase 29b T6 adds one query rule (`images.larger-than-displayed`) and one metric
+  //   (`render.image-measurement`): query 114, metric 16, total 202.
+  it("pins the ruleset split: 202 rules = 72 page + 114 query + 16 metric", () => {
     const registry = buildRegistry();
-    expect(registry.all()).toHaveLength(200);
+    expect(registry.all()).toHaveLength(202);
     expect(registry.byKind("page")).toHaveLength(72);
-    expect(registry.byKind("query")).toHaveLength(113);
+    expect(registry.byKind("query")).toHaveLength(114);
     // The link-graph five, the two content metrics and hreflang coverage, plus
     // the URL-parameter, redirect-volume and sitemap-structure metrics, plus
     // the render pass's coverage, the health rollup, the page-weight table, coverage.
-    expect(registry.byKind("metric")).toHaveLength(15);
+    expect(registry.byKind("metric")).toHaveLength(16);
   });
 
   // The section-12 claims, pinned in both directions the way CHECK-31's move is:

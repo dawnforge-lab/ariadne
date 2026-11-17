@@ -229,6 +229,11 @@ const SKIP_HARNESS_CLAIMS: string[] = [
   "render.js-exception",
   "render.console-error",
   "render.failed-request",
+  // Phase 29b Task 6, TEMPORARY. `images.larger-than-displayed` (CHECK-49) reads
+  // `render_images`, and no fixture page shows an image served wider than its box
+  // yet. Task 8 writes that page and REMOVES this entry; until then the rule is
+  // proved on synthetic rows in `test/rules/render-images.test.ts`.
+  "images.larger-than-displayed",
   // Phase 26b Task 5. `extraction.not-recorded` is the NOT MEASURED marker for a
   // crawl with pages below extraction version 2. The fixture crawl is always
   // current: this harness runs the current crawler, which stamps every row with
@@ -2468,6 +2473,7 @@ describe("the fixture site end to end", () => {
       "page.weight",
       "redirect.volume",
       "render.coverage",
+      "render.image-measurement",
       "schema.property-coverage",
       "site.health",
       "sitemap.structure",
@@ -4033,7 +4039,7 @@ describe("the fixture site end to end", () => {
     // twenty-six; Phase 29a's seven schema rules waited here for their fixtures and left again in T10, which is the number it stands at now — asserted below, so it cannot go stale again). A
     // new rule arrives here with no fixture and fails immediately, which is the
     // point — the alternative is a rule nobody has ever seen speak.
-    expect(SKIP_HARNESS_CLAIMS).toHaveLength(29);
+    expect(SKIP_HARNESS_CLAIMS).toHaveLength(30);
     expect(
       unfired,
       "a rule that fires nowhere is a rule no fixture proves — author a fixture " +

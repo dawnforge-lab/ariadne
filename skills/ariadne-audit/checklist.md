@@ -3077,8 +3077,8 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
 
 ### CHECK-49: Image optimisation and responsive images
 - **Priority**: Medium | **Requires**: Engine + DevTools
-- **Engine**: `issues_list` with `checkId: "CHECK-49"` — eight rule ids can come back,
-  six of them findings about the site and two about the crawl.
+- **Engine**: `issues_list` with `checkId: "CHECK-49"` — nine rule ids can come back,
+  seven of them findings about the site and two about the crawl.
   `images.missing-dimensions` (info) and `images.missing-alt` (warning), page by page
   across the whole crawl, with `issue_urls` naming the pages and the offending
   images (on a page crawled with extraction 2, `images.missing-alt` also lists up to
@@ -3090,9 +3090,31 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
   how many pages carry it, which is what turns "oversized image count" into a list of
   jobs. `metrics_get` with `metricId: "page.weight"` gives the image-byte distribution
   per template beside them. Two limits to state whenever these are quoted: the crawl
-  never decodes an image, so nothing here says whether one is over-compressed or
-  larger than the box it is displayed in; and only images named in the HTML the
+  never decodes an image, so nothing here says whether one is over-compressed (the
+  question of one larger than its display box is answered below, from the rendered
+  sample only); and only images named in the HTML the
   server sent are weighed, so a client-rendered gallery is invisible to all of it.
+  **Whether an image is larger than the box it is displayed in is measured from the
+  render pass's sample** — the pages the render budget reached, not the whole crawl.
+  `images.larger-than-displayed` (warning) fires on a rendered page where some image's
+  file is wider than `IMAGE_OVERSIZE_PERCENT` percent of the box it is shown in
+  (default 200, so a file up to twice as wide as its box is allowed, which leaves room
+  for high-density screens; an agent overrides it per crawl through `crawl_config_set`'s
+  judgement thresholds, 101 to 1000). The measurement is at a fixed 1280×900 desktop viewport with a
+  device-pixel ratio of 1, so a box that is narrower on a phone or wider on a large
+  monitor is not what was compared. The evidence lists up to 20 of the images with
+  their file width and displayed width, and `atLeast` is true when the page had more
+  oversized images than the capture kept (the 50 that waste the most pixels), so the
+  count is then a floor. Images that were hidden, lazy-loaded below the fold (our
+  browser does not scroll), never requested, broken, or of unknown size are COUNTED
+  but never measured, so the rule's silence about them says nothing about their size:
+  read `measuredShare` in the evidence, and `metrics_get` with
+  `metricId: "render.image-measurement"` for the crawl-wide and per-template counts of
+  each kind and the share measured, before saying a template's images are the right
+  size. A page with no capture (never rendered, or rendered before the image capture)
+  is not measured here, which is not the same as clean. The render pass answers an
+  image request with a blank stand-in of its stored size instead of fetching it, so
+  this costs the site no image requests.
   RESPONSIVE IMAGES are still browser work — `srcset` is read for its first candidate
   and nothing checks whether the set is sensible. The last two ids are the resource
   family's NOT MEASURED markers, and only one of them can be present:

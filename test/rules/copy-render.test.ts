@@ -61,6 +61,9 @@ const ADDED_SINCE_0_22 = [
   "render.js-exception",
   "render.console-error",
   "render.failed-request",
+  // 0.27.0, Phase 29b T6: the oversized image rule and its metric (CHECK-49).
+  "images.larger-than-displayed",
+  "render.image-measurement",
 ];
 // Entries whose text was deliberately changed after 0.22.0: the fields that
 // differ from the fixture, spelled out so any other drift still fails.

@@ -71,9 +71,11 @@ import {
 import type { Db } from "../../db/client.js";
 import { crawls } from "../../db/schema.js";
 import { metricRow, metricRule, NEVER_REQUESTED, type MetricIdentity } from "../helpers.js";
+import { assertCrawl } from "../query/crawl-evidence.js";
+import { measuredShare, scanRenderImages } from "../query/render-images.js";
 import { perScope } from "../registry/metric-table.js";
 import type { Metric, MetricRule } from "../registry/registry.js";
-import { num } from "./cohort.js";
+import { num, UNTYPED } from "./cohort.js";
 
 /**
  * `renderPassEvidence`'s closed vocabulary: `ran` when this crawl holds anything
@@ -411,6 +413,83 @@ async function renderCoverage(db: Db, crawlId: string, self: MetricIdentity): Pr
   ];
 }
 
+/** The sums `render.image-measurement` keeps per template and for the crawl. */
+const IMAGE_SUM_KEYS = [
+  "total",
+  "measured",
+  "hidden",
+  "lazyUnloaded",
+  "notRequested",
+  "noDimensions",
+  "broken",
+  "standIns",
+] as const;
+type ImageSums = Record<(typeof IMAGE_SUM_KEYS)[number], number> & { pages: number };
+
+const emptySums = (): ImageSums => ({
+  pages: 0,
+  total: 0,
+  measured: 0,
+  hidden: 0,
+  lazyUnloaded: 0,
+  notRequested: 0,
+  noDimensions: 0,
+  broken: 0,
+  standIns: 0,
+});
+
+/**
+ * `render.image-measurement` (CHECK-49): how much of the rendered sample's
+ * images the render pass could actually measure, crawl-wide and per template.
+ *
+ * `images.larger-than-displayed` is silent on every image this metric counts
+ * as anything but `measured`, so this is what says how much of the question
+ * the rule could ask: a site whose images are mostly `lazyUnloaded` (below the
+ * fold of a renderer that does not scroll) or `noDimensions` (no size stored)
+ * is not a site with no oversized images.
+ *
+ * Over the pages with a capture-3 `render_images`, read through the rule's own
+ * scan (one validated blob at a time, so RAM is a batch plus one running sum
+ * per template). `total` counts every `<img>` in the main document, including
+ * those past the per-page measurement cap, so it can exceed the sum of the
+ * buckets. `measuredShare` is `measured / (measured + noDimensions + broken)`,
+ * null when that is 0: the images that were requested and could have been
+ * measured, which is the fair denominator for "how much did we see"; hidden,
+ * lazy and never-requested images are not in it.
+ *
+ * One site row always (zeroes and a null share on a crawl with no capture, so a
+ * reader sees it was asked), and one row per template that has a capture.
+ */
+async function imageMeasurement(db: Db, crawlId: string, self: MetricIdentity): Promise<Metric[]> {
+  await assertCrawl(db, crawlId, self.id);
+
+  const site = emptySums();
+  const byType = new Map<string, ImageSums>();
+  await scanRenderImages(db, crawlId, self.id, (page) => {
+    const type = page.pageType ?? UNTYPED;
+    let sums = byType.get(type);
+    if (sums === undefined) {
+      sums = emptySums();
+      byType.set(type, sums);
+    }
+    for (const s of [site, sums]) {
+      s.pages += 1;
+      for (const key of IMAGE_SUM_KEYS) s[key] += page.images[key];
+    }
+  });
+
+  const value = (s: ImageSums): Record<string, unknown> => ({
+    ...s,
+    measuredShare: measuredShare(s),
+  });
+  return [
+    metricRow(self, { scope: "site", value: value(site) }),
+    ...[...byType.keys()].sort().map((type) =>
+      metricRow(self, { scope: "page_type", scopeValue: type, value: value(byType.get(type)!) }),
+    ),
+  ];
+}
+
 export const renderMetrics: MetricRule[] = [
   metricRule(
     "render.coverage",
@@ -433,5 +512,25 @@ export const renderMetrics: MetricRule[] = [
       { key: "renderFailures", label: "Render Failures" },
     ], 9),
     async (db, crawlId, self) => renderCoverage(db, crawlId, self),
+  ),
+  metricRule(
+    "render.image-measurement",
+    ["CHECK-49"],
+    "technical",
+    // `Share Measured` is the column to read first: it says how much of the
+    // rendered sample's images `images.larger-than-displayed` could judge.
+    perScope("Template", [
+      { key: "pages", label: "Pages" },
+      { key: "total", label: "Images" },
+      { key: "measured", label: "Measured" },
+      { key: "hidden", label: "Hidden" },
+      { key: "lazyUnloaded", label: "Lazy, Not Loaded" },
+      { key: "notRequested", label: "Not Requested" },
+      { key: "noDimensions", label: "Size Unknown" },
+      { key: "broken", label: "Broken" },
+      { key: "standIns", label: "Stand-ins Served" },
+      { key: "measuredShare", label: "Share Measured" },
+    ], 15),
+    async (db, crawlId, self) => imageMeasurement(db, crawlId, self),
   ),
 ];

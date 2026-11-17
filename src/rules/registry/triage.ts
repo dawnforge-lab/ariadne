@@ -151,6 +151,9 @@ export const TRIAGE: Readonly<Record<string, Readonly<TriageRow>>> = {
   // one that carries meaning, and the rule (as its copy says) cannot tell the
   // two apart, so a human checks it.
   "images.empty-alt": { type: "warning", priority: "low", sfIssue: "Images: Missing Alt Text" },
+  // No SF counterpart; from the rubric. A file much wider than its box is wasted transfer a
+  // developer can recover by serving a right-sized rendition, so an opportunity.
+  "images.larger-than-displayed": { type: "opportunity", priority: "medium" },
   "images.legacy-format": { type: "opportunity", priority: "medium", sfIssue: "PageSpeed: Improve Image Delivery" },
   "images.missing-alt": { type: "issue", priority: "low", sfIssue: "Images: Missing Alt Attribute" },
   "images.missing-dimensions": { type: "opportunity", priority: "low", sfIssue: "Images: Missing Size Attributes" },
