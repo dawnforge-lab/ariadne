@@ -230,11 +230,13 @@ import {
   type StoredImage,
 } from "./image-stand-in.js";
 import {
+  AXE_TERMINATE_GRACE_MS,
   AXE_TIMEOUT_MS,
   a11yDisabled,
   a11yErrorLine,
   axeRunExpression,
   shapeAxeResults,
+  type AxeFault,
   type RenderA11y,
 } from "./a11y.js";
 import { analyzeHtml, type RawPageAnalysis } from "../parse/page-analyzer.js";
@@ -592,22 +594,42 @@ const ISOLATED_WORLD_NAME = "ariadne-render-images";
 /** The slice of a `Runtime.evaluate` reply the image code reads. */
 interface EvaluateReply {
   result: { value?: unknown };
-  exceptionDetails?: { text: string; exception?: { description?: string } };
+  exceptionDetails?: {
+    text: string;
+    exception?: { type?: string; value?: unknown; description?: string };
+  };
 }
 
 /**
- * How long, after `Runtime.terminateExecution`, the renderer waits for the
- * page's thread to answer one trivial evaluation (`RenderTraffic.terminateAxe`)
- * before it moves on.
+ * What one axe evaluation came to, before `render` names it a status, and
+ * the run's own wall time — taken before any termination, so a `timeout`'s
+ * `ms` is the run's, never the cleanup's.
  */
-const AXE_TERMINATE_GRACE_MS = 5_000;
-
-/** What one axe evaluation came to, before `render` names it a status. */
-type AxeOutcome =
+type AxeOutcome = { ms: number } & (
   | { kind: "ran"; value: unknown }
   | { kind: "threw"; message: string }
   | { kind: "timeout" }
-  | { kind: "gone" };
+  | { kind: "gone" }
+);
+
+/**
+ * The evaluation's promise was dropped by the page's context before it
+ * settled — the document it belonged to went away under it, as with
+ * `CONTEXT_GONE`.
+ */
+const PROMISE_COLLECTED = /Promise was collected/i;
+
+/**
+ * The message of a value a page threw or rejected with: the runtime's own
+ * description of it (an Error's message and stack), else the value itself
+ * when it is a string (`Promise.reject("x")` has no description), else the
+ * runtime's label for the exception.
+ */
+function exceptionText(d: NonNullable<EvaluateReply["exceptionDetails"]>): string {
+  if (d.exception?.description !== undefined) return d.exception.description;
+  if (typeof d.exception?.value === "string") return d.exception.value;
+  return d.text;
+}
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -1216,6 +1238,7 @@ class RenderTraffic {
     if (contextId === null) {
       throw new Error("runAxe: no measured document to run in — measureImages has not succeeded");
     }
+    const started = Date.now();
     const evaluation = this.cdp.send("Runtime.evaluate", {
       expression,
       contextId,
@@ -1233,20 +1256,25 @@ class RenderTraffic {
       // run we terminated has nothing left to say.
       settled = await Promise.race([evaluation, expired]);
     } catch (error) {
-      if (CONTEXT_GONE.test(errorMessage(error))) return { kind: "gone" };
+      const message = errorMessage(error);
+      // The document went away under the run: a navigation destroyed the
+      // context, or the context dropped the run's promise with it.
+      if (CONTEXT_GONE.test(message) || PROMISE_COLLECTED.test(message)) {
+        return { kind: "gone", ms: Date.now() - started };
+      }
       throw error;
     } finally {
       clearTimeout(timer);
     }
+    const ms = Date.now() - started;
     if (settled === "timeout") {
       await this.terminateAxe();
-      return { kind: "timeout" };
+      return { kind: "timeout", ms };
     }
     if (settled.exceptionDetails !== undefined) {
-      const d = settled.exceptionDetails;
-      return { kind: "threw", message: d.exception?.description ?? d.text };
+      return { kind: "threw", message: exceptionText(settled.exceptionDetails), ms };
     }
-    return { kind: "ran", value: settled.result.value ?? null };
+    return { kind: "ran", value: settled.result.value ?? null, ms };
   }
 
   /**
@@ -1936,11 +1964,12 @@ export interface RenderTestFaults {
    */
   beforeAxe?: (page: Page) => Promise<void>;
   /**
-   * When set, the accessibility run injects the axe source and then rejects
-   * with this message, in the isolated world, in place of `axe.run`: the
-   * shape of an axe a page's DOM made throw (status `error`).
+   * When set, the accessibility run injects the axe source and then rejects,
+   * in the isolated world, in place of `axe.run` — with `new Error(error)`,
+   * or with the bare string `value`: the shape of an axe a page's DOM made
+   * throw (status `error`). See `axeRunExpression`.
    */
-  axeFault?: string;
+  axeFault?: AxeFault;
 }
 
 /** Where the network fence listens. */
@@ -2580,7 +2609,8 @@ export class PageRenderer {
    * render (`traffic.broken`, raced here as in phase 1).
    *
    * `ms` is wall time around the one evaluation (source injection included),
-   * whatever its end.
+   * whatever its end — on a timeout, up to the moment it timed out: the
+   * termination and its grace are cleanup, not the run.
    */
   private async accessibility(
     page: Page,
@@ -2599,12 +2629,22 @@ export class PageRenderer {
       if (traffic.failure !== null) throw traffic.failure;
       // A renderer process that crashed under the run took the document with
       // it: the page's doing, as a crash in phase 1 is.
+      //
+      // THE ORDERING THIS ASSUMES, and it is an assumption, not a measured
+      // fact (no test crashes a renderer): Playwright raises
+      // `page.on("crash")` from `Inspector.targetCrashed` on ITS OWN page
+      // session, while the run's `Runtime.evaluate` is pending on OURS
+      // (`newCDPSession`). Both arrive over the one browser connection, and
+      // the crash is announced before the target detaches, so `crashed()`
+      // is expected to be true by the time our command is rejected. Were the
+      // order ever the other way, the crash propagates as ours and stops the
+      // pass — loud, never a silent mislabel.
       if (crashed()) {
         return { status: "interrupted", ms: Date.now() - started, error: null, violations: [] };
       }
       throw error;
     }
-    const ms = Date.now() - started;
+    const ms = outcome.ms;
     switch (outcome.kind) {
       case "ran":
         return { status: "ran", ms, error: null, violations: shapeAxeResults(outcome.value) };

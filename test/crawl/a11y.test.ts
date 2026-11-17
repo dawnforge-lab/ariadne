@@ -193,6 +193,29 @@ describe("shapeAxeResults", () => {
     expect(shapeAxeResults({ ...recorded(), violations: [] })).toEqual([]);
   });
 
+  it("reads the cut-down wire shape: the in-world count, and the first five nodes only", () => {
+    const sent = {
+      violations: [
+        {
+          id: "image-alt",
+          impact: "critical",
+          nodeCount: 7,
+          nodes: [1, 2, 3, 4, 5].map((i) => ({ target: [`img[src="${i}.png"]`] })),
+        },
+        { id: "label", impact: "critical", nodeCount: 2, nodes: [{ target: ["#a"] }, { target: ["#b"] }] },
+      ],
+    };
+    expect(shapeAxeResults(sent)).toEqual([
+      {
+        rule: "image-alt",
+        impact: "critical",
+        nodeCount: 7,
+        targets: [1, 2, 3, 4, 5].map((i) => `img[src="${i}.png"]`),
+      },
+      { rule: "label", impact: "critical", nodeCount: 2, targets: ["#a", "#b"] },
+    ]);
+  });
+
   it("makes a selector holding a NUL or a lone surrogate storable", () => {
     const raw = recorded();
     raw["violations"] = [
@@ -217,6 +240,15 @@ describe("shapeAxeResults", () => {
       ["an impact that is not text", { violations: [{ id: "label", impact: 3, nodes: [] }] }],
       ["nodes not an array", { violations: [{ id: "label", impact: null, nodes: "x" }] }],
       ["a violation with no node", { violations: [{ id: "label", impact: null, nodes: [] }] }],
+      ["a nodeCount that is not an integer", {
+        violations: [{ id: "label", impact: null, nodeCount: "1", nodes: [{ target: ["a"] }] }],
+      }],
+      ["fewer nodes sent than the count allows", {
+        violations: [{ id: "label", impact: null, nodeCount: 7, nodes: [{ target: ["a"] }] }],
+      }],
+      ["more nodes sent than counted", {
+        violations: [{ id: "label", impact: null, nodeCount: 1, nodes: [{ target: ["a"] }, { target: ["b"] }] }],
+      }],
       ["a node without a target", { violations: [{ id: "label", impact: null, nodes: [{}] }] }],
       ["an iframe path", { violations: [{ id: "label", impact: null, nodes: [{ target: ["iframe", "a"] }] }] }],
       ["an empty target", { violations: [{ id: "label", impact: null, nodes: [{ target: [] }] }] }],

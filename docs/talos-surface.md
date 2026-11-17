@@ -1001,9 +1001,10 @@ profile floor, robots `Crawl-delay`, and what the crawl earned, per host and
 crawl-wide). That is 45 s at the default 1 s spacing and the 120 s cap from 3.5 s up;
 a profile's own budget (Shopify 60 s) still applies when it is larger, and the cap
 never lowers a caller's own larger setting. The render lease is derived from it as
-(2 × renderConcurrency + 1) × 30 s + navigation budget + settle + 30 s: 348 s at the
-defaults (four workers, 45 s), 423 s at the cap, 183 s under the Shopify profile at
-1 s, replacing a fixed 120 s.
+(2 × renderConcurrency + 1) × 30 s + navigation budget + settle + 30 s, plus 35 s for
+the accessibility run from Phase 29b (its 30 s budget and a 5 s grace after
+terminating it): 383 s at the defaults (four workers, 45 s), 458 s at the cap, 218 s
+under the Shopify profile at 1 s, replacing a fixed 120 s.
 
 **What Phase 23 changed here: proven behaviour.** Ruleset 0.18.0, migrations
 0020–0022, and no tool or route added: 14 rules joined (114 rows in
@@ -1915,7 +1916,7 @@ parse with. Every field carries its `description`, its `default` where the
 engine has one, and `x-ariadne-mutable` — `never` (`siteUrl`, `userAgent`,
 `probeHosts`, `legacyHosts`, `sitemapUrls`, `fetchResources`), `whenPaused`
 (`maxPages`, `maxDepth`, `perHostDelayMs`, `maxConcurrency`, the three render
-budgets) or `always` (`findingCap` and `judgement`). `judgement.rules` lists
+budgets, `renderAccessibility`) or `always` (`findingCap` and `judgement`). `judgement.rules` lists
 every page and query rule id as `propertyNames.enum` (zod's spelling of a
 partial record over an enum; no metric id), and `judgement.thresholds` has one
 property per overridable threshold with its `minimum`, `maximum` and `default`

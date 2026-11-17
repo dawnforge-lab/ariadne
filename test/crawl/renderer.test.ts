@@ -72,6 +72,7 @@ import { UrlPolicyError } from "../../src/crawl/url-policy.js";
 import {
   RENDER_PASS_DEFAULTS,
   RenderPassRefusal,
+  RENDER_AXE_ALLOWANCE_MS,
   renderLeaseSeconds,
   resourceImageLookup,
   runRenderPass,
@@ -2566,15 +2567,22 @@ describe("runRenderPass", () => {
     expect(record[wwwHost]!.escalations).toBe(2);
   }, 90_000);
 
-  it("derives the render lease from the gate cap, the navigation budget and the settle", () => {
-    // (2W + 1) × 30 s of gate wait + navigation + settle + 30 s allowance.
+  it("derives the render lease from the gate cap, the navigation budget, the settle and the axe run", () => {
+    // (2W + 1) × 30 s of gate wait + navigation + settle + 30 s allowance
+    // + 35 s for the accessibility run (Phase 29b: its 30 s budget and the
+    // 5 s grace after terminating it).
+    expect(RENDER_AXE_ALLOWANCE_MS).toBe(35_000);
     expect(
       renderLeaseSeconds({ renderConcurrency: 4, navigationTimeoutMs: 15_000, settleMs: 3_000 }),
-    ).toBe(318);
+    ).toBe(353);
+    // The defaults the docblock works through: four workers, a 45 s budget.
+    expect(
+      renderLeaseSeconds({ renderConcurrency: 4, navigationTimeoutMs: 45_000, settleMs: 3_000 }),
+    ).toBe(383);
     // The Shopify profile: one browser, a 60 s budget.
     expect(
       renderLeaseSeconds({ renderConcurrency: 1, navigationTimeoutMs: 60_000, settleMs: 3_000 }),
-    ).toBe(183);
+    ).toBe(218);
   });
 
   it("leaves its selection alone when the pass is aborted before it starts", async () => {
@@ -3491,6 +3499,11 @@ describe("PageRenderer accessibility (Phase 29b)", () => {
       `<!doctype html><html><head><title>Violations</title></head><body>` +
       `<main><h1>Heading</h1><p>Some words.</p><img src="/plain.png" width="20" height="20"></main>` +
       `</body></html>`,
+    // Seven images without `alt`: one rule, seven nodes, five selectors kept.
+    "/a11y/many":
+      `<!doctype html><html lang="en"><head><title>Many</title></head><body><main>` +
+      [1, 2, 3, 4, 5, 6, 7].map((i) => `<img src="/${i}.png" width="10" height="10">`).join("") +
+      `</main></body></html>`,
     "/a11y/clean":
       `<!doctype html><html lang="en"><head><title>Clean</title></head><body>` +
       `<main><h1>Clean</h1><p>Every word here is readable.</p></main></body></html>`,
@@ -3620,6 +3633,9 @@ describe("PageRenderer accessibility (Phase 29b)", () => {
     expect(result.rendered).toBe(true);
     expect(result.a11y).toMatchObject({ status: "timeout", error: null, violations: [] });
     expect(result.a11y!.ms).toBeGreaterThanOrEqual(1_000);
+    // M1: the run's own time, up to the moment it timed out — never the
+    // termination, the queued run that follows it, or the grace.
+    expect(result.a11y!.ms).toBeLessThan(1_000 + 250);
     expect(result.wordCount).toBe(3);
     expect(result.images).toMatchObject({ total: 1 });
     expect(result.htmlPath).not.toBeNull();
@@ -3652,7 +3668,7 @@ describe("PageRenderer accessibility (Phase 29b)", () => {
   });
 
   it("records an axe the page made throw as error, with its first line, and keeps every other measurement", async () => {
-    faults.axeFault = "axe broke on this page\nsecond line of it";
+    faults.axeFault = { error: "axe broke on this page\nsecond line of it" };
     let result: RenderResult;
     try {
       result = await render("/a11y/violations");
@@ -3669,6 +3685,32 @@ describe("PageRenderer accessibility (Phase 29b)", () => {
     });
     expect(result.wordCount).toBe(3);
     expect(result.images).toMatchObject({ total: 1 });
+  });
+
+  it("keeps the message of a rejection that is not an Error", async () => {
+    faults.axeFault = { value: "x" };
+    let result: RenderResult;
+    try {
+      result = await render("/a11y/violations");
+    } finally {
+      delete faults.axeFault;
+    }
+
+    expect(result.a11y).toMatchObject({ status: "error", error: "x", violations: [] });
+  });
+
+  it("counts every failing element and sends only the first five selectors", async () => {
+    const result = await render("/a11y/many");
+
+    expect(result.a11y).toMatchObject({ status: "ran", error: null });
+    expect(result.a11y!.violations).toEqual([
+      {
+        rule: "image-alt",
+        impact: "critical",
+        nodeCount: 7,
+        targets: [1, 2, 3, 4, 5].map((i) => `img[src="/${i}.png"]`),
+      },
+    ]);
   });
 
   it("carries no accessibility on a render refused before the browser", async () => {

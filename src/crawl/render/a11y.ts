@@ -43,6 +43,13 @@ import { storableText } from "../storable-text.js";
 
 /** The time one page's axe run may take before it is terminated (ruling R10). */
 export const AXE_TIMEOUT_MS = 30_000;
+/**
+ * How long, after `Runtime.terminateExecution`, the renderer waits for the
+ * page's thread to answer one trivial evaluation (`RenderTraffic.terminateAxe`)
+ * before it moves on. With `AXE_TIMEOUT_MS` it bounds the whole axe step, and
+ * the render lease counts both (`renderLeaseSeconds`, run-render.ts).
+ */
+export const AXE_TERMINATE_GRACE_MS = 5_000;
 /** Selectors kept per violated rule; `nodeCount` still counts every element. */
 export const A11Y_TARGETS_MAX = 5;
 /** Each kept selector is cut to this many UTF-16 units (`storableText`). */
@@ -154,23 +161,39 @@ export function axeSource(): string {
 
 /**
  * The ONE expression the isolated world evaluates: the axe source, then the
- * run, its result cut down there to what `shapeAxeResults` reads (rule id,
- * impact, each node's target) so the checks' messages and HTML snippets never
- * cross the protocol. `fault` is `RenderTestFaults.axeFault`: in place of the
- * run, a rejection with that message, still in the isolated world after the
- * source was injected — the shape of an axe the page made throw.
+ * run, its result cut down THERE to what `shapeAxeResults` reads — per rule
+ * its id, its impact, `nodeCount` (every failing element) and the targets of
+ * the first `A11Y_TARGETS_MAX` nodes only — so what crosses the protocol is
+ * bounded by the subset, never by the page's size, and the checks' messages
+ * and HTML snippets never cross at all.
+ *
+ * `fault` is `RenderTestFaults.axeFault`: in place of the run, a rejection,
+ * still in the isolated world after the source was injected — the shape of an
+ * axe the page made throw. `{error: m}` rejects with `new Error(m)`;
+ * `{value: v}` rejects with the bare value `v` (a page can make a library
+ * reject with a string as easily as with an Error).
  */
-export function axeRunExpression(fault: string | null = null): string {
+export function axeRunExpression(fault: AxeFault | null = null): string {
   const run =
     fault === null
       ? `axe.run(document, ${JSON.stringify(AXE_RUN_OPTIONS)}).then(function (r) {
   return { violations: r.violations.map(function (v) {
-    return { id: v.id, impact: v.impact, nodes: v.nodes.map(function (n) { return { target: n.target }; }) };
+    return {
+      id: v.id,
+      impact: v.impact,
+      nodeCount: v.nodes.length,
+      nodes: v.nodes.slice(0, ${A11Y_TARGETS_MAX}).map(function (n) { return { target: n.target }; })
+    };
   }) };
 })`
-      : `Promise.reject(new Error(${JSON.stringify(fault)}))`;
+      : "error" in fault
+        ? `Promise.reject(new Error(${JSON.stringify(fault.error)}))`
+        : `Promise.reject(${JSON.stringify(fault.value)})`;
   return `${axeSource()}\n;${run}`;
 }
+
+/** TEST ONLY — how `axeRunExpression` stands in for an axe the page made throw. */
+export type AxeFault = { error: string } | { value: string };
 
 function shapeError(what: string): Error {
   return new Error(`unknown axe result shape: ${what} — the pinned axe-core answered something this reader does not know`);
@@ -192,13 +215,15 @@ function targetSelector(target: unknown, rule: string): string {
 
 /**
  * An axe result — `axe.run`'s whole object, or the cut-down one
- * `axeRunExpression` returns — as `render_a11y` rows: one per violated rule,
+ * `axeRunExpression` returns (with `nodeCount` and at most
+ * `A11Y_TARGETS_MAX` nodes) — as `render_a11y` rows: one per violated rule,
  * in axe's order, each with its node count and the first `A11Y_TARGETS_MAX`
  * selectors through `storableText(…, A11Y_TARGET_CHARS)`.
  *
  * Only `violations` is read. Throws on any shape it does not know — a
  * non-array, a rule outside the subset (`runOnly` was not honoured), a rule
- * twice, a violation with no node, an iframe path — because each of those is
+ * twice, a violation with no node, a `nodeCount` that is not an integer or
+ * disagrees with the nodes sent, an iframe path — because each of those is
  * the pinned package answering differently from what this code was written
  * against: ours, never the page's.
  */
@@ -209,7 +234,12 @@ export function shapeAxeResults(raw: unknown): A11yViolation[] {
   const seen = new Set<string>();
   return violations.map((v: unknown): A11yViolation => {
     if (typeof v !== "object" || v === null) throw shapeError("a violation is not an object");
-    const { id, impact, nodes } = v as { id?: unknown; impact?: unknown; nodes?: unknown };
+    const { id, impact, nodes, nodeCount } = v as {
+      id?: unknown;
+      impact?: unknown;
+      nodes?: unknown;
+      nodeCount?: unknown;
+    };
     if (typeof id !== "string") throw shapeError("a violation has no rule id");
     if (!SUBSET.has(id)) throw shapeError(`rule ${JSON.stringify(id)} is outside the subset`);
     if (seen.has(id)) throw shapeError(`rule ${id} is reported twice`);
@@ -219,6 +249,19 @@ export function shapeAxeResults(raw: unknown): A11yViolation[] {
     }
     if (!Array.isArray(nodes)) throw shapeError(`rule ${id}'s nodes are not an array`);
     if (nodes.length === 0) throw shapeError(`rule ${id} is a violation with no node`);
+    // The cut-down wire shape counts in-world and sends the first targets
+    // only; `axe.run`'s own object has neither the count nor the cut. The two
+    // must agree with each other, or the count is not this run's.
+    let count = nodes.length;
+    if (nodeCount !== undefined) {
+      if (typeof nodeCount !== "number" || !Number.isInteger(nodeCount)) {
+        throw shapeError(`rule ${id}'s nodeCount is not an integer`);
+      }
+      if (nodes.length !== Math.min(nodeCount, A11Y_TARGETS_MAX)) {
+        throw shapeError(`rule ${id} sent ${nodes.length} nodes for a nodeCount of ${nodeCount}`);
+      }
+      count = nodeCount;
+    }
     const targets = nodes.map((n: unknown) => {
       if (typeof n !== "object" || n === null || !("target" in n)) {
         throw shapeError(`a ${id} node has no target`);
@@ -228,7 +271,7 @@ export function shapeAxeResults(raw: unknown): A11yViolation[] {
     return {
       rule: id,
       impact: typeof impact === "string" ? impact : null,
-      nodeCount: nodes.length,
+      nodeCount: count,
       targets: targets.slice(0, A11Y_TARGETS_MAX).map((t) => storableText(t, A11Y_TARGET_CHARS).text),
     };
   });

@@ -109,6 +109,7 @@ import {
   type UnpinnedHost,
 } from "./renderer.js";
 import type { ImageDimensionLookup, StoredImage } from "./image-stand-in.js";
+import { AXE_TERMINATE_GRACE_MS, AXE_TIMEOUT_MS } from "./a11y.js";
 import { parseStoredPlatformProfile, type StoredPlatformProfile } from "../platform.js";
 import { DEFAULT_MAX_DELAY_MS, HostGate, throttleRecordOf } from "../politeness.js";
 import { UrlPolicyError, type AddressResolver } from "../url-policy.js";
@@ -183,6 +184,18 @@ export const RENDER_PASS_DEFAULTS = {
 export const RENDER_POST_SETTLE_ALLOWANCE_MS = 30_000;
 
 /**
+ * The most the accessibility run can add to one render (Phase 29b): axe's own
+ * budget, then the grace the renderer waits after terminating it
+ * (`AXE_TIMEOUT_MS` + `AXE_TERMINATE_GRACE_MS`, a11y.ts) — 35 s. It is a
+ * page-controlled wait (a page that blocks its thread runs it out), so it is
+ * its own term in the lease rather than folded into the local allowance
+ * above. Counted ALWAYS, also when the crawl turned the run off: one fewer
+ * branch, and a longer lease is the polite direction (it only delays a
+ * CRASHED worker's URL).
+ */
+export const RENDER_AXE_ALLOWANCE_MS = AXE_TIMEOUT_MS + AXE_TERMINATE_GRACE_MS;
+
+/**
  * A render's lease, DERIVED from what one render can take — never a guess.
  *
  * The lease is a crash-resume deadline (frontier module header), and it must
@@ -203,10 +216,13 @@ export const RENDER_POST_SETTLE_ALLOWANCE_MS = 30_000;
  *     more than 120 s unless a caller configured more).
  *  3. **The settle** (3 s).
  *  4. **`RENDER_POST_SETTLE_ALLOWANCE_MS`.**
+ *  5. **`RENDER_AXE_ALLOWANCE_MS`** (Phase 29b): the accessibility run after
+ *     the document is written, up to its 30 s budget and the 5 s grace after
+ *     terminating it — 35 s.
  *
  * So four workers at the default 1 s spacing (a 45 s budget): (9 × 30) + 45 +
- * 3 + 30 = 348 s; four at the 120 s cap: 423 s; a Shopify profile's one worker
- * at 60 s: (3 × 30) + 60 + 3 + 30 = 183 s. The 120 s this replaced
+ * 3 + 30 + 35 = 383 s; four at the 120 s cap: 458 s; a Shopify profile's one
+ * worker at 60 s: (3 × 30) + 60 + 3 + 30 + 35 = 218 s. The 120 s this replaced
  * covered neither the profile's 60 s budget behind a 30 s wait nor four
  * workers queued on one escalated host. The cost of a long lease is only how
  * long a CRASHED worker's URL waits before a re-run may take it.
@@ -284,7 +300,11 @@ export function renderLeaseSeconds(pacing: {
 }): number {
   const gateWaitMs = (2 * pacing.renderConcurrency + 1) * DEFAULT_MAX_DELAY_MS;
   return Math.ceil(
-    (gateWaitMs + pacing.navigationTimeoutMs + pacing.settleMs + RENDER_POST_SETTLE_ALLOWANCE_MS) /
+    (gateWaitMs +
+      pacing.navigationTimeoutMs +
+      pacing.settleMs +
+      RENDER_POST_SETTLE_ALLOWANCE_MS +
+      RENDER_AXE_ALLOWANCE_MS) /
       1000,
   );
 }
