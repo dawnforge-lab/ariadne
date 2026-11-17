@@ -143,6 +143,10 @@
  *    pass: a run past `AXE_TIMEOUT_MS` is terminated (`timeout`), a document
  *    that navigated away under it is `interrupted`, an axe its DOM made throw
  *    is `error`. It makes no request: the source comes from the package.
+ *    The console and request evidence is snapshotted BEFORE it runs, and
+ *    console calls and exceptions from our isolated worlds' contexts are
+ *    never counted, so neither axe's own output nor the page's during the
+ *    run reaches `render_console` (29b final review M1).
  *  - **No silent fallbacks (rule 7).** A timeout, a navigation error and a
  *    policy refusal are three different classified strings on the page row, and
  *    every one of them leaves `rendered = false` with the five measurement
@@ -1052,6 +1056,14 @@ class RenderTraffic {
    * which could belong to a document the page navigated to since.
    */
   private measuredContextId: number | null = null;
+  /**
+   * Every execution context id this render's isolated worlds were given, kept
+   * for the render (a handful at most: one per navigation that destroyed the
+   * last). Console calls and exceptions from these contexts are OURS — the
+   * srcset lookup, the image measurement, axe and anything axe logs or throws
+   * asynchronously — and are never counted as the site's (29b final review M1).
+   */
+  private readonly ownContextIds = new Set<number>();
 
   constructor(
     private readonly cdp: CDPSession,
@@ -1125,8 +1137,14 @@ class RenderTraffic {
     // blocking dressed as the site's console. `consoleAPICalled` is only what
     // the page's script logged.
     this.cdp.on("Runtime.consoleAPICalled", (event) => {
-      const e = event as unknown as { type: string; args: RemoteObject[] };
+      const e = event as unknown as {
+        type: string;
+        args: RemoteObject[];
+        executionContextId: number;
+      };
       if (!this.open) return;
+      // Our isolated world's own output is not the page's (M1).
+      if (this.ownContextIds.has(e.executionContextId)) return;
       const level = consoleLevel(e.type);
       if (level === null) return;
       this.reported.addConsole(level, e.args.map(remoteText).join(" "));
@@ -1134,6 +1152,7 @@ class RenderTraffic {
     this.cdp.on("Runtime.exceptionThrown", (event) => {
       const d = (event as unknown as { exceptionDetails: ExceptionDetails }).exceptionDetails;
       if (!this.open) return;
+      if (d.executionContextId !== undefined && this.ownContextIds.has(d.executionContextId)) return;
       // `text` is the runtime's label ("Uncaught", "Uncaught (in promise)");
       // the exception itself is the page's value, its stack the page's URLs.
       this.reported.addException(
@@ -1542,6 +1561,7 @@ class RenderTraffic {
           worldName: ISOLATED_WORLD_NAME,
         });
         this.isolatedContextId = world.executionContextId;
+        this.ownContextIds.add(world.executionContextId);
       }
       const contextId = this.isolatedContextId;
       try {
@@ -1858,6 +1878,8 @@ interface RemoteObject {
 interface ExceptionDetails {
   text: string;
   exception?: RemoteObject;
+  /** The context the exception was thrown in; ours are dropped (M1). */
+  executionContextId?: number;
 }
 
 /**
@@ -2535,6 +2557,12 @@ export class PageRenderer {
           ? null
           : await writeSerialisedDom(this.opts.htmlDir, url, serialised);
 
+      // THE CONSOLE AND REQUEST WINDOW CLOSES HERE, before the accessibility
+      // run (29b final review M1): the counters and what the page reported are
+      // snapshotted with every other measurement, so the window is the render
+      // and never grows by the up-to-35 s axe may take.
+      const trafficEvidence = traffic.evidence();
+
       // THE ACCESSIBILITY RUN (Phase 29b), last: every measurement above is
       // already taken, so nothing axe does — or a page does to axe — can cost
       // one (ruling R10). How it can end is `accessibility`'s to say.
@@ -2577,7 +2605,7 @@ export class PageRenderer {
         error: null,
         images: traffic.images(imageRows),
         a11y,
-        ...traffic.evidence(),
+        ...trafficEvidence,
       };
     } finally {
       // Shut FIRST — every queued request failed, every later one failed on

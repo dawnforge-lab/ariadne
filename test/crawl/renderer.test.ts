@@ -3687,6 +3687,43 @@ describe("PageRenderer accessibility (Phase 29b)", () => {
     expect(result.images).toMatchObject({ total: 1 });
   });
 
+  it("never counts our isolated world's console or exceptions as the site's (29b final review M1)", async () => {
+    // The isolated world logs and throws while axe runs; axe still finishes.
+    faults.axeFault = { ownNoise: "ours" };
+    let result: RenderResult;
+    try {
+      result = await render("/a11y/violations");
+    } finally {
+      delete faults.axeFault;
+    }
+
+    expect(result.a11y).toMatchObject({ status: "ran", error: null });
+    expect(result.a11y!.violations).toHaveLength(2);
+    const evidence = result.console!;
+    expect(evidence.console.map((e) => e.text)).not.toContain("ours");
+    expect(evidence.exceptions.filter((e) => e.text.includes("ours"))).toEqual([]);
+    expect(evidence.consoleTotal).toBe(0);
+    expect(evidence.exceptionsTotal).toBe(0);
+  });
+
+  it("closes the console window before the accessibility run (29b final review M1)", async () => {
+    // The page's MAIN world logs just before axe runs: that is after every
+    // measurement, inside the up-to-35 s axe window the console no longer spans.
+    faults.beforeAxe = async (page) => {
+      await page.evaluate(`console.error("logged during the accessibility run")`);
+    };
+    let result: RenderResult;
+    try {
+      result = await render("/a11y/violations");
+    } finally {
+      delete faults.beforeAxe;
+    }
+
+    expect(result.a11y).toMatchObject({ status: "ran" });
+    expect(result.console!.console).toEqual([]);
+    expect(result.console!.consoleTotal).toBe(0);
+  });
+
   it("keeps the message of a rejection that is not an Error", async () => {
     faults.axeFault = { value: "x" };
     let result: RenderResult;
