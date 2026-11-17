@@ -9,6 +9,19 @@
  * is read in cursor-paged batches, the host census is bounded by
  * `maxResourceHosts`, and nothing here holds a set of resource URLs.
  *
+ * ONE EXCEPTION, bounded (Phase 29b): an IMAGE row is asked with a single
+ * `GET` carrying `Range: bytes=0-65535` in place of the HEAD, and the first
+ * 65,536 bytes of what comes back are read by `readImageSize` for the image's
+ * intrinsic width and height, then dropped. That is the most any row ever
+ * holds, and it is one buffer of that size per in-flight request, so memory
+ * stays O(concurrency). The request count does not grow: a server that honours
+ * Range answers in one request (206, the size from `Content-Range`), a server
+ * that ignores it answers 200 and the body is counted as a counted GET always
+ * was, and only a `206` of unknown total or a `416` earns one more plain GET.
+ * An image row therefore costs at most 2 requests plus its redirect hops, where
+ * the HEAD path cost 1 for a sized file and 2 for an unsized one. Every Range
+ * request takes a gate slot like the HEAD did. CSS and JS keep the HEAD.
+ *
  * ## The politeness arithmetic, which is the point of this module
  *
  * A crawl that grew resource fetching must not become a crawl that hits harder.
@@ -130,6 +143,7 @@ import {
   type HeaderBag,
 } from "../http.js";
 import { isSameOrigin } from "../parse/url-utils.js";
+import { IMAGE_HEADER_BYTES, readImageSize } from "./image-size.js";
 import type { HostGate } from "../politeness.js";
 import { isUrlAllowed } from "../url-policy.js";
 import { storableDeep } from "../storable-text.js";
@@ -273,9 +287,11 @@ const WORK_BATCH = 200;
 const MAX_RESOURCE_REDIRECTS = 5;
 
 /**
- * Requests one row may cost in total: its redirect chain, plus the HEAD and the
- * one counted GET at the end of it. A hard bound, so no chain of 405s and
- * redirects can turn one image into an unbounded conversation.
+ * Requests one row may cost in total: its redirect chain, plus the first
+ * request (a HEAD, or for an image the Range GET) and the one counted GET that
+ * can follow it. A hard bound, so no chain of 405s, 416s and redirects can turn
+ * one image into an unbounded conversation. An image row costs at most 2
+ * requests plus its redirect hops (Phase 29b).
  */
 const MAX_ROW_REQUESTS = MAX_RESOURCE_REDIRECTS + 2;
 
@@ -378,6 +394,8 @@ export interface ResourcePassSummary {
 /** One row of the work list. */
 interface WorkItem {
   url: string;
+  /** `image` rows are asked with a Range GET; css/js keep the HEAD. */
+  kind: string;
 }
 
 /** What the pass decided about one row. */
@@ -392,6 +410,14 @@ interface Verdict {
   cacheControl: string | null;
   expires: string | null;
   fetchMs: number | null;
+  /**
+   * Intrinsic image size (29b). All three stay null on css/js rows and on every
+   * row that is not `ok`; on an ok image row exactly one of {width and height}
+   * or `dimensionsReason` is set.
+   */
+  width: number | null;
+  height: number | null;
+  dimensionsReason: string | null;
 }
 
 /** What the pass remembers about one host. O(hosts), capped. */
@@ -422,6 +448,12 @@ type Attempt =
       headers: HeaderBag;
       /** Counted body bytes; null unless this was a counting GET. */
       counted: number | null;
+      /**
+       * The first IMAGE_HEADER_BYTES of the body, for the size reader; null
+       * unless the request was asked to keep them (an image's Range GET on a 206
+       * or a 200, or its plain GET).
+       */
+      head: Buffer | null;
       /** Set when the counter stopped at MAX_COUNTED_BYTES. */
       countTruncated: boolean;
     }
@@ -610,7 +642,14 @@ export async function fetchCrawlResources(
   const processOne = async (item: WorkItem): Promise<void> => {
     const started = Date.now();
     let url = item.url;
-    let method: "HEAD" | "GET" = "HEAD";
+    const isImage = item.kind === "image";
+    // What the next request is. An image starts (and, after each redirect,
+    // restarts) as a Range GET; css/js start as a HEAD. `plain` is the one
+    // counted GET without a Range, which a HEAD that could not size the file,
+    // a 206 of unknown total or a 416 earns (and which, with `range`, makes an
+    // image row's two-request ceiling).
+    const firstMode: RequestMode = isImage ? "range" : "head";
+    let mode: RequestMode = firstMode;
     let hops = 0;
     let spent = 0;
     let redirectedTo: string | null = null;
@@ -707,11 +746,11 @@ export async function fetchCrawlResources(
 
       let attempt: Attempt;
       try {
-        attempt = await requestResource(url, method, {
+        attempt = await requestResource(url, mode, {
           userAgent: opts.userAgent,
           allowPrivate,
           timeoutMs,
-          count: method === "GET",
+          captureHead: isImage,
           maxCountedBytes,
           credentials: opts.credentials,
           // A stop reaches the request on the wire (Phase 27b, Ruling 4).
@@ -777,14 +816,22 @@ export async function fetchCrawlResources(
         }
         url = resolved;
         redirectedTo = resolved;
-        method = "HEAD";
+        mode = firstMode;
         continue;
       }
 
       // The two answers that mean "not by HEAD": a server that refuses the
       // method outright. One GET, and only one — `spent` bounds the rest.
-      if (method === "HEAD" && (status === 405 || status === 501)) {
-        method = "GET";
+      if (mode === "head" && (status === 405 || status === 501)) {
+        mode = "plain";
+        continue;
+      }
+
+      // A server that cannot satisfy the Range (416) is not a broken image: it
+      // is a server that will not do ranges. One plain counted GET, and only
+      // one (planning ruling R7); `spent` bounds the rest.
+      if (mode === "range" && status === 416) {
+        mode = "plain";
         continue;
       }
 
@@ -810,14 +857,27 @@ export async function fetchCrawlResources(
           cacheControl,
           expires,
           fetchMs: null,
+          ...NO_DIMENSIONS,
         });
       }
 
-      const declared = contentLength(headers);
-      if (method === "HEAD" && declared === null) {
+      // A 206 answers the Range; its total is the `/N` of Content-Range. A `/*`
+      // (or a Content-Range we cannot read) does not say how big the file is,
+      // so it is measured with one plain GET (R7), exactly as a 416 is.
+      let rangeTotal: number | null = null;
+      if (mode === "range" && status === 206) {
+        rangeTotal = contentRangeTotal(headers);
+        if (rangeTotal === null) {
+          mode = "plain";
+          continue;
+        }
+      }
+
+      const declared = rangeTotal ?? contentLength(headers);
+      if (mode === "head" && declared === null) {
         // The server cannot say how big it is, so we measure it: one GET,
         // streamed into a counter and discarded (hard rule 6).
-        method = "GET";
+        mode = "plain";
         continue;
       }
 
@@ -854,6 +914,7 @@ export async function fetchCrawlResources(
         cacheControl,
         expires,
         fetchMs: null,
+        ...(isImage ? imageDimensions(attempt.head, contentType) : NO_DIMENSIONS),
       });
     }
   };
@@ -987,7 +1048,47 @@ function unfetchable(
     cacheControl: null,
     expires: null,
     fetchMs: null,
+    ...NO_DIMENSIONS,
   };
+}
+
+/** The three size columns of a row nothing was measured on. */
+const NO_DIMENSIONS = { width: null, height: null, dimensionsReason: null } as const;
+
+/**
+ * The size columns of an `ok` image row. A content type that is not `image/*`
+ * is `not-image`: the server answered, with something that is not an image, and
+ * its bytes are not handed to a format reader that would call them
+ * `unknown-format` (which says "an image we cannot read"). Otherwise the size
+ * reader decides, and its reason is stored as it gave it.
+ */
+function imageDimensions(
+  head: Buffer | null,
+  contentType: string | null,
+): Pick<Verdict, "width" | "height" | "dimensionsReason"> {
+  if (head === null) {
+    // An ok image answer always kept its head: that is this module's bug.
+    throw new Error("fetchCrawlResources: an ok image answer carried no body head to read");
+  }
+  const bare = (contentType ?? "").split(";")[0]!.trim().toLowerCase();
+  if (!bare.startsWith("image/")) return { width: null, height: null, dimensionsReason: "not-image" };
+  const size = readImageSize(head, contentType);
+  return size.kind === "size"
+    ? { width: size.width, height: size.height, dimensionsReason: null }
+    : { width: null, height: null, dimensionsReason: size.reason };
+}
+
+/**
+ * The total a `206`'s `Content-Range: bytes a-b/N` declares, or null when it
+ * does not declare one (`/*`, or a header we cannot read as that shape).
+ */
+function contentRangeTotal(headers: HeaderBag): number | null {
+  const raw = headerValue(headers, "content-range");
+  if (raw === null) return null;
+  const match = /^\s*bytes\s+\d+-\d+\/(\d+)\s*$/i.exec(raw);
+  if (match === null) return null;
+  const total = Number(match[1]);
+  return Number.isSafeInteger(total) ? total : null;
 }
 
 /**
@@ -1014,7 +1115,7 @@ async function workList(
           gt(resources.url, cursor),
         );
   return db
-    .select({ url: resources.url })
+    .select({ url: resources.url, kind: resources.kind })
     .from(resources)
     .where(where)
     .orderBy(asc(resources.url))
@@ -1059,6 +1160,9 @@ async function writeVerdict(
       // `fetch_class` move together, both null or neither.
       fetchedAt: verdict.fetchClass === null ? null : new Date(),
       fetchMs: verdict.fetchMs,
+      width: verdict.width,
+      height: verdict.height,
+      dimensionsReason: verdict.dimensionsReason,
     }))
     .where(and(eq(resources.crawlId, crawlId), eq(resources.url, url)));
 }
@@ -1107,8 +1211,11 @@ interface RequestOpts {
   userAgent: string;
   allowPrivate: boolean;
   timeoutMs: number;
-  /** Stream the body into a counter and discard it. GET only. */
-  count: boolean;
+  /**
+   * Keep the first IMAGE_HEADER_BYTES of the body for the size reader (an
+   * image row). Nothing past them is ever retained.
+   */
+  captureHead: boolean;
   /** The counter's ceiling. See MAX_COUNTED_BYTES. */
   maxCountedBytes: number;
   /**
@@ -1133,7 +1240,7 @@ interface RequestOpts {
  */
 async function requestResource(
   url: string,
-  method: "HEAD" | "GET",
+  mode: RequestMode,
   opts: RequestOpts,
 ): Promise<Attempt> {
   const callerSignal = opts.signal;
@@ -1155,12 +1262,13 @@ async function requestResource(
   try {
     const response = await request(url, {
       dispatcher: sharedAgent(opts.allowPrivate),
-      method,
+      method: mode === "head" ? "HEAD" : "GET",
       headers: {
         ...credentialHeadersOf(url, opts.credentials),
         "user-agent": opts.userAgent,
         accept: "*/*",
         "accept-encoding": ACCEPT_ENCODING,
+        ...(mode === "range" ? { range: `bytes=0-${IMAGE_HEADER_BYTES - 1}` } : {}),
       },
       // Manual redirects, like the page path: every hop is re-checked by the
       // URL policy and re-queued behind its own host's gate, which a client
@@ -1174,12 +1282,35 @@ async function requestResource(
     let counted: number | null = null;
     let countTruncated = false;
 
-    if (opts.count) {
+    let head: Buffer | null = null;
+    const status = response.statusCode;
+
+    if (mode === "range" && status === 206) {
+      // The Range was honoured: the body IS the header window, read to at most
+      // IMAGE_HEADER_BYTES. A server that sends MORE than it was asked for is
+      // misbehaving, and its excess is discarded unbuffered: the socket is
+      // destroyed the moment the window is full (hard rule 6). The size comes
+      // from Content-Range, so nothing is counted.
+      head = await readHead(response.body, IMAGE_HEADER_BYTES);
+    } else if (mode === "plain" || (mode === "range" && status === 200)) {
+      // A counted GET: either the pass's own plain GET, or a Range the server
+      // ignored (200). The body streams into the counter exactly as before; an
+      // image additionally copies its first IMAGE_HEADER_BYTES aside, and no
+      // more than that is held.
+      const kept: Buffer[] = [];
+      let keptBytes = 0;
       let bytes = 0;
       for await (const chunk of response.body) {
+        const buf = chunk as Buffer;
         // The whole of what we do with a resource body: add its length and drop
-        // it. Nothing is concatenated, nothing is decoded (hard rule 6).
-        bytes += (chunk as Buffer).length;
+        // it. Nothing is concatenated past the header window, nothing is
+        // decoded (hard rule 6).
+        bytes += buf.length;
+        if (opts.captureHead && keptBytes < IMAGE_HEADER_BYTES) {
+          const piece = buf.subarray(0, IMAGE_HEADER_BYTES - keptBytes);
+          kept.push(Buffer.from(piece));
+          keptBytes += piece.length;
+        }
         if (bytes > opts.maxCountedBytes) {
           countTruncated = true;
           response.body.destroy();
@@ -1187,13 +1318,16 @@ async function requestResource(
         }
       }
       counted = bytes;
+      if (opts.captureHead) head = Buffer.concat(kept);
     } else {
       // A HEAD has no body, but undici still hands one over and the socket does
-      // not return to the pool until it is consumed.
+      // not return to the pool until it is consumed. The same goes for any
+      // answer to a Range request that is neither 200 nor 206 (a redirect, a
+      // 404, a 416): its body is not read.
       await response.body.dump();
     }
 
-    return { kind: "response", statusCode: response.statusCode, headers, counted, countTruncated };
+    return { kind: "response", statusCode: status, headers, counted, countTruncated, head };
   } catch (error) {
     // Our own bug first: a programmer error is rethrown as itself even when a
     // stop landed in the same tick, so it is never reported as an abort.
@@ -1211,4 +1345,26 @@ async function requestResource(
   } finally {
     clearTimeout(timer);
   }
+}
+
+/** How a request is made. See `processOne`. */
+type RequestMode = "head" | "range" | "plain";
+
+/**
+ * Read at most `limit` bytes of `body` and stop: the rest of the stream is
+ * discarded by destroying it, never buffered.
+ */
+async function readHead(body: AsyncIterable<unknown> & { destroy(): unknown }, limit: number): Promise<Buffer> {
+  const kept: Buffer[] = [];
+  let have = 0;
+  for await (const chunk of body) {
+    const piece = (chunk as Buffer).subarray(0, limit - have);
+    kept.push(Buffer.from(piece));
+    have += piece.length;
+    if (have >= limit) {
+      body.destroy();
+      break;
+    }
+  }
+  return Buffer.concat(kept);
 }

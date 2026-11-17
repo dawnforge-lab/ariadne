@@ -25,11 +25,18 @@
  */
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
+import { pngBytes, serveImage } from "./images.js";
 
 interface Asset {
   contentType: string;
-  body: string;
+  body: string | Buffer;
   cacheControl: string | null;
+  /**
+   * A real raster image, served by `serveImage` with Range honoured (206 and a
+   * `Content-Range` total), the way a CDN serves a photo. Every other asset is
+   * answered whole, which is the "server ignores Range" shape (Phase 29b).
+   */
+  raster?: boolean;
 }
 
 function svg(label: string): string {
@@ -84,6 +91,12 @@ function padding(bytes: number): string {
  */
 export const SHARED_IMAGE_PATH = "/img/placeholder.svg";
 
+/** Real raster fixtures and the intrinsic sizes their PNG headers carry. */
+export const RASTER_LANDSCAPE_PATH = "/img/p29b-landscape.png";
+export const RASTER_LANDSCAPE = { width: 1200, height: 800 } as const;
+export const RASTER_SQUARE_PATH = "/img/p29b-square.png";
+export const RASTER_SQUARE = { width: 600, height: 600 } as const;
+
 const ASSETS = new Map<string, Asset>([
   [
     SHARED_IMAGE_PATH,
@@ -124,6 +137,27 @@ const ASSETS = new Map<string, Asset>([
       cacheControl: "public, max-age=3600",
     },
   ],
+  // Real PNGs at known sizes (29b), so the resource pass has intrinsic sizes to
+  // record and the renderer real dimensions to stand in. Range is honoured on
+  // these paths and on no other. Fixture pages reference them from Task 8 on.
+  [
+    RASTER_LANDSCAPE_PATH,
+    {
+      contentType: "image/png",
+      body: pngBytes(RASTER_LANDSCAPE.width, RASTER_LANDSCAPE.height),
+      cacheControl: "public, max-age=3600",
+      raster: true,
+    },
+  ],
+  [
+    RASTER_SQUARE_PATH,
+    {
+      contentType: "image/png",
+      body: pngBytes(RASTER_SQUARE.width, RASTER_SQUARE.height),
+      cacheControl: "public, max-age=3600",
+      raster: true,
+    },
+  ],
 ]);
 
 /**
@@ -137,7 +171,16 @@ const ASSETS = new Map<string, Asset>([
 export function serveAsset(req: IncomingMessage, res: ServerResponse, path: string): boolean {
   const asset = ASSETS.get(path);
   if (asset === undefined) return false;
-  const body = Buffer.from(asset.body, "utf8");
+  if (asset.raster === true) {
+    serveImage(req, res, {
+      bytes: Buffer.from(asset.body),
+      contentType: asset.contentType,
+      range: "honour",
+      ...(asset.cacheControl === null ? {} : { cacheControl: asset.cacheControl }),
+    });
+    return true;
+  }
+  const body = typeof asset.body === "string" ? Buffer.from(asset.body, "utf8") : asset.body;
   const headers: Record<string, string> = {
     "content-type": asset.contentType,
     "content-length": String(body.length),

@@ -34,6 +34,8 @@ import {
 import { LOCAL_TENANT } from "../../src/tenant.js";
 import { TEST_CREDENTIAL_KEYS } from "../helpers/credential-keys.js";
 import { hostKeyOf } from "../../src/crawl/host-key.js";
+import { jpegHeader, pngBytes, serveImage, type ServeImageOpts } from "../fixtures/images.js";
+import { RASTER_LANDSCAPE, RASTER_LANDSCAPE_PATH, serveAsset } from "../fixtures/assets.js";
 
 function databaseUrl(): string {
   const url = process.env.DATABASE_URL;
@@ -559,7 +561,25 @@ describe("the URL policy runs on read, not on write", () => {
 // ---------------------------------------------------------------------------
 
 describe("HEAD first, and exactly one GET when it must", () => {
-  it("takes the size from content-length and issues no GET", async () => {
+  it("takes a css file's size from content-length with a HEAD and no GET", async () => {
+    const crawlId = await seedCrawl(assets.base);
+    await seedResources(crawlId, [{ url: `${assets.base}/b.css`, kind: "css" }]);
+
+    await runPass(crawlId, assets.base);
+
+    const row = await rowFor(crawlId, `${assets.base}/b.css`);
+    expect(row.fetchClass).toBe("ok");
+    expect(row.statusCode).toBe(200);
+    expect(row.bytes).toBe("body{color:red}".length);
+    expect(row.bytesSource).toBe("header");
+    expect(row.contentType).toContain("text/css");
+    expect(row.fetchedAt).not.toBeNull();
+    expect(row.fetchMs).not.toBeNull();
+
+    expect(hitsFor(assets, "/b.css").map((hit) => hit.method)).toEqual(["HEAD"]);
+  });
+
+  it("an image on a server that ignores Range is one counted GET, with its cache headers kept", async () => {
     const crawlId = await seedCrawl(assets.base);
     await seedResources(crawlId, [{ url: `${assets.base}/a.png` }]);
 
@@ -569,14 +589,12 @@ describe("HEAD first, and exactly one GET when it must", () => {
     expect(row.fetchClass).toBe("ok");
     expect(row.statusCode).toBe(200);
     expect(row.bytes).toBe(1234);
-    expect(row.bytesSource).toBe("header");
+    expect(row.bytesSource).toBe("counted");
     expect(row.contentType).toContain("image/png");
     expect(row.cacheControl).toBe("public, max-age=600");
     expect(row.expires).toBe("Wed, 21 Oct 2026 07:28:00 GMT");
-    expect(row.fetchedAt).not.toBeNull();
-    expect(row.fetchMs).not.toBeNull();
 
-    expect(hitsFor(assets, "/a.png").map((hit) => hit.method)).toEqual(["HEAD"]);
+    expect(hitsFor(assets, "/a.png").map((hit) => hit.method)).toEqual(["GET"]);
   });
 
   it("counts a body the HEAD could not size, and says the bytes were counted", async () => {
@@ -702,8 +720,9 @@ describe("HEAD first, and exactly one GET when it must", () => {
     // empty first half is how a row ends up saying "; followed 1 redirect…",
     // which reads like a message with its first clause lost.
     expect(row.fetchReason).toBe(`followed 1 redirect to ${assets.base}/a.png`);
-    expect(hitsFor(assets, "/hop.png").map((hit) => hit.method)).toEqual(["HEAD"]);
-    expect(hitsFor(assets, "/a.png").map((hit) => hit.method)).toEqual(["HEAD"]);
+    // An image is a Range GET at every hop (29b); it was a HEAD at both.
+    expect(hitsFor(assets, "/hop.png").map((hit) => hit.method)).toEqual(["GET"]);
+    expect(hitsFor(assets, "/a.png").map((hit) => hit.method)).toEqual(["GET"]);
   });
 });
 
@@ -1002,7 +1021,8 @@ describe("the caps say so", () => {
     // A capped row is UNFETCHED, not failed: the null still means "seen, not
     // yet asked", and the reason says who stopped short of asking.
     expect(capped.every((row) => row.fetchClass === null)).toBe(true);
-    expect(assets.hits.filter((hit) => hit.method === "HEAD").length).toBe(2);
+    // a.png (an image) is one Range GET; b.css keeps its HEAD. Two requests, as before (29b).
+    expect(assets.hits.map((hit) => hit.method).sort()).toEqual(["GET", "HEAD"]);
   });
 
   it("stops at maxResourceHosts and never touches the host it refused", async () => {
@@ -1427,13 +1447,297 @@ describe("a share image with no page_resources edge is fetched like any other ro
       fetchClass: "ok",
       statusCode: 200,
       bytes: 1234,
-      bytesSource: "header",
+      // The assets server ignores Range, so the one GET is counted (29b).
+      bytesSource: "counted",
       contentType: "image/png",
     });
     expect(pick(await rowFor(crawlId, ogOnly))).toEqual(loadedRow);
     const missing = await rowFor(crawlId, ogMissing);
     expect(missing.statusCode).toBe(404);
     expect(missing.fetchedAt).not.toBeNull();
-    expect(hitsFor(assets, "/missing.png").map((hit) => hit.method)).toEqual(["HEAD"]);
+    expect(hitsFor(assets, "/missing.png").map((hit) => hit.method)).toEqual(["GET"]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 29b. An image row is asked with one Range GET and records its intrinsic size
+// ---------------------------------------------------------------------------
+
+interface ImageHit {
+  method: string;
+  path: string;
+  range: string | null;
+}
+
+/**
+ * A server of images, one route per path, each answering Range its own way
+ * (`serveImage`). `noLength` routes behave like a server that cannot size a
+ * HEAD: chunked, no `content-length`, whatever the method.
+ */
+async function startImageServer(
+  routes: Record<string, ServeImageOpts | { missing: true } | { noLength: Buffer; contentType: string }>,
+): Promise<{ base: string; hits: ImageHit[]; close(): Promise<void> }> {
+  const hits: ImageHit[] = [];
+  const server: Server = createServer((req: IncomingMessage, res: ServerResponse) => {
+    const path = (req.url ?? "/").split("?")[0] ?? "/";
+    if (path === "/robots.txt") {
+      res.writeHead(200, { "content-type": "text/plain" });
+      res.end("User-agent: *\nAllow: /\n");
+      return;
+    }
+    hits.push({ method: req.method ?? "?", path, range: req.headers.range ?? null });
+    const route = routes[path];
+    if (route === undefined || "missing" in route) {
+      res.writeHead(404, { "content-type": "image/png" });
+      res.end(req.method === "HEAD" ? undefined : "no");
+      return;
+    }
+    if ("noLength" in route) {
+      res.writeHead(200, { "content-type": route.contentType });
+      res.end(req.method === "HEAD" ? undefined : route.noLength);
+      return;
+    }
+    serveImage(req, res, route);
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address() as AddressInfo;
+  return {
+    base: `http://127.0.0.1:${address.port}`,
+    hits,
+    close: () =>
+      new Promise<void>((resolve, reject) =>
+        server.close((error) => (error === undefined ? resolve() : reject(error))),
+      ),
+  };
+}
+
+describe("an image row costs one Range GET and records its intrinsic size (29b)", () => {
+  const png = pngBytes(1600, 1200, 30_000);
+  let images: Awaited<ReturnType<typeof startImageServer>>;
+
+  beforeAll(async () => {
+    images = await startImageServer({
+      "/honour.png": { bytes: png, contentType: "image/png", range: "honour" },
+      "/ignore.png": { bytes: png, contentType: "image/png", range: "ignore" },
+      "/star.png": { bytes: png, contentType: "image/png", range: "star" },
+      "/range416.png": { bytes: png, contentType: "image/png", range: "unsatisfiable" },
+      "/nolength.png": { noLength: png, contentType: "image/png" },
+      "/logo.svg": {
+        bytes: Buffer.from('<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"/>'),
+        contentType: "image/svg+xml",
+        range: "honour",
+      },
+      "/garbage.png": { bytes: Buffer.alloc(500, 0x41), contentType: "image/png", range: "honour" },
+      "/big-exif.jpg": {
+        bytes: Buffer.concat([jpegHeader(800, 600, 70_000), Buffer.alloc(5_000)]),
+        contentType: "image/jpeg",
+        range: "honour",
+      },
+      "/page.png": { bytes: Buffer.from("<html>"), contentType: "text/html", range: "honour" },
+      "/missing.png": { missing: true },
+    });
+  });
+  afterAll(async () => {
+    await images.close();
+  });
+  beforeEach(() => {
+    images.hits.length = 0;
+  });
+
+  const imageHits = (path: string): ImageHit[] => images.hits.filter((h) => h.path === path);
+
+  async function measure(path: string, kind = "image") {
+    const crawlId = await seedCrawl(images.base);
+    await seedResources(crawlId, [{ url: `${images.base}${path}`, kind }]);
+    await runPass(crawlId, images.base);
+    return rowFor(crawlId, `${images.base}${path}`);
+  }
+
+  it("a server that honours Range: 206, the total from Content-Range, size read, one request", async () => {
+    const row = await measure("/honour.png");
+    expect(row).toMatchObject({
+      fetchClass: "ok",
+      statusCode: 206,
+      bytes: png.length,
+      bytesSource: "header",
+      width: 1600,
+      height: 1200,
+      dimensionsReason: null,
+    });
+    expect(png.length).toBe(30_000);
+    expect(imageHits("/honour.png")).toEqual([
+      { method: "GET", path: "/honour.png", range: "bytes=0-65535" },
+    ]);
+  });
+
+  it("a server that ignores Range: 200, counted, size read from the first 64 KiB, one request", async () => {
+    const row = await measure("/ignore.png");
+    expect(row).toMatchObject({
+      fetchClass: "ok",
+      statusCode: 200,
+      bytes: png.length,
+      bytesSource: "counted",
+      width: 1600,
+      height: 1200,
+      dimensionsReason: null,
+    });
+    expect(imageHits("/ignore.png")).toHaveLength(1);
+  });
+
+  it("a 206 with an unknown total is followed by exactly one plain GET", async () => {
+    const row = await measure("/star.png");
+    expect(row).toMatchObject({
+      fetchClass: "ok",
+      statusCode: 200,
+      bytes: png.length,
+      bytesSource: "counted",
+      width: 1600,
+      height: 1200,
+    });
+    expect(imageHits("/star.png")).toEqual([
+      { method: "GET", path: "/star.png", range: "bytes=0-65535" },
+      { method: "GET", path: "/star.png", range: null },
+    ]);
+  });
+
+  it("a 416 is followed by exactly one plain GET, and the row is the second answer", async () => {
+    const row = await measure("/range416.png");
+    expect(row).toMatchObject({
+      fetchClass: "ok",
+      statusCode: 200,
+      bytes: png.length,
+      bytesSource: "counted",
+      width: 1600,
+      height: 1200,
+    });
+    expect(imageHits("/range416.png")).toEqual([
+      { method: "GET", path: "/range416.png", range: "bytes=0-65535" },
+      { method: "GET", path: "/range416.png", range: null },
+    ]);
+  });
+
+  it("an SVG records no pixel size and says why", async () => {
+    const row = await measure("/logo.svg");
+    expect(row.fetchClass).toBe("ok");
+    expect(row.width).toBeNull();
+    expect(row.height).toBeNull();
+    expect(row.dimensionsReason).toBe("svg");
+    expect(imageHits("/logo.svg")).toHaveLength(1);
+  });
+
+  it("bytes that are no image format are unknown-format, never a guessed size", async () => {
+    const row = await measure("/garbage.png");
+    expect(row.fetchClass).toBe("ok");
+    expect(row.width).toBeNull();
+    expect(row.dimensionsReason).toBe("unknown-format");
+  });
+
+  it("a JPEG whose frame header lies past 64 KiB is header-beyond-limit, with the total from Content-Range", async () => {
+    const row = await measure("/big-exif.jpg");
+    expect(row).toMatchObject({
+      fetchClass: "ok",
+      statusCode: 206,
+      bytes: 2 + 4 + 4 + 70_000 + 19 + 5_000,
+      bytesSource: "header",
+      width: null,
+      height: null,
+      dimensionsReason: "header-beyond-limit",
+    });
+    expect(imageHits("/big-exif.jpg")).toHaveLength(1);
+  });
+
+  it("an ok answer that is not an image says not-image", async () => {
+    const row = await measure("/page.png");
+    expect(row.fetchClass).toBe("ok");
+    expect(row.contentType).toBe("text/html");
+    expect(row.width).toBeNull();
+    expect(row.dimensionsReason).toBe("not-image");
+  });
+
+  it("a redirect hop is followed as a Range GET too, and the row is the landed file's", async () => {
+    // The assets server's /hop.png redirects to /a.png.
+    const crawlId = await seedCrawl(assets.base);
+    await seedResources(crawlId, [{ url: `${assets.base}/hop.png` }]);
+    await runPass(crawlId, assets.base);
+    const row = await rowFor(crawlId, `${assets.base}/hop.png`);
+    expect(row.fetchClass).toBe("ok");
+    expect(row.bytes).toBe(1234);
+    // /a.png is 1234 bytes of 0x07: not an image format.
+    expect(row.dimensionsReason).toBe("unknown-format");
+    expect(hitsFor(assets, "/hop.png").map((h) => h.method)).toEqual(["GET"]);
+    expect(hitsFor(assets, "/a.png").map((h) => h.method)).toEqual(["GET"]);
+  });
+
+  it("a 404 image is a client_error with all three dimension columns null", async () => {
+    const row = await measure("/missing.png");
+    expect(row.fetchClass).toBe("client_error");
+    expect(row.statusCode).toBe(404);
+    expect(row.width).toBeNull();
+    expect(row.height).toBeNull();
+    expect(row.dimensionsReason).toBeNull();
+  });
+
+  it("a stylesheet still costs exactly one HEAD and records no dimensions", async () => {
+    const crawlId = await seedCrawl(assets.base);
+    await seedResources(crawlId, [{ url: `${assets.base}/b.css`, kind: "css" }]);
+    await runPass(crawlId, assets.base);
+    const row = await rowFor(crawlId, `${assets.base}/b.css`);
+    expect(row.fetchClass).toBe("ok");
+    expect(row.width).toBeNull();
+    expect(row.dimensionsReason).toBeNull();
+    expect(hitsFor(assets, "/b.css").map((h) => h.method)).toEqual(["HEAD"]);
+  });
+
+  it("the fixture site's raster asset is served with Range honoured and reads at its true size", async () => {
+    const fixture: Server = createServer((req, res) => {
+      const path = (req.url ?? "/").split("?")[0] ?? "/";
+      if (path === "/robots.txt") {
+        res.writeHead(200, { "content-type": "text/plain" });
+        res.end("User-agent: *\nAllow: /\n");
+        return;
+      }
+      if (!serveAsset(req, res, path)) {
+        res.writeHead(404);
+        res.end();
+      }
+    });
+    await new Promise<void>((resolve) => fixture.listen(0, "127.0.0.1", resolve));
+    try {
+      const base = `http://127.0.0.1:${(fixture.address() as AddressInfo).port}`;
+      const crawlId = await seedCrawl(base);
+      await seedResources(crawlId, [{ url: `${base}${RASTER_LANDSCAPE_PATH}` }]);
+      await runPass(crawlId, base);
+      const row = await rowFor(crawlId, `${base}${RASTER_LANDSCAPE_PATH}`);
+      expect(row).toMatchObject({
+        statusCode: 206,
+        bytesSource: "header",
+        width: RASTER_LANDSCAPE.width,
+        height: RASTER_LANDSCAPE.height,
+      });
+    } finally {
+      await new Promise<void>((resolve) => fixture.close(() => resolve()));
+    }
+  });
+
+  describe("request parity with the HEAD path (gate clause 3)", () => {
+    it("honour: 1 request (the HEAD path cost 1)", async () => {
+      await measure("/honour.png");
+      expect(imageHits("/honour.png")).toHaveLength(1);
+    });
+    it("ignore: 1 request (the HEAD path cost 1)", async () => {
+      await measure("/ignore.png");
+      expect(imageHits("/ignore.png")).toHaveLength(1);
+    });
+    it("a server whose HEAD carries no size: 1 request (the HEAD path cost 2)", async () => {
+      const row = await measure("/nolength.png");
+      expect(row).toMatchObject({ bytes: png.length, bytesSource: "counted", width: 1600, height: 1200 });
+      expect(imageHits("/nolength.png")).toHaveLength(1);
+    });
+    it("star and 416 cost 2, the documented ceiling (the HEAD path cost 1)", async () => {
+      await measure("/star.png");
+      await measure("/range416.png");
+      expect(imageHits("/star.png")).toHaveLength(2);
+      expect(imageHits("/range416.png")).toHaveLength(2);
+    });
   });
 });

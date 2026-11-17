@@ -386,6 +386,13 @@
       "when": 1794577634334,
       "tag": "0054_schema_template_thresholds",
       "breakpoints": true
+    },
+    {
+      "idx": 55,
+      "version": "7",
+      "when": 1794911691607,
+      "tag": "0055_resources_image_size",
+      "breakpoints": true
     }
   ]
 }

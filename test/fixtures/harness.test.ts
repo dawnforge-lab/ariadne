@@ -3572,7 +3572,11 @@ describe("the fixture site end to end", () => {
       pageUrl: `${app.base}${P11_HEAVY_PATH}`,
       resourceUrl: `${app.base}${P11_HEAVY_IMAGE}`,
       bytes: HEAVY_IMAGE_BYTES,
-      bytesSource: "header",
+      // 29b: an image is asked with a Range GET and this server ignores Range,
+      // so the 120,000 bytes were COUNTED off a 200 rather than read from a
+      // content-length (they used to be a HEAD's claim). Same number, a
+      // measurement now.
+      bytesSource: "counted",
       contentType: "image/png",
       threshold: IMAGE_WEIGHT_WARN,
       // One page carries it, and that page is the one the finding hangs on.
@@ -4099,17 +4103,22 @@ describe("the resource fetch pass ran on the fixture crawl", () => {
     expect(badge.statusCode).toBe(200);
     expect(badge.kind).toBe("image");
     expect(badge.contentType).toContain("image/svg+xml");
-    // A server that says how big a file is is believed, and the row says the
-    // number is a claim rather than a measurement.
-    expect(badge.bytesSource).toBe("header");
+    // 29b: an image is one Range GET, and this host ignores Range, so the
+    // body was counted (it was a HEAD's content-length claim before). An SVG
+    // has no intrinsic pixel size and the row says so.
+    expect(badge.bytesSource).toBe("counted");
     expect(badge.bytes).toBeGreaterThan(0);
+    expect(badge.width).toBeNull();
+    expect(badge.dimensionsReason).toBe("svg");
     expect(badge.cacheControl).toBe("public, max-age=31536000, immutable");
 
-    // One robots.txt for the host, one HEAD for the file — a third-party host
-    // is a guest's host, and the pass spends exactly what it must there.
+    // One robots.txt for the host, one request for the file (the Range GET,
+    // which was a HEAD before 29b) — a third-party host is a guest's host, and
+    // the pass spends exactly what it must there.
     expect(assetHost.hits.filter((hit) => hit.endsWith("/robots.txt")).length).toBe(1);
-    expect(assetHost.hits).toContain("HEAD /cdn/hub-badge.svg");
-    expect(assetHost.hits.filter((hit) => hit.startsWith("GET /cdn/"))).toEqual([]);
+    expect(assetHost.hits.filter((hit) => hit.endsWith("/cdn/hub-badge.svg"))).toEqual([
+      "GET /cdn/hub-badge.svg",
+    ]);
   });
 
   it("records the absence of a cache header as an absence, not as a zero", async () => {

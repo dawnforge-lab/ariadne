@@ -2200,9 +2200,9 @@ server errors apart from a crawl nobody rechecked",
 over the agent transport, `test/api/mcp.test.ts:1062` "answers the recheck
 coverage, and keeps its two zeroes apart" (which also reads the block off a
 crawl the suite really ran). The robots split itself is
-`test/crawl/fetch-resources.test.ts:865` "classes an unreachable third-party
+`test/crawl/fetch-resources.test.ts:884` "classes an unreachable third-party
 robots.txt apart from a forbidding one" and
-`test/crawl/fetch-resources.test.ts:883` "keeps `robots_denied` for a file the
+`test/crawl/fetch-resources.test.ts:902` "keeps `robots_denied` for a file the
 robots file actually forbade". Shape regenerated live from `crawl_02ff6f7a`
 (2026-09-08, after migration 0016 — the `recheck` block above is that crawl's
 own answer, not an invented example).
@@ -3386,7 +3386,7 @@ rows cannot say it and only the config can.
 Pinned: `src/db/schema.ts`'s `resources.fetch_class` comment (the column says
 this); `test/api/query.test.ts:3055` "writes one row per referenced file, with
 the class that makes an empty status readable" (all four spellings in the CSV);
-`test/crawl/fetch-resources.test.ts:1339` "asks nobody anything when the operator
+`test/crawl/fetch-resources.test.ts:1359` "asks nobody anything when the operator
 turned resource fetching off".
 
 ### 5.4 `resourceRefsCappedPages` null — nobody counted

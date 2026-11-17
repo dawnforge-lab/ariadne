@@ -469,7 +469,9 @@ async function badContentTypeFindings(
              count(*) over ()::int as total_matches
       from resources r
       where r.crawl_id = ${crawlId}
-        and r.status_code = 200
+        -- 206: an image is asked with a Range GET (29b) and a server that honours
+        -- it answers 206, which is an ok answer, not a partial failure.
+        and r.status_code in (200, 206)
         and r.fetch_class = ${RESOURCE_OK_CLASS}
         -- Deviation 3: a social-only image is no page's file (LOADED_BY_A_PAGE).
         and ${LOADED_BY_A_PAGE}

@@ -1303,6 +1303,20 @@ export const resources = pgTable("resources", {
   // twitter:image. The resource pass fetches share images too, so the row
   // keeps counting in `crawl_status.resources`; this flag tells them apart.
   shareImage: boolean("share_image").notNull().default(false),
+  // Phase 29b (migration 0055): an image's INTRINSIC size in pixels, read from
+  // the format's own header in the first 64 KiB of the body the resource pass's
+  // one Range GET returned (`readImageSize`, src/crawl/resources/image-size.ts).
+  // Null means NOT MEASURED and `dimensions_reason` says why; a size is never
+  // guessed or defaulted (hard rule 7). Both are null on css/js rows and on
+  // every row that is not `ok`.
+  width: integer("width"),
+  height: integer("height"),
+  // Why `width`/`height` are null on an `ok` image row: `svg` (a vector format
+  // has no intrinsic pixel size), `unknown-format`, `header-beyond-limit` (the
+  // size lies past the 64 KiB read), `malformed`, `empty`, or `not-image` (a 2xx
+  // whose content type is not `image/*`). Null when a size WAS read, and null on
+  // css/js and non-ok rows, where no measurement was attempted.
+  dimensionsReason: text("dimensions_reason"),
 }, (t) => [
   // The dedup, and the upsert target. One row per URL per crawl: the writer
   // inserts with `on conflict do nothing`, so the second page to reference an
