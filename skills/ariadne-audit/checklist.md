@@ -3104,8 +3104,10 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
   device-pixel ratio of 1, so a box that is narrower on a phone or wider on a large
   monitor is not what was compared. The evidence lists up to 20 of the images with
   their file width and displayed width, and `atLeast` is true when the page had more
-  oversized images than the capture kept (the 50 that waste the most pixels), so the
-  count is then a floor. Images that were hidden, lazy-loaded below the fold (our
+  images wider than their box, at any ratio, than the capture kept (the 50 that waste
+  the most pixels), so the count is then a floor. On such a page the rule judges only
+  those 50, so its silence about the rest is partial; the metric's
+  `keptTruncatedPages` counts those pages. Images that were hidden, lazy-loaded below the fold (our
   browser does not scroll), never requested, broken, or of unknown size are COUNTED
   but never measured, so the rule's silence about them says nothing about their size:
   read `measuredShare` in the evidence, and `metrics_get` with

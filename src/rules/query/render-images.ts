@@ -46,7 +46,6 @@
 import { sql } from "drizzle-orm";
 
 import {
-  RENDER_IMAGES_KEPT,
   type RenderImage,
   type RenderImages,
 } from "../../crawl/render/image-stand-in.js";
@@ -238,10 +237,9 @@ async function largerThanDisplayed(
         evidence: {
           template: page.pageType,
           oversizedCount: oversized.length,
-          // `kept` is the worst RENDER_IMAGES_KEPT of every image wider than its
-          // box; more of those exist than kept shows, so the count is a floor.
+          // `kept` holds the worst few of every image wider than its box (at any
+          // ratio); more of those exist than kept shows, so the count is a floor.
           atLeast: page.images.widerThanDisplayed > page.images.kept.length,
-          keptLimit: RENDER_IMAGES_KEPT,
           images: oversized.slice(0, IMAGES_LISTED),
           measured: page.images.measured,
           measuredShare: measuredShare(page.images),
@@ -263,6 +261,8 @@ export const renderImageRules: QueryRule[] = [
     columns: [
       { key: "template", label: "Template" },
       { key: "oversizedCount", label: "Oversized Images" },
+      { key: "images", label: "Images" },
+      { key: "measured", label: "Measured" },
       { key: "atLeast", label: "At Least" },
       { key: "measuredShare", label: "Share Measured" },
     ],

@@ -267,16 +267,26 @@ describe("images.larger-than-displayed and render.image-measurement against the 
     ]);
   });
 
-  it("lists at most 20 images", async () => {
+  it("lists the first 20 of 25 oversized images, in kept order", async () => {
     const crawlId = await newCrawl();
-    const kept = Array.from({ length: 30 }, (_, i) => image(2000, 100, `i${i}`));
+    const kept = Array.from({ length: 25 }, (_, i) => image(2000, 100, `i${String(i).padStart(2, "0")}`));
     await addPages(crawlId, [
-      { path: "/many", images: capture({ measured: 30, widerThanDisplayed: 30, kept }) },
+      { path: "/many", images: capture({ measured: 25, widerThanDisplayed: 25, kept }) },
     ]);
     const [f] = await rule.run(db, crawlId);
-    const ev = f!.evidence as { images: unknown[]; oversizedCount: number };
-    expect(ev.images).toHaveLength(20);
-    expect(ev.oversizedCount).toBe(30);
+    const ev = f!.evidence as { images: RenderImage[]; oversizedCount: number };
+    expect(ev.images.map((i) => i.url)).toEqual(kept.slice(0, 20).map((i) => i.url));
+    expect(ev.oversizedCount).toBe(25);
+  });
+
+  it("declares a column for every evidence key it writes", async () => {
+    const crawlId = await newCrawl();
+    await addPages(crawlId, [{ path: "/c", images: capture({ kept: [image(1600, 400)] }) }]);
+    const [f] = await rule.run(db, crawlId);
+    const declared = new Set((rule.columns ?? []).map((c) => c.key));
+    for (const key of Object.keys(f!.evidence as object)) {
+      expect(declared.has(key), `evidence key '${key}' has no column`).toBe(true);
+    }
   });
 
   it("says atLeast when kept was truncated: widerThanDisplayed exceeds kept", async () => {
@@ -314,6 +324,13 @@ describe("images.larger-than-displayed and render.image-measurement against the 
     await expect(rule.run(db, crawlId)).rejects.toThrow(
       new RegExp(`${ID}: crawl '${crawlId}', page '${SITE}/alien'`),
     );
+  });
+
+  it("throws on a blob missing only `broken`", async () => {
+    const crawlId = await newCrawl();
+    const { broken: _broken, ...withoutBroken } = capture({ kept: [image(1600, 400)] });
+    await addPages(crawlId, [{ path: "/nobroken", images: withoutBroken }]);
+    await expect(rule.run(db, crawlId)).rejects.toThrow(/'broken' is not a non-negative integer/);
   });
 
   it("throws on a kept entry of the wrong shape even when nothing would fire", async () => {
@@ -369,6 +386,8 @@ describe("images.larger-than-displayed and render.image-measurement against the 
           pageType: "blog",
           images: capture({
             total: 5, examined: 5, measured: 5, standIns: 5,
+            // Two images wider than their box but none kept: the list is truncated.
+            widerThanDisplayed: 2, kept: [],
           }),
         },
         // Not counted: capture 2, no capture, and a null page type is a template of its own.
@@ -379,6 +398,7 @@ describe("images.larger-than-displayed and render.image-measurement against the 
       const rows = await metricRowsByScope(db, metric, crawlId);
       expect(rows["page_type|product"]).toEqual({
         pages: 2,
+        keptTruncatedPages: 0,
         total: 14,
         measured: 8,
         hidden: 1,
@@ -391,11 +411,12 @@ describe("images.larger-than-displayed and render.image-measurement against the 
         measuredShare: 0.727,
       });
       expect(rows["page_type|blog"]).toMatchObject({
-        pages: 1, total: 5, measured: 5, noDimensions: 0, broken: 0, measuredShare: 1,
+        pages: 1, keptTruncatedPages: 1, total: 5, measured: 5, noDimensions: 0, broken: 0, measuredShare: 1,
       });
       expect(rows["page_type|(untyped)"]).toMatchObject({ pages: 1, total: 1, measured: 1 });
       expect(rows["site|"]).toEqual({
         pages: 4,
+        keptTruncatedPages: 1,
         total: 20,
         measured: 14,
         hidden: 1,

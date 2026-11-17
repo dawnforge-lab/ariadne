@@ -1096,14 +1096,14 @@ export const COPY_TEMPLATES: Record<string, IssueCopy> = {
   "images.larger-than-displayed": {
     title: "Images: Served wider than displayed",
     explanation:
-      "Pages with an image whose file is more than {IMAGE_OVERSIZE_PERCENT}% as wide as the space it is shown in. Judged from the rendered sample only, at a fixed 1280×900 desktop viewport with a device-pixel ratio of 1; the default of 200% allows for high-density screens. Each row gives the page's template, how many images were over the line (a floor when more than the 50 widest were kept) and up to 20 of them with file and displayed widths, and Share Measured says how much of the page's images could be judged at all, since hidden, lazy, never-requested, broken and unknown-size images are not.",
+      "Pages with an image whose file is more than {IMAGE_OVERSIZE_PERCENT}% as wide as the space it is shown in. Judged from the rendered sample only, at a fixed 1280×900 desktop viewport with a device-pixel ratio of 1; the default allows for high-density screens. Each row gives the page's template, how many images were over the line (a floor when more than the 50 widest were kept) and up to 20 of them with file and displayed widths, and Share Measured says how much of the page's images could be judged at all, since hidden, lazy, never-requested, broken and unknown-size images are not.",
     howToFix:
       "Serve the image at about the width it is displayed at, with srcset and sizes so larger screens still get a larger file, and re-export the source at that size rather than scaling it in CSS.",
   },
   "render.image-measurement": {
     title: "Rendering: Image measurement coverage",
     explanation:
-      "How much of the rendered sample's images the browser could measure against their displayed size, for the whole crawl and per template: pages with a measurement, images in the page's main document, how many were measured, hidden, lazy-loaded and never loaded, never requested, of unknown size, or broken, and how many stand-in images were served. Share Measured is measured divided by measured plus unknown-size plus broken, empty when there were none. Measured at a fixed 1280×900 desktop viewport, device-pixel ratio 1.",
+      "How much of the rendered sample's images the browser could measure against their displayed size, for the whole crawl and per template: pages with a measurement, images in the page's main document, how many were measured, hidden, lazy-loaded and never loaded, never requested, of unknown size, or broken, and how many stand-in images were served. Share Measured is measured divided by measured plus unknown-size plus broken, empty when there were none, and Pages With Truncated Image List counts pages where only the widest images were kept and judged. Measured at a fixed 1280×900 desktop viewport, device-pixel ratio 1.",
     howToFix:
       "Read this before quoting the oversized-image finding. A low share means the finding is silent on most images because they could not be judged, not because they are the right size. Lazy images below the fold are never measured by this render.",
   },

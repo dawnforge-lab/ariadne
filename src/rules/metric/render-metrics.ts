@@ -424,10 +424,14 @@ const IMAGE_SUM_KEYS = [
   "broken",
   "standIns",
 ] as const;
-type ImageSums = Record<(typeof IMAGE_SUM_KEYS)[number], number> & { pages: number };
+type ImageSums = Record<(typeof IMAGE_SUM_KEYS)[number], number> & {
+  pages: number;
+  keptTruncatedPages: number;
+};
 
 const emptySums = (): ImageSums => ({
   pages: 0,
+  keptTruncatedPages: 0,
   total: 0,
   measured: 0,
   hidden: 0,
@@ -457,6 +461,10 @@ const emptySums = (): ImageSums => ({
  * measured, which is the fair denominator for "how much did we see"; hidden,
  * lazy and never-requested images are not in it.
  *
+ * `keptTruncatedPages` counts the pages whose capture saw more images wider than
+ * displayed than it kept, so `images.larger-than-displayed` judged only the widest
+ * images there and its silence on them is partial.
+ *
  * One site row always (zeroes and a null share on a crawl with no capture, so a
  * reader sees it was asked), and one row per template that has a capture.
  */
@@ -474,6 +482,8 @@ async function imageMeasurement(db: Db, crawlId: string, self: MetricIdentity): 
     }
     for (const s of [site, sums]) {
       s.pages += 1;
+      // `kept` is the capture's widest-wasting few: on such a page the rule judged only those.
+      if (page.images.widerThanDisplayed > page.images.kept.length) s.keptTruncatedPages += 1;
       for (const key of IMAGE_SUM_KEYS) s[key] += page.images[key];
     }
   });
@@ -521,6 +531,7 @@ export const renderMetrics: MetricRule[] = [
     // rendered sample's images `images.larger-than-displayed` could judge.
     perScope("Template", [
       { key: "pages", label: "Pages" },
+      { key: "keptTruncatedPages", label: "Pages With Truncated Image List" },
       { key: "total", label: "Images" },
       { key: "measured", label: "Measured" },
       { key: "hidden", label: "Hidden" },
