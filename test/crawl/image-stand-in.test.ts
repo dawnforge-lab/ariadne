@@ -8,6 +8,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  IMAGE_LOOKUP_CONCURRENCY,
   IMAGES_MEASURE_SCRIPT,
   MAX_RENDER_IMAGES,
   RENDER_IMAGES_KEPT,
@@ -15,10 +16,12 @@ import {
   SRCSET_MAX_SIBLINGS,
   checkStoredImage,
   classifyImages,
+  perRenderLookup,
   readImageMeasurement,
   readSrcsetReply,
   srcsetStandIn,
   standInSvg,
+  type ImageDimensionLookup,
   type RenderImage,
   type StoredImage,
 } from "../../src/crawl/render/image-stand-in.js";
@@ -62,13 +65,13 @@ describe("classifyImages", () => {
       {
         total: 7,
         rows: [
-          [u("hidden.png"), 0, 0, "eager"],
-          [u("lazy.png"), 400, 300, "lazy"],
-          [u("plain.png"), 400, 300, "eager"],
-          [u("nodims.png"), 400, 300, "eager"],
-          [u("wide.png"), 400, 300, "eager"],
-          [u("exact.png"), 800, 600, "eager"],
-          [u("mid.png"), 600, 450, "eager"],
+          [u("hidden.png"), 0, 0, "eager", false],
+          [u("lazy.png"), 400, 300, "lazy", false],
+          [u("plain.png"), 400, 300, "eager", false],
+          [u("nodims.png"), 400, 300, "eager", false],
+          [u("wide.png"), 400, 300, "eager", false],
+          [u("exact.png"), 800, 600, "eager", false],
+          [u("mid.png"), 600, 450, "eager", false],
         ],
       },
       served,
@@ -83,6 +86,7 @@ describe("classifyImages", () => {
       lazyUnloaded: 1,
       notRequested: 1,
       noDimensions: 1,
+      broken: 0,
       widerThanDisplayed: 2,
       standIns: 3,
     });
@@ -114,13 +118,27 @@ describe("classifyImages", () => {
     ]);
   });
 
+  it("counts a stand-in the browser could not display as broken, never measured", () => {
+    // I1: e.g. a cors-mode request the stand-in did not satisfy. A broken
+    // image still has a box (the browser's broken-image glyph), which must
+    // never be read as an oversized image.
+    const url = `${BASE}cors.png`;
+    const result = classifyImages(
+      { total: 1, rows: [[url, 16, 16, "eager", true]] },
+      new Map<string, Served>([[url, { width: 1600, height: 1200, bytes: 1, widthFrom: "stored" }]]),
+      new Set([url]),
+    );
+    expect(result).toMatchObject({ broken: 1, measured: 0, widerThanDisplayed: 0, standIns: 1 });
+    expect(result.kept).toEqual([]);
+  });
+
   it("calls a box under 1×1 in either direction hidden, before anything else", () => {
     const url = `${BASE}a.png`;
     const served = new Map<string, Served>([
       [url, { width: 100, height: 100, bytes: 1, widthFrom: "stored" }],
     ]);
     const result = classifyImages(
-      { total: 2, rows: [[url, 0, 40, "eager"], [url, 40, 0, "lazy"]] },
+      { total: 2, rows: [[url, 0, 40, "eager", false], [url, 40, 0, "lazy", false]] },
       served,
       new Set([url]),
     );
@@ -131,12 +149,12 @@ describe("classifyImages", () => {
   it("keeps the 50 worst of 60 wider images, and says how many there were", () => {
     const served = new Map<string, Served>();
     const requested = new Set<string>();
-    const rows: [string, number, number, string][] = [];
+    const rows: [string, number, number, string, boolean][] = [];
     for (let i = 0; i < 60; i += 1) {
       const url = `${BASE}img-${String(i).padStart(2, "0")}.png`;
       served.set(url, { width: 1000 + i, height: 500, bytes: i, widthFrom: "stored" });
       requested.add(url);
-      rows.push([url, 100, 50, "eager"]);
+      rows.push([url, 100, 50, "eager", false]);
     }
     const result = classifyImages({ total: 60, rows }, served, requested);
     expect(result.measured).toBe(60);
@@ -156,7 +174,7 @@ describe("classifyImages", () => {
     ]);
     const urls = [...served.keys()];
     const result = classifyImages(
-      { total: 3, rows: urls.map((u) => [u, 100, 100, "eager"] as [string, number, number, string]) },
+      { total: 3, rows: urls.map((u) => [u, 100, 100, "eager", false] as [string, number, number, string, boolean]) },
       served,
       new Set(urls),
     );
@@ -166,7 +184,7 @@ describe("classifyImages", () => {
   it("never reports negative waste: an image shown larger than it is wastes nothing", () => {
     const url = `${BASE}up.png`;
     const result = classifyImages(
-      { total: 1, rows: [[url, 400, 400, "eager"]] },
+      { total: 1, rows: [[url, 400, 400, "eager", false]] },
       new Map<string, Served>([[url, { width: 100, height: 100, bytes: 1, widthFrom: "stored" }]]),
       new Set([url]),
     );
@@ -178,12 +196,73 @@ describe("classifyImages", () => {
   it("stores a url through the console's cap, and says it was cut", () => {
     const url = `${BASE}${"x".repeat(RENDER_CONSOLE_MAX_CHARS + 50)}.png`;
     const result = classifyImages(
-      { total: 1, rows: [[url, 10, 10, "eager"]] },
+      { total: 1, rows: [[url, 10, 10, "eager", false]] },
       new Map<string, Served>([[url, { width: 100, height: 100, bytes: 1, widthFrom: "stored" }]]),
       new Set([url]),
     );
     expect(result.kept[0]!.cut).toBe(true);
     expect(result.kept[0]!.url.length).toBe(RENDER_CONSOLE_MAX_CHARS);
+  });
+});
+
+describe("perRenderLookup (M2)", () => {
+  /** A lookup whose answers the test releases by hand, recording each call. */
+  function manualLookup() {
+    const calls: string[][] = [];
+    const pending: Array<() => void> = [];
+    let inFlight = 0;
+    let maxInFlight = 0;
+    const lookup: ImageDimensionLookup = async (urls) => {
+      calls.push([...urls]);
+      inFlight += 1;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      await new Promise<void>((resolve) => pending.push(resolve));
+      inFlight -= 1;
+      return new Map(urls.map((u) => [u, { width: 10, height: 10, bytes: null }]));
+    };
+    const releaseAll = async (): Promise<void> => {
+      // Let the queued calls reach the lookup first.
+      await new Promise((r) => setTimeout(r, 0));
+      while (pending.length > 0) {
+        pending.shift()!();
+        await new Promise((r) => setTimeout(r, 0));
+      }
+    };
+    return { lookup, calls, pending, releaseAll, max: () => maxInFlight };
+  }
+
+  it("asks for each URL once per render, however often the page requests it", async () => {
+    const m = manualLookup();
+    const once = perRenderLookup(m.lookup);
+    const a = once(["u1"]);
+    const b = once(["u1"]);
+    const c = once(["u1", "u2"]);
+    await m.releaseAll();
+    await Promise.all([a, b, c]);
+    expect(m.calls).toEqual([["u1"], ["u2"]]);
+    expect((await c).size).toBe(2);
+  });
+
+  it(`never has more than ${IMAGE_LOOKUP_CONCURRENCY} lookups waiting on the database at once`, async () => {
+    expect(IMAGE_LOOKUP_CONCURRENCY).toBe(4);
+    const m = manualLookup();
+    const capped = perRenderLookup(m.lookup);
+    const all = Array.from({ length: 12 }, (_, i) => capped([`u${i}`]));
+    await new Promise((r) => setTimeout(r, 0));
+    expect(m.pending.length).toBe(IMAGE_LOOKUP_CONCURRENCY);
+    await m.releaseAll();
+    const answers = await Promise.all(all);
+    expect(answers.every((a) => a.size === 1)).toBe(true);
+    expect(m.calls.length).toBe(12);
+    expect(m.max()).toBe(IMAGE_LOOKUP_CONCURRENCY);
+  });
+
+  it("passes a rejection through to every caller of that URL: it is ours", async () => {
+    const failing = perRenderLookup(async () => {
+      throw new Error("db down");
+    });
+    await expect(failing(["u"])).rejects.toThrow("db down");
+    await expect(failing(["u"])).rejects.toThrow("db down");
   });
 });
 
@@ -372,7 +451,7 @@ describe("IMAGES_MEASURE_SCRIPT and readImageMeasurement", () => {
   });
 
   it("accepts the script's shape", () => {
-    const value = { total: 2, rows: [["https://a/b.png", 10, 20, "lazy"]] };
+    const value = { total: 2, rows: [["https://a/b.png", 10, 20, "lazy", false]] };
     expect(readImageMeasurement(value)).toEqual(value);
   });
 
@@ -381,9 +460,11 @@ describe("IMAGES_MEASURE_SCRIPT and readImageMeasurement", () => {
       null,
       { total: -1, rows: [] },
       { total: 1, rows: [["u", 1, 1]] },
-      { total: 1, rows: [["u", "1", 1, "eager"]] },
-      { total: 1, rows: [["u", 1.5, 1, "eager"]] },
-      { total: 0, rows: [["u", 1, 1, "eager"]] },
+      { total: 1, rows: [["u", 1, 1, "eager"]] },
+      { total: 1, rows: [["u", 1, 1, "eager", "no"]] },
+      { total: 1, rows: [["u", "1", 1, "eager", false]] },
+      { total: 1, rows: [["u", 1.5, 1, "eager", false]] },
+      { total: 0, rows: [["u", 1, 1, "eager", false]] },
     ]) {
       expect(() => readImageMeasurement(bad), JSON.stringify(bad)).toThrow(/image measurement/);
     }

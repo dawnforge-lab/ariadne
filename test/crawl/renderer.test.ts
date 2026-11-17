@@ -2597,6 +2597,7 @@ describe("runRenderPass", () => {
         lazyUnloaded: 0,
         notRequested: 0,
         noDimensions: 0,
+        broken: 0,
         widerThanDisplayed: 1,
         standIns: 1,
         kept: [
@@ -3025,12 +3026,30 @@ describe("PageRenderer image stand-ins (Phase 29b)", () => {
       "/img/hidden": () =>
         pageHtml(`<div style="display:none"><img src="/hid.png" alt="h"></div><p>shown</p>`),
       "/img/no-dims": () => pageHtml(`<img src="/nodims.png" alt="n" width="200" height="100">`),
-      // The script writes the length of what it got into the title: the real
-      // PNG's byte count, never an SVG's.
+      // The same <img> as /img/same-origin, and a script that writes the
+      // length of what its own fetch got into the title: the real PNG's byte
+      // count, never an SVG's.
       "/img/fetch-big": () =>
         pageHtml(
-          `<script>fetch("/big.png").then(function (r) { return r.arrayBuffer(); })` +
+          `<img src="/big.png" alt="big" style="width:400px">` +
+            `<script>fetch("/big.png").then(function (r) { return r.arrayBuffer(); })` +
             `.then(function (b) { document.title = "bytes " + b.byteLength; });</script>`,
+        ),
+      // I1: cors-mode images from the CDN. Without an
+      // `Access-Control-Allow-Origin` on the stand-in the browser refuses it
+      // and draws a broken-image box.
+      "/img/cors": () =>
+        pageHtml(
+          `<img crossorigin="anonymous" src="${cdn.base}/cors-a.png" alt="a" style="width:300px">` +
+            `<img crossorigin="use-credentials" src="${cdn.base}/cors-c.png" alt="c" style="width:300px">`,
+        ),
+      // S1: a page that breaks the globals a main-world lookup would use, and
+      // a srcset candidate whose own size was never stored.
+      "/img/hostile": () =>
+        pageHtml(
+          `<script>Array.prototype.map = function () { throw new Error("no map"); };` +
+            `window.URL = function () { throw new Error("no URL"); };</script>` +
+            `<img srcset="h-400.png 400w, h-1600.png 1600w" sizes="100vw" alt="h" style="width:300px">`,
         ),
     };
     origin = await startCounting((path, res) => {
@@ -3050,6 +3069,9 @@ describe("PageRenderer image stand-ins (Phase 29b)", () => {
     });
     store(`${origin.base}/big.png`, { width: 1600, height: 1200, bytes: BIG_PNG.length });
     store(`${cdn.base}/hero.png`, { width: 1200, height: 800, bytes: 70_000 });
+    store(`${cdn.base}/cors-a.png`, { width: 1200, height: 800, bytes: 70_000 });
+    store(`${cdn.base}/cors-c.png`, { width: 1200, height: 800, bytes: 70_000 });
+    store(`${origin.base}/img/h-400.png`, { width: 400, height: 300, bytes: 9_000 });
     store(`${origin.base}/img/a-400.png`, { width: 400, height: 300, bytes: 9_000 });
     store(`${origin.base}/lazy.png`, { width: 800, height: 800, bytes: 1_000 });
     store(`${origin.base}/hid.png`, { width: 800, height: 800, bytes: 1_000 });
@@ -3175,8 +3197,8 @@ describe("PageRenderer image stand-ins (Phase 29b)", () => {
 
   it("(h) never lets a stand-in be served from the cache for the real URL", async () => {
     // Review Focus 1. P1 gets a stand-in for /big.png; P2, next on the SAME
-    // context (the one idle slot), fetches /big.png from script. The real
-    // request reaches the origin, paced.
+    // context (the one idle slot), carries the same <img> and also fetches
+    // /big.png from script.
     const p1 = await renderer.render(`${origin.base}/img/same-origin`);
     expect(p1.images!.standIns).toBe(1);
     const before = origin.count("/big.png");
@@ -3184,11 +3206,43 @@ describe("PageRenderer image stand-ins (Phase 29b)", () => {
     const p2 = await renderer.render(`${origin.base}/img/fetch-big`);
 
     expect(p2.error).toBeNull();
+    // P2's <img> made its OWN request, answered by its own stand-in: neither
+    // the HTTP cache nor the in-process image cache handed it P1's.
+    expect(p2.images).toMatchObject({ total: 1, measured: 1, standIns: 1, notRequested: 0 });
+    // The script's fetch went to the site, paced — the only /big.png request.
     expect(origin.count("/big.png")).toBe(before + 1);
     expect(p2.pacedRequests).toBe(2); // the document and the fetch
     expect(p2.cachedResponses).toBe(0);
     // The script read the REAL file's bytes, not an SVG's.
     expect(p2.title).toBe(`bytes ${BIG_PNG.length}`);
+  });
+
+  it("(I1) satisfies a cors-mode image's CORS check, anonymous and with credentials", async () => {
+    const result = await renderer.render(`${origin.base}/img/cors`);
+
+    expect(result.error).toBeNull();
+    expect(result.images).toMatchObject({ total: 2, measured: 2, broken: 0, standIns: 2 });
+    for (const kept of result.images!.kept) {
+      expect(kept).toMatchObject({ intrinsicWidth: 1200, displayedWidth: 300, displayedHeight: 200 });
+    }
+    expect(cdn.count("/cors-a.png")).toBe(0);
+    expect(cdn.count("/cors-c.png")).toBe(0);
+    expect(result.blockedRequests).toBe(0);
+  });
+
+  it("(S1) a page that breaks the globals cannot stop the render through the srcset lookup", async () => {
+    const result = await renderer.render(`${origin.base}/img/hostile`);
+
+    expect(result.error).toBeNull();
+    expect(result.rendered).toBe(true);
+    // The lookup ran in an isolated world, untouched by the page's globals.
+    expect(result.images).toMatchObject({ total: 1, measured: 1, noDimensions: 0 });
+    expect(result.images!.kept[0]).toMatchObject({
+      url: `${origin.base}/img/h-1600.png`,
+      intrinsicWidth: 1600,
+      intrinsicHeight: 1200,
+      widthFrom: "srcset-w",
+    });
   });
 
   it("(i) with no lookup, every image is aborted as before and counted as no-dimensions", async () => {

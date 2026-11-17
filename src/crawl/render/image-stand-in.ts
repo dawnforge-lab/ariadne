@@ -77,6 +77,64 @@ export type ImageDimensionLookup = (
   normalisedUrls: readonly string[],
 ) => Promise<ReadonlyMap<string, StoredImage>>;
 
+/**
+ * Lookups one render may have waiting on the database at once (M2). A page
+ * looping `new Image().src = "/x?" + i` pauses one image request per
+ * iteration; each would otherwise take a pool connection of the pass.
+ */
+export const IMAGE_LOOKUP_CONCURRENCY = 4;
+
+/**
+ * The per-render face of an `ImageDimensionLookup` (M2): each normalised URL
+ * is asked for ONCE per render (a URL asked again shares the first answer),
+ * and at most `concurrency` calls wait on `lookup` at a time; the rest queue
+ * in arrival order. Built per render and dropped with it, so what it
+ * remembers is O(one page's image URLs) (rule 6). A rejection reaches every
+ * caller of the URLs in that call: it is ours.
+ */
+export function perRenderLookup(
+  lookup: ImageDimensionLookup,
+  concurrency: number = IMAGE_LOOKUP_CONCURRENCY,
+): ImageDimensionLookup {
+  const known = new Map<string, Promise<StoredImage | undefined>>();
+  let running = 0;
+  const queued: Array<() => void> = [];
+  const claim = async (): Promise<void> => {
+    if (running < concurrency) {
+      running += 1;
+      return;
+    }
+    // Handed over by `free`, still counted in `running`.
+    await new Promise<void>((resolve) => queued.push(resolve));
+  };
+  const free = (): void => {
+    const next = queued.shift();
+    if (next === undefined) running -= 1;
+    else next();
+  };
+  return async (urls) => {
+    const missing = [...new Set(urls)].filter((url) => !known.has(url));
+    if (missing.length > 0) {
+      const call = (async () => {
+        await claim();
+        try {
+          return await lookup(missing);
+        } finally {
+          free();
+        }
+      })();
+      for (const url of missing) known.set(url, call.then((found) => found.get(url)));
+    }
+    const answers = await Promise.all(urls.map((url) => known.get(url)!));
+    const found = new Map<string, StoredImage>();
+    urls.forEach((url, i) => {
+      const image = answers[i];
+      if (image !== undefined) found.set(url, image);
+    });
+    return found;
+  };
+}
+
 function isDimension(n: unknown): n is number {
   return typeof n === "number" && Number.isInteger(n) && n >= 1 && n <= MAX_DIMENSION;
 }
@@ -136,7 +194,9 @@ export function srcsetStandIn(
  * fragment, is `requestUrl`. The first one found answers: `w` is its width
  * descriptor (null for a density or bare candidate), `candidates` are the
  * other candidates of the same attribute, resolved, deduplicated, at most
- * `SRCSET_MAX_SIBLINGS`. No element names it: null.
+ * `SRCSET_MAX_SIBLINGS`. No element names it: null. When two attributes list
+ * the same URL with different `w` descriptors (the page contradicting itself),
+ * the first in document order wins.
  *
  * WHILE THE DOCUMENT IS STILL BEING PARSED, a miss is not final, and the
  * answer is a Promise (the caller evaluates with `awaitPromise`). The
@@ -149,7 +209,11 @@ export function srcsetStandIn(
  * own completion, not a timer. A request from script or from an element made
  * after parsing always has its element already. A page that never finishes
  * parsing leaves the lookup waiting until the render closes it, which is
- * then a miss (renderer.ts).
+ * then a miss (renderer.ts). The wait is paid by EVERY main-frame image
+ * request with no stored size, not only by srcset ones — cross-origin ones
+ * included — since only the search can tell them apart: such a request is
+ * failed when the parser is done rather than at once. It holds nothing but
+ * itself.
  *
  * THE PARSER IS THE HTML SPEC'S "parse a srcset attribute" algorithm, step for
  * step (splitting loop, URL collection with trailing-comma removal, the
@@ -288,11 +352,11 @@ export interface SrcsetMatch {
 
 /**
  * The srcset lookup's value, checked — or null for "no match" AND for any
- * shape the script could not have produced. The script runs in the page's own
- * world, where the page can replace the globals it uses (`URL`, `Array`
- * methods); a value it bent is the page's doing, and costs one unmeasured
- * image (the request is then aborted and counted as `noDimensions`), never the
- * render.
+ * shape the script could not have produced. The renderer runs the script in an
+ * isolated world, whose globals the page cannot reach, so a bent value is not
+ * expected; checked anyway, because the DOM it reads is still the page's, and
+ * a value that is not a size costs one unmeasured image (the request is then
+ * aborted and counted as `noDimensions`), never the render.
  */
 export function readSrcsetReply(value: unknown): SrcsetMatch | null {
   if (value === null || typeof value !== "object") return null;
@@ -306,9 +370,20 @@ export function readSrcsetReply(value: unknown): SrcsetMatch | null {
 /**
  * `() => {total, rows}`, as an expression: the first `MAX_RENDER_IMAGES`
  * `<img>` elements of the main document, in document order, each as
- * `[currentSrc without its fragment, box width, box height, loading]`. The
- * box is `getBoundingClientRect`, rounded to whole CSS pixels; `loading` is the
- * reflected IDL value (`lazy` or `eager`).
+ * `[currentSrc without its fragment, box width, box height, loading, broken]`.
+ * The box is `getBoundingClientRect`, rounded to whole CSS pixels; `loading`
+ * is the reflected IDL value (`lazy` or `eager`); `broken` is
+ * `complete && naturalWidth === 0` — the browser finished with the image and
+ * has nothing to show (I1).
+ *
+ * The renderer evaluates it in an ISOLATED WORLD (renderer.ts), so a page
+ * that replaced `Array.prototype.push` or `getBoundingClientRect` in its own
+ * world can neither break nor falsify it: the DOM is shared, the globals and
+ * prototype objects are not.
+ *
+ * NOT SEEN: an `<img>` inside a shadow root. `getElementsByTagName` does not
+ * cross shadow boundaries, so such images are in neither `total` nor any
+ * bucket (their requests are still answered and counted in `standIns`).
  */
 export const IMAGES_MEASURE_SCRIPT = `(() => {
   const images = document.getElementsByTagName("img");
@@ -324,6 +399,7 @@ export const IMAGES_MEASURE_SCRIPT = `(() => {
       Math.round(box.width),
       Math.round(box.height),
       String(img.loading),
+      img.complete && img.naturalWidth === 0,
     ]);
   }
   return { total, rows };
@@ -332,7 +408,7 @@ export const IMAGES_MEASURE_SCRIPT = `(() => {
 /** What `IMAGES_MEASURE_SCRIPT` hands back. */
 export interface ImageMeasurement {
   total: number;
-  rows: [string, number, number, string][];
+  rows: [string, number, number, string, boolean][];
 }
 
 function isCount(n: unknown): n is number {
@@ -341,10 +417,9 @@ function isCount(n: unknown): n is number {
 
 /**
  * The measurement's value, checked, or THROW naming what came back. It runs in
- * the page (like `MEASURE_SCRIPT`), so a page that replaced the globals it
- * uses can bend it; the renderer evaluates it in phase 1, where a throw is
- * classified against the page rather than recorded as a measurement nobody
- * took.
+ * an isolated world the page cannot reach, so a wrong shape is not expected;
+ * the renderer evaluates it in phase 1, where a throw is classified rather
+ * than recorded as a measurement nobody took.
  */
 export function readImageMeasurement(value: unknown): ImageMeasurement {
   const bad = (): Error =>
@@ -358,11 +433,12 @@ export function readImageMeasurement(value: unknown): ImageMeasurement {
   for (const row of rows) {
     if (
       !Array.isArray(row) ||
-      row.length !== 4 ||
+      row.length !== 5 ||
       typeof row[0] !== "string" ||
       !isCount(row[1]) ||
       !isCount(row[2]) ||
-      typeof row[3] !== "string"
+      typeof row[3] !== "string" ||
+      typeof row[4] !== "boolean"
     ) {
       throw bad();
     }
@@ -381,7 +457,11 @@ export interface RenderImage {
   /** The `<img>` box in CSS px at the fixed 1280×900 viewport, DPR 1. */
   displayedWidth: number;
   displayedHeight: number;
-  /** `max(0, intrinsic area − displayed area)`. */
+  /**
+   * `max(0, intrinsic area − displayed area)`. A page-declared `w` descriptor
+   * is bounded at Postgres `integer` only, so on an absurd one the area can
+   * pass 2^53 and this is then a double, not an exact count.
+   */
   wastedPixels: number;
   /** The stored transferred size; null for a `srcset-w` stand-in, whose file nobody fetched. */
   bytes: number | null;
@@ -393,7 +473,7 @@ export interface RenderImage {
  * One render's images, as `pages.render_images` stores them. Every count is
  * over the `examined` rows; `total - examined` were past `MAX_RENDER_IMAGES`.
  * Each examined image is in exactly one of `hidden`, `lazyUnloaded`,
- * `notRequested`, `measured` and `noDimensions`.
+ * `notRequested`, `measured`, `broken` and `noDimensions`.
  */
 export interface RenderImages {
   /** Every `<img>` in the main document. */
@@ -408,8 +488,19 @@ export interface RenderImages {
   lazyUnloaded: number;
   /** Never requested otherwise (no source, an unsupported type, a srcset the page never chose). */
   notRequested: number;
-  /** Requested, but no size was known for it, so it was aborted as before 29b. */
+  /**
+   * Requested, but no size was known for it, so it was aborted as before 29b.
+   * Also an image whose lookup was still running when the page was measured:
+   * it had no stand-in yet, so it is counted here rather than guessed.
+   */
   noDimensions: number;
+  /**
+   * A stand-in WAS served and the browser could not display it (`complete`
+   * with `naturalWidth` 0) — e.g. a cors-mode request the answer did not
+   * satisfy. Never `measured`: its box is the broken-image glyph, not the
+   * image's.
+   */
+  broken: number;
   /** Of `measured`, the images whose intrinsic width exceeds their displayed width. */
   widerThanDisplayed: number;
   /** Distinct image URLs this render answered with a stand-in (any image, `<img>` or not). */
@@ -425,14 +516,15 @@ export interface RenderImages {
  *  1. a box under 1×1 → `hidden` (nothing is shown, so nothing is wasted on screen);
  *  2. its `currentSrc` was never requested → `lazyUnloaded` when it is
  *     `loading=lazy`, else `notRequested`;
- *  3. it was answered with a stand-in → `measured`;
+ *  3. it was answered with a stand-in → `broken` when the browser could not
+ *     display it, else `measured`;
  *  4. otherwise → `noDimensions` (requested and aborted).
  *
  * `served` and `requested` are keyed by the request URL without its fragment,
  * which is what `currentSrc` without its fragment is.
  */
 export function classifyImages(
-  measured: { total: number; rows: [string, number, number, string][] },
+  measured: { total: number; rows: [string, number, number, string, boolean][] },
   served: ReadonlyMap<string, StoredImage & { widthFrom: RenderImage["widthFrom"] }>,
   requested: ReadonlySet<string>,
 ): RenderImages {
@@ -444,11 +536,12 @@ export function classifyImages(
     lazyUnloaded: 0,
     notRequested: 0,
     noDimensions: 0,
+    broken: 0,
     widerThanDisplayed: 0,
     standIns: served.size,
   };
   const wider: Array<Omit<RenderImage, "url" | "cut"> & { rawUrl: string }> = [];
-  for (const [src, displayedWidth, displayedHeight, loading] of measured.rows) {
+  for (const [src, displayedWidth, displayedHeight, loading, broken] of measured.rows) {
     if (displayedWidth < 1 || displayedHeight < 1) {
       out.hidden += 1;
       continue;
@@ -461,6 +554,10 @@ export function classifyImages(
     const image = served.get(src);
     if (image === undefined) {
       out.noDimensions += 1;
+      continue;
+    }
+    if (broken) {
+      out.broken += 1;
       continue;
     }
     out.measured += 1;

@@ -119,7 +119,19 @@
  *    same-origin: skipped as paint-only), and so does every image when
  *    `imageDimensions` is null. A lookup that rejects is OURS: it shuts the
  *    render and `render` throws, like any protocol command of ours that
- *    failed.
+ *    failed. Per render, each URL is looked up once and at most
+ *    `IMAGE_LOOKUP_CONCURRENCY` lookups wait on the database at a time
+ *    (`perRenderLookup`), so a page that loops image requests cannot flood
+ *    the pass's pool. A cors-mode image (`crossorigin`) gets
+ *    `Access-Control-Allow-Origin` set to its own request's `Origin`, with
+ *    credentials allowed: still answered here, still sent nowhere. The
+ *    srcset lookup and the `<img>` measurement run in an ISOLATED WORLD of
+ *    the main frame (`Page.createIsolatedWorld`): the DOM is the page's, the
+ *    globals are not, so a page that replaced `URL` or `Array.prototype` can
+ *    neither break nor bend them, and any lookup failure the page could cause
+ *    is a miss — one unmeasured image, never a stopped pass. An image whose
+ *    lookup is still running when the page is measured has no stand-in yet
+ *    and is counted `noDimensions`.
  *  - **No silent fallbacks (rule 7).** A timeout, a navigation error and a
  *    policy refusal are three different classified strings on the page row, and
  *    every one of them leaves `rendered = false` with the five measurement
@@ -194,6 +206,7 @@ import {
   SRCSET_LOOKUP_SCRIPT,
   checkStoredImage,
   classifyImages,
+  perRenderLookup,
   readImageMeasurement,
   readSrcsetReply,
   srcsetStandIn,
@@ -530,6 +543,36 @@ type ServedImage = StoredImage & { widthFrom: RenderImage["widthFrom"] };
  */
 const CONTEXT_GONE =
   /Execution context was destroyed|Cannot find context with specified id|Inspected target navigated or closed/i;
+
+/** The isolated world the srcset lookup and the image measurement run in. */
+const ISOLATED_WORLD_NAME = "ariadne-render-images";
+
+/** The slice of a `Runtime.evaluate` reply the image code reads. */
+interface EvaluateReply {
+  result: { value?: unknown };
+  exceptionDetails?: { text: string };
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+/**
+ * OUR CDP session or target is gone — not the page's document. A context
+ * destroyed by a navigation says "navigated or closed" too, so it is ruled
+ * out first.
+ */
+function isSessionGone(error: unknown): boolean {
+  return !CONTEXT_GONE.test(errorMessage(error)) && isTargetClosed(error);
+}
+
+/** A request header by name, in any case, or null. */
+function headerOf(headers: Record<string, string>, name: string): string | null {
+  for (const [key, value] of Object.entries(headers)) {
+    if (key.toLowerCase() === name) return value;
+  }
+  return null;
+}
 
 /** What `MEASURE_SCRIPT` hands back. Counts only — no HTML crosses the seam. */
 interface Measurement {
@@ -913,6 +956,17 @@ class RenderTraffic {
   private readonly requested = new Set<string>();
   private readonly served = new Map<string, ServedImage>();
   private readonly standInIds = new Set<string>();
+  /**
+   * `imageDimensions` behind this render's dedupe and concurrency cap
+   * (`perRenderLookup`, M2), or null when there are no stand-ins. Per render.
+   */
+  private readonly imageLookup: ImageDimensionLookup | null;
+  /**
+   * The execution context of this render's isolated world in the main frame
+   * (`isolatedEvaluate`), or null until it is made — and again after a
+   * navigation destroyed it.
+   */
+  private isolatedContextId: number | null = null;
 
   constructor(
     private readonly cdp: CDPSession,
@@ -930,8 +984,9 @@ class RenderTraffic {
     /** The crawl's credentials, decided per released request (Phase 27c). */
     private readonly credentials: CredentialTarget | null,
     /** Stored image sizes (Phase 29b); null: no stand-ins, every image aborted. */
-    private readonly imageDimensions: ImageDimensionLookup | null,
+    imageDimensions: ImageDimensionLookup | null,
   ) {
+    this.imageLookup = imageDimensions === null ? null : perRenderLookup(imageDimensions);
     this.broken = new Promise<never>((_, reject) => {
       this.breakWith = reject;
     });
@@ -1056,6 +1111,22 @@ class RenderTraffic {
     return classifyImages(measurement, this.served, this.requested);
   }
 
+  /**
+   * Every `<img>` box of the document now in the main frame
+   * (`IMAGES_MEASURE_SCRIPT`), read in the isolated world so the page's own
+   * globals can neither break nor falsify it. Throws on anything else —
+   * `render` calls it in phase 1, where a navigation under it is classified.
+   */
+  async measureImages(): Promise<ImageMeasurement> {
+    const reply = await this.isolatedEvaluate(IMAGES_MEASURE_SCRIPT);
+    if (reply.exceptionDetails !== undefined) {
+      throw new Error(
+        `image measurement threw in the isolated world: ${reply.exceptionDetails.text}`,
+      );
+    }
+    return readImageMeasurement(reply.result.value ?? null);
+  }
+
   /** The counters, and a snapshot of what the page reported so far. */
   evidence(): TrafficEvidence {
     return {
@@ -1108,8 +1179,8 @@ class RenderTraffic {
       // site's 200 is what a stand-in must never do: such a request (the
       // protocol gives every Request-stage pause one in practice) is aborted
       // as before and is counted as `noDimensions` — visible, not guessed.
-      if (this.imageDimensions !== null && networkId !== undefined) {
-        const standIn = await this.standInFor(this.imageDimensions, event, requestUrl);
+      if (this.imageLookup !== null && networkId !== undefined) {
+        const standIn = await this.standInFor(this.imageLookup, event, requestUrl);
         if (!this.open) {
           await this.fail(event);
           return;
@@ -1235,15 +1306,18 @@ class RenderTraffic {
 
   /**
    * Ask the main frame which `srcset` candidate `requestUrl` is
-   * (`SRCSET_LOOKUP_SCRIPT`), with the URL passed as a JSON string literal —
-   * never spliced into the script as raw text.
+   * (`SRCSET_LOOKUP_SCRIPT`), in this render's isolated world, with the URL
+   * passed as a JSON string literal — never spliced into the script as raw
+   * text.
    *
-   * A PAGE THAT THROWS OR NAVIGATES DURING THE LOOKUP IS A MISS, NOT A FAILED
-   * RENDER: it is the page's doing (a navigation destroys the context the
-   * script ran in; a page that replaced a global the script uses makes it
-   * throw or answer nonsense), and what it costs is one unmeasured image —
-   * the request is aborted as before and counted as `noDimensions`. Anything
-   * else the protocol says is ours and propagates.
+   * ANY FAILURE OF THE LOOKUP IS A MISS, NOT A FAILED RENDER (S1), with one
+   * exception. What can make it fail is the page's doing: a navigation
+   * destroys the context the script ran in, a document can be gone, a page
+   * can make the DOM it reads strange. That costs one unmeasured image — the
+   * request is aborted as before and counted as `noDimensions` — and never the
+   * pass, which is what a hostile page could otherwise stop by making this
+   * throw. The exception is clearly ours: our own CDP session closed while the
+   * render is still open, which propagates like any broken command of ours.
    *
    * `awaitPromise`: while the document is still being parsed, a miss waits for
    * the parser to finish and searches once more (the preload scanner asks for
@@ -1252,21 +1326,51 @@ class RenderTraffic {
    * that ends first fails the request and closes the page under the lookup.
    */
   private async srcsetMatch(requestUrl: string): Promise<SrcsetMatch | null> {
-    let reply: { result: { value?: unknown }; exceptionDetails?: unknown };
+    let reply: EvaluateReply;
     try {
-      reply = await this.cdp.send("Runtime.evaluate", {
-        expression: `(${SRCSET_LOOKUP_SCRIPT})(${JSON.stringify(requestUrl)})`,
-        returnByValue: true,
-        awaitPromise: true,
-      });
+      reply = await this.isolatedEvaluate(
+        `(${SRCSET_LOOKUP_SCRIPT})(${JSON.stringify(requestUrl)})`,
+      );
     } catch (error) {
-      if (CONTEXT_GONE.test(error instanceof Error ? error.message : String(error))) return null;
-      // The render ended under the lookup and its page is closing.
-      if (!this.open && isTargetClosed(error)) return null;
-      throw error;
+      if (this.open && isSessionGone(error)) throw error;
+      return null;
     }
     if (reply.exceptionDetails !== undefined) return null;
     return readSrcsetReply(reply.result.value ?? null);
+  }
+
+  /**
+   * Evaluate `expression` in this render's isolated world of the main frame —
+   * same DOM, separate globals and prototypes, so nothing the page assigns
+   * reaches it. The world is made on first use and made again when a
+   * navigation has destroyed its context (one retry, on a fresh world).
+   */
+  private async isolatedEvaluate(expression: string): Promise<EvaluateReply> {
+    for (;;) {
+      const fresh = this.isolatedContextId === null;
+      if (fresh) {
+        const world = await this.cdp.send("Page.createIsolatedWorld", {
+          frameId: this.mainFrameId,
+          worldName: ISOLATED_WORLD_NAME,
+        });
+        this.isolatedContextId = world.executionContextId;
+      }
+      const contextId = this.isolatedContextId;
+      try {
+        return await this.cdp.send("Runtime.evaluate", {
+          expression,
+          contextId: contextId ?? undefined,
+          returnByValue: true,
+          awaitPromise: true,
+        });
+      } catch (error) {
+        if (!CONTEXT_GONE.test(errorMessage(error))) throw error;
+        // That document is gone; the next evaluate makes a world in the new
+        // one. A world made a moment ago and already gone is not retried.
+        if (this.isolatedContextId === contextId) this.isolatedContextId = null;
+        if (fresh) throw error;
+      }
+    }
   }
 
   /**
@@ -1284,15 +1388,28 @@ class RenderTraffic {
     // Recorded BEFORE the answer, so the response it produces is recognised.
     this.standInIds.add(networkId);
     this.served.set(requestUrl, image);
+    const headers = [
+      { name: "content-type", value: "image/svg+xml" },
+      // NEVER STORED: the context's HTTP cache outlives this page, and a
+      // later page's request for the real file must go to the site.
+      { name: "cache-control", value: "no-store" },
+    ];
+    // A CORS-MODE image (`crossorigin`, I1) carries an `Origin`, and the
+    // browser refuses an answer that does not allow it — a broken-image box
+    // that would then be measured as the image. So the stand-in allows
+    // exactly that origin, with credentials (`use-credentials` needs both).
+    // Only the headers change: it is still answered here and sent nowhere.
+    const requestOrigin = headerOf(event.request.headers, "origin");
+    if (requestOrigin !== null) {
+      headers.push(
+        { name: "access-control-allow-origin", value: requestOrigin },
+        { name: "access-control-allow-credentials", value: "true" },
+      );
+    }
     await this.command("Fetch.fulfillRequest", {
       requestId: event.requestId,
       responseCode: 200,
-      responseHeaders: [
-        { name: "content-type", value: "image/svg+xml" },
-        // NEVER STORED: the context's HTTP cache outlives this page, and a
-        // later page's request for the real file must go to the site.
-        { name: "cache-control", value: "no-store" },
-      ],
+      responseHeaders: headers,
       body: Buffer.from(standInSvg(image.width, image.height), "utf8").toString("base64"),
     });
   }
@@ -2136,10 +2253,10 @@ export class PageRenderer {
         // something and is right to classify.
         const measured = (await page.evaluate(MEASURE_SCRIPT)) as Measurement;
         // Every `<img>` box (Phase 29b), after the settle and in the same
-        // document — here for the same reason as the line above. A shape the
-        // script could not have produced (the page bent a global it uses)
-        // throws here and is classified with the page.
-        const imageRows = readImageMeasurement(await page.evaluate(IMAGES_MEASURE_SCRIPT));
+        // document — in the isolated world, so the page's globals cannot
+        // break or bend it, and here for the same reason as the line above:
+        // a navigation under it is the page's doing and is classified.
+        const imageRows = await traffic.measureImages();
         navigated = { finalUrl, measured, imageRows };
       } catch (error) {
         // Ours first: a protocol command the interception could not issue
