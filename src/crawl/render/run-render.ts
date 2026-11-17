@@ -108,6 +108,7 @@ import {
   type RenderResult,
   type UnpinnedHost,
 } from "./renderer.js";
+import type { ImageDimensionLookup, StoredImage } from "./image-stand-in.js";
 import { parseStoredPlatformProfile, type StoredPlatformProfile } from "../platform.js";
 import { DEFAULT_MAX_DELAY_MS, HostGate, throttleRecordOf } from "../politeness.js";
 import { UrlPolicyError, type AddressResolver } from "../url-policy.js";
@@ -496,6 +497,37 @@ export async function refuseLiveCrawl(db: Db, crawlId: string): Promise<Awaited<
 }
 
 /**
+ * The renderer's image-size lookup over THIS crawl's `resources` (Phase 29b,
+ * ruling R5): the rows whose URL is one of `normalisedUrls` and whose size the
+ * resource pass read (`width is not null` — `height` is set with it), with
+ * their transferred bytes. One query per call, keyed by the table's unique
+ * `(crawl_id, url)` index, so the renderer asks per image request and holds
+ * nothing crawl-wide (rule 6). A failed query rejects, and the renderer lets
+ * that stop the render: it is ours, not the site's.
+ */
+export function resourceImageLookup(db: Pick<Db, "execute">, crawlId: string): ImageDimensionLookup {
+  return async (normalisedUrls) => {
+    const found = new Map<string, StoredImage>();
+    if (normalisedUrls.length === 0) return found;
+    const res = await db.execute(sql`
+      select url, width, height, bytes
+      from resources
+      where crawl_id = ${crawlId}
+        and url = any(${sql.param([...normalisedUrls])}::text[])
+        and width is not null`);
+    for (const row of res.rows as Array<{
+      url: string;
+      width: number;
+      height: number;
+      bytes: number | null;
+    }>) {
+      found.set(row.url, { width: row.width, height: row.height, bytes: row.bytes });
+    }
+    return found;
+  };
+}
+
+/**
  * Run the render pass for `crawlId`.
  *
  * Throws — loudly, before touching the frontier — if the crawl is still live,
@@ -629,6 +661,8 @@ export async function runRenderPass(
     renderer = await PageRenderer.launch({
       origin,
       htmlDir,
+      // Image stand-ins (Phase 29b): sizes from this crawl's own resources.
+      imageDimensions: resourceImageLookup(db, crawlId),
       userAgent: cfg.userAgent,
       perHostDelayMs: profiled.perHostDelayMs,
       robotsCrawlDelaySec: cfg.robotsCrawlDelaySec ?? null,

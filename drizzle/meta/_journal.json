@@ -393,6 +393,13 @@
       "when": 1794911691607,
       "tag": "0055_resources_image_size",
       "breakpoints": true
+    },
+    {
+      "idx": 56,
+      "version": "7",
+      "when": 1794914923022,
+      "tag": "0056_pages_render_images",
+      "breakpoints": true
     }
   ]
 }

@@ -28,9 +28,15 @@ import { readFileSync } from "node:fs";
  * with ", ", as `robots_meta` does from extraction 2; at version 1 it held the
  * first one only. `render.noindex-changed` compares a row only when its two
  * readings have the same definition (both stamps at least 2, or both below).
+ * Version 3 (Phase 29b, migration 0056): the render answers image requests with
+ * true-size SVG stand-ins from the resource pass's stored sizes and measures
+ * every `<img>` box (`pages.render_images`). 29b's accessibility capture joins
+ * this same version before the phase merges, so no stored row is a partial 3.
+ * A row below 3 has no image capture: its null there means "not captured",
+ * never "no images".
  */
 export const EXTRACTION_VERSION = 4;
-export const RENDER_CAPTURE_VERSION = 2;
+export const RENDER_CAPTURE_VERSION = 3;
 
 const REDACTED_REQUEST_HEADERS = new Set(["authorization", "cookie", "proxy-authorization"]);
 

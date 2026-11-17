@@ -13,6 +13,8 @@ const target = process.argv[2] ?? "https://example.com/";
 const renderer = await PageRenderer.launch({
   origin: new URL(target).origin,
   htmlDir: "/tmp",
+  // No crawl, so no stored image sizes: every image is aborted, as before 29b.
+  imageDimensions: null,
   userAgent: "ariadne-launch-check",
   perHostDelayMs: 0,
 });

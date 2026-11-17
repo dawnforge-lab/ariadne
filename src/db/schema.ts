@@ -8,6 +8,7 @@ import type { ScheduleCrawl } from "../schedule/store.js";
 import type { StoredHostSpacing } from "../crawl/politeness.js";
 import type { StoredPlatformProfile } from "../crawl/platform.js";
 import type { RenderConsole } from "../crawl/render/console-capture.js";
+import type { RenderImages } from "../crawl/render/image-stand-in.js";
 import type { StoredResponseHeaders } from "../crawl/response-headers.js";
 import type { StructuredDataFormat, StructuredDataSkips } from "../crawl/parse/page-analyzer.js";
 import type { BlockValidation } from "../rules/schema-org/validate.js";
@@ -1040,6 +1041,20 @@ export const pages = pgTable("pages", {
   // console is a non-null capture with zero counts. Shape: `RenderConsole`
   // (src/crawl/render/console-capture.ts).
   renderConsole: jsonb("render_console").$type<RenderConsole>(),
+  // THE RENDERED PAGE'S IMAGES, MEASURED (Phase 29b, migration 0056; render
+  // capture 3). The browser answered each image request whose URL this crawl's
+  // `resources` had sized with a blank SVG of that intrinsic size, then measured
+  // every `<img>` box (the first `MAX_RENDER_IMAGES` in document order) at the
+  // fixed 1280×900 viewport, device-pixel ratio 1, without scrolling. Counts of
+  // hidden, lazy-unloaded, never-requested and unsized images, and the
+  // `RENDER_IMAGES_KEPT` images whose intrinsic width most exceeds their box.
+  //
+  // NULLABLE: null means the page was not rendered, its render failed (or was
+  // refused before a browser page opened), or it was rendered before capture 3
+  // (`render_version` < 3). It never means "no images": a page without any is a
+  // non-null capture with `total: 0`. Shape: `RenderImages`
+  // (src/crawl/render/image-stand-in.ts).
+  renderImages: jsonb("render_images").$type<RenderImages>(),
 }, (t) => [
   uniqueIndex("pages_crawl_url").on(t.crawlId, t.url),
   index("pages_crawl_normalised").on(t.crawlId, t.urlNormalised),

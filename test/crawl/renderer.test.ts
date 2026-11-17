@@ -36,7 +36,7 @@ import { and, eq, sql } from "drizzle-orm";
 
 import { closeDb, createDb, type Db } from "../../src/db/client.js";
 import { runMigrations } from "../../src/db/migrate.js";
-import { crawls, frontier, pages } from "../../src/db/schema.js";
+import { crawls, frontier, pages, resources } from "../../src/db/schema.js";
 import { throttleRecordOf, type HostSpacingEntry } from "../../src/crawl/politeness.js";
 import {
   completeUrls,
@@ -59,12 +59,19 @@ import {
 } from "../../src/crawl/render/renderer.js";
 import type { RenderConsole } from "../../src/crawl/render/console-capture.js";
 import { analyzeHtml } from "../../src/crawl/parse/page-analyzer.js";
-import { isSameOrigin } from "../../src/crawl/parse/url-utils.js";
+import { isSameOrigin, normalizeUrl } from "../../src/crawl/parse/url-utils.js";
+import type {
+  ImageDimensionLookup,
+  RenderImages,
+  StoredImage,
+} from "../../src/crawl/render/image-stand-in.js";
+import { pngBytes } from "../fixtures/images.js";
 import { UrlPolicyError } from "../../src/crawl/url-policy.js";
 import {
   RENDER_PASS_DEFAULTS,
   RenderPassRefusal,
   renderLeaseSeconds,
+  resourceImageLookup,
   runRenderPass,
 } from "../../src/crawl/render/run-render.js";
 import { LOCAL_TENANT } from "../../src/tenant.js";
@@ -478,6 +485,14 @@ async function startSite(otherOrigin: () => string): Promise<Site> {
       return;
     }
     if (path === "/reset-script") return html(resetScriptHtml());
+    if (path === "/img-page") {
+      // Phase 29b: one image the crawl's resources sized, one it could not.
+      return html(
+        `<!doctype html><html lang="en"><head><title>Img</title></head><body>` +
+          `<img src="/sized.png" alt="s" style="width:100px">` +
+          `<img src="/unsized.png" alt="u" width="20" height="20"></body></html>`,
+      );
+    }
     if (path === "/reset.js") {
       // No response at all: the socket goes before a status line is written.
       req.socket.destroy();
@@ -651,6 +666,7 @@ describe("PageRenderer", () => {
     renderer = await PageRenderer.launch({
       origin: site.base,
       htmlDir,
+      imageDimensions: null,
       userAgent: "AriadneBot/0.1 (render test)",
       perHostDelayMs: 0,
       // No `navigationTimeoutMs`: the production 15s. Every page this renderer
@@ -803,6 +819,7 @@ describe("PageRenderer", () => {
     const doomed = await PageRenderer.launch({
       origin: site.base,
       htmlDir: missing,
+      imageDimensions: null,
       userAgent: "AriadneBot/0.1 (render test)",
       perHostDelayMs: 0,
       settleMs: SETTLE_MS,
@@ -886,6 +903,8 @@ describe("PageRenderer", () => {
     expect(result.rendered).toBe(false);
     expect(result.error).toBe(`off-site navigation: ${third.base}/elsewhere`);
     expect(result.wordCount).toBeNull();
+    // Phase 29b: no image measurement on a failed render.
+    expect(result.images).toBeNull();
   });
 
   it("classifies a URL the policy refuses, without opening a page", async () => {
@@ -897,6 +916,7 @@ describe("PageRenderer", () => {
     expect(result.wordCount).toBeNull();
     // No page was opened, so nothing was looked at: null, not zero counts.
     expect(result.console).toBeNull();
+    expect(result.images).toBeNull();
   });
 
   // -------------------------------------------------------------------------
@@ -1029,6 +1049,7 @@ describe("PageRenderer", () => {
     const hangRenderer = await PageRenderer.launch({
       origin: site.base,
       htmlDir,
+      imageDimensions: null,
       userAgent: "AriadneBot/0.1 (render test)",
       perHostDelayMs: 0,
       navigationTimeoutMs: NAV_TIMEOUT_MS,
@@ -1063,6 +1084,7 @@ describe("PageRenderer", () => {
     const hangRenderer = await PageRenderer.launch({
       origin: site.base,
       htmlDir,
+      imageDimensions: null,
       userAgent: "AriadneBot/0.1 (render test)",
       perHostDelayMs: 0,
       navigationTimeoutMs: NAV_TIMEOUT_MS,
@@ -1080,6 +1102,7 @@ describe("PageRenderer", () => {
       );
       expect(result.wordCount).toBeNull();
       expect(result.redirectUrl).toBeNull();
+      expect(result.images).toBeNull();
     } finally {
       await hangRenderer.close();
     }
@@ -1128,6 +1151,7 @@ describe("PageRenderer under the crawl's pacing (Phase 24a)", () => {
     return PageRenderer.launch({
       origin: site.base,
       htmlDir,
+      imageDimensions: null,
       userAgent: "AriadneBot/0.1 (render pacing test)",
       perHostDelayMs: 0,
       settleMs: SETTLE_MS,
@@ -1494,6 +1518,7 @@ describe("PageRenderer under the crawl's pacing (Phase 24a)", () => {
     const renderer = await PageRenderer.launch({
       origin,
       htmlDir,
+      imageDimensions: null,
       userAgent: "AriadneBot/0.1 (render pin test)",
       perHostDelayMs: 0,
       settleMs: SETTLE_MS,
@@ -1534,6 +1559,7 @@ describe("PageRenderer under the crawl's pacing (Phase 24a)", () => {
     const renderer = await PageRenderer.launch({
       origin: `http://shop.test:${port}`,
       htmlDir,
+      imageDimensions: null,
       userAgent: "AriadneBot/0.1 (render pin test)",
       perHostDelayMs: 0,
       settleMs: SETTLE_MS,
@@ -1565,6 +1591,7 @@ describe("PageRenderer under the crawl's pacing (Phase 24a)", () => {
     const renderer = await PageRenderer.launch({
       origin: `http://shop.test:${port}`,
       htmlDir,
+      imageDimensions: null,
       userAgent: "AriadneBot/0.1 (render pin test)",
       perHostDelayMs: 0,
       settleMs: SETTLE_MS,
@@ -1606,6 +1633,7 @@ describe("PageRenderer under the crawl's pacing (Phase 24a)", () => {
       PageRenderer.launch({
         origin: "http://shop.test:8080",
         htmlDir,
+        imageDimensions: null,
         userAgent: "AriadneBot/0.1 (render pin test)",
         perHostDelayMs: 0,
         allowPrivate: true,
@@ -1622,6 +1650,7 @@ describe("PageRenderer under the crawl's pacing (Phase 24a)", () => {
       PageRenderer.launch({
         origin: "http://shop.test:8080",
         htmlDir,
+        imageDimensions: null,
         userAgent: "AriadneBot/0.1 (render pin test)",
         perHostDelayMs: 0,
         resolve: async (_host, type) => (type === "A" ? ["93.184.216.34", "127.0.0.1"] : []),
@@ -2525,6 +2554,7 @@ describe("runRenderPass", () => {
       cachedResponses: 0,
       unpacedNetworkRequests: 0,
       console: null,
+      images: null,
     };
 
     await expect(writeRenderResult(db, crawlId, ghost)).rejects.toThrow(/no page row/i);
@@ -2557,6 +2587,32 @@ describe("runRenderPass", () => {
       cachedResponses: 0,
       unpacedNetworkRequests: 0,
       console: null,
+      // Phase 29b: an image URL is the site's string too; the writer's
+      // `storableDeep` is the boundary for it as for every other.
+      images: {
+        total: 1,
+        examined: 1,
+        measured: 1,
+        hidden: 0,
+        lazyUnloaded: 0,
+        notRequested: 0,
+        noDimensions: 0,
+        widerThanDisplayed: 1,
+        standIns: 1,
+        kept: [
+          {
+            url: "https://x/a\u0000\uD800.png",
+            cut: false,
+            intrinsicWidth: 20,
+            intrinsicHeight: 10,
+            displayedWidth: 10,
+            displayedHeight: 5,
+            wastedPixels: 150,
+            bytes: 7,
+            widthFrom: "stored",
+          },
+        ],
+      },
     };
 
     await writeRenderResult(db, crawlId, result);
@@ -2566,20 +2622,21 @@ describe("runRenderPass", () => {
     expect(row.renderedRobotsMeta).toBe("noindex␀");
     expect(row.renderedMetaDescription).toBe("d�");
     expect(row.renderedH1Text).toBe("H␀�");
+    expect((row.renderImages as RenderImages).kept[0]!.url).toBe("https://x/a␀�.png");
   });
 
   // -------------------------------------------------------------------------
   // Phase 25: render_console and render_version on the page row.
   // -------------------------------------------------------------------------
 
-  it("writes render_console and render_version 2", async () => {
+  it("writes render_console and render_version 3", async () => {
     const crawlId = await newCrawl(["/console-errors", "/console-clean"]);
 
     const summary = await runRenderPass(db, crawlId, passConfig());
 
     expect(summary.failures).toBe(0);
     const errors = await pageRow(crawlId, "/console-errors");
-    expect(errors.renderVersion).toBe(2);
+    expect(errors.renderVersion).toBe(3);
     const stored = errors.renderConsole as RenderConsole;
     expect(stored.exceptionsTotal).toBeGreaterThanOrEqual(1);
     expect(stored.console).toContainEqual({ level: "error", text: "site says no", cut: false });
@@ -2592,7 +2649,7 @@ describe("runRenderPass", () => {
     expect(stored.blockedByRenderer.thirdParty).toBeGreaterThanOrEqual(1);
 
     const clean = await pageRow(crawlId, "/console-clean");
-    expect(clean.renderVersion).toBe(2);
+    expect(clean.renderVersion).toBe(3);
     expect(clean.renderConsole).toEqual({
       console: [],
       consoleTotal: 0,
@@ -2613,7 +2670,7 @@ describe("runRenderPass", () => {
 
     expect(summary.rendered).toBe(1);
     const row = await pageRow(crawlId, "/console-hostile");
-    expect(row.renderVersion).toBe(2);
+    expect(row.renderVersion).toBe(3);
     const stored = row.renderConsole as RenderConsole;
     // The NUL is marked as U+2400 (␀), never dropped; the lone surrogate is U+FFFD.
     expect(stored.console).toEqual([
@@ -2623,7 +2680,7 @@ describe("runRenderPass", () => {
     expect(stored.exceptions[0]!.text).toContain("thrown nul:\u2400 lone:\uFFFD");
   });
 
-  it("a pre-browser policy refusal writes render_version 2 with render_console null", async () => {
+  it("a pre-browser policy refusal writes render_version 3 with render_console and render_images null", async () => {
     // `www.` answers a metadata address, so it is left out of the pin at
     // launch and a page on it is refused before any browser page opens.
     const port = new URL(site.base).port;
@@ -2652,8 +2709,64 @@ describe("runRenderPass", () => {
     expect(row.renderError).toMatch(/^policy refusal: www\.shop\.test was not approved/);
     // The render writer wrote this row (its stamp says so), and nothing was
     // looked at: null, which `render_version` tells apart from a pre-25 null.
-    expect(row.renderVersion).toBe(2);
+    expect(row.renderVersion).toBe(3);
     expect(row.renderConsole).toBeNull();
+    expect(row.renderImages).toBeNull();
+  });
+
+  // -------------------------------------------------------------------------
+  // Phase 29b: image sizes from this crawl's resources, and render_images.
+  // -------------------------------------------------------------------------
+
+  it("looks image sizes up in this crawl's resources and writes render_images", async () => {
+    const crawlId = await newCrawl(["/img-page"]);
+    await db.insert(resources).values([
+      {
+        crawlId,
+        url: `${site.base}/sized.png`,
+        kind: "image",
+        fetchClass: "ok",
+        width: 640,
+        height: 480,
+        bytes: 12_345,
+        bytesSource: "header",
+      },
+      // Fetched, but no size could be read: never a stand-in.
+      { crawlId, url: `${site.base}/unsized.png`, kind: "image", fetchClass: "ok", dimensionsReason: "svg" },
+    ]);
+
+    const lookup = resourceImageLookup(db, crawlId);
+    const found = await lookup([
+      `${site.base}/sized.png`,
+      `${site.base}/unsized.png`,
+      `${site.base}/absent.png`,
+    ]);
+    expect([...found.entries()]).toEqual([
+      [`${site.base}/sized.png`, { width: 640, height: 480, bytes: 12_345 }],
+    ]);
+    // Another crawl's rows never answer.
+    expect((await resourceImageLookup(db, `crawl_${randomUUID()}`)([`${site.base}/sized.png`])).size).toBe(0);
+
+    const summary = await runRenderPass(db, crawlId, passConfig());
+
+    expect(summary.failures).toBe(0);
+    const row = await pageRow(crawlId, "/img-page");
+    expect(row.renderVersion).toBe(3);
+    const images = row.renderImages as RenderImages;
+    expect(images).toMatchObject({ total: 2, measured: 1, noDimensions: 1, standIns: 1 });
+    expect(images.kept).toEqual([
+      {
+        url: `${site.base}/sized.png`,
+        cut: false,
+        intrinsicWidth: 640,
+        intrinsicHeight: 480,
+        displayedWidth: 100,
+        displayedHeight: 75,
+        wastedPixels: 640 * 480 - 100 * 75,
+        bytes: 12_345,
+        widthFrom: "stored",
+      },
+    ]);
   });
 });
 
@@ -2701,6 +2814,7 @@ describe("PageRenderer credentials", () => {
     renderer = await PageRenderer.launch({
       origin: credBase,
       htmlDir,
+      imageDimensions: null,
       userAgent: "AriadneBot/0.1 (render credentials test)",
       perHostDelayMs: 0,
       settleMs: SETTLE_MS,
@@ -2794,6 +2908,7 @@ describe("PageRenderer credentials: one line per request header (27c M6)", () =>
     renderer = await PageRenderer.launch({
       origin: echoBase,
       htmlDir,
+      imageDimensions: null,
       userAgent: "AriadneBot/0.1 (render header lines test)",
       perHostDelayMs: 0,
       settleMs: SETTLE_MS,
@@ -2820,5 +2935,302 @@ describe("PageRenderer credentials: one line per request header (27c M6)", () =>
       expect(lines.filter((l) => l.startsWith("authorization:"))).toEqual(["authorization: Bearer cred"]);
       expect(lines.filter((l) => l.startsWith("x-own:"))).toEqual(["x-own: one"]);
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Phase 29b Task 3: image stand-ins and the per-<img> measurement.
+// ---------------------------------------------------------------------------
+
+/**
+ * A server that answers each path from a table and counts every request it
+ * receives by path — the evidence that a stand-in was answered inside the
+ * browser and nothing reached the host.
+ */
+async function startCounting(
+  answer: (path: string, res: ServerResponse) => void,
+): Promise<{ base: string; count: (path: string) => number; close(): Promise<void> }> {
+  const counts = new Map<string, number>();
+  const server: Server = createServer((req: IncomingMessage, res: ServerResponse) => {
+    const path = (req.url ?? "/").split("?")[0] ?? "/";
+    counts.set(path, (counts.get(path) ?? 0) + 1);
+    answer(path, res);
+  });
+  server.on("upgrade", (req: IncomingMessage, socket) => {
+    const path = `UPGRADE ${(req.url ?? "/").split("?")[0]}`;
+    counts.set(path, (counts.get(path) ?? 0) + 1);
+    socket.destroy();
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  return {
+    base: siteBase(server),
+    count: (path) => counts.get(path) ?? 0,
+    close: () =>
+      new Promise<void>((resolve, reject) =>
+        server.close((error) => (error === undefined ? resolve() : reject(error))),
+      ),
+  };
+}
+
+describe("PageRenderer image stand-ins (Phase 29b)", () => {
+  let origin: Awaited<ReturnType<typeof startCounting>>;
+  let cdn: Awaited<ReturnType<typeof startCounting>>;
+  let htmlDir: string;
+  let renderer: PageRenderer;
+  /** What the resource pass "stored": normalised URL → intrinsic size. */
+  const stored = new Map<string, StoredImage>();
+  /** When set, the lookup rejects with it — our defect, which must stop the render. */
+  let lookupFault: Error | null = null;
+  const lookup: ImageDimensionLookup = async (urls) => {
+    if (lookupFault !== null) throw lookupFault;
+    const out = new Map<string, StoredImage>();
+    for (const url of urls) {
+      const hit = stored.get(url);
+      if (hit !== undefined) out.set(url, hit);
+    }
+    return out;
+  };
+  const store = (url: string, image: StoredImage): void => {
+    stored.set(normalizeUrl(url)!, image);
+  };
+  const BIG_PNG = pngBytes(1600, 1200);
+
+  function pageHtml(body: string): string {
+    return `<!doctype html><html lang="en"><head><title>Images</title>
+<style>body { margin: 0 }</style></head><body>${body}</body></html>`;
+  }
+
+  beforeAll(async () => {
+    cdn = await startCounting((_path, res) => {
+      res.writeHead(200, { "content-type": "text/plain" });
+      res.end("cdn");
+    });
+    const pages: Record<string, () => string> = {
+      "/img/same-origin": () => pageHtml(`<img src="/big.png" alt="big" style="width:400px">`),
+      "/img/cdn": () => pageHtml(`<img src="${cdn.base}/hero.png" alt="hero" style="width:300px">`),
+      "/img/cdn-script": () =>
+        pageHtml(
+          `<script src="${cdn.base}/lib.js"></script>` +
+            `<img src="${cdn.base}/unsized.png" alt="u" width="50" height="50">`,
+        ),
+      "/img/srcset": () =>
+        pageHtml(
+          `<img srcset="a-400.png 400w, a-1600.png 1600w" sizes="100vw" alt="s" style="width:300px">`,
+        ),
+      "/img/lazy": () =>
+        pageHtml(
+          `<p>top</p><div style="position:absolute;top:5000px">` +
+            `<img loading="lazy" src="/lazy.png" alt="l" width="100" height="100"></div>`,
+        ),
+      "/img/hidden": () =>
+        pageHtml(`<div style="display:none"><img src="/hid.png" alt="h"></div><p>shown</p>`),
+      "/img/no-dims": () => pageHtml(`<img src="/nodims.png" alt="n" width="200" height="100">`),
+      // The script writes the length of what it got into the title: the real
+      // PNG's byte count, never an SVG's.
+      "/img/fetch-big": () =>
+        pageHtml(
+          `<script>fetch("/big.png").then(function (r) { return r.arrayBuffer(); })` +
+            `.then(function (b) { document.title = "bytes " + b.byteLength; });</script>`,
+        ),
+    };
+    origin = await startCounting((path, res) => {
+      const page = pages[path];
+      if (page !== undefined) {
+        res.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" });
+        res.end(page());
+        return;
+      }
+      if (path === "/big.png") {
+        res.writeHead(200, { "content-type": "image/png", "cache-control": "max-age=3600" });
+        res.end(BIG_PNG);
+        return;
+      }
+      res.writeHead(404, { "content-type": "text/plain" });
+      res.end("no");
+    });
+    store(`${origin.base}/big.png`, { width: 1600, height: 1200, bytes: BIG_PNG.length });
+    store(`${cdn.base}/hero.png`, { width: 1200, height: 800, bytes: 70_000 });
+    store(`${origin.base}/img/a-400.png`, { width: 400, height: 300, bytes: 9_000 });
+    store(`${origin.base}/lazy.png`, { width: 800, height: 800, bytes: 1_000 });
+    store(`${origin.base}/hid.png`, { width: 800, height: 800, bytes: 1_000 });
+    htmlDir = await mkdtemp(join(tmpdir(), "ariadne-render-images-"));
+    renderer = await PageRenderer.launch({
+      origin: origin.base,
+      htmlDir,
+      imageDimensions: lookup,
+      userAgent: "AriadneBot/0.1 (render image test)",
+      perHostDelayMs: 0,
+      settleMs: SETTLE_MS,
+      allowPrivate: true,
+    });
+  }, 120_000);
+
+  afterAll(async () => {
+    await renderer.close();
+    await origin.close();
+    await cdn.close();
+    await rm(htmlDir, { recursive: true, force: true });
+  });
+
+  it("(a) answers a same-origin image with a true-size stand-in and measures its box", async () => {
+    const result = await renderer.render(`${origin.base}/img/same-origin`);
+
+    expect(result.error).toBeNull();
+    expect(result.images).toMatchObject({
+      total: 1,
+      examined: 1,
+      measured: 1,
+      widerThanDisplayed: 1,
+      standIns: 1,
+      noDimensions: 0,
+    });
+    expect(result.images!.kept[0]).toEqual({
+      url: `${origin.base}/big.png`,
+      cut: false,
+      intrinsicWidth: 1600,
+      intrinsicHeight: 1200,
+      displayedWidth: 400,
+      displayedHeight: 300,
+      wastedPixels: 1600 * 1200 - 400 * 300,
+      bytes: BIG_PNG.length,
+      widthFrom: "stored",
+    });
+    // NOTHING WENT TO THE SITE for it, and nothing was counted for it: no
+    // gate slot (only the document was paced), not skipped, not blocked.
+    expect(origin.count("/big.png")).toBe(0);
+    expect(result.pacedRequests).toBe(1);
+    expect(result.skippedPaintRequests).toBe(0);
+    expect(result.blockedRequests).toBe(0);
+    expect(result.unpacedNetworkRequests).toBe(0);
+  });
+
+  it("(b) answers a CDN image with stored dimensions locally: no byte reaches the CDN", async () => {
+    const result = await renderer.render(`${origin.base}/img/cdn`);
+
+    expect(result.error).toBeNull();
+    expect(result.images).toMatchObject({ measured: 1, standIns: 1 });
+    expect(result.images!.kept[0]).toMatchObject({
+      url: `${cdn.base}/hero.png`,
+      intrinsicWidth: 1200,
+      displayedWidth: 300,
+      displayedHeight: 200,
+    });
+    expect(cdn.count("/hero.png")).toBe(0);
+    expect(result.blockedRequests).toBe(0);
+  });
+
+  it("(c) still fails every other cross-origin request, a CDN image without a size included", async () => {
+    const result = await renderer.render(`${origin.base}/img/cdn-script`);
+
+    expect(result.error).toBeNull();
+    expect(cdn.count("/lib.js")).toBe(0);
+    expect(cdn.count("/unsized.png")).toBe(0);
+    expect(result.console!.blockedByRenderer.thirdParty).toBe(2);
+    expect(result.images).toMatchObject({ measured: 0, noDimensions: 1, standIns: 0 });
+  });
+
+  it("(d) takes a srcset candidate's width descriptor and a stored sibling's aspect ratio", async () => {
+    const result = await renderer.render(`${origin.base}/img/srcset`);
+
+    expect(result.error).toBeNull();
+    // At 1280 CSS px and density 1, `sizes="100vw"` picks the 1600w candidate.
+    expect(result.images).toMatchObject({ measured: 1, standIns: 1, noDimensions: 0 });
+    expect(result.images!.kept[0]).toMatchObject({
+      url: `${origin.base}/img/a-1600.png`,
+      intrinsicWidth: 1600,
+      intrinsicHeight: 1200,
+      displayedWidth: 300,
+      displayedHeight: 225,
+      bytes: null,
+      widthFrom: "srcset-w",
+    });
+    expect(origin.count("/img/a-1600.png")).toBe(0);
+    expect(origin.count("/img/a-400.png")).toBe(0);
+  });
+
+  it("(e) counts a lazy image the renderer never scrolled to as lazy-unloaded", async () => {
+    const result = await renderer.render(`${origin.base}/img/lazy`);
+
+    expect(result.error).toBeNull();
+    expect(result.images).toMatchObject({ total: 1, lazyUnloaded: 1, measured: 0, standIns: 0 });
+    expect(origin.count("/lazy.png")).toBe(0);
+  });
+
+  it("(f) counts an image under a display:none parent as hidden", async () => {
+    const result = await renderer.render(`${origin.base}/img/hidden`);
+
+    expect(result.error).toBeNull();
+    expect(result.images).toMatchObject({ total: 1, hidden: 1, measured: 0 });
+  });
+
+  it("(g) aborts an image with no stored size as today, and counts it as no-dimensions", async () => {
+    const result = await renderer.render(`${origin.base}/img/no-dims`);
+
+    expect(result.error).toBeNull();
+    expect(result.images).toMatchObject({ total: 1, noDimensions: 1, measured: 0, standIns: 0 });
+    expect(result.skippedPaintRequests).toBe(1);
+    expect(result.console!.blockedByRenderer.sameOriginAssets).toBe(1);
+    expect(origin.count("/nodims.png")).toBe(0);
+  });
+
+  it("(h) never lets a stand-in be served from the cache for the real URL", async () => {
+    // Review Focus 1. P1 gets a stand-in for /big.png; P2, next on the SAME
+    // context (the one idle slot), fetches /big.png from script. The real
+    // request reaches the origin, paced.
+    const p1 = await renderer.render(`${origin.base}/img/same-origin`);
+    expect(p1.images!.standIns).toBe(1);
+    const before = origin.count("/big.png");
+
+    const p2 = await renderer.render(`${origin.base}/img/fetch-big`);
+
+    expect(p2.error).toBeNull();
+    expect(origin.count("/big.png")).toBe(before + 1);
+    expect(p2.pacedRequests).toBe(2); // the document and the fetch
+    expect(p2.cachedResponses).toBe(0);
+    // The script read the REAL file's bytes, not an SVG's.
+    expect(p2.title).toBe(`bytes ${BIG_PNG.length}`);
+  });
+
+  it("(i) with no lookup, every image is aborted as before and counted as no-dimensions", async () => {
+    const plain = await PageRenderer.launch({
+      origin: origin.base,
+      htmlDir,
+      imageDimensions: null,
+      userAgent: "AriadneBot/0.1 (render image test)",
+      perHostDelayMs: 0,
+      settleMs: SETTLE_MS,
+      allowPrivate: true,
+    });
+    try {
+      const before = origin.count("/big.png");
+      const result = await plain.render(`${origin.base}/img/same-origin`);
+
+      expect(result.error).toBeNull();
+      expect(result.images).toMatchObject({
+        total: 1,
+        measured: 0,
+        noDimensions: 1,
+        standIns: 0,
+        kept: [],
+      });
+      expect(result.skippedPaintRequests).toBe(1);
+      expect(origin.count("/big.png")).toBe(before);
+    } finally {
+      await plain.close();
+    }
+  });
+
+  it("throws when the dimension lookup rejects: that is our defect, not the site's", async () => {
+    lookupFault = new Error("lookup broke");
+    try {
+      await expect(renderer.render(`${origin.base}/img/same-origin`)).rejects.toThrow(
+        "lookup broke",
+      );
+    } finally {
+      lookupFault = null;
+    }
+    // The renderer is still usable afterwards: the context was released clean.
+    const next = await renderer.render(`${origin.base}/img/same-origin`);
+    expect(next.images!.measured).toBe(1);
   });
 });

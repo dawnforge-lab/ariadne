@@ -41,7 +41,10 @@
  *    burst landed on the very host the crawl had been asked to treat gently.
  *    What is still aborted, unpaced and uncounted: paint-only requests
  *    (`Image`, `Media`, `Font` — `PAINT_ONLY_RESOURCES`), which cannot move a
- *    measurement, and every third-party request (below).
+ *    measurement, and every third-party request (below). An image whose size
+ *    is known is not aborted but it is not paced either: it is answered by
+ *    the interception itself and never reaches any host (the stand-ins,
+ *    below).
  *  - **The HTTP cache is kept, the session is not.** A render worker reuses
  *    one browser context across URLs, so a theme's scripts are fetched once
  *    per worker rather than once per page; between URLs its cookies,
@@ -55,7 +58,10 @@
  *        pauses every request of the page, its iframes (same- and
  *        cross-origin documents) and its dedicated workers, redirect hops
  *        included. Each is failed unless it is same-origin, not paint-only,
- *        and (documents) allowed by url-policy; what survives is paced.
+ *        and (documents) allowed by url-policy; what survives is paced. The
+ *        one request ANSWERED rather than failed or released is an image
+ *        stand-in (below) — answered where it was paused, so it is not
+ *        traffic to anyone.
  *     2. FENCED — the browser's proxy is a local listener that drops every
  *        connection (`NetworkFence`), with ONE exception: `http(s)://` to the
  *        crawl's origin AT ITS PORT (pinned even when it is the default one —
@@ -87,6 +93,33 @@
  *    gate, and claims a slot after the fact. Chrome caps them per page. A
  *    blocked request never fails the render: the page is measured as the
  *    site's own bytes render it.
+ *  - **Image stand-ins (Phase 29b): an image is answered, never fetched.**
+ *    The resource pass read each image's intrinsic size from its header
+ *    (`resources.width/height`). An `Image` request whose URL has a stored
+ *    size — looked up per request through `RendererOptions.imageDimensions`,
+ *    so an image a script injected, or another page's `srcset` rendition, is
+ *    found too (ruling R5) — is answered with `Fetch.fulfillRequest`: a blank
+ *    SVG of exactly that size (image-stand-in.ts). The browser then lays the
+ *    page out as the real image would, and after the settle every `<img>` box
+ *    is measured against the stored size (`RenderResult.images`,
+ *    `pages.render_images`). A `srcset` candidate the browser picked whose
+ *    own size was never stored is found by asking the main frame which
+ *    `srcset` named it: its `w` descriptor is its width, and a stored
+ *    sibling's aspect ratio gives the height (R6). THIS IS THE ONE EXCEPTION
+ *    to "every cross-origin request is failed", and it is still no
+ *    third-party traffic: the answer comes from this process, a CDN image
+ *    included, and nothing reaches any host. So a stand-in takes NO gate
+ *    slot, is reported to no gate, never enters the `FreshnessLedger`, and is
+ *    counted as neither blocked nor skipped; it carries `cache-control:
+ *    no-store`, so the context's shared HTTP cache can never hand it to a
+ *    later page in place of the real file (a script's `fetch` of the same
+ *    URL goes to the site, paced). The branch runs before the cross-origin
+ *    check and only for `resourceType === "Image"`; an image with no known
+ *    size falls through to exactly the old path (cross-origin: blocked;
+ *    same-origin: skipped as paint-only), and so does every image when
+ *    `imageDimensions` is null. A lookup that rejects is OURS: it shuts the
+ *    render and `render` throws, like any protocol command of ours that
+ *    failed.
  *  - **No silent fallbacks (rule 7).** A timeout, a navigation error and a
  *    policy refusal are three different classified strings on the page row, and
  *    every one of them leaves `rendered = false` with the five measurement
@@ -156,6 +189,22 @@ import { headerValue, type HeaderBag } from "../http.js";
 import { HostGate, type HostSpacingEntry, type HostThrottle } from "../politeness.js";
 import { RENDER_CAPTURE_VERSION } from "../versions.js";
 import { RenderConsoleCollector, type RenderConsole } from "./console-capture.js";
+import {
+  IMAGES_MEASURE_SCRIPT,
+  SRCSET_LOOKUP_SCRIPT,
+  checkStoredImage,
+  classifyImages,
+  readImageMeasurement,
+  readSrcsetReply,
+  srcsetStandIn,
+  standInSvg,
+  type ImageDimensionLookup,
+  type ImageMeasurement,
+  type RenderImage,
+  type RenderImages,
+  type SrcsetMatch,
+  type StoredImage,
+} from "./image-stand-in.js";
 import { analyzeHtml, type RawPageAnalysis } from "../parse/page-analyzer.js";
 import { hostnameSpellings, isSameOrigin, normalizeUrl } from "../parse/url-utils.js";
 import { credentialHeadersOf, type CredentialTarget } from "../credentials.js";
@@ -256,6 +305,19 @@ export interface RendererOptions {
    * `htmlPath` stays null.
    */
   htmlDir: string | null;
+  /**
+   * Where an image's intrinsic size comes from (Phase 29b, ruling R5): called
+   * per image request with normalised URLs, it answers the ones this crawl's
+   * `resources` sized. An image it answers is given a true-size stand-in
+   * instead of being aborted (module header). `runRenderPass` builds it over
+   * the crawl's own rows (`resourceImageLookup`).
+   *
+   * REQUIRED, on the `htmlDir` precedent: a caller that wants no stand-ins says
+   * `null` — every image is then aborted as before 29b and measured as
+   * `noDimensions` — rather than getting that by forgetting the key. A lookup
+   * that REJECTS is a defect of ours and stops the render (it throws).
+   */
+  imageDimensions: ImageDimensionLookup | null;
   /** The crawl's branded UA, so a site sees one client, not two (rule 9). */
   userAgent: string;
   /** Minimum spacing between two requests to one host: the configured base. */
@@ -433,6 +495,16 @@ export interface RenderResult {
    * was looked at.
    */
   console: RenderConsole | null;
+  /**
+   * The page's `<img>` boxes measured against the intrinsic sizes the
+   * stand-ins gave them (Phase 29b, `pages.render_images`): counts per bucket
+   * and the images shown narrower than they are. See image-stand-in.ts.
+   *
+   * Non-null on every successful render — `total: 0` on a page with no image —
+   * and null on EVERY failed one, a refusal before the browser included: a
+   * page that did not finish rendering has no layout worth measuring.
+   */
+  images: RenderImages | null;
 }
 
 /**
@@ -448,6 +520,16 @@ type TrafficEvidence = Pick<
   | "unpacedNetworkRequests"
   | "console"
 >;
+
+/** A stand-in the interception answered an image request with, and where its width came from. */
+type ServedImage = StoredImage & { widthFrom: RenderImage["widthFrom"] };
+
+/**
+ * The page navigated, or its document went away, while the srcset lookup ran
+ * in it: no answer, and nothing of ours broke.
+ */
+const CONTEXT_GONE =
+  /Execution context was destroyed|Cannot find context with specified id|Inspected target navigated or closed/i;
 
 /** What `MEASURE_SCRIPT` hands back. Counts only — no HTML crosses the seam. */
 interface Measurement {
@@ -820,6 +902,17 @@ class RenderTraffic {
   private gotoNetworkId: string | null = null;
   /** What the page reported going wrong — see console-capture.ts. Per render. */
   private readonly reported = new RenderConsoleCollector();
+  /**
+   * IMAGE STAND-INS (Phase 29b, module header), per render and freed with it
+   * — O(one page's requests), the `pausedIds` precedent (rule 6):
+   * `requested` is the URL (without its fragment) of every `Image` request
+   * this render paused, answered or not; `served` the ones answered with a
+   * stand-in, with the size it carried; `standInIds` their network ids, so
+   * the local response each produces is never read as the site's.
+   */
+  private readonly requested = new Set<string>();
+  private readonly served = new Map<string, ServedImage>();
+  private readonly standInIds = new Set<string>();
 
   constructor(
     private readonly cdp: CDPSession,
@@ -836,6 +929,8 @@ class RenderTraffic {
     private readonly testFaults: RenderTestFaults | null,
     /** The crawl's credentials, decided per released request (Phase 27c). */
     private readonly credentials: CredentialTarget | null,
+    /** Stored image sizes (Phase 29b); null: no stand-ins, every image aborted. */
+    private readonly imageDimensions: ImageDimensionLookup | null,
   ) {
     this.broken = new Promise<never>((_, reject) => {
       this.breakWith = reject;
@@ -953,6 +1048,14 @@ class RenderTraffic {
     await this.cdp.send("Emulation.setScriptExecutionDisabled", { value: true });
   }
 
+  /**
+   * The page's measured `<img>` rows, sorted against what this render
+   * requested and answered with stand-ins (`classifyImages`).
+   */
+  images(measurement: ImageMeasurement): RenderImages {
+    return classifyImages(measurement, this.served, this.requested);
+  }
+
   /** The counters, and a snapshot of what the page reported so far. */
   evidence(): TrafficEvidence {
     return {
@@ -991,6 +1094,32 @@ class RenderTraffic {
       return;
     }
     const target = event.request.url;
+
+    // IMAGE STAND-INS (Phase 29b, module header) — BEFORE the cross-origin
+    // check, because a CDN image with a known size is answered here too, and
+    // only for `Image`: `Media` and `Font` are untouched. An image with no
+    // known size continues to exactly the old path below.
+    if (event.resourceType === "Image") {
+      const requestUrl = withoutFragment(target);
+      this.requested.add(requestUrl);
+      const networkId = event.networkId;
+      // Without a network id the stand-in's local answer could not be told
+      // from the site's in `onResponse`, and reporting it into the gate as the
+      // site's 200 is what a stand-in must never do: such a request (the
+      // protocol gives every Request-stage pause one in practice) is aborted
+      // as before and is counted as `noDimensions` — visible, not guessed.
+      if (this.imageDimensions !== null && networkId !== undefined) {
+        const standIn = await this.standInFor(this.imageDimensions, event, requestUrl);
+        if (!this.open) {
+          await this.fail(event);
+          return;
+        }
+        if (standIn !== null) {
+          await this.serveStandIn(event, networkId, requestUrl, standIn);
+          return;
+        }
+      }
+    }
 
     // EVERY DOCUMENT goes through url-policy (rule 5): the top-level one we
     // navigated to, each of its redirect hops, a page sending itself somewhere
@@ -1068,6 +1197,106 @@ class RenderTraffic {
     if (!this.pumping) this.guard(this.pump());
   }
 
+  /**
+   * The stand-in for one image request, or null when no size is known for it.
+   * Its own stored size first; then, for a request of the MAIN frame only
+   * (R6 — an iframe's image gets stored sizes only), the `srcset` candidate
+   * the page named it by, sized by its `w` descriptor and a stored sibling's
+   * aspect ratio (`srcsetStandIn`). A lookup that rejects propagates: it is
+   * ours, and `guard` shuts the render on it.
+   */
+  private async standInFor(
+    lookup: ImageDimensionLookup,
+    event: PausedRequest,
+    requestUrl: string,
+  ): Promise<ServedImage | null> {
+    const key = normalizeUrl(requestUrl);
+    // Not http(s) (a `data:` or `blob:` image is never paused anyway): nothing
+    // the resource pass could have sized.
+    if (key === null) return null;
+    const stored = (await lookup([key])).get(key);
+    if (stored !== undefined) return { ...checkStoredImage(stored, key), widthFrom: "stored" };
+    if (event.frameId !== this.mainFrameId || !this.open) return null;
+    const match = await this.srcsetMatch(requestUrl);
+    if (match === null || match.w === null || !this.open) return null;
+    const siblings = [
+      ...new Set(
+        match.candidates.map((c) => normalizeUrl(c)).filter((c): c is string => c !== null),
+      ),
+    ];
+    if (siblings.length === 0) return null;
+    const found = await lookup(siblings);
+    for (const sibling of siblings) {
+      const image = found.get(sibling);
+      if (image !== undefined) return srcsetStandIn(match.w, checkStoredImage(image, sibling));
+    }
+    return null;
+  }
+
+  /**
+   * Ask the main frame which `srcset` candidate `requestUrl` is
+   * (`SRCSET_LOOKUP_SCRIPT`), with the URL passed as a JSON string literal —
+   * never spliced into the script as raw text.
+   *
+   * A PAGE THAT THROWS OR NAVIGATES DURING THE LOOKUP IS A MISS, NOT A FAILED
+   * RENDER: it is the page's doing (a navigation destroys the context the
+   * script ran in; a page that replaced a global the script uses makes it
+   * throw or answer nonsense), and what it costs is one unmeasured image —
+   * the request is aborted as before and counted as `noDimensions`. Anything
+   * else the protocol says is ours and propagates.
+   *
+   * `awaitPromise`: while the document is still being parsed, a miss waits for
+   * the parser to finish and searches once more (the preload scanner asks for
+   * an image before its element exists — see `SRCSET_LOOKUP_SCRIPT`). Only
+   * this image's request waits; nothing else is held behind it, and a render
+   * that ends first fails the request and closes the page under the lookup.
+   */
+  private async srcsetMatch(requestUrl: string): Promise<SrcsetMatch | null> {
+    let reply: { result: { value?: unknown }; exceptionDetails?: unknown };
+    try {
+      reply = await this.cdp.send("Runtime.evaluate", {
+        expression: `(${SRCSET_LOOKUP_SCRIPT})(${JSON.stringify(requestUrl)})`,
+        returnByValue: true,
+        awaitPromise: true,
+      });
+    } catch (error) {
+      if (CONTEXT_GONE.test(error instanceof Error ? error.message : String(error))) return null;
+      // The render ended under the lookup and its page is closing.
+      if (!this.open && isTargetClosed(error)) return null;
+      throw error;
+    }
+    if (reply.exceptionDetails !== undefined) return null;
+    return readSrcsetReply(reply.result.value ?? null);
+  }
+
+  /**
+   * Answer a paused image request with its stand-in — never released, never
+   * paced, never reported to the gate or the ledger, counted as neither
+   * blocked nor skipped (module header).
+   */
+  private async serveStandIn(
+    event: PausedRequest,
+    networkId: string,
+    requestUrl: string,
+    image: ServedImage,
+  ): Promise<void> {
+    if (!this.pending.delete(event.requestId)) return; // already answered (failed by shut)
+    // Recorded BEFORE the answer, so the response it produces is recognised.
+    this.standInIds.add(networkId);
+    this.served.set(requestUrl, image);
+    await this.command("Fetch.fulfillRequest", {
+      requestId: event.requestId,
+      responseCode: 200,
+      responseHeaders: [
+        { name: "content-type", value: "image/svg+xml" },
+        // NEVER STORED: the context's HTTP cache outlives this page, and a
+        // later page's request for the real file must go to the site.
+        { name: "cache-control", value: "no-store" },
+      ],
+      body: Buffer.from(standInSvg(image.width, image.height), "utf8").toString("base64"),
+    });
+  }
+
   private pinned(url: string): boolean {
     return this.pinnedHosts.has(new URL(url).hostname.toLowerCase());
   }
@@ -1137,10 +1366,13 @@ class RenderTraffic {
     });
   }
 
-  private async command(method: "Fetch.continueRequest" | "Fetch.failRequest", params: object) {
+  private async command(
+    method: "Fetch.continueRequest" | "Fetch.failRequest" | "Fetch.fulfillRequest",
+    params: object,
+  ) {
     try {
       // The protocol's typed overloads want a literal method name per call;
-      // both commands here take `{requestId, …}` and answer nothing.
+      // all three commands here take `{requestId, …}` and answer nothing.
       await (this.cdp.send as (m: string, p: object) => Promise<unknown>)(method, params);
     } catch (error) {
       if (REQUEST_GONE.test(error instanceof Error ? error.message : String(error))) return;
@@ -1166,6 +1398,9 @@ class RenderTraffic {
    * request still waits a spacing behind it.
    */
   private onResponse(requestId: string, response: NetworkResponse): void {
+    // A STAND-IN'S ANSWER came from this process, not the site: it is
+    // reported to no gate, recorded in no ledger and counted nowhere.
+    if (this.standInIds.has(requestId)) return;
     if (!isHttpUrl(response.url)) return;
     const sent = this.inFlight.get(requestId);
     this.inFlight.delete(requestId);
@@ -1349,6 +1584,15 @@ function unpinnedReason(
   return known === undefined
     ? `${host} is not a spelling of this crawl's origin the render pass can reach`
     : `${host} was not approved for this pass (${known.reason})`;
+}
+
+/**
+ * A request URL without its fragment, by the same string cut the in-page
+ * measurement applies to `currentSrc`, so the two key the same image alike.
+ */
+function withoutFragment(url: string): string {
+  const hash = url.indexOf("#");
+  return hash === -1 ? url : url.slice(0, hash);
 }
 
 /** A URL as the browser puts it on the wire: parsed, serialised, without its fragment. */
@@ -1705,6 +1949,7 @@ export class PageRenderer {
       {
         origin: options.origin,
         htmlDir: options.htmlDir,
+        imageDimensions: options.imageDimensions,
         userAgent: options.userAgent,
         perHostDelayMs: options.perHostDelayMs,
         navigationTimeoutMs,
@@ -1814,6 +2059,7 @@ export class PageRenderer {
         this.opts.onRequestBlocked,
         this.opts.testFaults,
         this.opts.credentials,
+        this.opts.imageDimensions,
       );
       await traffic.start();
     } catch (error) {
@@ -1834,7 +2080,7 @@ export class PageRenderer {
       // about the page (rule 7). It ends either by returning a classified
       // `RenderResult` or by handing phase 2 the document it built.
       // ---------------------------------------------------------------------
-      let navigated: { finalUrl: string; measured: Measurement };
+      let navigated: { finalUrl: string; measured: Measurement; imageRows: ImageMeasurement };
       try {
         // The DOCUMENT's wait is spent HERE, after the page and its
         // interception exist (that setup is ours and must not be spent out of
@@ -1888,7 +2134,13 @@ export class PageRenderer {
         // the way it fails in practice is a page navigating away underneath it
         // ("Execution context was destroyed"), which is the site doing
         // something and is right to classify.
-        navigated = { finalUrl, measured: (await page.evaluate(MEASURE_SCRIPT)) as Measurement };
+        const measured = (await page.evaluate(MEASURE_SCRIPT)) as Measurement;
+        // Every `<img>` box (Phase 29b), after the settle and in the same
+        // document — here for the same reason as the line above. A shape the
+        // script could not have produced (the page bent a global it uses)
+        // throws here and is classified with the page.
+        const imageRows = readImageMeasurement(await page.evaluate(IMAGES_MEASURE_SCRIPT));
+        navigated = { finalUrl, measured, imageRows };
       } catch (error) {
         // Ours first: a protocol command the interception could not issue
         // shut the render, and whatever failed after it is our defect, not
@@ -1913,7 +2165,7 @@ export class PageRenderer {
         }
         return failure(url, `navigation error: ${firstLine(error)}`, null, traffic.evidence());
       }
-      const { finalUrl, measured } = navigated;
+      const { finalUrl, measured, imageRows } = navigated;
 
       // ---------------------------------------------------------------------
       // PHASE 2 — what WE do to a document the browser already built. Outside
@@ -1989,6 +2241,7 @@ export class PageRenderer {
         // is about.
         redirectUrl: traffic.offSite ?? navigatedTo(url, finalUrl),
         error: null,
+        images: traffic.images(imageRows),
         ...traffic.evidence(),
       };
     } finally {
@@ -2024,6 +2277,10 @@ export class PageRenderer {
       // a different width, and a render whose word count depended on an
       // unstated viewport would not be evidence of anything.
       viewport: { width: 1280, height: 900 },
+      // Density 1, pinned (Phase 29b): it decides which `srcset` candidate the
+      // browser picks, and an image box is judged against the file at 1 CSS
+      // px per image px. Left to the host it would follow the machine.
+      deviceScaleFactor: 1,
       // A service worker is a client outside the page's interception, and one
       // registered by page N would answer page N+1's requests from ITS cache.
       // None controls a first load anyway, so blocking them changes no DOM.
@@ -2144,6 +2401,7 @@ function failure(
     htmlPath: null,
     redirectUrl,
     error,
+    images: null,
     ...evidence,
   };
 }
@@ -2208,6 +2466,10 @@ function firstLine(error: unknown): string {
  * pre-browser refusal included, for the same reason: it says which render
  * capture wrote the row, so its `render_console` null ("nothing was looked
  * at") is never read as a pre-25 row's null ("nobody captured it").
+ *
+ * `render_images` (Phase 29b, capture 3) is written from `RenderResult.images`
+ * through the same `storableDeep` boundary: null on every failed render and on
+ * a pre-browser refusal, and the stamp tells that null from a pre-29b row's.
  */
 export async function writeRenderResult(
   db: Pick<Db, "execute">,
@@ -2240,6 +2502,7 @@ export async function writeRenderResult(
       rendered_redirect_url = ${row.redirectUrl},
       render_error = ${row.error},
       render_console = ${row.console === null ? null : JSON.stringify(row.console)}::jsonb,
+      render_images = ${row.images === null ? null : JSON.stringify(row.images)}::jsonb,
       render_version = ${RENDER_CAPTURE_VERSION}
     where crawl_id = ${crawlId} and url = ${result.url}
     returning id`);
