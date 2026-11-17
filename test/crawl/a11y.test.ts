@@ -52,6 +52,9 @@ describe("the pinned axe-core", () => {
   it("builds the production expression once, so a send copies it once", async () => {
     expect(axeRunExpression()).toBe(axeRunExpression());
     expect(axeRunExpression().startsWith(axeSource())).toBe(true);
+    // The 2-byte factor below holds only while the pinned source is two-byte;
+    // a one-byte source would loosen the bound to about 3× its real cost.
+    expect(/[^\u0000-ÿ]/.test(axeSource())).toBe(true);
     const sends = 20;
     const jsonBytes = 2 * JSON.stringify(axeRunExpression()).length;
     JSON.stringify({ expression: axeRunExpression() }); // flattened before the window
@@ -72,6 +75,8 @@ describe("the pinned axe-core", () => {
       };
       walk(profile.head);
       // One JSON text per send, and not a flattened copy of the source besides.
+      // The lower bound proves the profiler saw the sends at all.
+      expect(allocated / sends).toBeGreaterThan(0.5 * jsonBytes);
       expect(allocated / sends).toBeLessThan(1.5 * jsonBytes);
     } finally {
       session.disconnect();
