@@ -409,6 +409,22 @@ export const CRAWL_FIELDS = {
     description: "How many pages of each template cohort the render pass samples.",
     default: CRAWL_DEFAULTS.renderSamplePerType,
   },
+  renderAccessibility: {
+    schema: booleanField("renderAccessibility"),
+    mutable: "whenPaused",
+    description:
+      "Whether the render pass checks each page it renders for accessibility: " +
+      "a fixed set of 25 WCAG A and AA checks (axe-core 4.14.0) run in the " +
+      "browser after the page is measured — text alternatives, accessible names, " +
+      "language, viewport and refresh, ARIA, list structure and colour contrast. " +
+      "Defaults to true. It adds no request to the site: the checker runs " +
+      "inside the page already rendered. Pass false to render without it; each " +
+      "rendered page then records the check as disabled, so an audit with no " +
+      "accessibility findings still says whether anything was checked. Only " +
+      "rendered pages are checked, so findings come from the render sample, not " +
+      "the whole site.",
+    default: true,
+  },
   findingCap: {
     schema: findingCapSchema("field 'findingCap' must be"),
     // The judgement's: its bytes live in `config_jsonb` (plan Deviation 1), and
@@ -850,6 +866,7 @@ function buildStartBodySchema(registry: Registry) {
       renderBudgetPct: onTheWire(f.renderBudgetPct).optional(),
       renderMaxPages: onTheWire(f.renderMaxPages).optional(),
       renderSamplePerType: onTheWire(f.renderSamplePerType).optional(),
+      renderAccessibility: onTheWire(f.renderAccessibility).optional(),
       findingCap: onTheWire(f.findingCap).optional(),
       fetchResources: onTheWire(f.fetchResources).optional(),
       mode: onTheWire(f.mode).optional(),

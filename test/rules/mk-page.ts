@@ -208,6 +208,9 @@ export function mkPage(overrides: Partial<PageRecord> = {}): PageRecord {
     renderVersion: null,
     renderConsole: null,
     renderImages: null,
+    renderA11yStatus: null,
+    renderA11yMs: null,
+    renderA11yError: null,
     ...overrides,
   };
 }

@@ -176,6 +176,50 @@ describe("a render with no documents directory", () => {
   }, 90_000);
 });
 
+describe("renderAccessibility, from the request to the page row (Phase 29b)", () => {
+  async function crawlWith(body: Record<string, unknown>): Promise<string> {
+    const started = await call("POST", "/crawls", { siteUrl: `${site}/`, maxPages: 5, ...body });
+    expect(started.status).toBe(202);
+    const id = String(started.body["crawlId"]);
+    created.push(id);
+    const until = Date.now() + 25_000;
+    for (;;) {
+      const status = (await call("GET", `/crawls/${id}`)).body["status"];
+      if (status !== "queued" && status !== "running") {
+        expect(status).toBe("finished");
+        return id;
+      }
+      if (Date.now() > until) throw new Error(`crawl ${id} still '${String(status)}'`);
+      await new Promise((r) => setTimeout(r, 50));
+    }
+  }
+
+  async function statuses(id: string): Promise<Array<string | null>> {
+    const rows = await db
+      .select({ status: pages.renderA11yStatus })
+      .from(pages)
+      .where(and(eq(pages.crawlId, id), eq(pages.rendered, true)));
+    expect(rows.length).toBeGreaterThan(0);
+    return rows.map((r) => r.status);
+  }
+
+  it("is on by default, and a crawl started with it false renders without axe", async () => {
+    const on = await crawlWith({});
+    const off = await crawlWith({ renderAccessibility: false });
+    expect((await call("GET", `/crawls/${off}/config`)).body).toMatchObject({
+      crawl: { renderAccessibility: false },
+    });
+
+    for (const id of [on, off]) {
+      const res = await call("POST", `/crawls/${id}/render`);
+      expect(res.status).toBe(200);
+    }
+
+    expect(new Set(await statuses(on))).toEqual(new Set(["ran"]));
+    expect(new Set(await statuses(off))).toEqual(new Set(["disabled"]));
+  }, 120_000);
+});
+
 describe("the links are tenant-scoped", () => {
   it("a tenant that does not own the crawl is answered NOT_FOUND by both links, and nothing changes", async () => {
     const id = await crawlSite();

@@ -367,7 +367,8 @@ afterAll(async () => {
 describe("contract clause 1: both transports accept and refuse the same fields", () => {
   it("walks the published schema and drives every body through POST /crawls and crawl_start", async () => {
     const { valid, invalid } = await buildCases();
-    expect(valid.length).toBe(24);
+    // 25 from Phase 29b: `renderAccessibility` joined the published fields.
+    expect(valid.length).toBe(25);
 
     for (const c of valid) {
       const viaHttp = await call("POST", "/crawls", c.body);

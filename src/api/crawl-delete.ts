@@ -33,6 +33,7 @@ import {
   metrics,
   pageResources,
   pages,
+  renderA11y,
   resources,
   sitemapHreflang,
   sitemapMemberships,
@@ -45,7 +46,7 @@ import { tenantExportDir, type TenantId } from "../tenant.js";
 type CrawlChildTable = PgTable & { crawlId: PgColumn };
 
 /**
- * The 17 tables with a `crawl_id`, in deletion order: what points at `pages`
+ * The 18 tables with a `crawl_id`, in deletion order: what points at `pages`
  * and `resources` goes before them, then `frontier`, `list_urls`, the crawl's
  * encrypted credentials, its settled jobs (28b; `crawl_delete` refuses a
  * crawl that has a live one) and its history (`crawl_events`, 28c — last, as a
@@ -57,6 +58,7 @@ export const CRAWL_CHILD_TABLES: readonly CrawlChildTable[] = [
   links,
   pageResources,
   structuredData,
+  renderA11y,
   hreflang,
   urlParams,
   sitemapHreflang,

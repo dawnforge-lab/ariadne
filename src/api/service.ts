@@ -349,6 +349,8 @@ export interface StartCrawlInput {
   renderBudgetPct?: number;
   renderMaxPages?: number;
   renderSamplePerType?: number;
+  /** Phase 29b: the render pass's accessibility run; absent means on. */
+  renderAccessibility?: boolean;
   findingCap?: number | null;
   fetchResources?: boolean;
   /** Phase 27c: list mode. `urls` is stored in `list_urls`, never in `config_jsonb`. */

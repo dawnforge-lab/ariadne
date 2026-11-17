@@ -2013,6 +2013,14 @@ describe("the test-only config fields are not persisted", () => {
     ).toThrow(/sitemapUrls is not an array of strings/);
   });
 
+  it("reads renderAccessibility back, and refuses a stored one that is not a boolean (Phase 29b)", () => {
+    expect(parseStoredConfig({ ...config(), renderAccessibility: false }, "crawl_x").renderAccessibility).toBe(false);
+    expect(parseStoredConfig(config(), "crawl_x").renderAccessibility).toBeUndefined();
+    expect(() =>
+      parseStoredConfig({ ...config(), renderAccessibility: "false" }, "crawl_x"),
+    ).toThrow("crawl crawl_x: stored config.renderAccessibility is not a boolean");
+  });
+
   it("does not come back on a resume that does not re-assert it", async () => {
     const first = await crawl(config());
     expect(first.pagesCrawled).toBeGreaterThan(0);

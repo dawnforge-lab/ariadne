@@ -84,6 +84,8 @@ describe("the published schema", () => {
       renderBudgetPct: "whenPaused",
       renderMaxPages: "whenPaused",
       renderSamplePerType: "whenPaused",
+      // Phase 29b.
+      renderAccessibility: "whenPaused",
       findingCap: "always",
       judgement: "always",
       // Phase 27c.
@@ -310,6 +312,16 @@ describe("parseStartBody: the refusals the transport suites used to pin", () => 
       expect(error.path).toBe("fetchResources");
       expect(error.message).toBe("field 'fetchResources' must be a boolean");
     }
+  });
+
+  it("refuses a renderAccessibility that is not a boolean, and publishes its default (Phase 29b)", () => {
+    for (const bad of ["false", 0, null]) {
+      const error = first({ siteUrl: SITE, renderAccessibility: bad });
+      expect(error.code, JSON.stringify(bad)).toBe("invalid_type");
+      expect(error.path).toBe("renderAccessibility");
+      expect(error.message).toBe("field 'renderAccessibility' must be a boolean");
+    }
+    expect(props["renderAccessibility"]).toMatchObject({ type: "boolean", default: true });
   });
 
   it("refuses a body that is not a JSON object", () => {

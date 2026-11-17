@@ -36,7 +36,7 @@ import { and, eq, sql } from "drizzle-orm";
 
 import { closeDb, createDb, type Db } from "../../src/db/client.js";
 import { runMigrations } from "../../src/db/migrate.js";
-import { crawls, frontier, pages, resources } from "../../src/db/schema.js";
+import { crawls, frontier, pages, renderA11y, resources } from "../../src/db/schema.js";
 import { throttleRecordOf, type HostSpacingEntry } from "../../src/crawl/politeness.js";
 import {
   completeUrls,
@@ -56,8 +56,10 @@ import {
   renderedHtmlFilename,
   writeRenderResult,
   type RenderResult,
+  type RenderTestFaults,
 } from "../../src/crawl/render/renderer.js";
 import type { RenderConsole } from "../../src/crawl/render/console-capture.js";
+import type { RenderA11y } from "../../src/crawl/render/a11y.js";
 import { analyzeHtml } from "../../src/crawl/parse/page-analyzer.js";
 import { isSameOrigin, normalizeUrl } from "../../src/crawl/parse/url-utils.js";
 import type {
@@ -493,6 +495,14 @@ async function startSite(otherOrigin: () => string): Promise<Site> {
           `<img src="/unsized.png" alt="u" width="20" height="20"></body></html>`,
       );
     }
+    if (path === "/a11y-page") {
+      // Phase 29b: two of the subset's violations, one node each — a
+      // document without `lang` and an image without `alt`.
+      return html(
+        `<!doctype html><html><head><title>A11y</title></head><body>` +
+          `<main><h1>Heading</h1><img src="/plain.png" width="20" height="20"></main></body></html>`,
+      );
+    }
     if (path === "/reset.js") {
       // No response at all: the socket goes before a status line is written.
       req.socket.destroy();
@@ -667,6 +677,7 @@ describe("PageRenderer", () => {
       origin: site.base,
       htmlDir,
       imageDimensions: null,
+      accessibility: false,
       userAgent: "AriadneBot/0.1 (render test)",
       perHostDelayMs: 0,
       // No `navigationTimeoutMs`: the production 15s. Every page this renderer
@@ -820,6 +831,7 @@ describe("PageRenderer", () => {
       origin: site.base,
       htmlDir: missing,
       imageDimensions: null,
+      accessibility: false,
       userAgent: "AriadneBot/0.1 (render test)",
       perHostDelayMs: 0,
       settleMs: SETTLE_MS,
@@ -1050,6 +1062,7 @@ describe("PageRenderer", () => {
       origin: site.base,
       htmlDir,
       imageDimensions: null,
+      accessibility: false,
       userAgent: "AriadneBot/0.1 (render test)",
       perHostDelayMs: 0,
       navigationTimeoutMs: NAV_TIMEOUT_MS,
@@ -1085,6 +1098,7 @@ describe("PageRenderer", () => {
       origin: site.base,
       htmlDir,
       imageDimensions: null,
+      accessibility: false,
       userAgent: "AriadneBot/0.1 (render test)",
       perHostDelayMs: 0,
       navigationTimeoutMs: NAV_TIMEOUT_MS,
@@ -1152,6 +1166,7 @@ describe("PageRenderer under the crawl's pacing (Phase 24a)", () => {
       origin: site.base,
       htmlDir,
       imageDimensions: null,
+      accessibility: false,
       userAgent: "AriadneBot/0.1 (render pacing test)",
       perHostDelayMs: 0,
       settleMs: SETTLE_MS,
@@ -1519,6 +1534,7 @@ describe("PageRenderer under the crawl's pacing (Phase 24a)", () => {
       origin,
       htmlDir,
       imageDimensions: null,
+      accessibility: false,
       userAgent: "AriadneBot/0.1 (render pin test)",
       perHostDelayMs: 0,
       settleMs: SETTLE_MS,
@@ -1560,6 +1576,7 @@ describe("PageRenderer under the crawl's pacing (Phase 24a)", () => {
       origin: `http://shop.test:${port}`,
       htmlDir,
       imageDimensions: null,
+      accessibility: false,
       userAgent: "AriadneBot/0.1 (render pin test)",
       perHostDelayMs: 0,
       settleMs: SETTLE_MS,
@@ -1592,6 +1609,7 @@ describe("PageRenderer under the crawl's pacing (Phase 24a)", () => {
       origin: `http://shop.test:${port}`,
       htmlDir,
       imageDimensions: null,
+      accessibility: false,
       userAgent: "AriadneBot/0.1 (render pin test)",
       perHostDelayMs: 0,
       settleMs: SETTLE_MS,
@@ -1634,6 +1652,7 @@ describe("PageRenderer under the crawl's pacing (Phase 24a)", () => {
         origin: "http://shop.test:8080",
         htmlDir,
         imageDimensions: null,
+        accessibility: false,
         userAgent: "AriadneBot/0.1 (render pin test)",
         perHostDelayMs: 0,
         allowPrivate: true,
@@ -1651,6 +1670,7 @@ describe("PageRenderer under the crawl's pacing (Phase 24a)", () => {
         origin: "http://shop.test:8080",
         htmlDir,
         imageDimensions: null,
+        accessibility: false,
         userAgent: "AriadneBot/0.1 (render pin test)",
         perHostDelayMs: 0,
         resolve: async (_host, type) => (type === "A" ? ["93.184.216.34", "127.0.0.1"] : []),
@@ -1877,6 +1897,52 @@ describe("runRenderPass", () => {
       .from(pages)
       .where(and(eq(pages.crawlId, crawlId), eq(pages.url, `${site.base}${path}`)));
     return rows[0]!;
+  }
+
+  /** One page's `render_a11y` rows (Phase 29b), in rule order. */
+  async function a11yRows(crawlId: string, pageId: string) {
+    return db
+      .select({
+        axeRule: renderA11y.axeRule,
+        impact: renderA11y.impact,
+        nodeCount: renderA11y.nodeCount,
+        targets: renderA11y.targets,
+      })
+      .from(renderA11y)
+      .where(and(eq(renderA11y.crawlId, crawlId), eq(renderA11y.pageId, pageId)))
+      .orderBy(renderA11y.axeRule);
+  }
+
+  /** A successful render of `path` carrying `a11y`, every other column filled. */
+  function renderedWith(path: string, a11y: RenderA11y | null): RenderResult {
+    return {
+      url: `${site.base}${path}`,
+      rendered: true,
+      wordCount: 1,
+      linkCount: 0,
+      navLinkCount: 0,
+      footerLinkCount: 0,
+      filterLinkCount: 0,
+      analyzerWordCount: 1,
+      renderableWordCount: 1,
+      title: "A page",
+      h1Count: 0,
+      canonical: null,
+      robotsMeta: null,
+      metaDescription: null,
+      h1Text: null,
+      htmlPath: "/dev/null",
+      redirectUrl: null,
+      error: null,
+      blockedRequests: 0,
+      skippedPaintRequests: 0,
+      pacedRequests: 0,
+      cachedResponses: 0,
+      unpacedNetworkRequests: 0,
+      console: null,
+      images: null,
+      a11y,
+    };
   }
 
   it("pins the pass defaults", () => {
@@ -2555,6 +2621,7 @@ describe("runRenderPass", () => {
       unpacedNetworkRequests: 0,
       console: null,
       images: null,
+      a11y: null,
     };
 
     await expect(writeRenderResult(db, crawlId, ghost)).rejects.toThrow(/no page row/i);
@@ -2614,6 +2681,13 @@ describe("runRenderPass", () => {
           },
         ],
       },
+      // Phase 29b: a selector and an axe error are the site's strings too.
+      a11y: {
+        status: "ran",
+        ms: 12,
+        error: null,
+        violations: [{ rule: "label", impact: "critical", nodeCount: 1, targets: ["#a\u0000\uD800"] }],
+      },
     };
 
     await writeRenderResult(db, crawlId, result);
@@ -2624,6 +2698,9 @@ describe("runRenderPass", () => {
     expect(row.renderedMetaDescription).toBe("d�");
     expect(row.renderedH1Text).toBe("H␀�");
     expect((row.renderImages as RenderImages).kept[0]!.url).toBe("https://x/a␀�.png");
+    expect(await a11yRows(crawlId, row.id)).toEqual([
+      { axeRule: "label", impact: "critical", nodeCount: 1, targets: ["#a␀�"] },
+    ]);
   });
 
   // -------------------------------------------------------------------------
@@ -2769,6 +2846,104 @@ describe("runRenderPass", () => {
       },
     ]);
   });
+
+  // -------------------------------------------------------------------------
+  // Phase 29b: the accessibility run, render_a11y and renderAccessibility.
+  // -------------------------------------------------------------------------
+
+  it("runs axe on each rendered page and writes its status, time and violations", async () => {
+    const crawlId = await newCrawl(["/a11y-page", "/console-clean"]);
+
+    const summary = await runRenderPass(db, crawlId, passConfig());
+
+    expect(summary.failures).toBe(0);
+    const row = await pageRow(crawlId, "/a11y-page");
+    expect(row.renderA11yStatus).toBe("ran");
+    expect(row.renderA11yMs).toBeGreaterThanOrEqual(0);
+    expect(row.renderA11yError).toBeNull();
+    expect(await a11yRows(crawlId, row.id)).toEqual([
+      { axeRule: "html-has-lang", impact: "serious", nodeCount: 1, targets: ["html"] },
+      { axeRule: "image-alt", impact: "critical", nodeCount: 1, targets: ["img"] },
+    ]);
+    const clean = await pageRow(crawlId, "/console-clean");
+    expect(clean.renderA11yStatus).toBe("ran");
+    expect(await a11yRows(crawlId, clean.id)).toEqual([]);
+  });
+
+  it("renderAccessibility: false runs no axe and says so", async () => {
+    const crawlId = await newCrawl(["/a11y-page"]);
+
+    await runRenderPass(db, crawlId, passConfig({ renderAccessibility: false }));
+
+    const row = await pageRow(crawlId, "/a11y-page");
+    expect(row.rendered).toBe(true);
+    expect(row.renderA11yStatus).toBe("disabled");
+    expect(row.renderA11yMs).toBeNull();
+    expect(row.renderA11yError).toBeNull();
+    expect(await a11yRows(crawlId, row.id)).toEqual([]);
+  });
+
+  it("replaces a page's render_a11y rows on every write, and a failed render clears them", async () => {
+    const crawlId = await newCrawl(["/csr"]);
+    const id = (await pageRow(crawlId, "/csr")).id;
+
+    await writeRenderResult(db, crawlId, renderedWith("/csr", {
+      status: "ran",
+      ms: 40,
+      error: null,
+      violations: [
+        { rule: "list", impact: "serious", nodeCount: 3, targets: ["ul", "ol"] },
+        { rule: "label", impact: "critical", nodeCount: 1, targets: ["#q"] },
+      ],
+    }));
+    expect(await a11yRows(crawlId, id)).toEqual([
+      { axeRule: "label", impact: "critical", nodeCount: 1, targets: ["#q"] },
+      { axeRule: "list", impact: "serious", nodeCount: 3, targets: ["ul", "ol"] },
+    ]);
+
+    // A re-render: the old rows go, the new ones are the page's.
+    await writeRenderResult(db, crawlId, renderedWith("/csr", {
+      status: "ran",
+      ms: 41,
+      error: null,
+      violations: [{ rule: "image-alt", impact: null, nodeCount: 2, targets: ["img"] }],
+    }));
+    expect(await a11yRows(crawlId, id)).toEqual([
+      { axeRule: "image-alt", impact: null, nodeCount: 2, targets: ["img"] },
+    ]);
+
+    // An axe the page broke: `error` with its first line, and no rows.
+    await writeRenderResult(db, crawlId, renderedWith("/csr", {
+      status: "error",
+      ms: 5,
+      error: "Error: axe broke",
+      violations: [],
+    }));
+    let row = await pageRow(crawlId, "/csr");
+    expect([row.renderA11yStatus, row.renderA11yMs, row.renderA11yError]).toEqual([
+      "error",
+      5,
+      "Error: axe broke",
+    ]);
+    expect(await a11yRows(crawlId, id)).toEqual([]);
+
+    // A failed render measured nothing: every column null, no row left.
+    await writeRenderResult(db, crawlId, renderedWith("/csr", {
+      status: "ran",
+      ms: 7,
+      error: null,
+      violations: [{ rule: "label", impact: "critical", nodeCount: 1, targets: ["#q"] }],
+    }));
+    await writeRenderResult(db, crawlId, {
+      ...renderedWith("/csr", null),
+      rendered: false,
+      error: "navigation error: gone",
+      wordCount: null,
+    });
+    row = await pageRow(crawlId, "/csr");
+    expect([row.renderA11yStatus, row.renderA11yMs, row.renderA11yError]).toEqual([null, null, null]);
+    expect(await a11yRows(crawlId, id)).toEqual([]);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -2816,6 +2991,7 @@ describe("PageRenderer credentials", () => {
       origin: credBase,
       htmlDir,
       imageDimensions: null,
+      accessibility: false,
       userAgent: "AriadneBot/0.1 (render credentials test)",
       perHostDelayMs: 0,
       settleMs: SETTLE_MS,
@@ -2910,6 +3086,7 @@ describe("PageRenderer credentials: one line per request header (27c M6)", () =>
       origin: echoBase,
       htmlDir,
       imageDimensions: null,
+      accessibility: false,
       userAgent: "AriadneBot/0.1 (render header lines test)",
       perHostDelayMs: 0,
       settleMs: SETTLE_MS,
@@ -3080,6 +3257,7 @@ describe("PageRenderer image stand-ins (Phase 29b)", () => {
       origin: origin.base,
       htmlDir,
       imageDimensions: lookup,
+      accessibility: false,
       userAgent: "AriadneBot/0.1 (render image test)",
       perHostDelayMs: 0,
       settleMs: SETTLE_MS,
@@ -3250,6 +3428,7 @@ describe("PageRenderer image stand-ins (Phase 29b)", () => {
       origin: origin.base,
       htmlDir,
       imageDimensions: null,
+      accessibility: false,
       userAgent: "AriadneBot/0.1 (render image test)",
       perHostDelayMs: 0,
       settleMs: SETTLE_MS,
@@ -3286,5 +3465,215 @@ describe("PageRenderer image stand-ins (Phase 29b)", () => {
     // The renderer is still usable afterwards: the context was released clean.
     const next = await renderer.render(`${origin.base}/img/same-origin`);
     expect(next.images!.measured).toBe(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Phase 29b Task 4: the accessibility run (axe-core, in the isolated world).
+// ---------------------------------------------------------------------------
+
+describe("PageRenderer accessibility (Phase 29b)", () => {
+  let origin: Awaited<ReturnType<typeof startCounting>>;
+  let htmlDir: string;
+  let renderer: PageRenderer;
+  /**
+   * The renderer's TEST-ONLY faults, mutated per test (and restored in a
+   * `finally`): the hooks are read on every render, so one renderer serves
+   * the ordinary cases and the deterministic timeout, interruption and error.
+   */
+  const faults: RenderTestFaults = {};
+  /** `a11y.ms` of every `ran` render here, for the report's median. */
+  const ranMs: number[] = [];
+
+  const PAGES: Record<string, string> = {
+    // No `lang`, one `<img>` without `alt`: exactly two of the subset's rules.
+    "/a11y/violations":
+      `<!doctype html><html><head><title>Violations</title></head><body>` +
+      `<main><h1>Heading</h1><p>Some words.</p><img src="/plain.png" width="20" height="20"></main>` +
+      `</body></html>`,
+    "/a11y/clean":
+      `<!doctype html><html lang="en"><head><title>Clean</title></head><body>` +
+      `<main><h1>Clean</h1><p>Every word here is readable.</p></main></body></html>`,
+    // RULING A: the page breaks the globals a main-world axe would lean on.
+    // Its text is grey on grey, so `color-contrast` must still work — it reads
+    // computed styles and the layout through the isolated world's own DOM
+    // bindings — and it has no `lang`.
+    "/a11y/hostile":
+      `<!doctype html><html><head><title>Hostile</title></head><body>` +
+      `<p style="color:#777;background-color:#888">Grey on grey</p>` +
+      `<script>` +
+      `Array.prototype.map = function () { throw new Error("no map"); };` +
+      `Array.prototype.forEach = function () { throw new Error("no forEach"); };` +
+      `Element.prototype.matches = function () { throw new Error("no matches"); };` +
+      `Node.prototype.contains = function () { throw new Error("no contains"); };` +
+      `window.getComputedStyle = function () { throw new Error("no styles"); };` +
+      `window.Promise = function () { throw new Error("no Promise"); };` +
+      `</script></body></html>`,
+  };
+
+  function launch(overrides: Partial<Parameters<typeof PageRenderer.launch>[0]> = {}) {
+    return PageRenderer.launch({
+      origin: origin.base,
+      htmlDir,
+      imageDimensions: null,
+      accessibility: true,
+      userAgent: "AriadneBot/0.1 (render a11y test)",
+      perHostDelayMs: 0,
+      settleMs: SETTLE_MS,
+      allowPrivate: true,
+      testFaults: faults,
+      ...overrides,
+    });
+  }
+
+  beforeAll(async () => {
+    origin = await startCounting((path, res) => {
+      const page = PAGES[path];
+      if (page !== undefined) {
+        res.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" });
+        res.end(page);
+        return;
+      }
+      res.writeHead(404, { "content-type": "text/plain" });
+      res.end("no");
+    });
+    htmlDir = await mkdtemp(join(tmpdir(), "ariadne-render-a11y-"));
+    renderer = await launch();
+  }, 120_000);
+
+  afterAll(async () => {
+    await renderer.close();
+    await origin.close();
+    await rm(htmlDir, { recursive: true, force: true });
+    const sorted = [...ranMs].sort((a, b) => a - b);
+    // The report's figure (Task 4): the median axe time on this machine.
+    console.log(
+      `[a11y] axe ran ${sorted.length} times; median ${sorted[Math.floor(sorted.length / 2)]} ms, ` +
+        `max ${sorted[sorted.length - 1]} ms`,
+    );
+  });
+
+  async function render(path: string): Promise<RenderResult> {
+    const result = await renderer.render(`${origin.base}${path}`);
+    if (result.a11y?.status === "ran" && result.a11y.ms !== null) ranMs.push(result.a11y.ms);
+    return result;
+  }
+
+  it("finds exactly a missing alt and a missing lang, one node each", async () => {
+    const result = await render("/a11y/violations");
+
+    expect(result.error).toBeNull();
+    expect(result.a11y).toMatchObject({ status: "ran", error: null });
+    expect(result.a11y!.ms).toBeGreaterThanOrEqual(0);
+    expect(result.a11y!.violations.map((v) => [v.rule, v.nodeCount]).sort()).toEqual([
+      ["html-has-lang", 1],
+      ["image-alt", 1],
+    ]);
+  });
+
+  it("finds nothing on a clean page", async () => {
+    const result = await render("/a11y/clean");
+
+    expect(result.a11y).toMatchObject({ status: "ran", error: null, violations: [] });
+  });
+
+  it("runs in the isolated world: a page that breaks the globals cannot stop or bend it", async () => {
+    const result = await render("/a11y/hostile");
+
+    expect(result.error).toBeNull();
+    expect(result.a11y).toMatchObject({ status: "ran", error: null });
+    expect(result.a11y!.violations.map((v) => [v.rule, v.nodeCount]).sort()).toEqual([
+      ["color-contrast", 1],
+      ["html-has-lang", 1],
+    ]);
+  });
+
+  it("accessibility: false runs no axe", async () => {
+    const off = await launch({ accessibility: false });
+    try {
+      const result = await off.render(`${origin.base}/a11y/violations`);
+
+      expect(result.rendered).toBe(true);
+      expect(result.a11y).toEqual({ status: "disabled", ms: null, error: null, violations: [] });
+    } finally {
+      await off.close();
+    }
+  });
+
+  it("times out a run the page blocks, terminates it, keeps every other measurement, and renders on", async () => {
+    // P1: deterministic. Just before axe runs, the page's MAIN world starts a
+    // loop that never yields; the isolated world shares its thread, so axe
+    // cannot start until `Runtime.terminateExecution` frees it.
+    faults.axeTimeoutMs = 1_000;
+    faults.beforeAxe = async (page) => {
+      await page.evaluate("setTimeout(function () { for (;;) {} }, 0)");
+    };
+    let result: RenderResult;
+    try {
+      result = await render("/a11y/violations");
+    } finally {
+      delete faults.axeTimeoutMs;
+      delete faults.beforeAxe;
+    }
+
+    expect(result.error).toBeNull();
+    expect(result.rendered).toBe(true);
+    expect(result.a11y).toMatchObject({ status: "timeout", error: null, violations: [] });
+    expect(result.a11y!.ms).toBeGreaterThanOrEqual(1_000);
+    expect(result.wordCount).toBe(3);
+    expect(result.images).toMatchObject({ total: 1 });
+    expect(result.htmlPath).not.toBeNull();
+
+    // The page was released cleanly and the context renders the next page.
+    const next = await render("/a11y/violations");
+    expect(next.a11y).toMatchObject({ status: "ran" });
+    expect(next.a11y!.violations).toHaveLength(2);
+  });
+
+  it("records a run whose document navigated away under it as interrupted", async () => {
+    faults.beforeAxe = async (page) => {
+      await page.evaluate(`location.href = "/a11y/clean"`);
+      await page.waitForURL(/\/a11y\/clean$/, { waitUntil: "commit" });
+    };
+    let result: RenderResult;
+    try {
+      result = await render("/a11y/violations");
+    } finally {
+      delete faults.beforeAxe;
+    }
+
+    expect(result.error).toBeNull();
+    expect(result.rendered).toBe(true);
+    expect(result.a11y).toMatchObject({ status: "interrupted", error: null, violations: [] });
+    expect(result.a11y!.ms).not.toBeNull();
+    // Measured from the document that was serialised, before it left.
+    expect(result.title).toBe("Violations");
+    expect(result.wordCount).toBe(3);
+  });
+
+  it("records an axe the page made throw as error, with its first line, and keeps every other measurement", async () => {
+    faults.axeFault = "axe broke on this page\nsecond line of it";
+    let result: RenderResult;
+    try {
+      result = await render("/a11y/violations");
+    } finally {
+      delete faults.axeFault;
+    }
+
+    expect(result.error).toBeNull();
+    expect(result.rendered).toBe(true);
+    expect(result.a11y).toMatchObject({
+      status: "error",
+      error: "Error: axe broke on this page",
+      violations: [],
+    });
+    expect(result.wordCount).toBe(3);
+    expect(result.images).toMatchObject({ total: 1 });
+  });
+
+  it("carries no accessibility on a render refused before the browser", async () => {
+    const refused = await renderer.render("http://169.254.169.254/");
+    expect(refused.rendered).toBe(false);
+    expect(refused.a11y).toBeNull();
   });
 });

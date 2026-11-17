@@ -8,6 +8,7 @@ import type { ScheduleCrawl } from "../schedule/store.js";
 import type { StoredHostSpacing } from "../crawl/politeness.js";
 import type { StoredPlatformProfile } from "../crawl/platform.js";
 import type { RenderConsole } from "../crawl/render/console-capture.js";
+import type { A11yStatus } from "../crawl/render/a11y.js";
 import type { RenderImages } from "../crawl/render/image-stand-in.js";
 import type { StoredResponseHeaders } from "../crawl/response-headers.js";
 import type { StructuredDataFormat, StructuredDataSkips } from "../crawl/parse/page-analyzer.js";
@@ -1055,6 +1056,35 @@ export const pages = pgTable("pages", {
   // non-null capture with `total: 0`. Shape: `RenderImages`
   // (src/crawl/render/image-stand-in.ts).
   renderImages: jsonb("render_images").$type<RenderImages>(),
+  // THE ACCESSIBILITY RUN (Phase 29b, migration 0057; render capture 3). After
+  // the document is serialised, the renderer runs the pinned axe-core's WCAG
+  // A/AA subset (`A11Y_RULES`, src/crawl/render/a11y.ts) in an isolated world
+  // of the page; the violations are rows of `render_a11y`.
+  //
+  // `render_a11y_status` (ruling R3, widened by controller ruling B) is text,
+  // not a boolean:
+  //  - `ran`: axe finished; the page's rows in `render_a11y` are its
+  //    violations, and none means none.
+  //  - `disabled`: the crawl's `renderAccessibility` was false; axe never ran.
+  //  - `timeout`: axe did not finish inside `AXE_TIMEOUT_MS` and was terminated.
+  //  - `interrupted`: the page's document went away under it (it navigated, or
+  //    its target closed).
+  //  - `error`: axe threw or rejected inside the page; `render_a11y_error` says
+  //    how.
+  // `timeout`, `interrupted` and `error` are INCOMPLETE runs: no rows, and that
+  // is "not measured", never "no violations".
+  //
+  // NULLABLE: null means the page was not rendered, its render failed (or was
+  // refused before a browser page opened), or it was rendered before capture 3
+  // (`render_version` < 3).
+  renderA11yStatus: text("render_a11y_status").$type<A11yStatus>(),
+  // Wall time of the axe run in ms (injection included), so the gate can report
+  // its median and p95. Set for every status but `disabled`; null exactly when
+  // `render_a11y_status` is null or `disabled`.
+  renderA11yMs: integer("render_a11y_ms"),
+  // The first line of what axe threw, through `storableText(…, 500)`: set only
+  // when `render_a11y_status` is `error`, null otherwise.
+  renderA11yError: text("render_a11y_error"),
 }, (t) => [
   uniqueIndex("pages_crawl_url").on(t.crawlId, t.url),
   index("pages_crawl_normalised").on(t.crawlId, t.urlNormalised),
@@ -1223,6 +1253,34 @@ export const structuredData = pgTable("structured_data", {
   // which is exactly the failure that hides. Change the cursor there, change
   // this index here (the `pages_simhash_band*` precedent).
   index("sd_crawl_id").on(t.crawlId, t.id),
+]);
+
+/**
+ * ONE ROW PER AXE RULE A RENDERED PAGE VIOLATES (Phase 29b, migration 0057).
+ *
+ * Written by the render writer (`writeRenderResult`) for a page whose
+ * `render_a11y_status` is `ran`, and REPLACED on every write of that page: its
+ * rows are deleted and this render's inserted in the same transaction, so a
+ * re-render never leaves an older run's violation behind, and a failed or
+ * incomplete render leaves none. `axe_rule` is one of `A11Y_RULES`
+ * (src/crawl/render/a11y.ts); `impact` is axe's own for the rule on this page
+ * (null when axe gave none). `node_count` counts every element that failed;
+ * `targets` keeps the CSS selectors of the first `A11Y_TARGETS_MAX`, each cut
+ * to `A11Y_TARGET_CHARS` (a shadow DOM path joined with ` >>> `). No HTML
+ * snippet is stored: the selector finds the element in the kept document.
+ *
+ * No row for a rule means "not violated" ONLY on a page whose status is `ran`.
+ */
+export const renderA11y = pgTable("render_a11y", {
+  crawlId: text("crawl_id").notNull().references(() => crawls.id, { onDelete: "cascade" }),
+  pageId: text("page_id").notNull(),
+  axeRule: text("axe_rule").notNull(),
+  impact: text("impact"),
+  nodeCount: integer("node_count").notNull(),
+  targets: jsonb("targets").notNull().$type<string[]>(),
+}, (t) => [
+  uniqueIndex("render_a11y_crawl_page_rule").on(t.crawlId, t.pageId, t.axeRule),
+  index("render_a11y_crawl_rule").on(t.crawlId, t.axeRule),
 ]);
 
 /**

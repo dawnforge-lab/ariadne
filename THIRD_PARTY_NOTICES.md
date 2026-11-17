@@ -64,6 +64,31 @@ Playwright (Apache-2.0) is a runtime dependency of the render pass
 chromium`; that browser is not vendored into this repository and carries its
 own upstream licences.
 
+## axe-core — https://github.com/dequelabs/axe-core
+
+axe-core 4.14.0, pinned exactly (`"axe-core": "4.14.0"`, no caret), is a
+runtime dependency of the render pass's accessibility run (Phase 29b,
+src/crawl/render/a11y.ts). Copyright (c) 2015 - 2026 Deque Systems, Inc. Mozilla Public
+License 2.0 (https://www.mozilla.org/en-US/MPL/2.0/); the full text ships in
+node_modules/axe-core/LICENSE. **Unmodified**: the package's own
+`axe.min.js` is read from node_modules at run time and evaluated in the
+rendered page as published. No axe-core source is copied into this
+repository, and no file of it is changed, so MPL-2.0's file-level copyleft
+asks nothing further of Ariadne's own files. Its source is available at the
+URL above (tag v4.14.0) and on npm.
+
+axe-core bundles third-party code under its own licences, listed in
+node_modules/axe-core/LICENSE-3RD-PARTY.txt:
+
+- MIT: colorjs.io (Lea Verou, Chris Lilley), core-js-pure (Denis Pushkarev),
+  css-selector-parser (Dulin Marat), doT.js (Laura Doktorova; portions from
+  jQote2, aefxx), emoji-regex (Mathias Bynens), es6-iterator, event-emitter
+  and lru-queue (Mariusz Nowak), es6-promise (Yehuda Katz, Tom Dale, Stefan
+  Penner and contributors), is-promise (Forbes Lindesay), typedarray (Linden
+  Research, Inc.; Joshua Bell), weakmap-polyfill (polygonplanet).
+- ISC: d, es5-ext, es6-symbol, es6-weak-map, ext, memoizee, next-tick,
+  timers-ext and type (Mariusz Nowak).
+
 ## schema.org vocabulary
 
 Derived data in `src/rules/schema-org/vocabulary.generated.ts`; release 30.1

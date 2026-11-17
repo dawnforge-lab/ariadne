@@ -261,7 +261,7 @@ index that keeps `renderDocuments` from scanning a crawl's pages. Gate evidence:
   rules link pinned to a dead instance"), `test/schedule/scheduler.test.ts:618` ("the
   leader's session carries server-side TCP keepalives"),
   `test/schedule/scheduler.test.ts:638` ("logs the holder's application_name, once per
-  change of holder") and `test/crawl/render-link.test.ts:205` ("is an index read over the
+  change of holder") and `test/crawl/render-link.test.ts:249` ("is an index read over the
   crawl's kept documents").
 - **Not in 28c**: the domain allowlist is still one operator-set list (a per-tenant
   allowlist is an open item); nothing bounds how long a live crawl holds a host from other
@@ -1588,9 +1588,9 @@ transports (§4.1b): over MCP a body that does not fit it is refused by the SDK
 before the tool runs, in the schema's own words with the path appended, rather
 than as `{error}` JSON. `config_validate` answers every one of these without
 starting anything, with the same first message
-(`test/api/transport-parity.test.ts:397` "answers valid: false exactly when POST
+(`test/api/transport-parity.test.ts:398` "answers valid: false exactly when POST
 /crawls refuses"). The body refusals themselves are pinned in
-`test/api/config-schema.test.ts:241` ("refuses a perHostDelayMs under the
+`test/api/config-schema.test.ts:243` ("refuses a perHostDelayMs under the
 politeness floor rather than raising it").
 
 **An unknown key is named by its position, never quoted** (Phase 27d). A key can be a
@@ -1919,7 +1919,7 @@ budgets) or `always` (`findingCap` and `judgement`). `judgement.rules` lists
 every page and query rule id as `propertyNames.enum` (zod's spelling of a
 partial record over an enum; no metric id), and `judgement.thresholds` has one
 property per overridable threshold with its `minimum`, `maximum` and `default`
-(`test/api/config-schema.test.ts:116` "publishes every overridable threshold with
+(`test/api/config-schema.test.ts:118` "publishes every overridable threshold with
 its bounds and default"). A `default` is the ENGINE's: the operator's
 `crawlDefaults` sit over it, so `config_validate`'s `effective` is the answer
 to "what would this crawl run with".
@@ -1934,7 +1934,7 @@ same checks `crawl_start` does, allowlist and URL policy on `siteUrl`, every
 lookup**. `errors[0]` is the refusal `crawl_start` would answer with, in the
 same words; `effective`, on a valid body, is exactly what the crawl would store
 in `config_jsonb` plus the parsed `judgement` (null when none was given), and
-is null on an invalid one (`test/api/transport-parity.test.ts:397` "answers
+is null on an invalid one (`test/api/transport-parity.test.ts:398` "answers
 valid: false exactly when POST /crawls refuses").
 
 ### 4.2 `crawl_status` → the crawl in full

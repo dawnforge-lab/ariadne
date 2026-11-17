@@ -30,10 +30,13 @@ import { readFileSync } from "node:fs";
  * readings have the same definition (both stamps at least 2, or both below).
  * Version 3 (Phase 29b, migration 0056): the render answers image requests with
  * true-size SVG stand-ins from the resource pass's stored sizes and measures
- * every `<img>` box (`pages.render_images`). 29b's accessibility capture joins
- * this same version before the phase merges, so no stored row is a partial 3.
- * A row below 3 has no image capture: its null there means "not captured",
- * never "no images".
+ * every `<img>` box (`pages.render_images`). Capture 3 also records
+ * accessibility (migration 0057): the pinned axe-core subset's status, time and
+ * error on the page (`pages.render_a11y_status`, `_ms`, `_error`) and its
+ * violations as `render_a11y` rows. Both joined this one version before the
+ * phase merged, so no stored row is a partial 3. A row below 3 has no image or
+ * accessibility capture: its nulls there mean "not captured", never "no
+ * images" or "no violations".
  */
 export const EXTRACTION_VERSION = 4;
 export const RENDER_CAPTURE_VERSION = 3;

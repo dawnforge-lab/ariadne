@@ -275,6 +275,7 @@ describe("CRAWL_CHILD_TABLES", () => {
       "links",
       "page_resources",
       "structured_data",
+      "render_a11y",
       "hreflang",
       "url_params",
       "sitemap_hreflang",

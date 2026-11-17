@@ -15,12 +15,14 @@ const renderer = await PageRenderer.launch({
   htmlDir: "/tmp",
   // No crawl, so no stored image sizes: every image is aborted, as before 29b.
   imageDimensions: null,
+  // On, as production runs it: the check proves axe runs in the image too.
+  accessibility: true,
   userAgent: "ariadne-launch-check",
   perHostDelayMs: 0,
 });
 try {
   const result = await renderer.render(target);
-  console.log(JSON.stringify({ url: result.url, rendered: result.rendered, title: result.title, error: result.error }));
+  console.log(JSON.stringify({ url: result.url, rendered: result.rendered, title: result.title, error: result.error, a11y: result.a11y?.status ?? null }));
   if (!result.rendered) process.exit(1);
 } finally {
   await renderer.close();

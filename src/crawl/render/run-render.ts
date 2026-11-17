@@ -329,6 +329,13 @@ export interface RenderPassConfig extends RenderSelectionConfig {
    * refusals, the same pacing, the same earned spacing, the same evidence.
    */
   renderUrls?: readonly string[];
+  /**
+   * Run the accessibility subset in each rendered page (Phase 29b,
+   * `RendererOptions.accessibility`), on `CrawlConfig.renderAccessibility`'s
+   * terms so a stored config still satisfies this: absent means on, `false`
+   * records every rendered page `disabled`.
+   */
+  renderAccessibility?: boolean;
   /** TEST ONLY — the fixture-server escape hatch. See `CrawlConfig`. */
   allowPrivate?: boolean;
   /**
@@ -663,6 +670,9 @@ export async function runRenderPass(
       htmlDir,
       // Image stand-ins (Phase 29b): sizes from this crawl's own resources.
       imageDimensions: resourceImageLookup(db, crawlId),
+      // The accessibility run (Phase 29b): on unless the crawl said false —
+      // the documented default of `renderAccessibility`, not a guess.
+      accessibility: cfg.renderAccessibility !== false,
       userAgent: cfg.userAgent,
       perHostDelayMs: profiled.perHostDelayMs,
       robotsCrawlDelaySec: cfg.robotsCrawlDelaySec ?? null,

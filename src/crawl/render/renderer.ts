@@ -132,6 +132,17 @@
  *    is a miss — one unmeasured image, never a stopped pass. An image whose
  *    lookup is still running when the page is measured has no stand-in yet
  *    and is counted `noDimensions`.
+ *  - **Accessibility (Phase 29b): axe-core, in the isolated world, last.**
+ *    With `RendererOptions.accessibility` on, each rendered page gets the
+ *    pinned axe-core's WCAG A/AA subset (a11y.ts), injected and run in ONE
+ *    evaluation in the same isolated world the images were measured in — the
+ *    page's DOM, not its globals, so a page that broke `Array.prototype` or
+ *    `Promise` cannot stop or bend it. It runs after the document is
+ *    serialised, analysed and written, so it costs no other measurement.
+ *    Whatever the PAGE does to it is a status on the row, never a stopped
+ *    pass: a run past `AXE_TIMEOUT_MS` is terminated (`timeout`), a document
+ *    that navigated away under it is `interrupted`, an axe its DOM made throw
+ *    is `error`. It makes no request: the source comes from the package.
  *  - **No silent fallbacks (rule 7).** A timeout, a navigation error and a
  *    policy refusal are three different classified strings on the page row, and
  *    every one of them leaves `rendered = false` with the five measurement
@@ -218,6 +229,14 @@ import {
   type SrcsetMatch,
   type StoredImage,
 } from "./image-stand-in.js";
+import {
+  AXE_TIMEOUT_MS,
+  a11yDisabled,
+  a11yErrorLine,
+  axeRunExpression,
+  shapeAxeResults,
+  type RenderA11y,
+} from "./a11y.js";
 import { analyzeHtml, type RawPageAnalysis } from "../parse/page-analyzer.js";
 import { hostnameSpellings, isSameOrigin, normalizeUrl } from "../parse/url-utils.js";
 import { credentialHeadersOf, type CredentialTarget } from "../credentials.js";
@@ -331,6 +350,15 @@ export interface RendererOptions {
    * that REJECTS is a defect of ours and stops the render (it throws).
    */
   imageDimensions: ImageDimensionLookup | null;
+  /**
+   * Run the pinned axe-core WCAG A/AA subset in every rendered page (Phase
+   * 29b, a11y.ts; the crawl's `renderAccessibility`). False records
+   * `{status: "disabled"}` on each rendered page and runs nothing.
+   *
+   * REQUIRED, on the `htmlDir` and `imageDimensions` precedent: whether a page
+   * is checked is said by the caller, never inherited from a forgotten key.
+   */
+  accessibility: boolean;
   /** The crawl's branded UA, so a site sees one client, not two (rule 9). */
   userAgent: string;
   /** Minimum spacing between two requests to one host: the configured base. */
@@ -518,6 +546,17 @@ export interface RenderResult {
    * page that did not finish rendering has no layout worth measuring.
    */
   images: RenderImages | null;
+  /**
+   * The accessibility run (Phase 29b, `pages.render_a11y_*` and the
+   * `render_a11y` rows): how it ended, how long it took, what it found. See
+   * a11y.ts for the five statuses.
+   *
+   * Non-null on every successful render — `disabled` when the crawl turned it
+   * off, and `timeout`, `interrupted` or `error` when the page stopped it,
+   * with every other measurement kept — and null on EVERY failed one: a page
+   * that did not finish rendering was not checked.
+   */
+  a11y: RenderA11y | null;
 }
 
 /**
@@ -544,14 +583,31 @@ type ServedImage = StoredImage & { widthFrom: RenderImage["widthFrom"] };
 const CONTEXT_GONE =
   /Execution context was destroyed|Cannot find context with specified id|Inspected target navigated or closed/i;
 
-/** The isolated world the srcset lookup and the image measurement run in. */
+/**
+ * The isolated world the srcset lookup, the image measurement and (Phase 29b)
+ * the accessibility run happen in. The name predates the third; it is a label.
+ */
 const ISOLATED_WORLD_NAME = "ariadne-render-images";
 
 /** The slice of a `Runtime.evaluate` reply the image code reads. */
 interface EvaluateReply {
   result: { value?: unknown };
-  exceptionDetails?: { text: string };
+  exceptionDetails?: { text: string; exception?: { description?: string } };
 }
+
+/**
+ * How long, after `Runtime.terminateExecution`, the renderer waits for the
+ * page's thread to answer one trivial evaluation (`RenderTraffic.terminateAxe`)
+ * before it moves on.
+ */
+const AXE_TERMINATE_GRACE_MS = 5_000;
+
+/** What one axe evaluation came to, before `render` names it a status. */
+type AxeOutcome =
+  | { kind: "ran"; value: unknown }
+  | { kind: "threw"; message: string }
+  | { kind: "timeout" }
+  | { kind: "gone" };
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -967,6 +1023,13 @@ class RenderTraffic {
    * navigation destroyed it.
    */
   private isolatedContextId: number | null = null;
+  /**
+   * The isolated world's context in which `measureImages` measured the page —
+   * the document phase 2 then serialised. The accessibility run is evaluated
+   * in exactly this context (`runAxe`) and never in a world made afterwards,
+   * which could belong to a document the page navigated to since.
+   */
+  private measuredContextId: number | null = null;
 
   constructor(
     private readonly cdp: CDPSession,
@@ -1124,7 +1187,104 @@ class RenderTraffic {
         `image measurement threw in the isolated world: ${reply.exceptionDetails.text}`,
       );
     }
+    // The evaluate succeeded, so the world it ran in is the one still held.
+    this.measuredContextId = this.isolatedContextId;
     return readImageMeasurement(reply.result.value ?? null);
+  }
+
+  /**
+   * Evaluate the accessibility run (`axeRunExpression`: the axe source and
+   * the run, as one expression) in the isolated world of the document
+   * `measureImages` measured, and say how it ended (Phase 29b, ruling A).
+   *
+   *  - `ran` — axe resolved; `value` is its cut-down result.
+   *  - `threw` — the evaluation came back with `exceptionDetails`: axe threw
+   *    or `axe.run` rejected inside the page. The page's doing.
+   *  - `gone` — the context is gone: the page navigated (or its document was
+   *    replaced) before or during the run. The page's doing.
+   *  - `timeout` — no answer in `timeoutMs`: the run is terminated
+   *    (`terminateAxe`) and abandoned.
+   *
+   * Anything else the protocol answers — our session gone while the render is
+   * open, a command the browser refused — propagates: it is ours. NO RETRY on
+   * a fresh world: a world made now could be in a document the page navigated
+   * to, and checking that one would report another page's violations as this
+   * page's.
+   */
+  async runAxe(expression: string, timeoutMs: number): Promise<AxeOutcome> {
+    const contextId = this.measuredContextId;
+    if (contextId === null) {
+      throw new Error("runAxe: no measured document to run in — measureImages has not succeeded");
+    }
+    const evaluation = this.cdp.send("Runtime.evaluate", {
+      expression,
+      contextId,
+      returnByValue: true,
+      awaitPromise: true,
+    }) as Promise<EvaluateReply>;
+    let timer: NodeJS.Timeout | undefined;
+    const expired = new Promise<"timeout">((resolve) => {
+      timer = setTimeout(() => resolve("timeout"), timeoutMs);
+    });
+    let settled: EvaluateReply | "timeout";
+    try {
+      // `Promise.race` subscribes to the evaluation, so when the run is
+      // abandoned below its late answer — or late rejection — is handled: a
+      // run we terminated has nothing left to say.
+      settled = await Promise.race([evaluation, expired]);
+    } catch (error) {
+      if (CONTEXT_GONE.test(errorMessage(error))) return { kind: "gone" };
+      throw error;
+    } finally {
+      clearTimeout(timer);
+    }
+    if (settled === "timeout") {
+      await this.terminateAxe();
+      return { kind: "timeout" };
+    }
+    if (settled.exceptionDetails !== undefined) {
+      const d = settled.exceptionDetails;
+      return { kind: "threw", message: d.exception?.description ?? d.text };
+    }
+    return { kind: "ran", value: settled.result.value ?? null };
+  }
+
+  /**
+   * Stop whatever is holding the page's thread (ruling R10): axe itself, or a
+   * page script that never yields — the isolated world shares the main
+   * world's thread, so a busy loop in the page blocks the run before it
+   * starts.
+   *
+   * `Runtime.terminateExecution` ends the CURRENT execution, or the NEXT one
+   * when the thread is idle (axe waiting between rules). So one trivial
+   * evaluation follows it and is waited for: it either is that "next" and
+   * takes the termination itself, or runs after whatever took it — either
+   * way no termination is left armed for a later script (the next render's
+   * measurement included). Its answer is not read; "terminated" and a gone
+   * context are what is expected of it, and anything else propagates. The
+   * wait is bounded (`AXE_TERMINATE_GRACE_MS`): a thread still busy past it
+   * is busy with something that already took the termination, and the run is
+   * `timeout` either way.
+   */
+  private async terminateAxe(): Promise<void> {
+    await this.cdp.send("Runtime.terminateExecution");
+    const flush = (this.cdp.send("Runtime.evaluate", { expression: "0" }) as Promise<unknown>).then(
+      () => undefined,
+      (error: unknown) => {
+        const message = errorMessage(error);
+        if (/Execution was terminated/i.test(message) || CONTEXT_GONE.test(message)) return;
+        throw error;
+      },
+    );
+    let timer: NodeJS.Timeout | undefined;
+    const grace = new Promise<void>((resolve) => {
+      timer = setTimeout(resolve, AXE_TERMINATE_GRACE_MS);
+    });
+    try {
+      await Promise.race([flush, grace]);
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   /** The counters, and a snapshot of what the page reported so far. */
@@ -1761,6 +1921,26 @@ export interface RenderTestFaults {
    * arrives after it (it must still be reported to the gate).
    */
   holdAfterShut?: () => Promise<void>;
+  /**
+   * Replaces `AXE_TIMEOUT_MS` for the accessibility run (Phase 29b), so a
+   * suite can watch a run time out without waiting thirty seconds. Read on
+   * every render.
+   */
+  axeTimeoutMs?: number;
+  /**
+   * Awaited just before the accessibility run is evaluated, with the render's
+   * page, so a suite can make the page do something deterministic at exactly
+   * that moment — start a loop that never yields (a timeout), or navigate and
+   * wait for the commit (an interruption) — instead of racing a timer in the
+   * page against `page.content()`.
+   */
+  beforeAxe?: (page: Page) => Promise<void>;
+  /**
+   * When set, the accessibility run injects the axe source and then rejects
+   * with this message, in the isolated world, in place of `axe.run`: the
+   * shape of an axe a page's DOM made throw (status `error`).
+   */
+  axeFault?: string;
 }
 
 /** Where the network fence listens. */
@@ -2067,6 +2247,7 @@ export class PageRenderer {
         origin: options.origin,
         htmlDir: options.htmlDir,
         imageDimensions: options.imageDimensions,
+        accessibility: options.accessibility,
         userAgent: options.userAgent,
         perHostDelayMs: options.perHostDelayMs,
         navigationTimeoutMs,
@@ -2324,6 +2505,13 @@ export class PageRenderer {
         this.opts.htmlDir === null
           ? null
           : await writeSerialisedDom(this.opts.htmlDir, url, serialised);
+
+      // THE ACCESSIBILITY RUN (Phase 29b), last: every measurement above is
+      // already taken, so nothing axe does — or a page does to axe — can cost
+      // one (ruling R10). How it can end is `accessibility`'s to say.
+      const a11y = this.opts.accessibility
+        ? await this.accessibility(page, traffic, () => crashed)
+        : a11yDisabled();
       if (traffic.failure !== null) throw traffic.failure;
 
       return {
@@ -2359,6 +2547,7 @@ export class PageRenderer {
         redirectUrl: traffic.offSite ?? navigatedTo(url, finalUrl),
         error: null,
         images: traffic.images(imageRows),
+        a11y,
         ...traffic.evidence(),
       };
     } finally {
@@ -2374,6 +2563,57 @@ export class PageRenderer {
       } finally {
         await this.release(slot, page, traffic, crashed);
       }
+    }
+  }
+
+  /**
+   * Run the pinned axe subset in the page's isolated world and name how it
+   * ended (Phase 29b; a11y.ts has the five statuses).
+   *
+   * THE PAGE'S DOING IS A STATUS, NEVER A STOPPED PASS (controller ruling B):
+   * a run the page blocked past the budget is `timeout` (terminated, see
+   * `RenderTraffic.terminateAxe`); a document that went away under it — a
+   * navigation, or a page that crashed — is `interrupted`; an axe the page's
+   * DOM made throw is `error`, its first line kept. OURS PROPAGATES: the axe
+   * source that cannot be read, a result shape `shapeAxeResults` does not
+   * know, our session gone, and any protocol command of ours that broke the
+   * render (`traffic.broken`, raced here as in phase 1).
+   *
+   * `ms` is wall time around the one evaluation (source injection included),
+   * whatever its end.
+   */
+  private async accessibility(
+    page: Page,
+    traffic: RenderTraffic,
+    crashed: () => boolean,
+  ): Promise<RenderA11y> {
+    const faults = this.opts.testFaults;
+    const expression = axeRunExpression(faults?.axeFault ?? null);
+    await faults?.beforeAxe?.(page);
+    const timeoutMs = faults?.axeTimeoutMs ?? AXE_TIMEOUT_MS;
+    const started = Date.now();
+    let outcome: AxeOutcome;
+    try {
+      outcome = await Promise.race([traffic.runAxe(expression, timeoutMs), traffic.broken]);
+    } catch (error) {
+      if (traffic.failure !== null) throw traffic.failure;
+      // A renderer process that crashed under the run took the document with
+      // it: the page's doing, as a crash in phase 1 is.
+      if (crashed()) {
+        return { status: "interrupted", ms: Date.now() - started, error: null, violations: [] };
+      }
+      throw error;
+    }
+    const ms = Date.now() - started;
+    switch (outcome.kind) {
+      case "ran":
+        return { status: "ran", ms, error: null, violations: shapeAxeResults(outcome.value) };
+      case "threw":
+        return { status: "error", ms, error: a11yErrorLine(outcome.message), violations: [] };
+      case "timeout":
+        return { status: "timeout", ms, error: null, violations: [] };
+      case "gone":
+        return { status: "interrupted", ms, error: null, violations: [] };
     }
   }
 
@@ -2519,6 +2759,7 @@ function failure(
     redirectUrl,
     error,
     images: null,
+    a11y: null,
     ...evidence,
   };
 }
@@ -2587,6 +2828,13 @@ function firstLine(error: unknown): string {
  * `render_images` (Phase 29b, capture 3) is written from `RenderResult.images`
  * through the same `storableDeep` boundary: null on every failed render and on
  * a pre-browser refusal, and the stamp tells that null from a pre-29b row's.
+ *
+ * The accessibility run (Phase 29b, capture 3) writes `render_a11y_status`,
+ * `_ms` and `_error` from `RenderResult.a11y` — all three null on a failed
+ * render — and REPLACES the page's `render_a11y` rows: the ones there are
+ * deleted, then this render's violations inserted, keyed by the page id the
+ * update returned. The caller holds the transaction (`runWorker`), so the
+ * page row and its rows land together or not at all.
  */
 export async function writeRenderResult(
   db: Pick<Db, "execute">,
@@ -2620,6 +2868,9 @@ export async function writeRenderResult(
       render_error = ${row.error},
       render_console = ${row.console === null ? null : JSON.stringify(row.console)}::jsonb,
       render_images = ${row.images === null ? null : JSON.stringify(row.images)}::jsonb,
+      render_a11y_status = ${row.a11y?.status ?? null},
+      render_a11y_ms = ${row.a11y?.ms ?? null},
+      render_a11y_error = ${row.a11y?.error ?? null},
       render_version = ${RENDER_CAPTURE_VERSION}
     where crawl_id = ${crawlId} and url = ${result.url}
     returning id`);
@@ -2629,5 +2880,25 @@ export async function writeRenderResult(
       `writeRenderResult: no page row for '${result.url}' in crawl ${crawlId} ` +
         `(${res.rows.length} rows updated)`,
     );
+  }
+  const pageId = (res.rows[0] as { id: string }).id;
+
+  // THE PAGE'S `render_a11y` ROWS ARE REPLACED, never accumulated: an older
+  // run's violation must not outlive a re-render that no longer finds it, and
+  // a failed or incomplete run leaves none. In the caller's transaction
+  // (`runWorker` holds one), so no reader sees the page between the two.
+  await db.execute(sql`
+    delete from render_a11y where crawl_id = ${crawlId} and page_id = ${pageId}`);
+  const violations = row.a11y?.violations ?? [];
+  if (violations.length > 0) {
+    await db.execute(sql`
+      insert into render_a11y (crawl_id, page_id, axe_rule, impact, node_count, targets)
+      values ${sql.join(
+        violations.map(
+          (v) =>
+            sql`(${crawlId}, ${pageId}, ${v.rule}, ${v.impact}, ${v.nodeCount}, ${JSON.stringify(v.targets)}::jsonb)`,
+        ),
+        sql`, `,
+      )}`);
   }
 }
