@@ -3128,20 +3128,27 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
   is not measured here, which is not the same as clean. `render.not-recorded` (info)
   is the NOT MEASURED marker for the rendered half: it fires once when the crawl has
   rendered pages captured before the image measurement existed, and its
-  `capturedBeforeImagesAndA11y` count says how many; when it names `images` in
-  `families`, the larger-than-displayed half of this check is NOT MEASURED on those
-  pages rather than clean, and the remedy is a re-crawl. The render pass answers an
+  `capturedBeforeImagesAndA11y` count says how many. It also names `images` when the
+  crawl never sized its image files, which leaves every `<img>` of unknown size even on
+  a page captured after: `imageFetchOff` is true when the crawl was started with
+  `fetchResources: false`, and `imagesNeverSized` counts image files fetched before
+  sizes were read (a pre-29b crawl rendered again). When it names `images` in
+  `families`, the larger-than-displayed half of this check is NOT MEASURED rather than
+  clean, and the remedy is a re-crawl with file fetching on. The render pass answers an
   image request with a blank stand-in of its stored size instead of fetching it, so
-  this costs the site no image requests.
+  this costs the site no image requests. The stored size is the one the browser lays
+  out: a JPEG or AVIF that asks to be shown turned a quarter (EXIF orientation 5 to 8,
+  or `irot`) is measured with its width and height swapped.
   RESPONSIVE IMAGES are still browser work — `srcset` is read for its first candidate
   and nothing checks whether the set is sensible. The last two ids are the resource
   family's NOT MEASURED markers, and only one of them can be present:
   `resources.not-recorded` (info), which means the crawl recorded no files at all, and
   `resources.not-fetched` (info), which means it recorded them and asked about none.
-  When either is there the silence of `images.oversized` and `images.legacy-format`
-  says the crawl never asked rather than that the images are fine — the weight and
-  format halves of this check are then NOT MEASURED and a re-crawl is what answers
-  them. The two older findings are unaffected by either; they read the page's markup,
+  When either is there the silence of `images.oversized`, `images.legacy-format` and
+  `images.larger-than-displayed` says the crawl never asked rather than that the images
+  are fine — the weight, format and larger-than-displayed halves of this check are then
+  NOT MEASURED (on a rendered crawl `render.not-recorded` names `images` for the last)
+  and a re-crawl is what answers them. The two older findings are unaffected by either; they read the page's markup,
   not the files.
   **The window that once had no marker, now closed** (P13-T2): on a crawl where every
   file landed in an unknown class — refused by our own policy, disallowed by a
@@ -3248,7 +3255,8 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
   itself made that failed at the network level or answered 400 or above (its own
   scripts, CSS, XHR and fetch). Third-party requests are refused by our browser and
   never sent, so third-party failures are NOT measured. Our browser also refuses the
-  site's own images, media and fonts, and the evidence's `blockedByRenderer` counts
+  site's own media and fonts and its images whose size is unknown (a sized image is
+  answered with a blank stand-in of its size), and the evidence's `blockedByRenderer` counts
   say how much: an error such as an undefined analytics global can be caused by that
   blocking, so confirm a console error or exception on the live page before reporting
   it. A page with no capture (never rendered, or an older capture) is not measured
@@ -3332,7 +3340,8 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
   warning, moderate or minor is info); none is critical, because WCAG conformance
   is the client's call and not a crawl or indexing blocker. The run is at a fixed
   1280×900 desktop viewport, our browser refuses third-party requests and the site's
-  own images, media and fonts, and it never scrolls or interacts, so what a menu,
+  own media and fonts, shows each image as a blank stand-in of its size (or refuses it
+  when its size is unknown), and it never scrolls or interacts, so what a menu,
   a modal or a lazy section shows after a click is not checked, and colour contrast
   over a background image is not judged. This subset is not a WCAG audit: it is the
   part of WCAG a machine can decide from one rendered page, and an automated run

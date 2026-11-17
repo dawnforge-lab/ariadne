@@ -24,6 +24,7 @@ import {
   type ConfigError,
 } from "../../src/api/config-schema.js";
 import { MAX_SUPPLIED_SITEMAPS, MIN_PER_HOST_DELAY_MS } from "../../src/api/service.js";
+import { A11Y_RULES } from "../../src/crawl/render/a11y.js";
 import { buildRegistry } from "../../src/rules/index.js";
 import { OVERRIDABLE_THRESHOLDS } from "../../src/rules/judgement.js";
 import { RULESET_VERSION } from "../../src/rules/registry/registry.js";
@@ -322,6 +323,13 @@ describe("parseStartBody: the refusals the transport suites used to pin", () => 
       expect(error.message).toBe("field 'renderAccessibility' must be a boolean");
     }
     expect(props["renderAccessibility"]).toMatchObject({ type: "boolean", default: true });
+  });
+
+  it("states the accessibility subset's size from the table the renderer runs (29b final review F1)", () => {
+    // Served to Talos through `config_schema`: a count that drifts from
+    // `A11Y_RULES` tells an agent the crawl checks something it does not.
+    const description = props["renderAccessibility"]!.description ?? "";
+    expect(description).toContain(`a fixed set of ${A11Y_RULES.length} WCAG A and AA checks`);
   });
 
   it("refuses a body that is not a JSON object", () => {

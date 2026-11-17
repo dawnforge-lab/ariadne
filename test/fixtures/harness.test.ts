@@ -233,17 +233,17 @@ function databaseUrl(): string {
  * `test/rules/security-query.test.ts`.
  */
 const SKIP_HARNESS_CLAIMS: string[] = [
-  // Phase 29b Task 7, PERMANENT (confirmed in Task 8). `render.not-recorded` is
-  // the NOT MEASURED marker for a crawl whose RENDERED pages lack a console
-  // capture, predate render capture 3, or carry an accessibility run that was
-  // disabled, timed out, interrupted or errored. This harness renders with the
-  // current renderer and accessibility on, and every fixture's axe run finishes,
-  // so the marker's condition is false BY CONSTRUCTION, the
+  // Phase 29b Task 7, PERMANENT (confirmed in Task 8). `render.not-recorded`: a
+  // crawl whose RENDERED pages lack a console capture, predate capture 3, or ran
+  // accessibility disabled / timed out / interrupted / errored, or whose crawl
+  // never sized its images (`fetchResources: false`, or `ok` image rows with no
+  // size and no reason; 29b final review F4). This harness renders with the
+  // current renderer, accessibility on, every axe run finishing, and every image
+  // sized or given a reason, so the condition is false BY CONSTRUCTION, the
   // `extraction.not-recorded` shape below. Producing the crawl it reports would
-  // mean hand-writing `pages` rows or a second crawl with accessibility off. Its
-  // firing on each of the four conditions, and its silence on a current crawl
-  // and a crawl with no rendered page, are covered in
-  // `test/rules/render-a11y.test.ts`.
+  // mean hand-writing rows or a second crawl with accessibility or fetching off.
+  // Its firing on each condition, and its silence on a current crawl and one
+  // with no rendered page, are covered in `test/rules/render-a11y.test.ts`.
   "render.not-recorded",
   // Phase 26b Task 5. `extraction.not-recorded` is the NOT MEASURED marker for a
   // crawl with pages below extraction version 2. The fixture crawl is always

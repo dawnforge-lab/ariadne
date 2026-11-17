@@ -127,14 +127,21 @@ re-judged, to gain the new facts (see "Which crawls have them", below).
   - **`render.not-recorded`** (info, marker, CHECK-49, CHECK-51, CHECK-89): the crawl
     rendered pages whose console, images or accessibility were never captured. Evidence:
     `renderedPages`, `consoleNotCaptured`, `capturedBeforeImagesAndA11y`,
-    `accessibilityDisabled`, `accessibilityIncomplete` and `families`. A crawl with no
-    rendered page does not fire it (`render.coverage` already says nothing was rendered).
-    The image and accessibility rules are silent on a page without their capture, not
-    clean.
+    `accessibilityDisabled`, `accessibilityIncomplete`, `imageFetchOff`,
+    `imagesNeverSized` and `families`. `images` is also named when the crawl never sized
+    its image files: it was started with `fetchResources: false` (`imageFetchOff`), or
+    it holds `ok` image rows with neither a size nor a reason, which the resource pass
+    asked about before 29b (`imagesNeverSized`, a count of those rows). On such a crawl
+    every `<img>` is unmeasurable even on a capture-3 page, so
+    `images.larger-than-displayed` cannot fire. A crawl with no rendered page does not
+    fire it (`render.coverage` already says nothing was rendered). The image and
+    accessibility rules are silent on a page without their capture, not clean.
 - **Which crawls have them.** Image sizes need a resource pass at 29b or later; the
-  measurement and the accessibility run need a render at capture 3. A crawl made before
-  needs a re-crawl, because the stored image sizes come from the resource pass and the
-  renderer needs them; re-judging, or rendering again, alone adds nothing.
+  measurement and the accessibility run need a render at capture 3. Re-judging a crawl
+  made before adds nothing. Rendering it again adds the console capture and the
+  accessibility run, but measures no image: the stored image rows carry no size, so the
+  renderer has nothing to stand in with, and `render.not-recorded` names `images`
+  (`imagesNeverSized`). Image findings need a re-crawl.
 
 **What Phase 29a changed here (2026-11-13, reworked 2026-11-16): structured data is
 validated against web standards, not only counted.** One tool and one route are added
@@ -1720,7 +1727,7 @@ than as `{error}` JSON. `config_validate` answers every one of these without
 starting anything, with the same first message
 (`test/api/transport-parity.test.ts:398` "answers valid: false exactly when POST
 /crawls refuses"). The body refusals themselves are pinned in
-`test/api/config-schema.test.ts:243` ("refuses a perHostDelayMs under the
+`test/api/config-schema.test.ts:244` ("refuses a perHostDelayMs under the
 politeness floor rather than raising it").
 
 **An unknown key is named by its position, never quoted** (Phase 27d). A key can be a
@@ -2049,7 +2056,7 @@ budgets, `renderAccessibility`) or `always` (`findingCap` and `judgement`). `jud
 every page and query rule id as `propertyNames.enum` (zod's spelling of a
 partial record over an enum; no metric id), and `judgement.thresholds` has one
 property per overridable threshold with its `minimum`, `maximum` and `default`
-(`test/api/config-schema.test.ts:118` "publishes every overridable threshold with
+(`test/api/config-schema.test.ts:119` "publishes every overridable threshold with
 its bounds and default"). A `default` is the ENGINE's: the operator's
 `crawlDefaults` sit over it, so `config_validate`'s `effective` is the answer
 to "what would this crawl run with".

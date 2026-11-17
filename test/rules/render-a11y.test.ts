@@ -18,7 +18,7 @@ import { A11Y_RULES, A11Y_TARGETS_MAX, type A11yStatus } from "../../src/crawl/r
 import { RENDER_CAPTURE_VERSION } from "../../src/crawl/versions.js";
 import { closeDb, createDb, type Db } from "../../src/db/client.js";
 import { runMigrations } from "../../src/db/migrate.js";
-import { crawls, pages, renderA11y } from "../../src/db/schema.js";
+import { crawls, pages, renderA11y, resources } from "../../src/db/schema.js";
 import { buildRegistry } from "../../src/rules/index.js";
 import { A11Y_BATCH, renderA11yRules } from "../../src/rules/query/render-a11y.js";
 import type { QueryRule } from "../../src/rules/registry/types.js";
@@ -142,14 +142,14 @@ describe("a11y.* and render.not-recorded against the database", () => {
     images?: unknown;
   }
 
-  async function newCrawl(): Promise<string> {
+  async function newCrawl(config: Record<string, unknown> = {}): Promise<string> {
     const id = `crawl_${randomUUID()}`;
     await db.insert(crawls).values({
       tenantId: LOCAL_TENANT,
       id,
       siteUrl: SITE,
       hostKey: hostKeyOf(SITE),
-      config: { userAgent: "AriadneBot-test", maxPages: 500 },
+      config: { userAgent: "AriadneBot-test", maxPages: 500, ...config },
       rulesetVersion: "test",
       status: "finished",
     });
@@ -208,6 +208,36 @@ describe("a11y.* and render.not-recorded against the database", () => {
         nodeCount: v.nodeCount ?? 1,
         targets: (v.targets === undefined ? ["img.hero"] : v.targets) as string[],
       })),
+    );
+  }
+
+  interface ImageRowSpec {
+    path: string;
+    /** `undefined` is `ok`. */
+    fetchClass?: string | null;
+    width?: number | null;
+    dimensionsReason?: string | null;
+    kind?: string;
+  }
+
+  /** `resources` rows as the resource pass leaves them (only what the marker reads varies). */
+  async function addResources(crawlId: string, specs: ImageRowSpec[]): Promise<void> {
+    await db.insert(resources).values(
+      specs.map((s) => {
+        const fetchClass = s.fetchClass === undefined ? "ok" : s.fetchClass;
+        const width = s.width === undefined ? null : s.width;
+        return {
+          crawlId,
+          url: url(s.path),
+          kind: s.kind ?? "image",
+          fetchClass,
+          statusCode: fetchClass === "ok" ? 200 : null,
+          contentType: fetchClass === "ok" ? "image/jpeg" : null,
+          width,
+          height: width,
+          dimensionsReason: s.dimensionsReason === undefined ? null : s.dimensionsReason,
+        };
+      }),
     );
   }
 
@@ -421,6 +451,8 @@ describe("a11y.* and render.not-recorded against the database", () => {
         capturedBeforeImagesAndA11y: 1,
         accessibilityDisabled: 0,
         accessibilityIncomplete: 0,
+        imageFetchOff: false,
+        imagesNeverSized: 0,
         families: ["console", "images", "accessibility"],
       });
     });
@@ -438,6 +470,8 @@ describe("a11y.* and render.not-recorded against the database", () => {
         capturedBeforeImagesAndA11y: 1,
         accessibilityDisabled: 0,
         accessibilityIncomplete: 0,
+        imageFetchOff: false,
+        imagesNeverSized: 0,
         families: ["images", "accessibility"],
       });
     });
@@ -469,8 +503,85 @@ describe("a11y.* and render.not-recorded against the database", () => {
         capturedBeforeImagesAndA11y: 0,
         accessibilityDisabled: 0,
         accessibilityIncomplete: 3,
+        imageFetchOff: false,
+        imagesNeverSized: 0,
         families: ["accessibility"],
       });
+    });
+
+    // 29b final review F4: a crawl that never SIZED its images sends every
+    // `<img>` to `noDimensions`, so `images.larger-than-displayed` cannot fire —
+    // on pages that are capture 3 with a `render_images`, which the version count
+    // above does not see.
+    it("is silent on a 29b crawl whose every image row has a size or a reason", async () => {
+      const crawlId = await newCrawl({ fetchResources: true });
+      await addPages(crawlId, [{ path: "/a" }]);
+      await addResources(crawlId, [
+        { path: "/sized.jpg", width: 800 },
+        { path: "/vector.svg", dimensionsReason: "svg" },
+        // Not ok: nothing was measured and nothing should have been.
+        { path: "/missing.jpg", fetchClass: "client_error" },
+        { path: "/unasked.jpg", fetchClass: null },
+        // A stylesheet is never sized.
+        { path: "/site.css", kind: "css" },
+      ]);
+      expect(await marker().run(db, crawlId)).toEqual([]);
+    });
+
+    it("names images when the crawl was started with fetchResources: false", async () => {
+      const crawlId = await newCrawl({ fetchResources: false });
+      await addPages(crawlId, [{ path: "/a" }, { path: "/b" }]);
+      await addResources(crawlId, [{ path: "/hero.jpg", fetchClass: null }]);
+      const [f] = await marker().run(db, crawlId);
+      expect(f!.evidence).toEqual({
+        renderedPages: 2,
+        consoleNotCaptured: 0,
+        capturedBeforeImagesAndA11y: 0,
+        accessibilityDisabled: 0,
+        accessibilityIncomplete: 0,
+        imageFetchOff: true,
+        imagesNeverSized: 0,
+        families: ["images"],
+      });
+    });
+
+    it("names images when ok image rows carry neither a size nor a reason (asked before 29b)", async () => {
+      const crawlId = await newCrawl();
+      await addPages(crawlId, [{ path: "/a" }]);
+      await addResources(crawlId, [
+        { path: "/old-1.jpg" },
+        { path: "/old-2.png" },
+        { path: "/sized.jpg", width: 640 },
+        { path: "/site.css", kind: "css" },
+      ]);
+      const [f] = await marker().run(db, crawlId);
+      expect(f!.evidence).toEqual({
+        renderedPages: 1,
+        consoleNotCaptured: 0,
+        capturedBeforeImagesAndA11y: 0,
+        accessibilityDisabled: 0,
+        accessibilityIncomplete: 0,
+        imageFetchOff: false,
+        imagesNeverSized: 2,
+        families: ["images"],
+      });
+    });
+
+    it("stays silent on unsized image rows when nothing was rendered (R4)", async () => {
+      const crawlId = await newCrawl({ fetchResources: false });
+      await addPages(crawlId, [
+        { path: "/raw", rendered: false, status: null, renderVersion: null, console: null, images: null },
+      ]);
+      await addResources(crawlId, [{ path: "/old.jpg" }]);
+      expect(await marker().run(db, crawlId)).toEqual([]);
+    });
+
+    it("refuses a stored fetchResources that is not a boolean, naming the crawl", async () => {
+      const crawlId = await newCrawl({ fetchResources: "false" });
+      await addPages(crawlId, [{ path: "/a" }]);
+      await expect(marker().run(db, crawlId)).rejects.toThrow(
+        new RegExp(`${MARKER_ID}: crawl '${crawlId}'.*fetchResources`),
+      );
     });
 
     it("declares a column for every evidence key it writes", async () => {

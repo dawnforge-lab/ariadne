@@ -66,6 +66,7 @@ import {
   MIN_URL_LENGTH,
 } from "../crawl/loop.js";
 import { INDEXED_URL_MAX } from "../crawl/parse/url-utils.js";
+import { A11Y_RULES } from "../crawl/render/a11y.js";
 import { MAX_PATTERN_LENGTH, MAX_SCOPE_PATTERNS } from "../crawl/url-scope.js";
 import {
   JUDGEMENT_BLOCK_KEYS,
@@ -414,7 +415,9 @@ export const CRAWL_FIELDS = {
     mutable: "whenPaused",
     description:
       "Whether the render pass checks each page it renders for accessibility: " +
-      "a fixed set of 25 WCAG A and AA checks (axe-core 4.14.0) run in the " +
+      // The count is the table's own (29b final review F1): a literal here
+      // told every agent 25 after the subset had become 24.
+      `a fixed set of ${A11Y_RULES.length} WCAG A and AA checks (axe-core 4.14.0) run in the ` +
       "browser after the page is measured — text alternatives, accessible names, " +
       "language, viewport and refresh, ARIA, list structure and colour contrast. " +
       "Defaults to true. It adds no request to the site: the checker runs " +

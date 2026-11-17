@@ -44,7 +44,18 @@
  *  - `accessibilityDisabled`: the crawl's `renderAccessibility` was false;
  *  - `accessibilityIncomplete`: the run timed out, was interrupted or errored
  *    (controller ruling: `error` is incomplete too — the page made axe throw,
- *    and what it would have found is unknown).
+ *    and what it would have found is unknown);
+ *  - `imageFetchOff`: the crawl was started with `fetchResources: false`, so
+ *    no image was ever sized (29b final review F4);
+ *  - `imagesNeverSized`: `ok` image rows in `resources` with neither a `width`
+ *    nor a `dimensions_reason` — rows the resource pass asked about before it
+ *    read sizes (a crawl from before 29b, rendered again) (F4).
+ * THE LAST TWO ARE THE IMAGE FAMILY'S OTHER SILENCE. The renderer answers an
+ * image request with a stand-in only when the resource pass stored its size;
+ * every other `<img>` lands in `noDimensions` on a capture-3 page with a
+ * perfectly good `render_images`, so the version count above cannot see it and
+ * `images.larger-than-displayed` cannot fire (hard rule 1). A 29b crawl whose
+ * image rows all carry a size or a reason, or that has none, is silent here.
  * `families` names the families those counts leave unanswered. A crawl with no
  * rendered page is SILENT: `render.coverage` already says nothing was rendered,
  * and firing here on every unrendered crawl would add no fact. A rendered
@@ -58,6 +69,7 @@ import {
   A11Y_TARGETS_MAX,
   type A11yRuleRow,
 } from "../../crawl/render/a11y.js";
+import { RESOURCE_OK_CLASS } from "../../crawl/resources/fetch-resources.js";
 import type { Db } from "../../db/client.js";
 import { queryFinding, type RuleIdentity } from "../helpers.js";
 import { copyFor } from "../registry/copy/index.js";
@@ -68,7 +80,12 @@ import {
   type QueryRule,
 } from "../registry/registry.js";
 import type { RuleCaps } from "../registry/types.js";
-import { assertCrawl, capsOr, noteTruncation } from "./crawl-evidence.js";
+import {
+  assertCrawl,
+  capsOr,
+  noteTruncation,
+  readStoredFetchResources,
+} from "./crawl-evidence.js";
 
 const NOT_RECORDED: RuleIdentity = { id: "render.not-recorded", severity: "info" };
 
@@ -228,7 +245,8 @@ type Family = "console" | "images" | "accessibility";
 
 async function notRecordedFindings(db: Db, crawlId: string): Promise<Finding[]> {
   const self = NOT_RECORDED;
-  await assertCrawl(db, crawlId, self.id);
+  // The existence gate, and whether the crawl asked about its files at all.
+  const fetchResources = await readStoredFetchResources(db, crawlId, self.id);
 
   const known = sql.join(
     KNOWN_STATUSES.map((s) => sql`${s}`),
@@ -279,9 +297,25 @@ async function notRecordedFindings(db: Db, crawlId: string): Promise<Finding[]> 
   // R4: a crawl with no rendered page is `render.coverage`'s subject.
   if (row.rendered_pages === 0) return [];
 
+  // F4: image rows the pass asked about and never sized. `width` and
+  // `dimensions_reason` are written together on every `ok` image row since
+  // 29b (`imageDimensions`, fetch-resources.ts), so both null is a row asked
+  // before sizing existed. One aggregate over the crawl's rows.
+  const sizing = await db.execute<{ never_sized: number }>(sql`
+    select count(*)::int as never_sized
+    from resources r
+    where r.crawl_id = ${crawlId}
+      and r.kind = 'image'
+      and r.fetch_class = ${RESOURCE_OK_CLASS}
+      and r.width is null
+      and r.dimensions_reason is null`);
+  const neverSized = sizing.rows[0]?.never_sized;
+  if (neverSized === undefined) throw new Error(`${self.id}: image sizing aggregate returned no row`);
+  const imageFetchOff = !fetchResources;
+
   const families: Family[] = [];
   if (row.console_not_captured > 0) families.push("console");
-  if (row.before_capture > 0) families.push("images");
+  if (row.before_capture > 0 || imageFetchOff || neverSized > 0) families.push("images");
   if (row.before_capture > 0 || row.disabled > 0 || row.incomplete > 0) {
     families.push("accessibility");
   }
@@ -297,6 +331,8 @@ async function notRecordedFindings(db: Db, crawlId: string): Promise<Finding[]> 
         capturedBeforeImagesAndA11y: row.before_capture,
         accessibilityDisabled: row.disabled,
         accessibilityIncomplete: row.incomplete,
+        imageFetchOff,
+        imagesNeverSized: neverSized,
         families,
       },
       dedupeKey: "site",
@@ -336,12 +372,14 @@ export const renderA11yRules: QueryRule[] = [
       { key: "capturedBeforeImagesAndA11y", label: "Images and Accessibility Not Recorded" },
       { key: "accessibilityDisabled", label: "Accessibility Turned Off" },
       { key: "accessibilityIncomplete", label: "Accessibility Unfinished" },
+      { key: "imageFetchOff", label: "Image Files Not Fetched" },
+      { key: "imagesNeverSized", label: "Images Never Sized" },
       { key: "families", label: "Checks Not Run" },
     ],
     ...copyFor(NOT_RECORDED.id),
     rulesetVersion: RULESET_VERSION,
     marker:
-      "Some rendered pages were captured before the console, image or accessibility checks were recorded, or with the accessibility check turned off or unfinished, so those checks were not run on them; re-crawl the site with accessibility checking turned on.",
+      "Some rendered pages were captured before the console, image or accessibility checks were recorded, with the accessibility check turned off or unfinished, or on a crawl whose image files were never sized (file fetching turned off, or fetched before sizes were read), so those checks were not run on them; re-crawl the site with file fetching and accessibility checking turned on.",
     run: (db, crawlId) => notRecordedFindings(db, crawlId),
   }),
 ];

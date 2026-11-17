@@ -1261,7 +1261,7 @@ export const COPY_TEMPLATES: Record<string, IssueCopy> = {
   "render.js-exception": {
     title: "Rendering: JavaScript exceptions on the page",
     explanation:
-      "Pages where an uncaught exception or an unhandled promise rejection was thrown while the page was rendered in a browser; the row gives the count and the first message, and the Template column names the page's template. Only the rendered sample is checked, and our browser refuses other origins' requests and the site's own images, media and fonts, so an exception caused by a refused script can be an artefact of the render. Confirm it on the live page before reporting it.",
+      "Pages where an uncaught exception or an unhandled promise rejection was thrown while the page was rendered in a browser; the row gives the count and the first message, and the Template column names the page's template. Only the rendered sample is checked, and our browser refuses other origins' requests, the site's own media and fonts, and its images whose size is unknown, so an exception caused by a refused request can be an artefact of the render. Confirm it on the live page before reporting it.",
     howToFix:
       "Check the exception in a browser with the console open and fix the script that throws it. Make any call that depends on another script tolerate that script not having loaded.",
   },
@@ -1455,9 +1455,9 @@ export const COPY_TEMPLATES: Record<string, IssueCopy> = {
   "render.not-recorded": {
     title: "Rendering: Console, image or accessibility checks not run",
     explanation:
-      "Some rendered pages in this crawl lack what the console, image-size or accessibility checks read: they were rendered before those were recorded, or with the accessibility check turned off, timed out, interrupted (the page navigated away, or the renderer crashed), or stopped by an error the page caused, so those checks were left unrun on them rather than reported clean. The row counts the rendered pages and how many lack each record, and Checks Not Run names the checks affected.",
+      "Some rendered pages in this crawl lack what the console, image-size or accessibility checks read: they were rendered before those were recorded, or with the accessibility check turned off, timed out, interrupted (the page navigated away, or the renderer crashed), or stopped by an error the page caused, or the crawl never read its image files' sizes (file fetching was turned off, or the files were fetched before sizes were recorded), so those checks were left unrun on them rather than reported clean. The row counts the rendered pages and how many lack each record, and Checks Not Run names the checks affected.",
     howToFix:
-      "Re-crawl the site with accessibility checking turned on. If the check keeps timing out or being interrupted on one template, check that its pages finish loading and do not navigate away on their own.",
+      "Re-crawl the site with file fetching and accessibility checking turned on. If the check keeps timing out or being interrupted on one template, check that its pages finish loading and do not navigate away on their own.",
   },
   "pagination.canonical-to-other": {
     title: "Pagination: Paginated page canonicalised to another URL",

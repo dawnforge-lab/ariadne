@@ -151,8 +151,11 @@ Fields worth setting deliberately:
   pass's sample, stored on the crawl row now and read by the render pass later. Set
   them here if the default sample would not cover the page types you care about.
 - **`renderAccessibility`** (boolean, default `true`) — whether the render pass also
-  runs the WCAG A/AA accessibility subset on each rendered page. It costs up to 35 s of
-  lease per page and is skipped when false; the pages then record `disabled` and
+  runs the WCAG A/AA accessibility subset on each rendered page. What it costs is the
+  run's own time, about 180 ms a page at the median on the fixture site; the render
+  lease is lengthened by 35 s (a 30 s timeout plus a 5 s grace) only so that a page
+  that hangs the check is recovered, not because a page takes that long. It is
+  skipped when false; the pages then record `disabled` and
   `render.not-recorded` says the check was not run. Change it only while the crawl is
   queued or paused.
 - **`findingCap`** — how many findings each listing rule may report when this crawl

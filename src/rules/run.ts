@@ -222,7 +222,7 @@ export async function runRules(
   // One statement over every table a rule or a derivation reads —
   // `structured_data` included, since the schema query rules select
   // from it and `deriveSchemaValidation` scans it, and `sitemap_hreflang`, which
-  // only `deriveSitemapHreflang` reads, and `render_a11y`, which the 25
+  // only `deriveSitemapHreflang` reads, and `render_a11y`, which the 24
   // accessibility rules (Phase 29b) join to `pages` by axe rule. `metrics` is
   // deliberately absent: no rule reads it — the metric phase only writes it.
   //

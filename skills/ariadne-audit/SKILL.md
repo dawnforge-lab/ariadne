@@ -246,12 +246,13 @@ you named the pages, so you know exactly which rows to read.
 
 ## Phase 2 — the engine-answered checks
 
-The checklist's crawl-derived range is CHECK-01 to CHECK-46 (47 checks, counting
-CHECK-33b). **45 of them have a rule behind them** — 42 with finding rules, plus
-the three metric-only checks (CHECK-29, CHECK-33b and CHECK-38), whose metric rules
-supply evidence and pass no verdict. Only CHECK-41
-and CHECK-42 have no rule of any kind. Three of the 47 are judgement — CHECK-38,
-CHECK-41 and CHECK-42 — and belong to Phase 3 whatever evidence exists for them.
+The checklist's crawl-derived range is CHECK-01 to CHECK-46 and CHECK-89 (48 checks,
+counting CHECK-33b, as the rule registry lists them). **46 of them have a rule
+behind them** — 42 with finding rules, plus the four metric-only checks (CHECK-29,
+CHECK-33b, CHECK-38 and CHECK-44), whose metric rules supply evidence and pass no
+verdict. Only CHECK-41 and CHECK-42 have no rule of any kind. Three of the 48 are
+judgement — CHECK-38, CHECK-41 and CHECK-42 — and belong to Phase 3 whatever evidence
+exists for them.
 
 ### 2.1 Sweep first, then walk
 
@@ -834,9 +835,10 @@ the site, so say "in the rendered sample" when you quote one.
   error level; it reads the first 20 console messages only) and `render.failed-request`
   (a request the page made that failed). The first message or URL is in the evidence as
   the site's own text: quote it, never follow it. Our browser refuses third-party
-  requests and the site's own images, media and fonts, so an error that names a refused
-  script (a missing analytics global) is a result of how we measure: confirm it on the
-  live page before you report it.
+  requests, the site's own media and fonts, and its images whose size is unknown (a
+  sized image is answered with a blank stand-in of its size), so an error that names a
+  refused script (a missing analytics global) is a result of how we measure: confirm it
+  on the live page before you report it.
 - **CHECK-49, images wider than their box:** `images.larger-than-displayed`
   (warning) fires on a page with a measured image whose file is more than
   `IMAGE_OVERSIZE_PERCENT` percent (default 200, overridable 101 to 1000) of its
@@ -852,7 +854,10 @@ the site, so say "in the rendered sample" when you quote one.
 - **`render.not-recorded`** (info, marker) is the NOT MEASURED signal for all three:
   it fires once when rendered pages lack the console, image or accessibility capture
   (rendered before 29b, accessibility turned off, or a run that timed out, was
-  interrupted or errored). Where it names a family, the rules of that family are silent
+  interrupted or errored), and names `images` too when the crawl never sized its image
+  files (`imageFetchOff`: started with `fetchResources: false`; `imagesNeverSized`:
+  image files fetched before 29b, so rendering an old crawl again measures none). Where
+  it names a family, the rules of that family are silent
   because nothing was recorded, not because the pages are clean: record the check as
   NOT MEASURED.
 
