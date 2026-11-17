@@ -1378,7 +1378,9 @@ export const resources = pgTable("resources", {
   shareImage: boolean("share_image").notNull().default(false),
   // Phase 29b (migration 0055): an image's INTRINSIC size in pixels, read from
   // the format's own header in the first 64 KiB of the body the resource pass's
-  // one Range GET returned (`readImageSize`, src/crawl/resources/image-size.ts).
+  // one Range GET returned (`readImageSize`, src/crawl/resources/image-size.ts),
+  // as DISPLAYED: a JPEG's EXIF orientation 5-8 or an AVIF's `irot` 1/3 swaps
+  // the stored pair, as the browser does.
   // Null means NOT MEASURED and `dimensions_reason` says why; a size is never
   // guessed or defaulted (hard rule 7). Both are null on css/js rows and on
   // every row that is not `ok`.

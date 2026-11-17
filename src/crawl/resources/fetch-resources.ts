@@ -1318,9 +1318,10 @@ async function requestResource(
     } else if (mode === "plain" || (mode === "range" && status >= 200 && status < 300)) {
       // A counted GET: either the pass's own plain GET, or a Range the server
       // ignored (any 2xx but 206: a 200, or a 204 pixel). Whatever it answers is
-      // server-controlled, so no 2xx may reach a branch that throws. The body streams into the counter exactly as before; an
-      // image additionally copies its first IMAGE_HEADER_BYTES aside, and no
-      // more than that is held.
+      // server-controlled, so no 2xx may reach a branch that throws. The body
+      // streams into the counter exactly as before; an image additionally
+      // copies its first IMAGE_HEADER_BYTES aside, and no more than that is
+      // held.
       const kept: Buffer[] = [];
       let keptBytes = 0;
       let bytes = 0;

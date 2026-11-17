@@ -160,6 +160,9 @@ export function checkStoredImage(image: StoredImage, url: string): StoredImage {
 /**
  * The stand-in body: an empty SVG whose `width`/`height` attributes give the
  * browser exactly the intrinsic size of the real image. Nothing is painted.
+ * The stored size is already the DISPLAYED one — a JPEG or AVIF that asks to
+ * be turned a quarter is stored with its sides swapped (`readImageSize`) — and
+ * an SVG carries no orientation, so it is laid out as the real file would be.
  */
 export function standInSvg(width: number, height: number): string {
   if (!isDimension(width) || !isDimension(height)) {

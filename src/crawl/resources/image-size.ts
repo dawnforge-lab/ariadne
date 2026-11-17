@@ -2,11 +2,51 @@
  * Intrinsic image size from the first 64 KiB of a response body.
  *
  * Pure: no I/O, no dependencies, and it never decodes a pixel. It reads the
- * width and height a format records in its own header, which is what the
- * browser would use as the image's intrinsic size. Written from the format
- * specs (PNG per the W3C spec, JPEG per ITU T.81 markers, GIF89a, the WebP
- * RIFF container per RFC 9649, and ISOBMFF boxes with the HEIF `ispe`
- * property for AVIF). Nothing is lifted from any library (hard rule 8).
+ * width and height a format records in its own header, turned as the file
+ * asks to be shown (below), which is what the browser uses as the image's
+ * intrinsic size. Written from the format specs (PNG per the W3C spec, JPEG
+ * per ITU T.81 markers with EXIF's TIFF IFD0 for orientation, GIF89a, the
+ * WebP RIFF container per RFC 9649, and ISOBMFF boxes with the HEIF `ispe`
+ * and `irot` properties for AVIF). Nothing is lifted from any library (hard
+ * rule 8).
+ *
+ * THE SIZE IS THE ONE THE BROWSER LAYS OUT, rotation applied (29b final review
+ * F3). A file can ask to be shown turned a quarter: a JPEG through its EXIF
+ * Orientation tag (values 5 to 8 turn it 90 or 270 degrees, with or without a
+ * mirror), an AVIF through the HEIF `irot` property (angle 1 or 3). The browser
+ * honours that by default (CSS `image-orientation: from-image`), so its
+ * `naturalWidth` is the stored height. The width and height returned here are
+ * therefore the DISPLAYED ones: the stored pair, swapped when the file asks for
+ * a quarter turn. A half turn (orientation 3 or 4, `irot` angle 2) and a mirror
+ * alone (2, 4) keep the pair. Without this the stand-in the renderer serves
+ * would be laid out on its side, and `images.larger-than-displayed` would
+ * report the stored width of a portrait photograph as the width it is shown at.
+ *
+ *  - JPEG: the first APP1 segment that opens with `Exif\0\0` is read for the
+ *    Orientation tag (0x0112) of its IFD0: byte order `II` or `MM`, the TIFF
+ *    magic 42, then the IFD's 12-byte entries, every read bounded by the
+ *    segment's own end. The tag must be a SHORT with a count of 1 and a value
+ *    of 1 to 8. A block that is not that — a malformed or truncated TIFF
+ *    header, an IFD offset or entry count running past the segment, an
+ *    orientation of the wrong type or out of range — is IGNORED FOR
+ *    ORIENTATION and the stored size stands. That is a deliberate fallback,
+ *    not a silent one: the SOF size is still read off the file, and an EXIF
+ *    block the browser could not read either is one it does not rotate by.
+ *    Later Exif APP1 segments are not read. APP1 precedes SOF in the format,
+ *    so the block is always inside the bytes a size is read from.
+ *  - AVIF: the `ipco` of `meta/iprp` is walked whole for its first `ispe` and
+ *    its first `irot` (angle in the low two bits of its one byte). An `ipco`
+ *    that runs past the bytes we hold after its `ispe` is
+ *    `header-beyond-limit`, not a size: an `irot` could follow, and a stored
+ *    size reported then would be a guess about the displayed one.
+ *
+ * KNOWN UNDER-REPORT (AVIF, 29b final review M6). `ispe` and `irot` are taken
+ * as the first of each in `ipco`, without following `ipma` to the primary
+ * item. On a single-image AVIF that is the image's. On a GRID or other
+ * multi-item AVIF the first `ispe` may be one tile's (or an alpha or thumbnail
+ * item's), smaller than the composed image, so the size can be UNDER-reported.
+ * That direction gives a missed `images.larger-than-displayed`, never a false
+ * one: a smaller intrinsic width can only fall under the threshold.
  *
  * NO GUESSING. A size that cannot be read is `{kind:"none", reason}`, with the
  * reason saying why, never a default dimension. The reasons:
@@ -95,8 +135,56 @@ function readGif(head: Uint8Array): ImageSize {
 /** SOF0-SOF15 carry the frame size, except DHT (C4), JPG (C8) and DAC (CC). */
 const isSof = (m: number): boolean => m >= 0xc0 && m <= 0xcf && m !== 0xc4 && m !== 0xc8 && m !== 0xcc;
 
+/** The EXIF Orientation tag, a TIFF SHORT, in IFD0. */
+const EXIF_ORIENTATION_TAG = 0x0112;
+const TIFF_SHORT = 3;
+/** `Exif` and two zero bytes: the APP1 payload signature of an EXIF block. */
+const EXIF_SIGNATURE = [0x45, 0x78, 0x69, 0x66, 0x00, 0x00];
+
+/**
+ * The EXIF Orientation (1 to 8) of the APP1 payload in `[start, end)`, or null
+ * when the payload is not an EXIF block or its orientation cannot be read —
+ * which leaves the stored size standing (module header). Every read is checked
+ * against `end`, the segment's own end, which the caller has checked against
+ * `head.length`; nothing here throws.
+ */
+function exifOrientation(head: Uint8Array, start: number, end: number): number | null {
+  if (start + EXIF_SIGNATURE.length > end || !hasAt(head, start, EXIF_SIGNATURE)) return null;
+  const tiff = start + EXIF_SIGNATURE.length;
+  // Byte order (2), the magic 42 (2), the IFD0 offset from the TIFF start (4).
+  if (tiff + 8 > end) return null;
+  let little: boolean;
+  if (head[tiff] === 0x49 && head[tiff + 1] === 0x49) little = true;
+  else if (head[tiff] === 0x4d && head[tiff + 1] === 0x4d) little = false;
+  else return null;
+  const r16 = (o: number): number => (little ? le16(head, o) : be16(head, o));
+  const r32 = (o: number): number => (little ? le32(head, o) : be32(head, o));
+  if (r16(tiff + 2) !== 42) return null;
+  const ifd = tiff + r32(tiff + 4);
+  if (ifd + 2 > end) return null;
+  const count = r16(ifd);
+  // The whole IFD must lie in the segment: an entry count that runs past it is
+  // a malformed block, even when the entry wanted happens to come first.
+  if (ifd + 2 + count * 12 > end) return null;
+  for (let i = 0; i < count; i++) {
+    // Each entry: tag (2), type (2), count (4), value or offset (4).
+    const entry = ifd + 2 + i * 12;
+    if (r16(entry) !== EXIF_ORIENTATION_TAG) continue;
+    if (r16(entry + 2) !== TIFF_SHORT || r32(entry + 4) !== 1) return null;
+    // A SHORT sits left-justified in the value field, in the block's order.
+    const value = r16(entry + 8);
+    return value >= 1 && value <= 8 ? value : null;
+  }
+  return null;
+}
+
+/** Orientations 5 to 8 turn the image a quarter, so its sides swap. */
+const quarterTurned = (orientation: number | null): boolean => orientation !== null && orientation >= 5;
+
 function readJpeg(head: Uint8Array): ImageSize {
   let pos = 2; // past SOI
+  // `undefined` until the first Exif APP1 is read; null when it had none we could read.
+  let orientation: number | null | undefined;
   for (;;) {
     // Find the next marker: 0xFF, then any number of 0xFF fill bytes.
     while (pos < head.length && head[pos] !== 0xff) pos++;
@@ -116,9 +204,15 @@ function readJpeg(head: Uint8Array): ImageSize {
       // length(2) precision(1) height(2) width(2)
       if (length < 7) return none("malformed");
       if (pos + 7 > head.length) return none("header-beyond-limit");
-      return size("jpeg", be16(head, pos + 5), be16(head, pos + 3));
+      const width = be16(head, pos + 5);
+      const height = be16(head, pos + 3);
+      return quarterTurned(orientation ?? null) ? size("jpeg", height, width) : size("jpeg", width, height);
     }
     if (pos + length > head.length) return none("header-beyond-limit");
+    // APP1, and no Exif block read yet: the payload starts past the length.
+    if (marker === 0xe1 && orientation === undefined && hasAt(head, pos + 2, EXIF_SIGNATURE)) {
+      orientation = exifOrientation(head, pos + 2, pos + length);
+    }
     pos += length;
   }
 }
@@ -174,10 +268,46 @@ function boxAt(head: Uint8Array, pos: number, limit: number): BoxHeader | "beyon
 }
 
 /**
- * Walk the children in `[from, to)` for the first box of `type`, descending
- * through `path`. Returns the size, or the reason none was found.
+ * The size an `ipco` whose children lie in `[from, to)` gives: its first `ispe`,
+ * swapped when its first `irot` turns the image a quarter (module header). The
+ * whole box is walked, because `irot` usually follows `ispe`. Null when the
+ * `ipco` holds no `ispe` at all.
  */
-function findIspe(head: Uint8Array, from: number, to: number, path: readonly string[]): ImageSize | null {
+function readIpco(head: Uint8Array, from: number, to: number): ImageSize | null {
+  let stored: { width: number; height: number } | null = null;
+  let angle: number | null = null;
+  let pos = from;
+  while (pos < to) {
+    const b = boxAt(head, pos, Math.min(to, head.length));
+    if (b === "beyond") return none("header-beyond-limit");
+    if (b === "bad") return none("malformed");
+    // A property that claims to run past its `ipco`: past our bytes we cannot
+    // tell, inside them it contradicts its parent.
+    if (b.end > to) return none(to > head.length ? "header-beyond-limit" : "malformed");
+    if (b.type === "ispe" && stored === null) {
+      // ispe is a full box: version/flags (4), then width (4) and height (4).
+      if (b.body + 12 > head.length) return none("header-beyond-limit");
+      stored = { width: be32(head, b.body + 4), height: be32(head, b.body + 8) };
+    } else if (b.type === "irot" && angle === null) {
+      // irot: one byte, six reserved bits and the angle in quarter turns.
+      if (b.body + 1 > head.length) return none("header-beyond-limit");
+      angle = u8(head, b.body) & 0x03;
+    }
+    if (stored !== null && angle !== null) break;
+    pos = b.end;
+  }
+  if (stored === null) return null;
+  return angle === 1 || angle === 3
+    ? size("avif", stored.height, stored.width)
+    : size("avif", stored.width, stored.height);
+}
+
+/**
+ * Walk the children in `[from, to)` for the first box of `path[0]`, descending
+ * through `path` to the `ipco`, then read it (`readIpco`). Returns the size,
+ * or the reason none was found.
+ */
+function findIpcoSize(head: Uint8Array, from: number, to: number, path: readonly string[]): ImageSize | null {
   const want = path[0]!;
   let pos = from;
   while (pos < to) {
@@ -185,17 +315,15 @@ function findIspe(head: Uint8Array, from: number, to: number, path: readonly str
     if (b === "beyond") return none("header-beyond-limit");
     if (b === "bad") return none("malformed");
     if (b.type === want) {
-      if (path.length === 1) {
-        // ispe is a full box: version/flags (4), then width (4) and height (4).
-        if (b.body + 12 > head.length) return none("header-beyond-limit");
-        return size("avif", be32(head, b.body + 4), be32(head, b.body + 8));
-      }
       // `meta` is a full box (4 bytes of version/flags before its children).
       const childrenAt = want === "meta" ? b.body + 4 : b.body;
-      const found = findIspe(head, childrenAt, Math.min(b.end, head.length), path.slice(1));
+      const found =
+        path.length === 1
+          ? readIpco(head, childrenAt, b.end)
+          : findIpcoSize(head, childrenAt, Math.min(b.end, head.length), path.slice(1));
       if (found !== null) {
         // A container that ended in bounds without the target is malformed, but
-        // one that ran past our bytes is beyond the limit: findIspe says which.
+        // one that ran past our bytes is beyond the limit: the walk says which.
         return found;
       }
     }
@@ -209,7 +337,7 @@ function readAvif(head: Uint8Array): ImageSize {
   const ftyp = boxAt(head, 0, head.length);
   if (ftyp === "beyond") return none("header-beyond-limit");
   if (ftyp === "bad" || ftyp.type !== "ftyp") return none("malformed");
-  const result = findIspe(head, 0, head.length, ["meta", "iprp", "ipco", "ispe"]);
+  const result = findIpcoSize(head, 0, head.length, ["meta", "iprp", "ipco"]);
   // Walked every box in bounds and no ispe: the file has no size to report.
   return result ?? none("malformed");
 }
