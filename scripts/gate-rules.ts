@@ -60,6 +60,10 @@
  *      - `content.template-similarity` — a Phase 4 rule, so Phase 3 mandated
  *        nothing about it; its OWN header flags a cost linear in the number of
  *        page types, and that flag has never been measured at scale.
+ *    The render phase also records the accessibility run (Phase 29b): the axe
+ *    time per page (median and p95 over `pages.render_a11y_ms`) and the pages'
+ *    `render_a11y_status` counts, beside the render duration, in `--json-out`'s
+ *    `render` block. Recorded, not gated.
  *    And the render pass's own numbers are printed in full — selection stats,
  *    per-render mean, failures by class, and what the fixture server was asked
  *    for while the browser was running (the politeness residual, measured at the
@@ -703,6 +707,61 @@ async function countWhere(db: Db, query: SQL): Promise<number> {
   return n;
 }
 
+/**
+ * What the render pass's accessibility run cost and how it ended (Phase 29b).
+ * RECORDED, NOT GATED: the 29b gate asks for the numbers, and the process peak
+ * RSS stays the only gated one.
+ *
+ * `ms` is over `pages.render_a11y_ms`, which is set for every page whose run
+ * started (`ran`, `timeout`, `interrupted`, `error`) and null for `disabled`
+ * and for a page with no run. `runs` is how many pages the percentiles are
+ * over, and `medianMs` / `p95Ms` are null, never 0, when that is zero: a gate
+ * that printed a median of 0 ms for a pass that ran no axe would read as a very
+ * fast one (hard rule 7).
+ *
+ * `byStatus` counts pages by `render_a11y_status`, only the values the column
+ * holds. `renderedWithoutStatus` counts RENDERED pages whose status is null: the
+ * render writer sets a status on every capture-3 page it finishes, so a
+ * non-zero there is a defect the gate should show, and it is said rather than
+ * folded into a status that does not exist.
+ */
+interface AxeReport {
+  runs: number;
+  medianMs: number | null;
+  p95Ms: number | null;
+  byStatus: Record<string, number>;
+  renderedWithoutStatus: number;
+}
+
+async function axeReport(db: Db, crawlId: string): Promise<AxeReport> {
+  const timing = await db.execute<{ runs: number; median: number | null; p95: number | null }>(sql`
+    select count(render_a11y_ms)::int as runs,
+           percentile_cont(0.5) within group (order by render_a11y_ms) as median,
+           percentile_cont(0.95) within group (order by render_a11y_ms) as p95
+    from pages
+    where crawl_id = ${crawlId} and render_a11y_ms is not null`);
+  const row = timing.rows[0];
+  if (row === undefined) throw new Error("gate: the axe timing query returned no row");
+  const statuses = await db.execute<{ status: string; n: number }>(sql`
+    select render_a11y_status as status, count(*)::int as n
+    from pages
+    where crawl_id = ${crawlId} and render_a11y_status is not null
+    group by render_a11y_status order by render_a11y_status`);
+  const missing = await countWhere(
+    db,
+    sql`select count(*)::int as n from pages
+        where crawl_id = ${crawlId} and rendered and render_a11y_status is null`,
+  );
+  return {
+    runs: row.runs,
+    // `percentile_cont` is double precision, which node-postgres parses as a number.
+    medianMs: row.median === null ? null : Number(row.median),
+    p95Ms: row.p95 === null ? null : Number(row.p95),
+    byStatus: Object.fromEntries(statuses.rows.map((r) => [r.status, r.n])),
+    renderedWithoutStatus: missing,
+  };
+}
+
 function seconds(ms: number): string {
   return `${(ms / 1000).toFixed(1)}s`;
 }
@@ -785,6 +844,8 @@ async function main(): Promise<number> {
    * is no fixture to render and the numbers would be another run's.
    */
   let renderReport: { summary: RenderPassSummary; ms: number; rss: PhaseRss } | null = null;
+  /** The axe numbers of the render phase (recorded, not gated); null on a run with no render phase. */
+  let axe: AxeReport | null = null;
   /** The crawl phase's own peak, kept for the three-phase summary at the end; null until that phase ends. */
   let crawlPeakBytes: number | null = null;
   /** The exclude census, or null when no `--exclude` was given. */
@@ -1163,6 +1224,33 @@ async function main(): Promise<number> {
         ),
       );
       console.log(line("third-party", `${thirdPartyBlocked} request(s) aborted`));
+      // Phase 29b: what the accessibility run cost and how each page's run
+      // ended. Recorded, not gated (header). The render duration is `elapsed` above.
+      axe = await axeReport(db, crawlId);
+      console.log(
+        line(
+          "axe time",
+          axe.medianMs === null || axe.p95Ms === null
+            ? "n/a (no page recorded an axe run)"
+            : `median ${axe.medianMs.toFixed(0)}ms, p95 ${axe.p95Ms.toFixed(0)}ms over ` +
+              `${axe.runs.toLocaleString()} run(s)`,
+        ),
+      );
+      console.log(
+        line(
+          "axe status",
+          Object.keys(axe.byStatus).length === 0
+            ? "none recorded"
+            : Object.entries(axe.byStatus)
+                .map(([status, n]) => `${status} ${n.toLocaleString()}`)
+                .join(", "),
+        ),
+      );
+      if (axe.renderedWithoutStatus > 0) {
+        console.log(
+          line("axe status", `WARNING: ${axe.renderedWithoutStatus} rendered page(s) have no status`),
+        );
+      }
 
       // The pass's own invariant, checked rather than trusted: a URL is leased
       // once, rendered once and completed once, so nothing may be left over.
@@ -1409,6 +1497,18 @@ async function main(): Promise<number> {
                 overallBytes: sampler.peakBytes(),
               },
               durationsMs,
+              // Recorded, not gated (Phase 29b). Null on a run with no render phase.
+              render:
+                axe === null
+                  ? null
+                  : {
+                      durationMs: durationsMs.render,
+                      axeRuns: axe.runs,
+                      axeMedianMs: axe.medianMs,
+                      axeP95Ms: axe.p95Ms,
+                      axeStatus: axe.byStatus,
+                      renderedWithoutAxeStatus: axe.renderedWithoutStatus,
+                    },
             },
             null,
             2,

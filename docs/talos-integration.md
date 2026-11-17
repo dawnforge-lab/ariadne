@@ -239,6 +239,19 @@ crawler inside Talos. The intended shape:
 - **Node 22**, and **Chromium** wherever a crawl's render pass runs: in the API process
   for `crawl_render`, and since Phase 28c on a worker for a schedule's render link. Both
   run the same image, which carries Chromium.
+- **Phase 29b adds no service, secret or environment variable.** axe-core is an npm
+  dependency read from the installed package, so the image needs nothing beyond the
+  Chromium it already carries. Two behaviours to know about, neither of which loosens
+  an obligation above. The resource pass now asks each image with one `GET` carrying
+  `Range: bytes=0-65535` in place of a `HEAD` (at most two requests per image plus
+  redirect hops, usually one, still through the per-host gate), so a site's logs show
+  ranged image GETs and `resources.status_code` can be 206. And the render pass answers
+  an image from the size the resource pass stored, with a blank SVG made inside the
+  browser: nothing is sent to an image host, a CDN included, so the render fence (every
+  third-party request refused, none reaching the network) is unchanged; the one
+  difference is that an image request is answered where it used to be aborted. The
+  accessibility run is on by default and costs up to 35 s of render lease per page;
+  `renderAccessibility: false` on `crawl_start` turns it off.
 - **Workers (Phase 28b).** `api:serve` accepts and answers and runs no crawl;
   `npm run worker:serve` claims and runs them, and at least one must be running for a
   crawl to start. Both processes need `DATABASE_URL` and `ARIADNE_CREDENTIALS_KEY`

@@ -1101,7 +1101,7 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "overridden}: value is what the NEXT rules run will use, overridden is true " +
         "where the block sets it.\n\n" +
         "judgedWith is the stamp of the last completed rules run — {disabledRules, " +
-        "thresholds (all 20, at the effective values that run used), findingCap?} — " +
+        "thresholds (every one, at the effective values that run used), findingCap?} — " +
         "or null on a crawl nobody has " +
         "judged. judgementStale {stale, reasons} compares it with the current block " +
         "(reasons: overrides | thresholds | findingCap).",

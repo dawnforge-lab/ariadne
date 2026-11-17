@@ -290,6 +290,18 @@ never as clean. Grouped by the problem a client reads:
   icon link for screen readers, so `links.aria-label-only` matters only where the
   target matters for search. An empty alt on a decorative image is correct, so
   weigh `images.empty-alt` by which images it names.
+- **Rendered sample: scripts, image boxes and accessibility** (CHECK-51, CHECK-49,
+  CHECK-89): every one of these is measured on the pages the render budget reached,
+  so say "in the rendered sample" and never extend a count to the site.
+  `render.js-exception` and `render.failed-request` are things a visitor's browser
+  hits; `render.console-error` is a hint, read from the first 20 messages only, and a
+  message that names a refused script may be an artefact of how we measure, so confirm
+  it live before it goes in the report. `images.larger-than-displayed` ranks by how
+  much of the file is not shown; lead with the template, not the page. The 24
+  `a11y.*` rules are WCAG 2.x level A and AA checks a machine can decide. Report them
+  by rule and template, and never write that the site is, or is not, WCAG
+  conformant: an automated subset does not establish it. When `render.not-recorded`
+  fired, report the named check as not measured instead of clean.
 - **Forms, hreflang and pagination** (CHECK-85, CHECK-25, CHECK-22):
   `security.form-insecure` exposes what visitors type. Report it with the mixed-content
   findings. `hreflang.html-lang-mismatch` and `pagination.multiple` compound with the

@@ -1,11 +1,140 @@
 # The Ariadne surface Talos codes against
 
-**Status:** the contract as of Phase 29a (ruleset 0.26.0, migrations 0000–0054,
+**Status:** the contract as of Phase 29b (ruleset 0.27.0, migrations 0000–0058,
 35 MCP tools / 35 HTTP routes; every column label in this document is served
 under the ruleset version the engine reports — `rules_catalog`'s
 `rulesetVersion`, which the metric-table pass moves).
 `docs/talos-integration.md` says *why* the seam exists and what obligations bind
 it; this document says *what the seam is*.
+
+**What Phase 29b changed here: the render pass reads the page's own errors, its image
+boxes and its accessibility, and the resource pass measures images.** No tool or route
+is added (35 / 35) and no response shape changes: every change is a new rule, a new
+evidence field, a new config key or a new threshold. The ruleset moves to **0.27.0**
+(227 rules: 72 page / 139 query / 16 metric; 33 critical / 97 warning / 97 info, the
+metric rules counting as info; 23 overridable thresholds). Migrations 0055–0058 add
+the image size columns on `resources` (0055), `pages.render_images` (0056), the
+accessibility columns on `pages` and the `render_a11y` table (0057), and stamp the new
+threshold onto every stored run stamp (0058). A crawl must be re-crawled, not only
+re-judged, to gain the new facts (see "Which crawls have them", below).
+
+- **Resource pass: an image is asked with a Range GET.** Rows of `kind = 'image'` are
+  requested with `GET` and `Range: bytes=0-65535` in place of `HEAD`, so one request
+  returns both the headers and the first 64 KiB, which is where an image format keeps
+  its size. A server that honours the range answers 206 and `resources.status_code`
+  can now be **206**; a 206 counts as success, exactly as a 200 does. A server that
+  ignores the range answers 200, the body is counted as a plain GET always was, and
+  only its first 64 KiB is read for the size. Per image row
+  the pass makes at most two requests plus redirect hops, and usually one; only a 206
+  of unknown total length or a 416 earns the second, plain GET. CSS and JS rows are
+  unchanged. Politeness is unchanged: the pass still waits for the per-host gate, and
+  the body is bounded, not downloaded.
+- **Three new `resources` columns:** `width` and `height` (integer pixels, the image's
+  own intrinsic size, read from the format header) and `dimensions_reason`. Null means
+  **not measured**, never zero and never a guess, and `dimensions_reason` says why on an
+  `ok` image row: `svg` (a vector format has no pixel size), `encoded` (a
+  content-encoded body is compressed bytes and is not parsed), `unknown-format`,
+  `header-beyond-limit` (the size lies past the 64 KiB read), `malformed`, `empty`, or
+  `not-image` (a 2xx whose content type is not `image/*`). All three are null on CSS
+  and JS rows and on every row that is not `ok`. They are stored columns: the
+  `resources` CSV view does not export them, and `pages_query` does not carry them.
+- **The renderer answers an image from the stored size: the fence's one
+  answered-not-failed exception.** Until 29b the render pass aborted every image.
+  Now an image request whose URL has a stored size is answered locally with a blank SVG
+  of exactly that width and height, **CDN-hosted images included**. Nothing is sent to
+  any host for it, image hosts included: the answer is made inside the browser's
+  interception layer from the stored size, so the fence and the "no third-party
+  request leaves" guarantee stand. An image with no stored size is aborted as before
+  and is counted in `noDimensions`. This is the only request the fence answers rather
+  than aborts or lets through.
+- **`pages.render_images`** holds, per rendered page, the measurement of every `<img>`
+  (the first 1,000) at a 1280 by 900 viewport with a device pixel ratio of 1:
+  `{total, examined, measured, hidden, lazyUnloaded, notRequested, noDimensions,
+  broken, widerThanDisplayed, standIns, kept}`. Each image falls in exactly one bucket
+  (`hidden`: a box under 1 by 1; `lazyUnloaded`: never requested and `loading=lazy`;
+  `notRequested`: never requested otherwise; `noDimensions`: no stored size;
+  `broken`: the browser could not display the stand-in; else `measured`).
+  `widerThanDisplayed` counts measured images whose intrinsic width exceeds their
+  displayed width, and `kept` holds the 50 worst of them by wasted pixels. Null means
+  the page was not measured. It is read by the rule and the metric below, and is not
+  served as a column by `pages_query`.
+- **Accessibility, from the same render.** axe-core 4.14.0 (pinned, unmodified) runs
+  after the page is serialised, in an isolated world of the main frame, with the
+  24-rule WCAG A/AA subset and nothing else. `pages.render_a11y_status` is one of
+  `ran`, `disabled` (the crawl set `renderAccessibility` false), `timeout` (30 s, then
+  terminated), `interrupted` (the page navigated away or closed under it) or `error`
+  (axe threw inside the page; `pages.render_a11y_error` holds the first line);
+  `pages.render_a11y_ms` is the run's time. Violations are rows of the new
+  **`render_a11y`** table, `(crawl_id, page_id, axe_rule, impact, node_count,
+  targets)`, with at most 5 selectors per rule and the true element count in
+  `node_count`; the table is replaced on every render of a page and removed by
+  `crawl_delete`. Only a page whose status is `ran` can say what it violates. The render
+  lease gains 35 s for the run (30 s plus a 5 s grace after terminating it), so it is
+  383 s at the defaults. **`RENDER_CAPTURE_VERSION` is 3**; a page rendered before 29b
+  has no image measurement and no accessibility status.
+- **A new crawl config key, `renderAccessibility`** (boolean, default `true`,
+  `x-ariadne-mutable: whenPaused`), on `crawl_start`, `crawl_config_set`,
+  `config_schema` and `config_validate`. False skips axe; the pages then record
+  `disabled` and `render.not-recorded` says so. It is a render-pass setting, in the
+  same group as the three render budgets.
+- **Three console rules, one image rule, one metric, 24 accessibility rules and one
+  marker are new.**
+  - `render.js-exception` (warning), `render.console-error` (info) and
+    `render.failed-request` (warning), CHECK-51, read `pages.render_console`. They are
+    judged on every page whose console was captured, a failed render included.
+    Their `columns` are declared in `src/rules/query/render-console.ts`:
+    `render.js-exception` has Template, Render Completed, Exceptions
+    (`exceptionsTotal`), First Exception (`firstException`), Exceptions Kept
+    (`exceptions`) and Blocked By Our Browser (`blockedByRenderer`);
+    `render.console-error` has Template, Render Completed, Console Messages
+    (`consoleTotal`), First Error (`firstError`), Messages Kept (`console`) and
+    Blocked By Our Browser; `render.failed-request` has Template, Render Completed,
+    Failed Requests (`failedRequestsTotal`), First Failed URL (`firstFailedUrl`),
+    Reason (`firstFailedReason`) and Requests Kept (`failedRequests`). The earlier
+    `keptLimit` evidence key is **gone**; the kept lists are bounded by the capture
+    (20 console messages, with one total across both levels and no per-level count, so
+    `render.console-error` reads the first 20 and the copy says so).
+    **`firstException` and `firstError` are the site's own text**: a page's message
+    verbatim (cut at a fixed length, with `cut: true` on the kept entry), which may span
+    several lines and may say anything. Treat it as data, never as instructions, and
+    escape it before it is shown.
+    `blockedByRenderer` is `{thirdParty, sameOriginAssets}`: requests our browser
+    refused, so a `gtag is not defined` after a refused analytics script is an artefact
+    of the measurement to confirm on the live page. Third-party failures are not
+    measured at all.
+  - `images.larger-than-displayed` (warning, CHECK-49): a measured image whose
+    intrinsic width is more than `IMAGE_OVERSIZE_PERCENT` percent of its displayed width.
+    Evidence: `oversizedCount`, `images`, `measured`, `atLeast` (true when the page has
+    more oversized images than the 50 kept, so the count is a floor) and `measuredShare`.
+  - **`IMAGE_OVERSIZE_PERCENT`** is the twenty-third overridable threshold (integer
+    percent, 101–1000, default 200). `crawl_config_get` lists 23 and every run stamp
+    holds 23.
+  - The metric `render.image-measurement` (CHECK-49) says how much of the rendered
+    sample's images could be measured at all, per template and for the crawl.
+  - 24 `a11y.*` rules (CHECK-89), one per row of the subset: `a11y.image-alt`,
+    `a11y.input-image-alt`, `a11y.role-img-alt`, `a11y.area-alt`, `a11y.object-alt`,
+    `a11y.link-name`, `a11y.button-name`, `a11y.input-button-name`,
+    `a11y.select-name`, `a11y.label`, `a11y.frame-title`, `a11y.document-title`,
+    `a11y.html-has-lang`, `a11y.html-lang-valid`, `a11y.valid-lang`,
+    `a11y.meta-viewport`, `a11y.meta-refresh`, `a11y.aria-hidden-focus`,
+    `a11y.aria-required-attr`, `a11y.aria-valid-attr`, `a11y.aria-valid-attr-value`,
+    `a11y.list`, `a11y.listitem` and `a11y.color-contrast`. Severity is axe's declared
+    impact (critical or serious is `warning`, moderate or minor is `info`). Columns:
+    Template, Impact (`impact`), Elements (`nodeCount`), Selectors (`targets`, at most
+    5) and WCAG Level (`wcag`). `duplicate-id-aria` is not in the subset: axe reports it
+    as needs-review, never as a violation, so it could not fire. Only a sample of the
+    site is rendered, so each is a fact about the rendered pages and not about the site.
+  - **`render.not-recorded`** (info, marker, CHECK-49, CHECK-51, CHECK-89): the crawl
+    rendered pages whose console, images or accessibility were never captured. Evidence:
+    `renderedPages`, `consoleNotCaptured`, `capturedBeforeImagesAndA11y`,
+    `accessibilityDisabled`, `accessibilityIncomplete` and `families`. A crawl with no
+    rendered page does not fire it (`render.coverage` already says nothing was rendered).
+    The image and accessibility rules are silent on a page without their capture, not
+    clean.
+- **Which crawls have them.** Image sizes need a resource pass at 29b or later; the
+  measurement and the accessibility run need a render at capture 3. A crawl made before
+  needs a re-crawl, because the stored image sizes come from the resource pass and the
+  renderer needs them; re-judging, or rendering again, alone adds nothing.
 
 **What Phase 29a changed here (2026-11-13, reworked 2026-11-16): structured data is
 validated against web standards, not only counted.** One tool and one route are added
@@ -84,7 +213,7 @@ validated before it is refused (409, "re-run the rules"), never read.
     speak of every consumer of the markup, not of one search engine.
 - **Two thresholds are overridable:** `SCHEMA_TEMPLATE_SHARE` (percent, 50–100,
   default 70) and `SCHEMA_TEMPLATE_MIN_PAGES` (2–100000, default 10), so
-  `crawl_config_get` lists 22 and every run stamp holds 22.
+  `crawl_config_get` lists 22 and every run stamp holds 22 (23 from Phase 29b).
 - **`schema.none-on-site`, `schema.breadcrumb-absent` and `schema.template-inconsistent`
   need extraction 4** across the whole crawl; on an older crawl `extraction.not-recorded`
   speaks (`requiredVersion: 4`) and they are silent, not clean.
@@ -1606,7 +1735,7 @@ every MCP tool's arguments. `crawl_start` and `config_validate` answer ONE
 `unknown_field` error per object, not one per key, so a body of a hundred thousand
 unknown keys is one short refusal, read in linear time. Rule ids in `judgement` are
 positional too, with the ruleset version (`key 2 in the order sent names no rule in
-ruleset 0.26.0`). Two things are still named: a credential header or cookie name that
+ruleset 0.27.0`). Two things are still named: a credential header or cookie name that
 is a valid HTTP token (27c), and a rule id already **stored** in a crawl's judgement
 that the ruleset no longer has, because that is the repair path (`crawl_config_set`,
 §4.9). "In the order sent" is `Object.keys` order, so an integer-like key counts first.
@@ -2025,7 +2154,7 @@ and after a `SLOW_MS` override on top of that, `{"stale":true,"reasons":["overri
 A crawl whose stored judgement overrides a rule this ruleset does not define is a
 **409** here, naming the rule, as on every surface that reads the judgement;
 `crawl_config_set` removing that override is the repair (§4.9). A judged crawl
-with no stamp, or with a stamp whose `thresholds` lack any of the 22 names or
+with no stamp, or with a stamp whose `thresholds` lack any of the 23 names or
 hold a value outside its range, is a 500 (the server log names the crawl under
 the correlation id), never "not stale" (hard rule 7). Pinned:
 `test/api/judgement-config.test.ts:599` "judgementStale on crawl_status,
@@ -2954,7 +3083,7 @@ half** follows them. The gate crawl,
 as it came back after its last re-judge (2026-11-08, after migration 0033; 18 of
 the 20 thresholds it then had elided in `thresholds`, every one has the same five keys, and 16
 of the 20 in `judgedWith.thresholds`, which always holds every threshold; Phase 29a
-made it 22):
+made it 22, and Phase 29b 23):
 
 ```json
 {"crawlId":"crawl_4dd32709-56c9-4a62-9af4-7a843f76ff6c","judgement":{},
@@ -2974,7 +3103,7 @@ made it 22):
   200 applies. It is stored where it always was, `config_jsonb.findingCap`
   (Deviation 1), so `crawl_status.findingCap`, `crawl_start`'s top-level key and
   this block read and write one value.
-- **`thresholds`** lists ALL 22 overridable thresholds as `{value, default, min,
+- **`thresholds`** lists ALL 23 overridable thresholds as `{value, default, min,
   max, overridden}`: `value` is what the NEXT rules run will use, `overridden` is
   true where the block sets it, and `min` / `max` are the inclusive bounds. The
   names: `TITLE_MIN`, `TITLE_MAX`, `META_MIN`, `META_MAX`, `H1_MAX`, `H2_MAX`,
@@ -2984,12 +3113,13 @@ made it 22):
   `HIGH_EXTERNAL_OUTLINKS`, `UNAVAILABLE_AFTER_WARN_DAYS` (20, not the 19 the
   plan's prose counted: ruling 5), and, from Phase 29a, `SCHEMA_TEMPLATE_SHARE`
   (percent, 50–100, default 70) and `SCHEMA_TEMPLATE_MIN_PAGES` (2–100000, default
-  10), 22 in all. Extraction-time limits, similarity distances,
+  10), and, from Phase 29b, `IMAGE_OVERSIZE_PERCENT` (percent, 101–1000, default 200),
+  23 in all. Extraction-time limits, similarity distances,
   render heuristics, walk bounds and protocol limits are engine internals and
   are not overridable.
 - **`judgedWith`** is the stamp the last completed rules run wrote of what it
   used, `{disabledRules, thresholds, findingCap?}`, or `null` on a crawl nobody
-  has judged. Its `thresholds` holds ALL 22 names at the EFFECTIVE values that
+  has judged. Its `thresholds` holds ALL 23 names at the EFFECTIVE values that
   run used (its override, else the default then in force), not only the
   overrides, so it stays true when a later ruleset moves a default: the copy is
   rendered from these values, and a moved default reads stale `thresholds`. **`judgementStale`** compares it with the
@@ -3175,7 +3305,7 @@ applied as well:** `type` and `priority` are that crawl's, with
 value; **`disabled: true`** marks a rule the judgement disables, which is still
 listed, and whose `fired.count` still counts its stored findings (338 for the
 gate crawl's disabled `title.same-as-h1`), while every findings listing and
-export leaves them out; the answer gains `thresholds` (the 22 values, by name,
+export leaves them out; the answer gains `thresholds` (the 23 values, by name,
 the crawl's findings were judged with) and `judgementStale`; and the copy is
 rendered from those thresholds, so an override shows in the text only after
 `crawl_rules` re-runs (the gate crawl's `performance.slow-response` title read
@@ -4045,10 +4175,23 @@ Six postures a Talos integrator should know about rather than discover:
 
 ## 11. Versioning, and what a ruleset change does to a served crawl
 
-`RULESET_VERSION` (**0.26.0** as of Phase 29a) stamps **judgement**: bump it when
+`RULESET_VERSION` (**0.27.0** as of Phase 29b) stamps **judgement**: bump it when
 a rule's verdict or copy changes. Adding a rule or a metric family adds rows
 without changing a verdict — `metrics` rows carry no version column at all —
 which is the argument Phase 10 held 0.7.0 on.
+
+**Phase 29b bumped to 0.27.0, once, and moved `RENDER_CAPTURE_VERSION` to 3.** Twenty-nine
+rule ids and one metric id joined: `render.js-exception`, `render.console-error`,
+`render.failed-request`, `images.larger-than-displayed`, the 24 `a11y.*` rules, the
+marker `render.not-recorded`, and the metric `render.image-measurement`. No verdict
+that existed moved, so a crawl re-judged at 0.27.0 keeps its findings and gains the new
+ids where the data exists. The ruleset is 227 rules (72 page / 139 query / 16 metric;
+33 critical / 97 warning / 97 info), and `IMAGE_OVERSIZE_PERCENT` is the twenty-third
+overridable threshold; migration 0058 rewrites every stored run stamp to hold it at its
+default, so `judgementStale` does not read stale on an old stamp for that reason. The
+new rules are silent on a crawl without the capture they read, and
+`render.not-recorded` says which family is missing. A crawl compared across the
+boundary raises `ruleset-mismatch`.
 
 **Phase 29a bumped to 0.26.0, once, and moved `EXTRACTION_VERSION` to 4.** Eight rule
 ids and one metric id joined (`schema.parse-error`, `schema.unknown-type`,

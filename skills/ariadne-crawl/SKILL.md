@@ -150,6 +150,11 @@ Fields worth setting deliberately:
 - **`renderBudgetPct` / `renderMaxPages` / `renderSamplePerType`** — the render
   pass's sample, stored on the crawl row now and read by the render pass later. Set
   them here if the default sample would not cover the page types you care about.
+- **`renderAccessibility`** (boolean, default `true`) — whether the render pass also
+  runs the WCAG A/AA accessibility subset on each rendered page. It costs up to 35 s of
+  lease per page and is skipped when false; the pages then record `disabled` and
+  `render.not-recorded` says the check was not run. Change it only while the crawl is
+  queued or paused.
 - **`findingCap`** — how many findings each listing rule may report when this crawl
   is judged. Defaults to 200: a bounded first look.
   **Set `findingCap: null` for a billed audit** — the client is paying for the whole
@@ -825,10 +830,10 @@ upgrading the engine rather than re-crawling the site.
 
 `crawl_config_get` answers the crawl's judgement: `{crawlId, judgement, thresholds,
 judgedWith, judgementStale}`. `judgement` is the block, `{}` when nothing is set;
-`thresholds` lists all 22 overridable thresholds as `{value, default, min, max,
+`thresholds` lists all 23 overridable thresholds as `{value, default, min, max,
 overridden}`, where `value` is what the NEXT rules run will use; `judgedWith` is what
 the last completed run used — `{disabledRules, thresholds, findingCap?}`, its
-`thresholds` all 22 at the values that run actually judged with — (`null` if nobody
+`thresholds` all 23 at the values that run actually judged with — (`null` if nobody
 has judged the crawl); and
 `judgementStale` (`{stale, reasons}`) says whether the two differ.
 
