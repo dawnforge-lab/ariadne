@@ -1,6 +1,6 @@
 /**
  * The accessibility run's pure half (Phase 29b, src/crawl/render/a11y.ts): the
- * pinned axe-core, the 25-rule subset, and the shaping of an axe result into
+ * pinned axe-core, the 24-rule subset, and the shaping of an axe result into
  * the rows `render_a11y` stores. The run itself is renderer.test.ts's.
  *
  * The one browser here asks the PINNED axe which rules it has, so a rule id
@@ -56,7 +56,7 @@ describe("the pinned axe-core", () => {
 });
 
 describe("A11Y_RULES", () => {
-  it("is the 25 rules in order, with their group, severity and WCAG level", () => {
+  it("is the 24 rules in order, with their group, severity and WCAG level", () => {
     expect(A11Y_RULES.map((r) => [r.group, r.axeId, r.severity, r.wcag])).toEqual([
       ["Text alternatives", "image-alt", "warning", "A"],
       ["Text alternatives", "input-image-alt", "warning", "A"],
@@ -79,7 +79,6 @@ describe("A11Y_RULES", () => {
       ["ARIA", "aria-required-attr", "warning", "A"],
       ["ARIA", "aria-valid-attr", "warning", "A"],
       ["ARIA", "aria-valid-attr-value", "warning", "A"],
-      ["ARIA", "duplicate-id-aria", "warning", "A"],
       ["Structure", "list", "warning", "A"],
       ["Structure", "listitem", "warning", "A"],
       ["Contrast", "color-contrast", "warning", "AA"],
@@ -89,6 +88,12 @@ describe("A11Y_RULES", () => {
   describe("against the pinned axe in a page", () => {
     let browser: Browser;
     let rules: Array<{ ruleId: string; tags: string[] }>;
+    /**
+     * Every rule's own flags, read from the rule objects the pinned package
+     * loaded (`axe._audit.rules`): `enabled` (false for a rule axe ships
+     * switched off) and `reviewOnFail` (a failure is reported as `incomplete`).
+     */
+    let flags: Array<{ id: string; enabled: boolean; reviewOnFail: boolean }>;
 
     beforeAll(async () => {
       browser = await chromium.launch({ headless: true });
@@ -96,6 +101,9 @@ describe("A11Y_RULES", () => {
       await page.setContent("<!doctype html><html lang=en><title>t</title><body></body></html>");
       await page.addScriptTag({ content: axeSource() });
       rules = (await page.evaluate("axe.getRules()")) as Array<{ ruleId: string; tags: string[] }>;
+      flags = (await page.evaluate(
+        "axe._audit.rules.map(function (r) { return { id: r.id, enabled: r.enabled, reviewOnFail: r.reviewOnFail }; })",
+      )) as Array<{ id: string; enabled: boolean; reviewOnFail: boolean }>;
     }, 60_000);
 
     afterAll(async () => {
@@ -108,6 +116,23 @@ describe("A11Y_RULES", () => {
         expect(known, `${rule.axeId} is not an axe 4.14.0 rule`).toBeDefined();
         expect(known!.tags, rule.axeId).toContain(rule.wcag === "A" ? "wcag2a" : "wcag2aa");
       }
+    });
+
+    it("names no rule axe reports as needing review, and none axe ships disabled", () => {
+      // The run stores VIOLATIONS only (`AXE_RUN_OPTIONS.resultTypes`). A
+      // `reviewOnFail` rule turns every failure into `incomplete`, so its
+      // `a11y.*` rule could never fire (hard rule 1): the reason
+      // `duplicate-id-aria` left the subset in Phase 29b Task 8.
+      for (const rule of A11Y_RULES) {
+        const flag = flags.find((f) => f.id === rule.axeId);
+        expect(flag, `${rule.axeId} has no rule object in axe 4.14.0`).toBeDefined();
+        expect(flag!.reviewOnFail, `${rule.axeId} is reviewOnFail`).toBe(false);
+        expect(flag!.enabled, `${rule.axeId} is disabled by default`).toBe(true);
+      }
+      // The reader is not vacuous: the package does carry both flags, on the
+      // rule that was dropped and on rules axe ships off.
+      expect(flags.find((f) => f.id === "duplicate-id-aria")?.reviewOnFail).toBe(true);
+      expect(flags.some((f) => f.enabled === false)).toBe(true);
     });
   });
 });

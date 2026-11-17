@@ -5,7 +5,7 @@
  *
  * WHAT RUNS. axe-core 4.14.0, exactly (package.json pins it without a caret),
  * unmodified (MPL-2.0; THIRD_PARTY_NOTICES.md), loaded from the package's own
- * `axe.min.js` (`axeSource`). It runs the 25 rules of `A11Y_RULES` and nothing
+ * `axe.min.js` (`axeSource`). It runs the 24 rules of `A11Y_RULES` and nothing
  * else (`AXE_RUN_OPTIONS.runOnly`), reports violations only, and is asked for
  * CSS selectors and no element references, ancestry or XPath. The benchmark is
  * WCAG 2.x through axe's own tags — a web standard, not any engine's list.
@@ -69,7 +69,17 @@ export interface A11yRuleRow {
   wcag: "A" | "AA";
 }
 
-/** The pinned subset, in report order. Task 7 writes one rule per row. */
+/**
+ * The pinned subset, in report order. Task 7 writes one rule per row.
+ *
+ * Only rules that give a VERDICT belong here: the run stores violations only,
+ * so a rule axe reports as "needs review" could never fire. That is why
+ * `duplicate-id-aria` is not in the subset (Phase 29b Task 8): axe-core 4.14.0
+ * declares it `reviewOnFail`, so every failure comes back `incomplete`, and the
+ * WCAG criterion it tested, 4.1.1 Parsing, was removed in WCAG 2.2.
+ * test/crawl/a11y.test.ts reads the pinned package and fails if any row here is
+ * `reviewOnFail` or disabled by default.
+ */
 export const A11Y_RULES: readonly A11yRuleRow[] = [
   { group: "Text alternatives", axeId: "image-alt", severity: "warning", wcag: "A" },
   { group: "Text alternatives", axeId: "input-image-alt", severity: "warning", wcag: "A" },
@@ -92,7 +102,6 @@ export const A11Y_RULES: readonly A11yRuleRow[] = [
   { group: "ARIA", axeId: "aria-required-attr", severity: "warning", wcag: "A" },
   { group: "ARIA", axeId: "aria-valid-attr", severity: "warning", wcag: "A" },
   { group: "ARIA", axeId: "aria-valid-attr-value", severity: "warning", wcag: "A" },
-  { group: "ARIA", axeId: "duplicate-id-aria", severity: "warning", wcag: "A" },
   { group: "Structure", axeId: "list", severity: "warning", wcag: "A" },
   { group: "Structure", axeId: "listitem", severity: "warning", wcag: "A" },
   { group: "Contrast", axeId: "color-contrast", severity: "warning", wcag: "AA" },

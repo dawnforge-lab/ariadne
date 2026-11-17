@@ -1135,6 +1135,9 @@ const kitchenSink: Fixture = {
     "headings.h1-multiple",
     "headings.level-skip",
     "images.missing-alt",
+    // The same alt-less image, read by the render's axe run: a genuine WCAG
+    // 1.1.1 violation, not an incidental one (Phase 29b, CHECK-89).
+    "a11y.image-alt",
     "performance.slow-response",
   ],
   handler: (req, res) =>

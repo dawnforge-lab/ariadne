@@ -565,11 +565,13 @@ describe("checklist coverage", () => {
   //   Phase 29b T7 adds 26 query rules, the 25 `a11y.*` rules (one per `A11Y_RULES`
   //   row) and the marker `render.not-recorded`: query 114 + 26 = 140, total 228.
   //   The 25 claim CHECK-89, which joins `CRAWL_CHECK_IDS` claimed (below).
-  it("pins the ruleset split: 228 rules = 72 page + 140 query + 16 metric", () => {
+  //   Phase 29b T8 drops `a11y.duplicate-id-aria` (axe reports it as needing
+  //   review, never as a violation): query 140 - 1 = 139, total 227.
+  it("pins the ruleset split: 227 rules = 72 page + 139 query + 16 metric", () => {
     const registry = buildRegistry();
-    expect(registry.all()).toHaveLength(228);
+    expect(registry.all()).toHaveLength(227);
     expect(registry.byKind("page")).toHaveLength(72);
-    expect(registry.byKind("query")).toHaveLength(140);
+    expect(registry.byKind("query")).toHaveLength(139);
     // The link-graph five, the two content metrics and hreflang coverage, plus
     // the URL-parameter, redirect-volume and sitemap-structure metrics, plus
     // the render pass's coverage, the health rollup, the page-weight table, coverage.

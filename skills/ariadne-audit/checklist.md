@@ -60,7 +60,7 @@ WHAT CHANGED AFTER IMPORT (the living authority's own change log):
   Phase 29b (ruleset 0.27.0, 2026-11-17) — engine paragraphs, and ONE NEW CHECK. No
   existing check's id, title, priority, Evaluate criteria or Record list moved.
   - CHECK-89 (new): Accessibility — WCAG A/AA subset (rendered sample), answered by
-    the 25 `a11y.*` rules over the render's axe-core run.
+    the 24 `a11y.*` rules over the render's axe-core run.
   - CHECK-49: `images.larger-than-displayed` and the `render.image-measurement`
     metric, from the rendered sample.
   - CHECK-51: the render console rules (`render.js-exception`,
@@ -3305,11 +3305,11 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
 
 ### CHECK-89: Accessibility — WCAG A/AA subset (rendered sample)
 - **Priority**: Medium | **Requires**: Engine
-- **Engine**: `issues_list` with `checkId: "CHECK-89"` — up to 26 rule ids can come
-  back, 25 of them findings about the site and one about the crawl. **Measured from
+- **Engine**: `issues_list` with `checkId: "CHECK-89"` — up to 25 rule ids can come
+  back, 24 of them findings about the site and one about the crawl. **Measured from
   the render's sample only** — the pages the render budget reached, not the whole
   crawl. After a page is rendered, our browser runs a pinned axe-core (4.14.0) with a
-  fixed subset of 25 WCAG 2.x level A and AA rules and nothing else, and each rule
+  fixed subset of 24 WCAG 2.x level A and AA rules and nothing else, and each rule
   that the page violates is one finding on that page: the evidence gives the page's
   `template`, axe's `impact`, `nodeCount` (every element that failed), up to five CSS
   selectors in `targets`, and the WCAG level (`wcag`). The rules, by group:
@@ -3322,10 +3322,12 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
     `a11y.html-lang-valid` (warning), `a11y.valid-lang` (warning).
   - Behaviour: `a11y.meta-viewport` (info; zooming disabled), `a11y.meta-refresh` (warning).
   - ARIA: `a11y.aria-hidden-focus` (warning), `a11y.aria-required-attr` (warning),
-    `a11y.aria-valid-attr` (warning), `a11y.aria-valid-attr-value` (warning),
-    `a11y.duplicate-id-aria` (warning).
+    `a11y.aria-valid-attr` (warning), `a11y.aria-valid-attr-value` (warning).
   - Structure: `a11y.list` (warning), `a11y.listitem` (warning).
   - Contrast: `a11y.color-contrast` (warning).
+  Duplicate ids referenced by ARIA are not in the subset: the pinned axe reports
+  that rule only as "needs review", never as a violation, and WCAG 2.2 removed the
+  criterion it tested (4.1.1 Parsing).
   The severity is axe's declared impact for the rule (critical or serious is a
   warning, moderate or minor is info); none is critical, because WCAG conformance
   is the client's call and not a crawl or indexing blocker. The run is at a fixed
@@ -3338,8 +3340,8 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
   is this check's NOT MEASURED signal: it fires once when the crawl has rendered
   pages with no accessibility result — rendered before the check existed
   (`capturedBeforeImagesAndA11y`), with the check turned off for the crawl
-  (`accessibilityDisabled`), or with a run that timed out, was interrupted by the
-  page navigating away, or failed on an error the page caused
+  (`accessibilityDisabled`), or with a run that timed out, was interrupted (the
+  page navigated away, or the renderer crashed), or failed on an error the page caused
   (`accessibilityIncomplete`). When it names `accessibility` in `families`, the
   silence of the `a11y.*` rules says nothing about those pages; the remedy is a
   re-crawl with accessibility checking on. A page that was never rendered is not

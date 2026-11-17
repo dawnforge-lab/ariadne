@@ -66,10 +66,12 @@ describe("renderA11yRules metadata", () => {
 
   it("holds one a11y rule per A11Y_RULES row, in table order, and nothing retyped", () => {
     expect(a11y.map((r) => r.id)).toEqual(A11Y_RULES.map((row) => `a11y.${row.axeId}`));
-    expect(a11y).toHaveLength(25);
+    // 24 since Phase 29b Task 8 dropped `duplicate-id-aria` (axe reports it as
+    // needing review, never as a violation).
+    expect(a11y).toHaveLength(24);
   });
 
-  it("the registry holds exactly those 25 a11y rules", () => {
+  it("the registry holds exactly those 24 a11y rules", () => {
     const registered = buildRegistry()
       .all()
       .filter((r) => r.id.startsWith("a11y."))

@@ -1431,13 +1431,6 @@ export const COPY_TEMPLATES: Record<string, IssueCopy> = {
     howToFix:
       "Set each such attribute in the template to an allowed value, and make id references such as aria-labelledby point to ids that exist on the page.",
   },
-  "a11y.duplicate-id-aria": {
-    title: "Accessibility: Duplicate ids used for names or labels",
-    explanation:
-      "Pages where an id referenced by aria-labelledby, aria-describedby or a label's for attribute appears on more than one element, so a field or region can be named from the wrong element; this fails WCAG success criterion 4.1.2 Name, Role, Value, level A. Judged on the rendered sample only, in the page as our browser built it; the row gives the template, how many elements failed and up to five of their selectors.",
-    howToFix:
-      "Give every element the template outputs a unique id, and generate ids per instance for repeated components such as product cards and form fields.",
-  },
   "a11y.list": {
     title: "Accessibility: Lists with invalid children",
     explanation:
@@ -1462,7 +1455,7 @@ export const COPY_TEMPLATES: Record<string, IssueCopy> = {
   "render.not-recorded": {
     title: "Rendering: Console, image or accessibility checks not run",
     explanation:
-      "Some rendered pages in this crawl lack what the console, image-size or accessibility checks read: they were rendered before those were recorded, or with the accessibility check turned off, timed out, interrupted by the page navigating away, or stopped by an error the page caused, so those checks were left unrun on them rather than reported clean. The row counts the rendered pages and how many lack each record, and Checks Not Run names the checks affected.",
+      "Some rendered pages in this crawl lack what the console, image-size or accessibility checks read: they were rendered before those were recorded, or with the accessibility check turned off, timed out, interrupted (the page navigated away, or the renderer crashed), or stopped by an error the page caused, so those checks were left unrun on them rather than reported clean. The row counts the rendered pages and how many lack each record, and Checks Not Run names the checks affected.",
     howToFix:
       "Re-crawl the site with accessibility checking turned on. If the check keeps timing out or being interrupted on one template, check that its pages finish loading and do not navigate away on their own.",
   },

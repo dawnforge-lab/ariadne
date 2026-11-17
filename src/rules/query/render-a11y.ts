@@ -3,7 +3,7 @@
  * marker (CHECK-49, CHECK-51, CHECK-89).
  *
  *  - `a11y.<axe-id>`, one per row of `A11Y_RULES` (src/crawl/render/a11y.ts),
- *    25 in all: a rendered page whose pinned axe-core run reported that rule
+ *    24 in all: a rendered page whose pinned axe-core run reported that rule
  *    violated. Severity from the table (axe's declared impact: critical or
  *    serious is `warning`, moderate or minor is `info`); `issue` / `low`.
  *  - `render.not-recorded` (info): the crawl rendered pages whose console,

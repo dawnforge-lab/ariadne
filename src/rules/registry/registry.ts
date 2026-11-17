@@ -1056,12 +1056,12 @@ const KINDS = ["page", "query", "metric"] as const satisfies readonly AnyRule["k
 //        size-unknown and broken images and a `measuredShare`. A
 //        `render_images` that is not a RenderImages throws.
 //        202 rules: 72 page / 114 query / 16 metric.
-//     3. Task 7: 25 query rules `a11y.<axe-id>`, one per row of `A11Y_RULES`
+//     3. Task 7: 24 query rules `a11y.<axe-id>`, one per row of `A11Y_RULES`
 //        (generated from that table), read the render pass's accessibility run
 //        (`render_a11y`, capture 3) on pages whose run finished
 //        (`render_a11y_status = 'ran'`): one finding per page that violates the
 //        rule, with its impact, element count, up to five selectors and WCAG
-//        level. Severity from the table (24 warning, `a11y.meta-viewport`
+//        level. Severity from the table (23 warning, `a11y.meta-viewport`
 //        info); category `accessibility` (new); triage issue / low. All claim
 //        CHECK-89, "Accessibility — WCAG A/AA subset (rendered sample)", new in
 //        the checklist and in `CRAWL_CHECK_IDS` (48 checks now). The NOT
@@ -1071,7 +1071,10 @@ const KINDS = ["page", "query", "metric"] as const satisfies readonly AnyRule["k
 //        accessibility run was disabled, timed out, interrupted or errored;
 //        silent on a crawl with no rendered page. A `render_a11y` row of an
 //        unknown axe rule, a node count below one or bad targets throws.
-//        228 rules: 72 page / 140 query / 16 metric.
+//        The subset was 25 until Task 8 dropped `duplicate-id-aria`: axe-core
+//        4.14.0 marks it `reviewOnFail`, so it reports "needs review" and never
+//        a violation, and WCAG 2.2 removed the criterion it tested (4.1.1).
+//        227 rules: 72 page / 139 query / 16 metric.
 export const RULESET_VERSION = "0.27.0";
 
 /**

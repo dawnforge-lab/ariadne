@@ -26,9 +26,7 @@
  *    subset without a page fails here at import rather than passing unseen.
  *    Each page carries exactly one violation of its rule. Where the violation
  *    is also a defect an existing rule reports, that rule is in the page's
- *    expectations with a one-line reason (`alsoFires`). One rule cannot fire
- *    at all under the pinned axe (`neverAViolation`, `duplicate-id-aria`): its
- *    page carries the violation and expects nothing.
+ *    expectations with a one-line reason (`alsoFires`).
  *
  * WHY NONE OF THESE PAGES HAS AN ANCHOR THAT BECOMES A LINK. The render pass
  * renders suspects and a three-page sample per page type (src/crawl/render/
@@ -306,13 +304,6 @@ interface A11yPage {
   spec?: Partial<Pick<PageSpec, "htmlLang" | "viewport" | "headExtra" | "social">>;
   /** Existing rules the violation necessarily trips, each with its reason beside it. */
   alsoFires?: string[];
-  /**
-   * Set, with the reason, when the pinned axe cannot report this rule as a
-   * VIOLATION however the page is written. The page still carries the
-   * violation, and its own `a11y.*` rule is then not expected: an exact page
-   * that claimed it would be claiming something the engine cannot produce.
-   */
-  neverAViolation?: string;
 }
 
 const A11Y_PAGES: Record<string, A11yPage> = {
@@ -564,25 +555,6 @@ const A11Y_PAGES: Record<string, A11yPage> = {
     fix: "Write true when the menu is shown and false when it is hidden, from the same code that shows and hides it. Keep a short list of the values each ARIA attribute accepts near the component library, since the wrong word is an easy and invisible mistake.",
     violation: '<p><button type="button" aria-expanded="open">Calendar</button></p>',
   },
-  "duplicate-id-aria": {
-    title: "A labelled region whose label id appears twice",
-    metaDescription:
-      "A page where the id a region uses for its label is used by two elements, so which label is read depends on the browser.",
-    h1: "Mooring fees for the coming season",
-    lede: "The fee table on this page is labelled through an id reference, and that id belongs to two elements at once.",
-    what: "A region points at its heading with aria-labelledby. A second heading further down, copied from the first block, kept the same id, so the reference now names two elements and the browser picks one of them by its own rule.",
-    why: "Ids must be unique, and the requirement matters most where ARIA uses them. A label that resolves to the wrong element announces the wrong section, and a later edit to either heading can change what assistive technology says without anyone touching the region itself.",
-    fix: "Give every element a unique id, especially any that a label or description points to. Generate ids in components rather than writing them by hand, so that a block copied to another part of the page brings its own references along with it.",
-    violation:
-      '<h3 id="fees-label">Annual mooring fees</h3>' +
-      '<div role="region" aria-labelledby="fees-label"><p>Swinging moorings are charged by the length of the boat.</p></div>' +
-      '<h3 id="fees-label">Visitor mooring fees</h3>',
-    // The violation above is real, and axe finds it: checked against the pinned
-    // package, it comes back under `incomplete`, never `violations`.
-    neverAViolation:
-      "axe-core 4.14.0 declares duplicate-id-aria `reviewOnFail`, so a failing node is " +
-      "reported as needing review (incomplete), and render_a11y stores violations only",
-  },
   list: {
     title: "A kit list that contains something other than items",
     metaDescription:
@@ -626,10 +598,7 @@ function a11yFixture(axeId: string, page: A11yPage): Fixture {
     path: `/p29b/a11y/${axeId}`,
     category: A11Y,
     name: `Accessibility: one violation of ${axeId}`,
-    expectedIssues: [
-      ...(page.neverAViolation === undefined ? [`a11y.${axeId}`] : []),
-      ...(page.alsoFires ?? []),
-    ],
+    expectedIssues: [`a11y.${axeId}`, ...(page.alsoFires ?? [])],
     exact: true,
     handler: (req, res) =>
       serve(req, res, () => ({

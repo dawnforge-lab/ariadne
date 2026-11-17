@@ -643,15 +643,18 @@ describe("check annotations", () => {
  * `a11y.meta-viewport` info (axe's moderate impact), and the marker
  * `render.not-recorded` (info): 74 + 24 = 98 warning, 95 + 2 = 97 info, 228
  * rules. The critical list does not move: no accessibility rule is critical.
+ *
+ * Task 8 drops `a11y.duplicate-id-aria` (a warning) from the subset, because
+ * axe-core 4.14.0 never reports it as a violation: 97 warning, 227 rules.
  */
 describe("severity shape of the ruleset", () => {
   const all = buildRegistry().all();
 
-  it("holds 33 critical, 98 warning and 97 info rules", () => {
+  it("holds 33 critical, 97 warning and 97 info rules", () => {
     const counts = { critical: 0, warning: 0, info: 0 };
     for (const r of all) counts[r.severity] += 1;
-    expect(counts).toEqual({ critical: 33, warning: 98, info: 97 });
-    expect(all).toHaveLength(228);
+    expect(counts).toEqual({ critical: 33, warning: 97, info: 97 });
+    expect(all).toHaveLength(227);
   });
 
   it("names exactly the rules that are critical", () => {
@@ -884,9 +887,9 @@ describe("a metric table's declared order", () => {
 
 // 29a rework final review: the severity split, pinned from the registry itself.
 describe("the registry's severity totals", () => {
-  it("228 rules are 33 critical, 98 warning and 97 info", () => {
+  it("227 rules are 33 critical, 97 warning and 97 info", () => {
     const counts: Record<string, number> = {};
     for (const rule of buildRegistry().all()) counts[rule.severity] = (counts[rule.severity] ?? 0) + 1;
-    expect(counts).toEqual({ critical: 33, warning: 98, info: 97 });
+    expect(counts).toEqual({ critical: 33, warning: 97, info: 97 });
   });
 });

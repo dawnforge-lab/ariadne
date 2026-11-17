@@ -172,7 +172,8 @@ describe("buildRegistry", () => {
     expect(ids).toContain("a11y.image-alt");
     expect(ids).toContain("a11y.color-contrast");
     expect(ids).toContain("render.not-recorded");
-    expect(ids.length).toBe(228);
+    // 227 since Phase 29b Task 8 dropped `a11y.duplicate-id-aria` (228 before).
+    expect(ids.length).toBe(227);
   });
 
   it("registers every kind the runner drives", () => {
