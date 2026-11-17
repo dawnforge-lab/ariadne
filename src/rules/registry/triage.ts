@@ -41,6 +41,7 @@
  * a crawl's overrides) at read time, so an override takes effect without
  * re-running the rules.
  */
+import { A11Y_RULES } from "../../crawl/render/a11y.js";
 import type { IssueType, Priority } from "./types.js";
 
 /** A rule's default judgement: what the finding is, and what fixing it is worth. */
@@ -64,7 +65,22 @@ export type TriageLookup = (ruleId: string) => Triage | undefined;
 
 const MARKER: TriageRow = { type: "warning", priority: "low" };
 
+/**
+ * The accessibility rules (Phase 29b, CHECK-89), one row per `A11Y_RULES` row,
+ * GENERATED from the same table the rules are, so the subset is never retyped.
+ * No SF counterpart; from the rubric: a WCAG A/AA violation is a defect on the
+ * page (issue), and its fix improves who can use the page rather than how it is
+ * crawled or ranked (low). Sorted by id, ahead of every other row ("a1" sorts
+ * before any letter), which keeps the table in rule-id order.
+ */
+const A11Y_TRIAGE: Record<string, TriageRow> = Object.fromEntries(
+  A11Y_RULES.map((r) => `a11y.${r.axeId}`)
+    .sort()
+    .map((id) => [id, { type: "issue", priority: "low" }]),
+);
+
 export const TRIAGE: Readonly<Record<string, Readonly<TriageRow>>> = {
+  ...A11Y_TRIAGE,
   "canonical.chain": { type: "issue", priority: "high" },
   "canonical.cross-domain": { type: "warning", priority: "high" },
   "canonical.fragment": { type: "issue", priority: "high", sfIssue: "Canonicals: Contains Fragment URL" },
@@ -217,6 +233,7 @@ export const TRIAGE: Readonly<Record<string, Readonly<TriageRow>>> = {
   // JavaScript, or added by it), and either one decides whether the page is
   // indexed, depending on which reading a search engine acts on.
   "render.noindex-changed": { type: "issue", priority: "high", sfIssue: "JavaScript: Noindex Only in Original HTML" },
+  "render.not-recorded": MARKER,
   "render.title-changed": { type: "warning", priority: "medium", sfIssue: "JavaScript: Page Title Updated by JavaScript" },
   "resources.all-unknown": MARKER,
   "resources.bad-content-type": { type: "warning", priority: "low", sfIssue: "Security: Bad Content Type" },

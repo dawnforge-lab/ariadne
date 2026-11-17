@@ -1714,6 +1714,9 @@ const AREAS = [
   "Robots.txt",
   "Social",
   "HTML",
+  // Phase 29b: the WCAG A/AA subset run on the rendered sample (CHECK-89), the
+  // group a reader looks for these under.
+  "Accessibility",
 ];
 
 /** `Area: Condition` — an area from the list above, then a condition. */

@@ -384,8 +384,10 @@ describe("Registry", () => {
 
 describe("check universe", () => {
   it("exports the crawl-derived check universe and agent list", () => {
-    expect(CRAWL_CHECK_IDS).toHaveLength(47);
+    // 47 from the build plan, and CHECK-89 (Phase 29b, accessibility).
+    expect(CRAWL_CHECK_IDS).toHaveLength(48);
     expect(CRAWL_CHECK_IDS).toContain("CHECK-33b");
+    expect(CRAWL_CHECK_IDS).toContain("CHECK-89");
     expect(AGENT_CHECKS).toEqual(["CHECK-38", "CHECK-41", "CHECK-42"]);
     // 0.13.0: Phase 17, on THREE grounds. The 5xx re-verification pass
     // (docs/superpowers/specs/2026-09-08-5xx-recheck-design.md) takes a SECOND
@@ -636,15 +638,20 @@ describe("check annotations", () => {
  *
  * Phase 27c Task 7 (0.24.0) adds the marker `crawl.list-mode` (info): 90 info,
  * seventeen markers.
+ *
+ * Phase 29b (0.27.0) Task 7 adds the 25 accessibility rules, 24 warning and
+ * `a11y.meta-viewport` info (axe's moderate impact), and the marker
+ * `render.not-recorded` (info): 74 + 24 = 98 warning, 95 + 2 = 97 info, 228
+ * rules. The critical list does not move: no accessibility rule is critical.
  */
 describe("severity shape of the ruleset", () => {
   const all = buildRegistry().all();
 
-  it("holds 33 critical, 74 warning and 95 info rules", () => {
+  it("holds 33 critical, 98 warning and 97 info rules", () => {
     const counts = { critical: 0, warning: 0, info: 0 };
     for (const r of all) counts[r.severity] += 1;
-    expect(counts).toEqual({ critical: 33, warning: 74, info: 95 });
-    expect(all).toHaveLength(202);
+    expect(counts).toEqual({ critical: 33, warning: 98, info: 97 });
+    expect(all).toHaveLength(228);
   });
 
   it("names exactly the rules that are critical", () => {
@@ -754,6 +761,12 @@ describe("the reserved headings are exactly the ones the surface prints itself",
  * rule's id as a string literal, and the test asserts that uniqueness first —
  * a rule split across two files would make the search ambiguous rather than
  * wrong, and this is where that would be noticed.
+ *
+ * ONE FAMILY IS GENERATED RATHER THAN SPELLED: the 25 `a11y.*` rules (Phase
+ * 29b) are built by mapping `A11Y_RULES` through `defineRule`, so no file holds
+ * `"a11y.image-alt"` as a literal. For an id no file spells, the owner is the
+ * one file that builds ids of its prefix from a template (`` `a11y.${ ``),
+ * and the same uniqueness applies to that search.
  */
 describe("every declared column names a key its own rule's source writes", () => {
   const RULES_DIR = fileURLToPath(new URL("../../src/rules", import.meta.url));
@@ -786,7 +799,11 @@ describe("every declared column names a key its own rule's source writes", () =>
     for (const rule of buildRegistry().all()) {
       const columns = rule.columns ?? [];
       if (columns.length === 0) continue;
-      const owners = [...files].filter(([, text]) => text.includes(`"${rule.id}"`));
+      let owners = [...files].filter(([, text]) => text.includes(`"${rule.id}"`));
+      if (owners.length === 0) {
+        const prefix = rule.id.slice(0, rule.id.indexOf("."));
+        owners = [...files].filter(([, text]) => text.includes(`\`${prefix}.\${`));
+      }
       if (owners.length !== 1) {
         ambiguous.push(`${rule.id} (${owners.length} files)`);
         continue;
@@ -867,9 +884,9 @@ describe("a metric table's declared order", () => {
 
 // 29a rework final review: the severity split, pinned from the registry itself.
 describe("the registry's severity totals", () => {
-  it("202 rules are 33 critical, 74 warning and 95 info", () => {
+  it("228 rules are 33 critical, 98 warning and 97 info", () => {
     const counts: Record<string, number> = {};
     for (const rule of buildRegistry().all()) counts[rule.severity] = (counts[rule.severity] ?? 0) + 1;
-    expect(counts).toEqual({ critical: 33, warning: 74, info: 95 });
+    expect(counts).toEqual({ critical: 33, warning: 98, info: 97 });
   });
 });

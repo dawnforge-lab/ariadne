@@ -558,7 +558,9 @@ const metaRefresh: Fixture = {
   path: "/p26b/meta-refresh",
   category: "redirects",
   name: "A page that refreshes to another URL after a delay",
-  expectedIssues: ["redirect.meta-refresh"],
+  // A timed refresh the reader cannot stop is also WCAG 2.2.1's failure, which
+  // the rendered page's accessibility run reports (Phase 29b, CHECK-89).
+  expectedIssues: ["redirect.meta-refresh", "a11y.meta-refresh"],
   exact: true,
   handler: (req, res) =>
     serve(req, res, () => ({

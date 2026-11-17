@@ -35,6 +35,7 @@ import { linkTargetRules } from "./query/link-targets.js";
 import { pageFactsRules } from "./query/page-facts.js";
 import { paginationRules } from "./query/pagination.js";
 import { redirectRules } from "./query/redirects.js";
+import { renderA11yRules } from "./query/render-a11y.js";
 import { renderConsoleRules } from "./query/render-console.js";
 import { renderDiffRules } from "./query/render-diff.js";
 import { renderImageRules } from "./query/render-images.js";
@@ -115,6 +116,10 @@ export function buildRegistry(): Registry {
     ...renderConsoleRules,
     // Phase 29b: the render pass's image measurement (CHECK-49).
     ...renderImageRules,
+    // Phase 29b: the WCAG A/AA accessibility subset (CHECK-89), one rule per
+    // `A11Y_RULES` row, and `render.not-recorded`, the NOT MEASURED marker for
+    // rendered pages whose console, images or accessibility were not captured.
+    ...renderA11yRules,
     ...renderRedirectRules,
     // The resource rules (P11-T3): what the fetch pass learned about the files
     // the pages point at. Query-kind for the reason every rule here is — they

@@ -57,6 +57,16 @@ WHAT CHANGED AFTER IMPORT (the living authority's own change log):
   - CHECK-46: the self-serving match covers the Organization branch, not one type, and
     the finding states a fact about the markup, not a search engine's policy.
 
+  Phase 29b (ruleset 0.27.0, 2026-11-17) — engine paragraphs, and ONE NEW CHECK. No
+  existing check's id, title, priority, Evaluate criteria or Record list moved.
+  - CHECK-89 (new): Accessibility — WCAG A/AA subset (rendered sample), answered by
+    the 25 `a11y.*` rules over the render's axe-core run.
+  - CHECK-49: `images.larger-than-displayed` and the `render.image-measurement`
+    metric, from the rendered sample.
+  - CHECK-51: the render console rules (`render.js-exception`,
+    `render.console-error`, `render.failed-request`).
+  - CHECK-49 / 51 / 89 and CHECK-83: the marker `render.not-recorded`.
+
 WHAT DID NOT CHANGE, and must not: every CHECK id, every check's title, priority,
 `**Evaluate**` criteria and `**Record**` list. The rule registry's `checkIds`
 trace to the ids in this file and CI asserts the coverage.
@@ -370,6 +380,7 @@ answered from, and its verdict is the confidence interval around all of them.
   `hreflang.alternates-not-crawled`, `hreflang.declarations-incomplete`,
   `content.near-duplicate-skipped`,
   `security.headers-not-recorded`, `extraction.not-recorded`, `crawl.list-mode`,
+  `render.not-recorded`,
   and the per-page `crawl.blocked` and `crawl.unreadable-encoding`. Each one
   is the engine saying a check below could not be answered on this crawl. The four
   resource markers are siblings and never more than one appears: `resources.not-recorded` means
@@ -3077,8 +3088,8 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
 
 ### CHECK-49: Image optimisation and responsive images
 - **Priority**: Medium | **Requires**: Engine + DevTools
-- **Engine**: `issues_list` with `checkId: "CHECK-49"` — nine rule ids can come back,
-  seven of them findings about the site and two about the crawl.
+- **Engine**: `issues_list` with `checkId: "CHECK-49"` — ten rule ids can come back,
+  seven of them findings about the site and three about the crawl.
   `images.missing-dimensions` (info) and `images.missing-alt` (warning), page by page
   across the whole crawl, with `issue_urls` naming the pages and the offending
   images (on a page crawled with extraction 2, `images.missing-alt` also lists up to
@@ -3114,7 +3125,12 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
   `metricId: "render.image-measurement"` for the crawl-wide and per-template counts of
   each kind and the share measured, before saying a template's images are the right
   size. A page with no capture (never rendered, or rendered before the image capture)
-  is not measured here, which is not the same as clean. The render pass answers an
+  is not measured here, which is not the same as clean. `render.not-recorded` (info)
+  is the NOT MEASURED marker for the rendered half: it fires once when the crawl has
+  rendered pages captured before the image measurement existed, and its
+  `capturedBeforeImagesAndA11y` count says how many; when it names `images` in
+  `families`, the larger-than-displayed half of this check is NOT MEASURED on those
+  pages rather than clean, and the remedy is a re-crawl. The render pass answers an
   image request with a blank stand-in of its stored size instead of fetching it, so
   this costs the site no image requests.
   RESPONSIVE IMAGES are still browser work — `srcset` is read for its first candidate
@@ -3237,7 +3253,11 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
   blocking, so confirm a console error or exception on the live page before reporting
   it. A page with no capture (never rendered, or an older capture) is not measured
   here, which is not the same as clean.
-  <!-- 29b T7: name the render not-recorded marker here -->
+  `render.not-recorded` (info) is the NOT MEASURED marker for this half: it fires once
+  when the crawl has rendered pages whose console was never captured (rendered before
+  the console was recorded), and its `consoleNotCaptured` count says how many. When
+  it names `console` in `families`, the JavaScript-error half of this check is NOT
+  MEASURED on those pages rather than clean, and the remedy is a re-crawl.
   A second rule reads the same table: `resources.bad-content-type` (info) — a file the
   server answered 200 for whose content type contradicts what the page called it (a
   stylesheet not served as `text/css`, a script not served as JavaScript, an image
@@ -3282,6 +3302,57 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
   - FAIL if viewport meta missing
   - WARN if intrusive overlays cover significant content
   - Record: viewport tag, overlay observations
+
+### CHECK-89: Accessibility — WCAG A/AA subset (rendered sample)
+- **Priority**: Medium | **Requires**: Engine
+- **Engine**: `issues_list` with `checkId: "CHECK-89"` — up to 26 rule ids can come
+  back, 25 of them findings about the site and one about the crawl. **Measured from
+  the render's sample only** — the pages the render budget reached, not the whole
+  crawl. After a page is rendered, our browser runs a pinned axe-core (4.14.0) with a
+  fixed subset of 25 WCAG 2.x level A and AA rules and nothing else, and each rule
+  that the page violates is one finding on that page: the evidence gives the page's
+  `template`, axe's `impact`, `nodeCount` (every element that failed), up to five CSS
+  selectors in `targets`, and the WCAG level (`wcag`). The rules, by group:
+  - Text alternatives: `a11y.image-alt` (warning), `a11y.input-image-alt` (warning),
+    `a11y.role-img-alt` (warning), `a11y.area-alt` (warning), `a11y.object-alt` (warning).
+  - Names: `a11y.link-name` (warning), `a11y.button-name` (warning),
+    `a11y.input-button-name` (warning), `a11y.select-name` (warning), `a11y.label`
+    (warning), `a11y.frame-title` (warning).
+  - Language: `a11y.document-title` (warning), `a11y.html-has-lang` (warning),
+    `a11y.html-lang-valid` (warning), `a11y.valid-lang` (warning).
+  - Behaviour: `a11y.meta-viewport` (info; zooming disabled), `a11y.meta-refresh` (warning).
+  - ARIA: `a11y.aria-hidden-focus` (warning), `a11y.aria-required-attr` (warning),
+    `a11y.aria-valid-attr` (warning), `a11y.aria-valid-attr-value` (warning),
+    `a11y.duplicate-id-aria` (warning).
+  - Structure: `a11y.list` (warning), `a11y.listitem` (warning).
+  - Contrast: `a11y.color-contrast` (warning).
+  The severity is axe's declared impact for the rule (critical or serious is a
+  warning, moderate or minor is info); none is critical, because WCAG conformance
+  is the client's call and not a crawl or indexing blocker. The run is at a fixed
+  1280×900 desktop viewport, our browser refuses third-party requests and the site's
+  own images, media and fonts, and it never scrolls or interacts, so what a menu,
+  a modal or a lazy section shows after a click is not checked, and colour contrast
+  over a background image is not judged. This subset is not a WCAG audit: it is the
+  part of WCAG a machine can decide from one rendered page, and an automated run
+  never establishes conformance on its own. The marker `render.not-recorded` (info)
+  is this check's NOT MEASURED signal: it fires once when the crawl has rendered
+  pages with no accessibility result — rendered before the check existed
+  (`capturedBeforeImagesAndA11y`), with the check turned off for the crawl
+  (`accessibilityDisabled`), or with a run that timed out, was interrupted by the
+  page navigating away, or failed on an error the page caused
+  (`accessibilityIncomplete`). When it names `accessibility` in `families`, the
+  silence of the `a11y.*` rules says nothing about those pages; the remedy is a
+  re-crawl with accessibility checking on. A page that was never rendered is not
+  measured either, and `render.coverage` says how many were.
+- **Evaluate**:
+  - PASS if no `a11y.*` rule fired and `render.not-recorded` did not name
+    `accessibility`, stated as a pass on the rendered sample at the subset's level
+  - WARN if any `a11y.*` rule fired: group the findings by template, since one
+    template fix clears every page built from it
+  - NOT MEASURED if the crawl rendered no page, or `render.not-recorded` (info) names
+    `accessibility` for most of the rendered pages
+  - Record: the rules that fired, the templates and page counts behind each, and the
+    share of the crawl the rendered sample covers
 
 ---
 

@@ -234,6 +234,48 @@ const SKIP_HARNESS_CLAIMS: string[] = [
   // yet. Task 8 writes that page and REMOVES this entry; until then the rule is
   // proved on synthetic rows in `test/rules/render-images.test.ts`.
   "images.larger-than-displayed",
+  // Phase 29b Task 7, TEMPORARY. Twenty-two of the 25 accessibility rules
+  // (CHECK-89) read `render_a11y`, and no fixture page violates them yet: the
+  // fixture markup is minimal and was written to be accessible. The other three
+  // fire already, each on a page whose own defect is the violation
+  // (`a11y.document-title` on `/head/missing-title`, `a11y.image-alt` on
+  // `/content/images-missing-alt`, `a11y.meta-refresh` on `/p26b/meta-refresh`).
+  // Task 8 writes one page per axe rule (`/p29b/a11y/<axe-id>`) and REMOVES these
+  // entries; until then the rules are proved on synthetic rows in
+  // `test/rules/render-a11y.test.ts`.
+  "a11y.input-image-alt",
+  "a11y.role-img-alt",
+  "a11y.area-alt",
+  "a11y.object-alt",
+  "a11y.link-name",
+  "a11y.button-name",
+  "a11y.input-button-name",
+  "a11y.select-name",
+  "a11y.label",
+  "a11y.frame-title",
+  "a11y.html-has-lang",
+  "a11y.html-lang-valid",
+  "a11y.valid-lang",
+  "a11y.meta-viewport",
+  "a11y.aria-hidden-focus",
+  "a11y.aria-required-attr",
+  "a11y.aria-valid-attr",
+  "a11y.aria-valid-attr-value",
+  "a11y.duplicate-id-aria",
+  "a11y.list",
+  "a11y.listitem",
+  "a11y.color-contrast",
+  // Phase 29b Task 7. `render.not-recorded` is the NOT MEASURED marker for a
+  // crawl whose RENDERED pages lack a console capture, predate render capture 3,
+  // or carry an accessibility run that was disabled, timed out, interrupted or
+  // errored. This harness renders with the current renderer and accessibility
+  // on, and every fixture's axe run finishes, so the marker's condition is false
+  // BY CONSTRUCTION, the `extraction.not-recorded` shape above. Producing the
+  // crawl it reports would mean hand-writing `pages` rows or a second crawl with
+  // accessibility off. Its firing on each of the four conditions, and its
+  // silence on a current crawl and a crawl with no rendered page, are covered in
+  // `test/rules/render-a11y.test.ts`.
+  "render.not-recorded",
   // Phase 26b Task 5. `extraction.not-recorded` is the NOT MEASURED marker for a
   // crawl with pages below extraction version 2. The fixture crawl is always
   // current: this harness runs the current crawler, which stamps every row with
@@ -4039,7 +4081,9 @@ describe("the fixture site end to end", () => {
     // twenty-six; Phase 29a's seven schema rules waited here for their fixtures and left again in T10, which is the number it stands at now — asserted below, so it cannot go stale again). A
     // new rule arrives here with no fixture and fails immediately, which is the
     // point — the alternative is a rule nobody has ever seen speak.
-    expect(SKIP_HARNESS_CLAIMS).toHaveLength(30);
+    // Phase 29b T7 adds 22 TEMPORARY accessibility entries and the
+    // `render.not-recorded` marker: 30 + 23 = 53.
+    expect(SKIP_HARNESS_CLAIMS).toHaveLength(53);
     expect(
       unfired,
       "a rule that fires nowhere is a rule no fixture proves — author a fixture " +

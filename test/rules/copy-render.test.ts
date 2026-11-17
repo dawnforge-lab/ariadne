@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
+import { A11Y_RULES } from "../../src/crawl/render/a11y.js";
 import {
   COPY_TEMPLATES,
   ISSUE_COPY,
@@ -64,6 +65,10 @@ const ADDED_SINCE_0_22 = [
   // 0.27.0, Phase 29b T6: the oversized image rule and its metric (CHECK-49).
   "images.larger-than-displayed",
   "render.image-measurement",
+  // 0.27.0, Phase 29b T7: the render family's marker, and the 25 accessibility
+  // rules, named from the table they are generated from (CHECK-89).
+  "render.not-recorded",
+  ...A11Y_RULES.map((r) => `a11y.${r.axeId}`),
 ];
 // Entries whose text was deliberately changed after 0.22.0: the fields that
 // differ from the fixture, spelled out so any other drift still fails.

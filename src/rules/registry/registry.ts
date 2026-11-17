@@ -1056,12 +1056,35 @@ const KINDS = ["page", "query", "metric"] as const satisfies readonly AnyRule["k
 //        size-unknown and broken images and a `measuredShare`. A
 //        `render_images` that is not a RenderImages throws.
 //        202 rules: 72 page / 114 query / 16 metric.
+//     3. Task 7: 25 query rules `a11y.<axe-id>`, one per row of `A11Y_RULES`
+//        (generated from that table), read the render pass's accessibility run
+//        (`render_a11y`, capture 3) on pages whose run finished
+//        (`render_a11y_status = 'ran'`): one finding per page that violates the
+//        rule, with its impact, element count, up to five selectors and WCAG
+//        level. Severity from the table (24 warning, `a11y.meta-viewport`
+//        info); category `accessibility` (new); triage issue / low. All claim
+//        CHECK-89, "Accessibility — WCAG A/AA subset (rendered sample)", new in
+//        the checklist and in `CRAWL_CHECK_IDS` (48 checks now). The NOT
+//        MEASURED marker `render.not-recorded` (info; CHECK-49, CHECK-51,
+//        CHECK-89) fires once on a crawl whose rendered pages include one with
+//        no console capture, one captured before capture 3, or one whose
+//        accessibility run was disabled, timed out, interrupted or errored;
+//        silent on a crawl with no rendered page. A `render_a11y` row of an
+//        unknown axe rule, a node count below one or bad targets throws.
+//        228 rules: 72 page / 140 query / 16 metric.
 export const RULESET_VERSION = "0.27.0";
 
 /**
- * The 47 crawl-derived checks (sf-audit checklist, Pre-Crawl + sections 1–11):
- * the universe a crawl can speak to. CI compares this against the registry's
- * claimed checks, so an unclaimed check is visible rather than silently absent.
+ * The 48 crawl-derived checks (sf-audit checklist, Pre-Crawl + sections 1–11,
+ * and CHECK-89): the universe a crawl can speak to. CI compares this against
+ * the registry's claimed checks, so an unclaimed check is visible rather than
+ * silently absent.
+ *
+ * CHECK-89 (Phase 29b, accessibility on the rendered sample) is the one id
+ * added since the build plan drew the 47: unlike the section-12 checks, which
+ * the engine answers in part beside a browser recipe, it was written for the
+ * engine and is answered by its rules alone, so it belongs in the universe the
+ * coverage pin guards.
  */
 export const CRAWL_CHECK_IDS: readonly string[] = [
   "CHECK-01","CHECK-02","CHECK-03","CHECK-04","CHECK-05","CHECK-06","CHECK-07",
@@ -1070,7 +1093,7 @@ export const CRAWL_CHECK_IDS: readonly string[] = [
   "CHECK-22","CHECK-23","CHECK-24","CHECK-25","CHECK-26","CHECK-27","CHECK-28",
   "CHECK-29","CHECK-30","CHECK-31","CHECK-32","CHECK-33","CHECK-33b","CHECK-34",
   "CHECK-35","CHECK-36","CHECK-37","CHECK-38","CHECK-39","CHECK-40","CHECK-41",
-  "CHECK-42","CHECK-43","CHECK-44","CHECK-45","CHECK-46",
+  "CHECK-42","CHECK-43","CHECK-44","CHECK-45","CHECK-46","CHECK-89",
 ];
 
 /**

@@ -168,7 +168,11 @@ describe("buildRegistry", () => {
     expect(ids).toContain("schema.empty-value");
     expect(ids).toContain("schema.property-coverage");
     expect(ids).toContain("schema.template-inconsistent");
-    expect(ids.length).toBe(202);
+    // Phase 29b Task 7: the accessibility rules and the render family's marker.
+    expect(ids).toContain("a11y.image-alt");
+    expect(ids).toContain("a11y.color-contrast");
+    expect(ids).toContain("render.not-recorded");
+    expect(ids.length).toBe(228);
   });
 
   it("registers every kind the runner drives", () => {
@@ -606,8 +610,10 @@ describe("runRules against the database", () => {
     // Exactly two statements per run: the top-of-run one over every table a
     // rule reads, and the one across the derivation seam.
     expect(issued).toHaveLength(2);
-    // Once per run, at the top, before the first rule reads them.
-    for (const table of ["links", "sitemap_urls", "issues", "sitemap_hreflang"]) {
+    // Once per run, at the top, before the first rule reads them. `render_a11y`
+    // (Phase 29b) is read by the accessibility rules and written only by the
+    // render pass, never by a derivation, so once is enough.
+    for (const table of ["links", "sitemap_urls", "issues", "sitemap_hreflang", "render_a11y"]) {
       expect(perTable(table), `${table}: once per run`).toBe(1);
     }
     // Twice per run for the three tables the derivation phase rewrites

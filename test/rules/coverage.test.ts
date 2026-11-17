@@ -32,6 +32,13 @@
  * 47 stayed exactly where it was. That is not an omission: the universe here is
  * the crawl-derived range the build plan drew, and section 12 has always been
  * outside it.
+ *
+ * **ONE ID HAS JOINED THE UNIVERSE SINCE: CHECK-89** (Phase 29b), accessibility
+ * on the rendered sample. It was written for the engine rather than carried
+ * from the audit's browser recipes, and the engine's 25 `a11y.*` rules answer it
+ * whole, so it is a crawl-derived check in every sense the 47 are: 48 now, and
+ * the pin below stays empty because those rules claim it in the same commit
+ * that added it.
  */
 import { describe, expect, it } from "vitest";
 
@@ -555,11 +562,14 @@ describe("checklist coverage", () => {
   //   Phase 29b T5 adds three query rules (the render console rules): query 113, total 200.
   //   Phase 29b T6 adds one query rule (`images.larger-than-displayed`) and one metric
   //   (`render.image-measurement`): query 114, metric 16, total 202.
-  it("pins the ruleset split: 202 rules = 72 page + 114 query + 16 metric", () => {
+  //   Phase 29b T7 adds 26 query rules, the 25 `a11y.*` rules (one per `A11Y_RULES`
+  //   row) and the marker `render.not-recorded`: query 114 + 26 = 140, total 228.
+  //   The 25 claim CHECK-89, which joins `CRAWL_CHECK_IDS` claimed (below).
+  it("pins the ruleset split: 228 rules = 72 page + 140 query + 16 metric", () => {
     const registry = buildRegistry();
-    expect(registry.all()).toHaveLength(202);
+    expect(registry.all()).toHaveLength(228);
     expect(registry.byKind("page")).toHaveLength(72);
-    expect(registry.byKind("query")).toHaveLength(114);
+    expect(registry.byKind("query")).toHaveLength(140);
     // The link-graph five, the two content metrics and hreflang coverage, plus
     // the URL-parameter, redirect-volume and sitemap-structure metrics, plus
     // the render pass's coverage, the health rollup, the page-weight table, coverage.
@@ -674,7 +684,7 @@ describe("checklist coverage", () => {
     expect(byId.get("structure.deep-page")).toContain("CHECK-31");
   });
 
-  it("accounts for all 47 crawl-derived checks: 44 claimed, 3 agent, 0 unclaimed", () => {
+  it("accounts for all 48 crawl-derived checks: 45 claimed, 3 agent, 0 unclaimed", () => {
     // The arithmetic behind the pin above, stated so a drift in the universe
     // itself (an id added to or removed from `CRAWL_CHECK_IDS`) fails here
     // rather than silently changing what "unclaimed" means.
@@ -684,11 +694,12 @@ describe("checklist coverage", () => {
     // Agent checks are excluded from the claimed bucket rather than assumed
     // absent from it: a METRIC may carry an agent check's id (see the test
     // below), and counting it in both buckets would make the arithmetic sum to
-    // 48 while every individual number stayed right.
+    // 49 while every individual number stayed right.
     const claimedInUniverse = CRAWL_CHECK_IDS.filter((c) => claimed.has(c) && !agent.has(c));
     const unclaimed = registry.unclaimedChecks([...CRAWL_CHECK_IDS], [...AGENT_CHECKS]);
 
-    expect(CRAWL_CHECK_IDS).toHaveLength(47);
+    // 47 from the build plan, and CHECK-89 (Phase 29b, accessibility).
+    expect(CRAWL_CHECK_IDS).toHaveLength(48);
     expect(AGENT_CHECKS).toHaveLength(3);
     expect(claimedInUniverse.sort()).toEqual([
       // The render three, claimed in Phase 5: CHECK-01 by
@@ -703,6 +714,9 @@ describe("checklist coverage", () => {
       "CHECK-33","CHECK-33b","CHECK-34",
       "CHECK-35","CHECK-36","CHECK-37","CHECK-39","CHECK-40",
       "CHECK-43","CHECK-44","CHECK-45","CHECK-46",
+      // Phase 29b: claimed by the 25 `a11y.*` rules (and by the marker
+      // `render.not-recorded`, which speaks for their silence).
+      "CHECK-89",
     ]);
     expect(claimedInUniverse.length + AGENT_CHECKS.length + unclaimed.length).toBe(
       CRAWL_CHECK_IDS.length,
