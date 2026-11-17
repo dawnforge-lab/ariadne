@@ -17,8 +17,13 @@ const le32 = (n: number): number[] => [n & 0xff, (n >>> 8) & 0xff, (n >>> 16) & 
 const bytes = (...parts: number[][]): Uint8Array => Uint8Array.from(parts.flat());
 
 const PNG_SIG = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
-const png = (w: number, h: number): Uint8Array =>
-  bytes(PNG_SIG, be32(13), ascii("IHDR"), be32(w), be32(h), [8, 2, 0, 0, 0]);
+/** One PNG chunk: length, type, data, and a CRC the reader does not check (zeros). */
+const pngChunk = (type: string, data: number[]): number[] => [...be32(data.length), ...ascii(type), ...data, 0, 0, 0, 0];
+const IHDR = (w: number, h: number): number[] => pngChunk("IHDR", [...be32(w), ...be32(h), 8, 2, 0, 0, 0]);
+/** The start of an IDAT: the reader stops at its type, so no image data follows. */
+const IDAT_START = [...be32(10), ...ascii("IDAT")];
+const png = (w: number, h: number, ...beforeIdat: number[][]): Uint8Array =>
+  bytes(PNG_SIG, IHDR(w, h), ...beforeIdat, IDAT_START);
 
 const jpegSof = (marker: number, w: number, h: number): number[] => [
   0xff, marker, ...be16(17), 8, ...be16(h), ...be16(w), 3, 1, 0x22, 0, 2, 0x11, 1, 3, 0x11, 1,
@@ -151,6 +156,97 @@ describe("readImageSize: the size the browser lays out, rotation applied (29b fi
   });
 });
 
+/** A bare TIFF header with IFD0 holding one Orientation entry: a PNG `eXIf` payload. */
+const tiffOrientation = (order: "II" | "MM", orientation: number): number[] => {
+  const w16 = order === "II" ? le16 : be16;
+  const w32 = order === "II" ? le32 : be32;
+  return [...ascii(order), ...w16(42), ...w32(8), ...w16(1), ...w16(0x0112), ...w16(3), ...w32(1), ...w16(orientation), 0, 0, ...w32(0)];
+};
+
+describe("readImageSize: a PNG eXIf before IDAT turns the size (29b re-review)", () => {
+  it("an eXIf orientation of 6 before IDAT swaps the sides, in either byte order", () => {
+    for (const order of ["II", "MM"] as const) {
+      expect(readImageSize(png(40, 20, pngChunk("eXIf", tiffOrientation(order, 6))), "image/png"), order).toEqual({
+        kind: "size",
+        format: "png",
+        width: 20,
+        height: 40,
+      });
+    }
+  });
+
+  it("orientation 8 swaps, 3 does not, and an eXIf behind other chunks still counts", () => {
+    const text = pngChunk("tEXt", ascii("Comment\0made by hand"));
+    expect(readImageSize(png(40, 20, text, pngChunk("eXIf", tiffOrientation("MM", 8))), null)).toMatchObject({ width: 20, height: 40 });
+    expect(readImageSize(png(40, 20, pngChunk("eXIf", tiffOrientation("MM", 3))), null)).toMatchObject({ width: 40, height: 20 });
+  });
+
+  it("an eXIf after IDAT is not read: the browser ignores it", () => {
+    const head = bytes(PNG_SIG, IHDR(40, 20), pngChunk("IDAT", [0, 0]), pngChunk("eXIf", tiffOrientation("MM", 6)));
+    expect(readImageSize(head, "image/png")).toEqual({ kind: "size", format: "png", width: 40, height: 20 });
+  });
+
+  it("a malformed eXIf falls back to the IHDR size and never throws", () => {
+    const bad: Record<string, number[]> = {
+      "an unknown byte order": [...ascii("XX"), ...tiffOrientation("MM", 6).slice(2)],
+      "an Exif prefix (a JPEG payload, not a PNG one)": [...ascii("Exif"), 0, 0, ...tiffOrientation("MM", 6)],
+      "a TIFF header cut short": [...ascii("MM"), 0],
+      "an empty chunk": [],
+      "an orientation of 9": tiffOrientation("II", 9),
+    };
+    for (const [name, payload] of Object.entries(bad)) {
+      expect(readImageSize(png(40, 20, pngChunk("eXIf", payload)), "image/png"), name).toEqual({ kind: "size", format: "png", width: 40, height: 20 });
+    }
+  });
+
+  it("chunks running past the window before IDAT are header-beyond-limit: an eXIf could follow", () => {
+    const full = png(40, 20, pngChunk("iCCP", new Array<number>(70_000).fill(0x41)), pngChunk("eXIf", tiffOrientation("MM", 6)));
+    expect(readImageSize(full.subarray(0, IMAGE_HEADER_BYTES), "image/png")).toEqual({ kind: "none", reason: "header-beyond-limit" });
+    // Once the eXIf is read, a cut-off before IDAT changes nothing.
+    const read = png(40, 20, pngChunk("eXIf", tiffOrientation("MM", 6)), pngChunk("iTXt", new Array<number>(70_000).fill(0x41)));
+    expect(readImageSize(read.subarray(0, IMAGE_HEADER_BYTES), "image/png")).toMatchObject({ width: 20, height: 40 });
+    // A truncated eXIf cannot be read.
+    const cut = png(40, 20, pngChunk("eXIf", tiffOrientation("MM", 6)));
+    expect(readImageSize(cut.subarray(0, 33 + 8 + 10), "image/png")).toEqual({ kind: "none", reason: "header-beyond-limit" });
+  });
+
+  it("IEND before any IDAT, a bad IHDR length or a chunk length past the spec's ceiling is malformed", () => {
+    expect(readImageSize(bytes(PNG_SIG, IHDR(40, 20), pngChunk("IEND", [])), null)).toEqual({ kind: "none", reason: "malformed" });
+    const longIhdr = bytes(PNG_SIG, be32(14), ascii("IHDR"), be32(40), be32(20), [8, 2, 0, 0, 0, 0], [0, 0, 0, 0], IDAT_START);
+    expect(readImageSize(longIhdr, null)).toEqual({ kind: "none", reason: "malformed" });
+    expect(readImageSize(bytes(PNG_SIG, IHDR(40, 20), be32(0x80000000), ascii("tEXt")), null)).toEqual({ kind: "none", reason: "malformed" });
+  });
+});
+
+describe("readImageSize: AVIF boxes are bounded by their own end (29b re-review)", () => {
+  const avifWith = (...ipco: number[][]): Uint8Array =>
+    bytes(box("ftyp", ascii("avif"), be32(0), ascii("avif")), box("meta", [0, 0, 0, 0], box("iprp", box("ipco", ...ipco))));
+  const ispe = box("ispe", [0, 0, 0, 0], be32(300), be32(200));
+
+  it("an empty irot or a short ispe is malformed, not read from the next box", () => {
+    expect(readImageSize(avifWith(ispe, box("irot")), "image/avif")).toEqual({ kind: "none", reason: "malformed" });
+    expect(readImageSize(avifWith(box("ispe", [0, 0, 0, 0], be32(300)), irot(1)), "image/avif")).toEqual({ kind: "none", reason: "malformed" });
+  });
+
+  it("a child box running past its ipco's declared end is malformed", () => {
+    // An ipco declaring 8 bytes fewer than the ispe it holds needs.
+    const ispeBytes = box("ispe", [0, 0, 0, 0], be32(300), be32(200));
+    const ipco = [...be32(8 + ispeBytes.length - 8), ...ascii("ipco"), ...ispeBytes];
+    const head = bytes(box("ftyp", ascii("avif"), be32(0), ascii("avif")), box("meta", [0, 0, 0, 0], box("iprp", ipco)));
+    expect(readImageSize(head, "image/avif")).toEqual({ kind: "none", reason: "malformed" });
+    // The same contradiction in a file cut off inside its ipco: the child's
+    // header is held, and its declared end already passes the ipco's.
+    const cut = bytes(
+      box("ftyp", ascii("avif"), be32(0), ascii("avif")),
+      [...be32(1000), ...ascii("meta"), 0, 0, 0, 0],
+      [...be32(900), ...ascii("iprp")],
+      [...be32(108), ...ascii("ipco")],
+      [...be32(200), ...ascii("free"), 0, 0, 0, 0],
+    );
+    expect(readImageSize(cut, "image/avif")).toEqual({ kind: "none", reason: "malformed" });
+  });
+});
+
 describe("readImageSize: a dimension past int4 is malformed, never a size", () => {
   it("an AVIF ispe of 0xFFFFFFFF", () => {
     expect(readImageSize(avif(0xffffffff, 100), "image/avif")).toEqual({ kind: "none", reason: "malformed" });
@@ -254,6 +350,10 @@ describe("readImageSize: never throws", () => {
       // signature, in both byte orders, so random bytes reach every read in it.
       [0xff, 0xd8, 0xff, 0xe1, 0x00, 0x80, ...ascii("Exif"), 0, 0, ...ascii("II"), 42, 0],
       [0xff, 0xd8, 0xff, 0xe1, 0x00, 0x80, ...ascii("Exif"), 0, 0, ...ascii("MM"), 0, 42],
+      // PNG (29b re-review): an eXIf before IDAT, both byte orders, so random
+      // bytes reach the chunk walk and the bare-TIFF reader.
+      [...PNG_SIG, ...IHDR(40, 20), 0, 0, 0, 0x60, ...ascii("eXIf"), ...ascii("II"), 42, 0],
+      [...PNG_SIG, ...IHDR(40, 20), 0, 0, 0, 0x60, ...ascii("eXIf"), ...ascii("MM"), 0, 42],
       // ...and the ipco walk that reads irot beside ispe.
       [0, 0, 0, 16, ...ascii("ftyp"), ...ascii("avif"), 0, 0, 0, 0, 0, 0, 0, 0x80, ...ascii("meta"), 0, 0, 0, 0,
         0, 0, 0, 0x70, ...ascii("iprp"), 0, 0, 0, 0x68, ...ascii("ipco")],

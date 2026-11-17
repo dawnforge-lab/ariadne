@@ -4,17 +4,19 @@
  * Pure: no I/O, no dependencies, and it never decodes a pixel. It reads the
  * width and height a format records in its own header, turned as the file
  * asks to be shown (below), which is what the browser uses as the image's
- * intrinsic size. Written from the format specs (PNG per the W3C spec, JPEG
- * per ITU T.81 markers with EXIF's TIFF IFD0 for orientation, GIF89a, the
+ * intrinsic size. Written from the format specs (PNG per the W3C spec with its
+ * `eXIf` chunk, JPEG per ITU T.81 markers, EXIF's TIFF IFD0 for both
+ * orientations, GIF89a, the
  * WebP RIFF container per RFC 9649, and ISOBMFF boxes with the HEIF `ispe`
  * and `irot` properties for AVIF). Nothing is lifted from any library (hard
  * rule 8).
  *
  * THE SIZE IS THE ONE THE BROWSER LAYS OUT, rotation applied (29b final review
- * F3). A file can ask to be shown turned a quarter: a JPEG through its EXIF
- * Orientation tag (values 5 to 8 turn it 90 or 270 degrees, with or without a
- * mirror), an AVIF through the HEIF `irot` property (angle 1 or 3). The browser
- * honours that by default (CSS `image-orientation: from-image`), so its
+ * F3). A file can ask to be shown turned a quarter: a JPEG or a PNG through an
+ * EXIF Orientation tag (values 5 to 8 turn it 90 or 270 degrees, with or
+ * without a mirror), an AVIF through the HEIF `irot` property (angle 1 or 3).
+ * The browser honours that by default (CSS `image-orientation: from-image`),
+ * so its
  * `naturalWidth` is the stored height. The width and height returned here are
  * therefore the DISPLAYED ones: the stored pair, swapped when the file asks for
  * a quarter turn. A half turn (orientation 3 or 4, `irot` angle 2) and a mirror
@@ -34,19 +36,40 @@
  *    block the browser could not read either is one it does not rotate by.
  *    Later Exif APP1 segments are not read. APP1 precedes SOF in the format,
  *    so the block is always inside the bytes a size is read from.
+ *  - PNG: the chunks after IHDR are walked up to the first IDAT, and the
+ *    first `eXIf` among them is read for the same tag. Its payload is a bare
+ *    TIFF header (no `Exif\0\0` prefix), read with the same parser and the
+ *    same fallback: a malformed block leaves the IHDR size. Only an `eXIf`
+ *    BEFORE IDAT counts — the PNG spec places it there, and Chromium ignores
+ *    one after (verified against the pinned Chromium: 40x20 with `eXIf`
+ *    orientation 6 before IDAT lays out 20x40, after IDAT 40x20). A walk that
+ *    runs past the bytes we hold before IDAT, with no `eXIf` read yet, is
+ *    `header-beyond-limit`: an `eXIf` could still follow, so the displayed
+ *    size is unknown. That costs a size only on a PNG carrying more than
+ *    64 KiB of chunks before its image data (a large ICC profile or text
+ *    metadata), which is rare on images prepared for the web; reporting the
+ *    IHDR size there would be a guess about the displayed one.
+ *  - WebP: not turned. Chromium does not apply a WebP `EXIF` chunk's
+ *    orientation (verified as above), so the VP8/VP8L/VP8X size is what it
+ *    lays out.
  *  - AVIF: the `ipco` of `meta/iprp` is walked whole for its first `ispe` and
  *    its first `irot` (angle in the low two bits of its one byte). An `ipco`
  *    that runs past the bytes we hold after its `ispe` is
  *    `header-beyond-limit`, not a size: an `irot` could follow, and a stored
  *    size reported then would be a guess about the displayed one.
  *
- * KNOWN UNDER-REPORT (AVIF, 29b final review M6). `ispe` and `irot` are taken
- * as the first of each in `ipco`, without following `ipma` to the primary
- * item. On a single-image AVIF that is the image's. On a GRID or other
- * multi-item AVIF the first `ispe` may be one tile's (or an alpha or thumbnail
- * item's), smaller than the composed image, so the size can be UNDER-reported.
- * That direction gives a missed `images.larger-than-displayed`, never a false
- * one: a smaller intrinsic width can only fall under the threshold.
+ * KNOWN LIMIT (AVIF, 29b final review M6). `ispe` and `irot` are taken as the
+ * first of each in `ipco`, without following `ipma` to the primary item. On a
+ * single-image AVIF those are the image's. On a GRID or other multi-item AVIF
+ * the first `ispe` may be one tile's (or an alpha or thumbnail item's),
+ * smaller than the composed image, so the size can be UNDER-reported; for the
+ * `ispe` that direction gives a missed `images.larger-than-displayed`, never a
+ * false one, since a smaller intrinsic width can only fall under the
+ * threshold. The `irot` carries no such guarantee: a first `irot` that belongs
+ * to another item would swap (or fail to swap) the primary image's sides, and
+ * a wrongly swapped width can fall either side of the threshold. That needs a
+ * multi-item AVIF whose items disagree on rotation, which is rare, and is a
+ * known limit rather than a handled case.
  *
  * NO GUESSING. A size that cannot be read is `{kind:"none", reason}`, with the
  * reason saying why, never a default dimension. The reasons:
@@ -56,7 +79,10 @@
  *                           to name a raster format: bytes decide);
  *   - `header-beyond-limit` the structure is sound so far but runs past the
  *                           bytes we hold before any size appears (a JPEG with
- *                           a huge APP segment, an AVIF with a big `meta`);
+ *                           a huge APP segment, an AVIF with a big `meta`), or
+ *                           before the rotation is known (a PNG with over
+ *                           64 KiB of chunks before IDAT and no `eXIf` read, an
+ *                           AVIF `ipco` cut off after its `ispe`);
  *   - `malformed`           the structure is wrong or a dimension is 0.
  *
  * Every read is bounds-checked against `head.length`, and the function never
@@ -120,10 +146,43 @@ function looksLikeSvg(head: Uint8Array, contentType: string | null): boolean {
   return fourcc(head, i, "<svg") || fourcc(head, i, "<?xml");
 }
 
+/** IHDR's data length: the spec fixes it at 13. */
+const PNG_IHDR_LENGTH = 13;
+/** The PNG spec's ceiling on a chunk's data length. */
+const PNG_MAX_CHUNK = 0x7fffffff;
+
 function readPng(head: Uint8Array): ImageSize {
   // Signature (8), IHDR length (4), "IHDR" (4), width (4), height (4).
   if (head.length < 24 || !fourcc(head, 12, "IHDR")) return none("malformed");
-  return size("png", be32(head, 16), be32(head, 20));
+  if (be32(head, 8) !== PNG_IHDR_LENGTH) return none("malformed");
+  const width = be32(head, 16);
+  const height = be32(head, 20);
+  // The chunks between IHDR and the first IDAT, for an `eXIf` (module
+  // header). Each: length (4), type (4), data, CRC (4).
+  let orientation: number | null | undefined;
+  let pos = 8 + 12 + PNG_IHDR_LENGTH;
+  for (;;) {
+    if (pos + 8 > head.length) {
+      // Past our bytes before IDAT: an `eXIf` already read decides; without
+      // one, a later chunk could still be one, and the size is unknown.
+      if (orientation === undefined) return none("header-beyond-limit");
+      break;
+    }
+    const length = be32(head, pos);
+    if (length > PNG_MAX_CHUNK) return none("malformed");
+    if (fourcc(head, pos + 4, "IDAT")) break;
+    // IEND before any image data: no image to size.
+    if (fourcc(head, pos + 4, "IEND")) return none("malformed");
+    const data = pos + 8;
+    const end = data + length;
+    if (orientation === undefined && fourcc(head, pos + 4, "eXIf")) {
+      // A truncated `eXIf` cannot be read, and is not a malformed one.
+      if (end > head.length) return none("header-beyond-limit");
+      orientation = tiffOrientation(head, data, end);
+    }
+    pos = end + 4;
+  }
+  return quarterTurned(orientation ?? null) ? size("png", height, width) : size("png", width, height);
 }
 
 function readGif(head: Uint8Array): ImageSize {
@@ -144,13 +203,21 @@ const EXIF_SIGNATURE = [0x45, 0x78, 0x69, 0x66, 0x00, 0x00];
 /**
  * The EXIF Orientation (1 to 8) of the APP1 payload in `[start, end)`, or null
  * when the payload is not an EXIF block or its orientation cannot be read —
- * which leaves the stored size standing (module header). Every read is checked
- * against `end`, the segment's own end, which the caller has checked against
- * `head.length`; nothing here throws.
+ * which leaves the stored size standing (module header).
  */
 function exifOrientation(head: Uint8Array, start: number, end: number): number | null {
   if (start + EXIF_SIGNATURE.length > end || !hasAt(head, start, EXIF_SIGNATURE)) return null;
-  const tiff = start + EXIF_SIGNATURE.length;
+  return tiffOrientation(head, start + EXIF_SIGNATURE.length, end);
+}
+
+/**
+ * The Orientation (1 to 8) in IFD0 of the TIFF header at `tiff`, inside
+ * `[tiff, end)`, or null when it cannot be read. A JPEG's APP1 carries this
+ * after `Exif\0\0`; a PNG `eXIf` chunk is this alone. Every read is checked
+ * against `end`, which the caller has checked against `head.length`; nothing
+ * here throws.
+ */
+function tiffOrientation(head: Uint8Array, tiff: number, end: number): number | null {
   // Byte order (2), the magic 42 (2), the IFD0 offset from the TIFF start (4).
   if (tiff + 8 > end) return null;
   let little: boolean;
@@ -279,17 +346,22 @@ function readIpco(head: Uint8Array, from: number, to: number): ImageSize | null 
   let pos = from;
   while (pos < to) {
     const b = boxAt(head, pos, Math.min(to, head.length));
-    if (b === "beyond") return none("header-beyond-limit");
+    // A header that does not fit: past our bytes we cannot tell, but inside
+    // them it overruns its `ipco`.
+    if (b === "beyond") return none(to > head.length ? "header-beyond-limit" : "malformed");
     if (b === "bad") return none("malformed");
-    // A property that claims to run past its `ipco`: past our bytes we cannot
-    // tell, inside them it contradicts its parent.
-    if (b.end > to) return none(to > head.length ? "header-beyond-limit" : "malformed");
+    // A property that claims to run past its `ipco`'s declared end contradicts
+    // its parent, whether or not we hold the bytes.
+    if (b.end > to) return none("malformed");
     if (b.type === "ispe" && stored === null) {
-      // ispe is a full box: version/flags (4), then width (4) and height (4).
+      // ispe is a full box: version/flags (4), then width (4) and height (4),
+      // inside the box's own end first, then inside our bytes.
+      if (b.body + 12 > b.end) return none("malformed");
       if (b.body + 12 > head.length) return none("header-beyond-limit");
       stored = { width: be32(head, b.body + 4), height: be32(head, b.body + 8) };
     } else if (b.type === "irot" && angle === null) {
       // irot: one byte, six reserved bits and the angle in quarter turns.
+      if (b.body + 1 > b.end) return none("malformed");
       if (b.body + 1 > head.length) return none("header-beyond-limit");
       angle = u8(head, b.body) & 0x03;
     }

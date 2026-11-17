@@ -180,14 +180,12 @@ export function axeSource(): string {
  * still in the isolated world after the source was injected — the shape of an
  * axe the page made throw. `{error: m}` rejects with `new Error(m)`;
  * `{value: v}` rejects with the bare value `v` (a page can make a library
- * reject with a string as easily as with an Error). `{ownNoise: m}` is not a
- * rejection: the isolated world logs `console.error(m)` and schedules an
- * uncaught `throw new Error(m)` that lands while axe runs, and then the run
- * proceeds as normal — the shape of axe's own console output, which must
- * never be counted as the site's (29b final review M1).
+ * reject with a string as easily as with an Error).
  */
 export function axeRunExpression(fault: AxeFault | null = null): string {
-  const normal = `axe.run(document, ${JSON.stringify(AXE_RUN_OPTIONS)}).then(function (r) {
+  const run =
+    fault === null
+      ? `axe.run(document, ${JSON.stringify(AXE_RUN_OPTIONS)}).then(function (r) {
   return { violations: r.violations.map(function (v) {
     return {
       id: v.id,
@@ -196,25 +194,15 @@ export function axeRunExpression(fault: AxeFault | null = null): string {
       nodes: v.nodes.slice(0, ${A11Y_TARGETS_MAX}).map(function (n) { return { target: n.target }; })
     };
   }) };
-})`;
-  let run: string;
-  if (fault === null) run = normal;
-  else if ("error" in fault) run = `Promise.reject(new Error(${JSON.stringify(fault.error)}))`;
-  else if ("value" in fault) run = `Promise.reject(${JSON.stringify(fault.value)})`;
-  else {
-    const noise = JSON.stringify(fault.ownNoise);
-    run =
-      `(console.error(${noise}), ` +
-      `setTimeout(function () { throw new Error(${noise}); }, 0), ${normal})`;
-  }
+})`
+      : "error" in fault
+        ? `Promise.reject(new Error(${JSON.stringify(fault.error)}))`
+        : `Promise.reject(${JSON.stringify(fault.value)})`;
   return `${axeSource()}\n;${run}`;
 }
 
-/**
- * TEST ONLY — how `axeRunExpression` stands in for an axe the page made throw,
- * or (`ownNoise`) for an axe that writes to the console as it runs.
- */
-export type AxeFault = { error: string } | { value: string } | { ownNoise: string };
+/** TEST ONLY — how `axeRunExpression` stands in for an axe the page made throw. */
+export type AxeFault = { error: string } | { value: string };
 
 function shapeError(what: string): Error {
   return new Error(`unknown axe result shape: ${what} — the pinned axe-core answered something this reader does not know`);

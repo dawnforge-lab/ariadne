@@ -1222,7 +1222,14 @@ class RenderTraffic {
    * `render` calls it in phase 1, where a navigation under it is classified.
    */
   async measureImages(): Promise<ImageMeasurement> {
-    const reply = await this.isolatedEvaluate(IMAGES_MEASURE_SCRIPT);
+    const noise = this.testFaults?.isolatedNoise;
+    const reply = await this.isolatedEvaluate(
+      noise === undefined
+        ? IMAGES_MEASURE_SCRIPT
+        : `console.error(${JSON.stringify(noise)});\n` +
+            `setTimeout(function () { throw new Error(${JSON.stringify(noise)}); }, 0);\n` +
+            IMAGES_MEASURE_SCRIPT,
+    );
     if (reply.exceptionDetails !== undefined) {
       throw new Error(
         `image measurement threw in the isolated world: ${reply.exceptionDetails.text}`,
@@ -1992,6 +1999,14 @@ export interface RenderTestFaults {
    * throw (status `error`). See `axeRunExpression`.
    */
   axeFault?: AxeFault;
+  /**
+   * When set, the image measurement's evaluation in the isolated world first
+   * logs `console.error(isolatedNoise)` and schedules an uncaught
+   * `throw new Error(isolatedNoise)`, then measures as normal: output of OURS
+   * that lands BEFORE the console evidence is snapshotted, so only the
+   * context-id filter keeps it out of `render_console` (29b final review M1).
+   */
+  isolatedNoise?: string;
 }
 
 /** Where the network fence listens. */

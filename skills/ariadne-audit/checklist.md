@@ -3137,7 +3137,7 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
   clean, and the remedy is a re-crawl with file fetching on. The render pass answers an
   image request with a blank stand-in of its stored size instead of fetching it, so
   this costs the site no image requests. The stored size is the one the browser lays
-  out: a JPEG or AVIF that asks to be shown turned a quarter (EXIF orientation 5 to 8,
+  out: a JPEG, PNG or AVIF that asks to be shown turned a quarter (EXIF orientation 5 to 8,
   or `irot`) is measured with its width and height swapped.
   RESPONSIVE IMAGES are still browser work — `srcset` is read for its first candidate
   and nothing checks whether the set is sensible. The last two ids are the resource
@@ -3147,8 +3147,10 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
   When either is there the silence of `images.oversized`, `images.legacy-format` and
   `images.larger-than-displayed` says the crawl never asked rather than that the images
   are fine — the weight, format and larger-than-displayed halves of this check are then
-  NOT MEASURED (on a rendered crawl `render.not-recorded` names `images` for the last)
-  and a re-crawl is what answers them. The two older findings are unaffected by either; they read the page's markup,
+  NOT MEASURED and a re-crawl is what answers them. For the last, `render.not-recorded`
+  also names `images` on a rendered crawl only when it was started with
+  `fetchResources: false`, not for a crawl with no resource records or one whose pass
+  never ran or was claimed by the budget. The two older findings are unaffected by either; they read the page's markup,
   not the files.
   **The window that once had no marker, now closed** (P13-T2): on a crawl where every
   file landed in an unknown class — refused by our own policy, disallowed by a

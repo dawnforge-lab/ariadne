@@ -3688,17 +3688,20 @@ describe("PageRenderer accessibility (Phase 29b)", () => {
   });
 
   it("never counts our isolated world's console or exceptions as the site's (29b final review M1)", async () => {
-    // The isolated world logs and throws while axe runs; axe still finishes.
-    faults.axeFault = { ownNoise: "ours" };
+    // The isolated world logs (and schedules a throw) during the image
+    // measurement, BEFORE the evidence is snapshotted: the snapshot cannot
+    // hide it, only the context-id filter can. Removing the filter fails this.
+    faults.isolatedNoise = "ours";
     let result: RenderResult;
     try {
       result = await render("/a11y/violations");
     } finally {
-      delete faults.axeFault;
+      delete faults.isolatedNoise;
     }
 
+    expect(result.error).toBeNull();
+    expect(result.images).toMatchObject({ total: 1 });
     expect(result.a11y).toMatchObject({ status: "ran", error: null });
-    expect(result.a11y!.violations).toHaveLength(2);
     const evidence = result.console!;
     expect(evidence.console.map((e) => e.text)).not.toContain("ours");
     expect(evidence.exceptions.filter((e) => e.text.includes("ours"))).toEqual([]);
