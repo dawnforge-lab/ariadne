@@ -48,10 +48,7 @@
  */
 import { sql } from "drizzle-orm";
 
-import {
-  RENDER_CONSOLE_MAX_ENTRIES,
-  type RenderConsole,
-} from "../../crawl/render/console-capture.js";
+import type { RenderConsole } from "../../crawl/render/console-capture.js";
 import type { Db } from "../../db/client.js";
 import { queryFinding, type RuleIdentity } from "../helpers.js";
 import { copyFor } from "../registry/copy/index.js";
@@ -213,7 +210,6 @@ const CONSOLE_ERROR_RULE: ConsoleRule = {
   fires: (c) => c.console.some((e) => e.level === "error"),
   evidence: (c) => ({
     consoleTotal: c.consoleTotal,
-    keptLimit: RENDER_CONSOLE_MAX_ENTRIES,
     console: c.console,
     firstError: first(c.console.filter((e) => e.level === "error"))?.text ?? null,
     blockedByRenderer: c.blockedByRenderer,
@@ -243,8 +239,11 @@ export const renderConsoleRules: QueryRule[] = [
     severity: JS_EXCEPTION.severity,
     columns: [
       { key: "template", label: "Template" },
+      { key: "rendered", label: "Render Completed" },
       { key: "exceptionsTotal", label: "Exceptions" },
       { key: "firstException", label: "First Exception" },
+      { key: "exceptions", label: "Exceptions Kept" },
+      { key: "blockedByRenderer", label: "Blocked By Our Browser" },
     ],
     ...copyFor(JS_EXCEPTION.id),
     rulesetVersion: RULESET_VERSION,
@@ -258,8 +257,11 @@ export const renderConsoleRules: QueryRule[] = [
     severity: CONSOLE_ERROR.severity,
     columns: [
       { key: "template", label: "Template" },
+      { key: "rendered", label: "Render Completed" },
       { key: "consoleTotal", label: "Console Messages" },
       { key: "firstError", label: "First Error" },
+      { key: "console", label: "Messages Kept" },
+      { key: "blockedByRenderer", label: "Blocked By Our Browser" },
     ],
     ...copyFor(CONSOLE_ERROR.id),
     rulesetVersion: RULESET_VERSION,
@@ -273,9 +275,11 @@ export const renderConsoleRules: QueryRule[] = [
     severity: FAILED_REQUEST.severity,
     columns: [
       { key: "template", label: "Template" },
+      { key: "rendered", label: "Render Completed" },
       { key: "failedRequestsTotal", label: "Failed Requests" },
       { key: "firstFailedUrl", label: "First Failed URL" },
       { key: "firstFailedReason", label: "Reason" },
+      { key: "failedRequests", label: "Requests Kept" },
     ],
     ...copyFor(FAILED_REQUEST.id),
     rulesetVersion: RULESET_VERSION,

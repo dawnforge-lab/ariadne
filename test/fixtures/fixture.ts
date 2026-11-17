@@ -20,6 +20,7 @@ import { authoredP26Fixtures } from "./pages/authored-p26.js";
 import { authoredP26bFixtures } from "./pages/authored-p26b.js";
 import { authoredP26cFixtures } from "./pages/authored-p26c.js";
 import { authoredP29aFixtures } from "./pages/authored-p29a.js";
+import { authoredP29bFixtures } from "./pages/authored-p29b.js";
 import { controlFixture } from "./pages/control.js";
 import { renderFixtures } from "./pages/render-p5.js";
 
@@ -183,6 +184,11 @@ export function allFixtures(): Fixture[] {
     // P29a: structured data validated. One fixture per new schema rule, two clean
     // pages in microdata and RDFa, and a ten-page template with one page missing its type.
     ...authoredP29aFixtures,
+    // P29b: what a real browser sees go wrong. Three console pages, five image
+    // pages (three oversized, a 1x control and a lazy one the render never
+    // loads), and one page per rule of the accessibility subset, generated from
+    // `A11Y_RULES`.
+    ...authoredP29bFixtures,
     controlFixture,
   ];
 }

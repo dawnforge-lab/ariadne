@@ -39,12 +39,15 @@ import {
   issues,
   metrics,
   pages,
+  renderA11y,
   resources,
   sitemapUrls,
 } from "../../src/db/schema.js";
 import { INDEXED_URL_MAX } from "../../src/crawl/parse/url-utils.js";
 import { RESPONSE_HEADER_VALUE_CAP } from "../../src/crawl/response-headers.js";
-import { EXTRACTION_VERSION } from "../../src/crawl/versions.js";
+import { EXTRACTION_VERSION, RENDER_CAPTURE_VERSION } from "../../src/crawl/versions.js";
+import { A11Y_RULES } from "../../src/crawl/render/a11y.js";
+import { measuredShare } from "../../src/rules/query/render-images.js";
 import { indexabilityOf, isJudged, ROBOTS_BLOCKED } from "../../src/rules/helpers.js";
 import { buildRegistry } from "../../src/rules/index.js";
 
@@ -58,7 +61,16 @@ import type { Registry } from "../../src/rules/registry/registry.js";
 import type { PageRecord } from "../../src/rules/registry/types.js";
 import { allFixtures } from "./fixture.js";
 import { startFixtureApp, type FixtureApp } from "./app.js";
-import { HEAVY_IMAGE_BYTES, startAssetHost, type AssetHost } from "./assets.js";
+import {
+  HEAVY_IMAGE_BYTES,
+  P29B_CDN_IMAGE_PATH,
+  P29B_IMAGE_PATHS,
+  P29B_LARGE,
+  P29B_SMALL,
+  startAssetHost,
+  type AssetHost,
+} from "./assets.js";
+import { P29B_IMAGE_PAGE_PATHS, P29B_MISSING_SCRIPT } from "./pages/authored-p29b.js";
 import { LONG_CSP, P25_LONG_HEADER_PATH } from "./pages/authored-p25.js";
 import {
   P11_BROKEN_PATH,
@@ -221,59 +233,29 @@ function databaseUrl(): string {
  * `test/rules/security-query.test.ts`.
  */
 const SKIP_HARNESS_CLAIMS: string[] = [
-  // Phase 29b Task 5, TEMPORARY. The three render console rules (CHECK-51) read
-  // `render_console`, and no fixture page throws, logs an error or requests a
-  // missing file yet. Task 8 writes those pages (test/fixtures/pages/
-  // authored-p29b.ts) and REMOVES these three entries; until then the rules are
-  // proved on synthetic rows in `test/rules/render-console.test.ts`.
-  "render.js-exception",
-  "render.console-error",
-  "render.failed-request",
-  // Phase 29b Task 6, TEMPORARY. `images.larger-than-displayed` (CHECK-49) reads
-  // `render_images`, and no fixture page shows an image served wider than its box
-  // yet. Task 8 writes that page and REMOVES this entry; until then the rule is
-  // proved on synthetic rows in `test/rules/render-images.test.ts`.
-  "images.larger-than-displayed",
-  // Phase 29b Task 7, TEMPORARY. Twenty-two of the 25 accessibility rules
-  // (CHECK-89) read `render_a11y`, and no fixture page violates them yet: the
-  // fixture markup is minimal and was written to be accessible. The other three
-  // fire already, each on a page whose own defect is the violation
-  // (`a11y.document-title` on `/head/missing-title`, `a11y.image-alt` on
-  // `/content/images-missing-alt`, `a11y.meta-refresh` on `/p26b/meta-refresh`).
-  // Task 8 writes one page per axe rule (`/p29b/a11y/<axe-id>`) and REMOVES these
-  // entries; until then the rules are proved on synthetic rows in
-  // `test/rules/render-a11y.test.ts`.
-  "a11y.input-image-alt",
-  "a11y.role-img-alt",
-  "a11y.area-alt",
-  "a11y.object-alt",
-  "a11y.link-name",
-  "a11y.button-name",
-  "a11y.input-button-name",
-  "a11y.select-name",
-  "a11y.label",
-  "a11y.frame-title",
-  "a11y.html-has-lang",
-  "a11y.html-lang-valid",
-  "a11y.valid-lang",
-  "a11y.meta-viewport",
-  "a11y.aria-hidden-focus",
-  "a11y.aria-required-attr",
-  "a11y.aria-valid-attr",
-  "a11y.aria-valid-attr-value",
+  // Phase 29b Task 8: NOT A FIXTURE GAP — A RULE THAT CANNOT FIRE, left here for
+  // the controller to decide (see the Task 8 report). `a11y.duplicate-id-aria`
+  // reads `render_a11y`, which holds axe's VIOLATIONS only (`AXE_RUN_OPTIONS
+  // .resultTypes`, src/crawl/render/a11y.ts). The pinned axe-core 4.14.0 declares
+  // this rule `reviewOnFail: true`, so a failing node is reported under
+  // `incomplete` ("needs review") and never under `violations`, whatever the
+  // page does. `/p29b/a11y/duplicate-id-aria` carries a real violation — an
+  // `aria-labelledby` naming an id two headings share — and axe returns it as
+  // incomplete, checked directly against the pinned package. The rule is proved
+  // on synthetic rows in `test/rules/render-a11y.test.ts`; on a real page it is
+  // silent by construction, which is hard rule 1's shape and why this entry is
+  // not marked permanent.
   "a11y.duplicate-id-aria",
-  "a11y.list",
-  "a11y.listitem",
-  "a11y.color-contrast",
-  // Phase 29b Task 7. `render.not-recorded` is the NOT MEASURED marker for a
-  // crawl whose RENDERED pages lack a console capture, predate render capture 3,
-  // or carry an accessibility run that was disabled, timed out, interrupted or
-  // errored. This harness renders with the current renderer and accessibility
-  // on, and every fixture's axe run finishes, so the marker's condition is false
-  // BY CONSTRUCTION, the `extraction.not-recorded` shape above. Producing the
-  // crawl it reports would mean hand-writing `pages` rows or a second crawl with
-  // accessibility off. Its firing on each of the four conditions, and its
-  // silence on a current crawl and a crawl with no rendered page, are covered in
+  // Phase 29b Task 7, PERMANENT (confirmed in Task 8). `render.not-recorded` is
+  // the NOT MEASURED marker for a crawl whose RENDERED pages lack a console
+  // capture, predate render capture 3, or carry an accessibility run that was
+  // disabled, timed out, interrupted or errored. This harness renders with the
+  // current renderer and accessibility on, and every fixture's axe run finishes,
+  // so the marker's condition is false BY CONSTRUCTION, the
+  // `extraction.not-recorded` shape below. Producing the crawl it reports would
+  // mean hand-writing `pages` rows or a second crawl with accessibility off. Its
+  // firing on each of the four conditions, and its silence on a current crawl
+  // and a crawl with no rendered page, are covered in
   // `test/rules/render-a11y.test.ts`.
   "render.not-recorded",
   // Phase 26b Task 5. `extraction.not-recorded` is the NOT MEASURED marker for a
@@ -576,6 +558,15 @@ const FIXTURE_COLUMN_RULES: readonly string[] = [
   "url.tracking-params-internal",
   "url.underscores",
   "url.uppercase",
+  // Phase 29b Task 8: the render pass's rules, now that a fixture provokes each.
+  // The console rules' evidence keys were first checked here, and declared in
+  // the same task. Every accessibility rule but `duplicate-id-aria`, which axe
+  // never reports as a violation (its `SKIP_HARNESS_CLAIMS` entry).
+  "images.larger-than-displayed",
+  "render.console-error",
+  "render.failed-request",
+  "render.js-exception",
+  ...A11Y_RULES.filter((r) => r.axeId !== "duplicate-id-aria").map((r) => `a11y.${r.axeId}`),
 ];
 
 
@@ -602,6 +593,16 @@ let offsite: OffsiteHost;
 let assetHost: AssetHost;
 let summary: CrawlSummary;
 let render: RenderPassSummary;
+/**
+ * The two asset servers' request logs as they stood when `runCrawl` returned:
+ * the crawl's own requests and the resource pass's, and nothing of the render
+ * pass, which runs after it (Gate 29b clause 3).
+ */
+let crawlAssetRequests: string[];
+let crawlCdnHits: string[];
+/** What the two asset servers were asked during the render pass, and only then. */
+let renderAssetRequests: string[];
+let renderCdnHits: string[];
 /**
  * Where this run's serialised post-JavaScript documents go.
  *
@@ -766,6 +767,11 @@ beforeAll(async () => {
     renderBudgetPct: RENDER_BUDGET_PCT,
   };
   summary = await runCrawl(db, LOCAL_TENANT, config);
+  // Gate 29b clause 3: what the two asset servers had been asked when the crawl,
+  // and with it the resource pass, ended. Everything after this is the render
+  // pass's (the rules fetch nothing, hard rule 2).
+  crawlAssetRequests = [...app.assetRequests];
+  crawlCdnHits = [...assetHost.hits];
 
   // The crawl is `finished` by the time `runCrawl` returns (`closeCrawl` writes
   // the status before the summary is built), which is what lets the render pass
@@ -781,6 +787,8 @@ beforeAll(async () => {
     settleMs: RENDER_SETTLE_MS,
     renderHtmlDir: renderHtmlRoot,
   });
+  renderAssetRequests = app.assetRequests.slice(crawlAssetRequests.length);
+  renderCdnHits = assetHost.hits.slice(crawlCdnHits.length);
 
   registry = buildRegistry();
   await runRules(db, summary.crawlId, registry);
@@ -2455,8 +2463,9 @@ describe("the fixture site end to end", () => {
       // `/p26b/aria-label-link` makes 161: 100 x 4 / 161 = 2.48 -> 2.5.
       // Phase 26c's five `/p26c/` pages make 166: 100 x 4 / 166 = 2.41 -> 2.4.
       // Phase 29a's nineteen `/authored29a/` pages make 185: 100 x 4 / 185 = 2.16 -> 2.2.
-      totalPages: 185,
-      ratioPct: 2.2,
+      // Phase 29b's thirty-three `/p29b/` pages make 218: 100 x 4 / 218 = 1.83 -> 1.8.
+      totalPages: 218,
+      ratioPct: 1.8,
       chains: 1,
       loops: 1,
     });
@@ -2714,6 +2723,10 @@ describe("the fixture site end to end", () => {
     // oversight: `/authored11/` holds exactly two pages, which is under
     // MIN_COHORT, and two pages are two pages — the `/structure/` precedent two
     // rows below, which has the same shape for the same reason.
+    //
+    // Phase 29b adds two families, all judged: `/p29b/:slug`, the eight console
+    // and image pages one segment under `/p29b/`, and `/p29b/a11y/:slug`, the
+    // twenty-five accessibility pages one segment under `/p29b/a11y/`.
     expect([...(metricsById.get("inlinks.sources-by-type") ?? new Map()).keys()].sort()).toEqual(
       [
         "page_type|/",
@@ -2734,6 +2747,8 @@ describe("the fixture site end to end", () => {
         "page_type|/links/:slug",
         "page_type|/p26b/:slug",
         "page_type|/p26c/:slug",
+        "page_type|/p29b/:slug",
+        "page_type|/p29b/a11y/:slug",
         "page_type|/perf/slow-response",
         "page_type|/redirect/:slug",
         "page_type|/render/:slug",
@@ -2861,9 +2876,21 @@ describe("the fixture site end to end", () => {
       // ten `/tpl/N` are already one type, `/authored29a/tpl/:id`. typesBefore
       // 116 -> 125, typesAfter 27 -> 29 and pagesRetyped 94 -> 101 (the seven
       // literals fold into the family; nine pages is under the template minimum).
-      typesBefore: 125,
-      typesAfter: 29,
-      pagesRetyped: 101,
+      // Phase 29b adds thirty-three `/p29b/` pages. The eight one segment under
+      // `/p29b/` (`js-exception`, `console-error`, `failing-script`,
+      // `image-4x`, `image-1x`, `srcset`, `cdn-image`, `lazy`) each have two
+      // hyphenated words or fewer, so eight literal parse-time types, folded
+      // into one `/p29b/:slug` family: all eight retyped. Of the twenty-five
+      // under `/p29b/a11y/`, the ten with three words or more (`input-image-alt`,
+      // `role-img-alt`, `input-button-name`, `html-has-lang`, `html-lang-valid`,
+      // `aria-hidden-focus`, `aria-required-attr`, `aria-valid-attr`,
+      // `aria-valid-attr-value`, `duplicate-id-aria`) parse to one
+      // `/p29b/a11y/:slug` type and the fifteen others stay literal, then fold
+      // into it: retyped. typesBefore 125 -> 125 + 8 + 16 = 149, typesAfter
+      // 29 -> 31 and pagesRetyped 101 -> 101 + 8 + 15 = 124.
+      typesBefore: 149,
+      typesAfter: 31,
+      pagesRetyped: 124,
     });
   });
 
@@ -2933,8 +2960,11 @@ describe("the fixture site end to end", () => {
     // `/p26b/aria-label-link`, the same kind of page. 142 with Phase 26c's
     // five `/p26c/` pages, each a hub-linked, listed, indexable 200 whose
     // canonical is itself. 161 with Phase 29a's nineteen `/authored29a/` pages
-    // (nine single pages and the ten of `/tpl/`), all of the same kind.
-    const COHORT = 161;
+    // (nine single pages and the ten of `/tpl/`), all of the same kind. 194
+    // with Phase 29b's thirty-three `/p29b/` pages: hub-linked, listed,
+    // indexable 200s whose canonical is itself (`/p29b/a11y/document-title` has
+    // no `<title>`, which is a finding, not a reason to leave the cohort).
+    const COHORT = 194;
 
     // THE LINK GRAPH. Every anchor the site renders, and there are only five
     // kinds: the hub at `/` links the 121 fixtures whose `linkedFromHub` is not
@@ -3023,6 +3053,10 @@ describe("the fixture site end to end", () => {
       // first is counted, not stored, so it is no inlink of anything): 4 zeros,
       // 132 ones, 2 x 5, 3 over 142 pages, mean = (132 + 10 + 3) / 142 =
       // 1.0211 -> 1.02, max = 3; p95 at pos 133.95 is still inside the 1s.
+      // Phase 29b's thirty-three pages are hub-linked and store no link (the
+      // one anchor among them is a `mailto:`, and an image map's `<area>` is no
+      // stored link): one inlink each, so the 1s grow by 33 and the mean and
+      // max stand.
       max: 3,
       mean: 1.02,
     });
@@ -3060,7 +3094,8 @@ describe("the fixture site end to end", () => {
       // 100 x 17 / 142 = 11.97 -> 12.0 with Phase 26c's five pages: the
       // `/p26c/header-en` / `-de` pair declares, the other three do not.
       // 100 x 17 / 161 = 10.56 -> 10.6 with Phase 29a's nineteen pages (none declares).
-      coveragePct: 10.6,
+      // 100 x 17 / 194 = 8.76 -> 8.8 with Phase 29b's thirty-three (none declares).
+      coveragePct: 8.8,
     });
     // The two counts are read from the tables the harness already holds, so a
     // fixture that stopped declaring hreflang, or a page that stopped being
@@ -3104,13 +3139,14 @@ describe("the fixture site end to end", () => {
     // = 164 with Phase 29a's nineteen listed `/authored29a/` pages (145 before),
     // all distinct, so the walk's first-source-wins dedupe drops none of them.
     // (Counted from the fixture collection: 185 fixtures, 23 of them opted out,
-    // 162 listed; 166 and 143 before Phase 29a.)
+    // 162 listed; 166 and 143 before Phase 29a.) = 197 with Phase 29b's
+    // thirty-three `/p29b/` pages, all listed (218 fixtures, 195 listed).
     //
     // `/sitemap-extra.xml` lists one of those URLs, `/p26c/sitemap-twice`,
-    // twice. It is a URL already listed, so `totalUrls` stays 164 (distinct
-    // URLs); it is one more MEMBERSHIP, so `totalMemberships` is 165; and the
+    // twice. It is a URL already listed, so `totalUrls` stays 197 (distinct
+    // URLs); it is one more MEMBERSHIP, so `totalMemberships` is 198; and the
     // repeat inside the extra document is not a second membership of it, so it
-    // is 165 and not 166 (review focus 2, end to end).
+    // is 198 and not 199 (review focus 2, end to end).
     //
     // 164 is nowhere near `SITEMAP_URL_CAP` (50,000), so no document breaches
     // it; no document was dropped for exceeding the read cap; and the walk
@@ -3118,8 +3154,8 @@ describe("the fixture site end to end", () => {
     // rather than a floor.
     expect(siteMetric("sitemap.structure")).toEqual({
       docs: 2,
-      totalUrls: 164,
-      totalMemberships: 165,
+      totalUrls: 197,
+      totalMemberships: 198,
       oversizedDocsSkipped: 0,
       urlCapBreaches: 0,
       entryCapReached: false,
@@ -3132,7 +3168,7 @@ describe("the fixture site end to end", () => {
       overlongLocsSkipped: 0, alternatesCapped: 0,
     });
     // The per-document rows beneath it, which is where `docs: 2` is spent: the
-    // main document with its 164 entries, and the extra one with its single
+    // main document with its 197 entries, and the extra one with its single
     // URL, listed twice and counted once. Asserted as the exact key set, so the
     // broken document appearing here — or a good one vanishing — is a failure
     // rather than a number nobody reads.
@@ -3142,7 +3178,7 @@ describe("the fixture site end to end", () => {
       "site|",
     ]);
     expect(metricsById.get("sitemap.structure")?.get(`sitemap_doc|${app.base}/sitemap.xml`)).toEqual(
-      { urls: 164, breaches50k: false },
+      { urls: 197, breaches50k: false },
     );
     expect(
       metricsById.get("sitemap.structure")?.get(`sitemap_doc|${app.base}/sitemap-extra.xml`),
@@ -3198,7 +3234,8 @@ describe("the fixture site end to end", () => {
     // Task 12's four pixel-width pages and Phase 26b Task 6's seven social pages
     // are hub-linked cohort pages: depth 1.)
     expect(siteMetric("structure.click-depth-distribution")).toEqual({
-      count: 161,
+      // 194 judged pages since Phase 29b's thirty-three (161 before).
+      count: 194,
       nullCount: 4,
       min: 0,
       p25: 1,
@@ -3223,10 +3260,13 @@ describe("the fixture site end to end", () => {
       // Phase 29a's nineteen pages are hub-linked at depth 1 too: 157 pages with a
       // depth, v0 = 0, v1…v149 = 1, then 2,2,3,4,5,6,7. mean = 178/157 = 1.134 ->
       // 1.13; p95 at pos 148.2 sits inside the run of 1s -> 1.
+      // Phase 29b's thirty-three pages are hub-linked at depth 1 as well: 190
+      // pages with a depth, v0 = 0, v1…v182 = 1, then 2,2,3,4,5,6,7.
+      // mean = 211/190 = 1.1105 -> 1.11; p95 at pos 179.55 is inside the 1s -> 1.
       p75: 1,
       p95: 1,
       max: 7,
-      mean: 1.13,
+      mean: 1.11,
     });
 
     // The same two facts read off the pages table rather than out of the metric,
@@ -3242,8 +3282,9 @@ describe("the fixture site end to end", () => {
     // (136 before Task 10's four pages, which are indexable 200s like the rest; 140 before Task 11's four;
     // 145 with owner call O1's `/p26b/aria-label-link`; 150 with Phase 26c's
     // five `/p26c/` pages.)
-    // 169 with Phase 29a's nineteen `/authored29a/` pages.
-    expect(cohort).toHaveLength(169);
+    // 169 with Phase 29a's nineteen `/authored29a/` pages; 202 with Phase 29b's
+    // thirty-three `/p29b/` pages.
+    expect(cohort).toHaveLength(202);
     expect(
       cohort.filter(([, p]) => p.clickDepth === null).map(([path]) => path).sort(),
     ).toEqual([
@@ -3271,8 +3312,9 @@ describe("the fixture site end to end", () => {
     // whose entry is on another host), and those 10 carry the depth the frontier
     // reached them at. (104 before Phase 26b Task 6's seven listed social pages;
     // 135 with owner call O1's listed `/p26b/aria-label-link`; 140 with Phase
-    // 26c's five listed `/p26c/` pages.)
-    expect(cohort.filter(([, p]) => p.depth === 0)).toHaveLength(159);
+    // 26c's five listed `/p26c/` pages; 159 with Phase 29a's nineteen; 192 with
+    // Phase 29b's thirty-three, every one listed.)
+    expect(cohort.filter(([, p]) => p.depth === 0)).toHaveLength(192);
     expect(cohort.filter(([, p]) => p.clickDepth === 0).map(([path]) => path)).toEqual(["/"]);
   });
 
@@ -3408,6 +3450,15 @@ describe("the fixture site end to end", () => {
     // 166 -> 185, suspects 133 -> 151, sampled 8 -> 9, selected 141 -> 160,
     // rendered 140 -> 159. The numbers are what the crawl recorded.
     //
+    // Phase 29b's thirty-three `/p29b/` pages (Task 8) store no link — the one
+    // anchor among them is a `mailto:`, which is no `links` row, and the image
+    // map's `<area>` is not one either — so every one is a suspect, which is
+    // what puts each of them in front of the browser whatever its place in its
+    // template (the console, image and accessibility rules can only speak about
+    // a page that was rendered; a test below asserts every one was). Pages
+    // crawled 185 -> 218, budget 185 -> 218, suspects 151 -> 184, sampled stays
+    // 9, selected 160 -> 193, rendered 159 -> 192.
+    //
     // selectionSampled = 6, and it MOVED FROM 9 IN P8-T5 — the one number in
     // this file that the template inference changes, and the change is the
     // point of it. The sample takes `renderSamplePerType` (3) pages of every
@@ -3443,7 +3494,7 @@ describe("the fixture site end to end", () => {
     // satisfy, because it was selected once. The one failure is
     // `/render/js-redirect-offsite`, whose row shape the next test pins.
     expect(siteMetric("render.coverage")).toEqual({
-      pagesCrawled: 185,
+      pagesCrawled: 218,
       // P12-T4. The end-to-end crawl really did render, so this is the `ran`
       // side of the field — the whole-site case the unit tests bound from the
       // other end. `pagesRendered: 120` below is evidence enough on its own
@@ -3454,12 +3505,12 @@ describe("the fixture site end to end", () => {
       // and this is the field that says so. The five numbers under it describe
       // that decision and are present only because it was taken.
       selectionMode: "auto",
-      selectionBudget: 185,
-      selectionSuspects: 151,
+      selectionBudget: 218,
+      selectionSuspects: 184,
       selectionSampled: 9,
-      selectionSelected: 160,
+      selectionSelected: 193,
       selectionTruncated: false,
-      pagesRendered: 159,
+      pagesRendered: 192,
       renderFailures: 1,
     });
 
@@ -3467,12 +3518,12 @@ describe("the fixture site end to end", () => {
     // the statement that actually promoted the frontier rows. Asserting both
     // is what proves `renderSelectionStats` describes the selection that
     // happened rather than one it would make today.
-    expect(render.selection.budget).toBe(185);
-    expect(render.selection.suspects).toBe(151);
+    expect(render.selection.budget).toBe(218);
+    expect(render.selection.suspects).toBe(184);
     expect(render.selection.sampled).toBe(9);
     expect(render.selection.truncated).toBe(false);
-    expect(render.selection.selected).toHaveLength(160);
-    expect(render.rendered).toBe(159);
+    expect(render.selection.selected).toHaveLength(193);
+    expect(render.rendered).toBe(192);
     expect(render.failures).toBe(1);
     // No URL left behind: the pass was not aborted, so every leased render was
     // recorded and completed.
@@ -3500,7 +3551,7 @@ describe("the fixture site end to end", () => {
       .select({ count: crawls.renderPassCount })
       .from(crawls)
       .where(eq(crawls.id, summary.crawlId));
-    expect(crawlRow?.count).toBe(159);
+    expect(crawlRow?.count).toBe(192);
   });
 
   it("the health rollup agrees with a page-by-page recount (P10-T2)", () => {
@@ -3586,8 +3637,9 @@ describe("the fixture site end to end", () => {
       // Task 10's four pages, also judged; 161 with Task 11's four; 162 with
       // owner call O1's `/p26b/aria-label-link`, judged; 167 with Phase 26c's
       // five `/p26c/` pages, all judged.)
-      // 186 with Phase 29a's nineteen `/authored29a/` pages, all judged.
-      pagesNotAuditable: 186 - judged - canonicalised - noindex,
+      // 186 with Phase 29a's nineteen `/authored29a/` pages, all judged; 219
+      // with Phase 29b's thirty-three `/p29b/` pages, all judged.
+      pagesNotAuditable: 219 - judged - canonicalised - noindex,
       urlsCanonicalised: canonicalised,
       urlsNoindex: noindex,
       // Inside `urlsTotal`, not a partition member: judged pages declaring
@@ -3605,8 +3657,8 @@ describe("the fixture site end to end", () => {
         health["urlsCanonicalised"]! +
         health["urlsNoindex"]! +
         health["pagesNotAuditable"]!,
-    ).toBe(186);
-    expect(pageByPath.size).toBe(186);
+    ).toBe(219);
+    expect(pageByPath.size).toBe(219);
   });
 
   it("the resource findings carry what the asset server actually answered (P11-T3)", () => {
@@ -3699,16 +3751,19 @@ describe("the fixture site end to end", () => {
       atLeast: boolean;
       pageWeight: { count: number; max: number };
     };
-    // Exactly one reference on this whole site could not be weighed, and it is
-    // the 404 above. The difference is asserted rather than the two totals,
-    // because the totals move with every fixture that carries an image while
-    // the GAP is the property this row exists to state.
-    expect(weight.resourcesReferenced - weight.resourcesWeighed).toBe(1);
-    expect(weight.pagesWithUnmeasuredResources).toBe(1);
+    // Exactly two references on this whole site could not be weighed: the 404
+    // above, and since Phase 29b `/p29b/missing.js`, the script
+    // `/p29b/failing-script` asks for and the server does not have (that page
+    // carries `resources.broken` for it). The difference is asserted rather
+    // than the two totals, because the totals move with every fixture that
+    // carries an image while the GAP is the property this row exists to state.
+    expect(weight.resourcesReferenced - weight.resourcesWeighed).toBe(2);
+    expect(weight.pagesWithUnmeasuredResources).toBe(2);
     expect(weight.atLeast).toBe(true);
     // And the distribution is over the same cohort every other metric uses, so
     // its count is the constant the three quotable metrics are pinned against.
-    expect(weight.pageWeight.count).toBe(161);
+    // 194 since Phase 29b's thirty-three judged pages (161 before).
+    expect(weight.pageWeight.count).toBe(194);
     // The heavy page is the heaviest thing on this site by a wide margin, so
     // the maximum is at least the image the assertion above pinned. Stated as a
     // floor rather than a sum: the page's own HTML is in there too.
@@ -4025,9 +4080,13 @@ describe("the fixture site end to end", () => {
 
     // And nowhere else: every divergence on the fixture site is one of these
     // five, so no page whose script changes nothing is reported as changed.
+    // The divergence rules are the `render.*-changed` family; Phase 29b's
+    // console rules share the `render.` prefix and are pinned where they fire.
     const divergences = [...issuesByPath.entries()]
       .flatMap(([path, ids]) =>
-        [...ids].filter((id) => id.startsWith("render.")).map((id) => `${path} ${id}`),
+        [...ids]
+          .filter((id) => /^render\.[a-z0-9-]+-changed$/.test(id))
+          .map((id) => `${path} ${id}`),
       )
       .sort();
     expect(divergences).toEqual([
@@ -4082,8 +4141,12 @@ describe("the fixture site end to end", () => {
     // new rule arrives here with no fixture and fails immediately, which is the
     // point — the alternative is a rule nobody has ever seen speak.
     // Phase 29b T7 adds 22 TEMPORARY accessibility entries and the
-    // `render.not-recorded` marker: 30 + 23 = 53.
-    expect(SKIP_HARNESS_CLAIMS).toHaveLength(53);
+    // `render.not-recorded` marker: 30 + 23 = 53. Task 8's pages make the
+    // three console rules, the image rule and twenty-one of the twenty-two
+    // accessibility rules fire, so twenty-five leave: 28. The one that stays,
+    // `a11y.duplicate-id-aria`, cannot fire under the pinned axe (its entry
+    // says why).
+    expect(SKIP_HARNESS_CLAIMS).toHaveLength(28);
     expect(
       unfired,
       "a rule that fires nowhere is a rule no fixture proves — author a fixture " +
@@ -4106,6 +4169,324 @@ describe("the fixture site end to end", () => {
         registry.all().map((rule) => rule.id),
         `${id} is exempted from coverage but is not a registered rule`,
       ).toContain(id);
+    }
+  });
+});
+
+/**
+ * PHASE 29b, END TO END: what a real browser saw go wrong on the fixture site
+ * (Gate 29b clauses 1 and 3).
+ *
+ * The pages are test/fixtures/pages/authored-p29b.ts: three console pages, five
+ * image pages and one page per rule of the accessibility subset. Their
+ * `expectedIssues` (asserted exactly in the first describe) say each fires its
+ * rule; this block says the rule fired NOWHERE ELSE, that the evidence is the
+ * markup's, that each accessibility page carries exactly one violation, and
+ * that the images were measured without the renderer asking any server for
+ * them.
+ */
+describe("the Phase 29b render checks on the fixture crawl", () => {
+  const p29bPaths = (): string[] =>
+    allFixtures()
+      .map((f) => f.path)
+      .filter((path) => path.startsWith("/p29b/"));
+  const firedOn = (ruleId: string): string[] =>
+    [...issuesByPath]
+      .filter(([, ids]) => ids.has(ruleId))
+      .map(([path]) => path)
+      .sort();
+  const pageAt = (path: string): PageRecord => {
+    const page = pageByPath.get(path);
+    if (page === undefined) throw new Error(`${path} has no pages row`);
+    return page;
+  };
+
+  it("rendered every /p29b/ page at capture 3, with its accessibility run finished", () => {
+    // A rule that reads the render can only be silent about a page that was
+    // rendered, so "the 1x and lazy pages fire nothing" means something only
+    // once this holds. Every page is a suspect (none stores a link), which is
+    // what seats it whatever its place in its template.
+    const paths = p29bPaths();
+    expect(paths).toHaveLength(33);
+    const selected = new Set(render.selection.selected.map((url) => new URL(url).pathname));
+    for (const path of paths) {
+      const page = pageAt(path);
+      expect(selected.has(path), `${path} was not selected for rendering`).toBe(true);
+      expect(page.rendered, `${path} rendered`).toBe(true);
+      expect(page.renderError, `${path} renderError`).toBeNull();
+      expect(page.renderVersion, `${path} renderVersion`).toBe(RENDER_CAPTURE_VERSION);
+      expect(page.renderA11yStatus, `${path} accessibility run`).toBe("ran");
+      expect(page.renderConsole, `${path} console capture`).not.toBeNull();
+      expect(page.renderImages, `${path} image measurement`).not.toBeNull();
+    }
+  });
+
+  it("each console rule fires on exactly the page built for it, in the browser's own words", () => {
+    expect(firedOn("render.js-exception")).toEqual(["/p29b/js-exception"]);
+    expect(firedOn("render.console-error")).toEqual(["/p29b/console-error"]);
+    expect(firedOn("render.failed-request")).toEqual(["/p29b/failing-script"]);
+
+    // The exception, as Chromium's runtime worded it: the page's own message
+    // behind the runtime's "Uncaught Error:" prefix, then the page's own stack
+    // frame (the inline script's line and column in the served document). The
+    // page's one image is the shared SVG, which has no stored size and is
+    // aborted as paint-only: that abort is the one the renderer counts.
+    const thrown =
+      "Uncaught Error: fixture: the delivery estimate has no postcode to read\n" +
+      `    at ${app.base}/p29b/js-exception:27:61`;
+    expect(detailsByPath.get("/p29b/js-exception\nrender.js-exception")).toEqual({
+      pageUrl: `${app.base}/p29b/js-exception`,
+      template: "/p29b/:slug",
+      rendered: true,
+      exceptionsTotal: 1,
+      exceptions: [{ text: thrown, cut: false }],
+      firstException: thrown,
+      blockedByRenderer: { thirdParty: 0, sameOriginAssets: 1 },
+    });
+    expect(detailsByPath.get("/p29b/console-error\nrender.console-error")).toEqual({
+      pageUrl: `${app.base}/p29b/console-error`,
+      template: "/p29b/:slug",
+      rendered: true,
+      consoleTotal: 1,
+      console: [{ level: "error", text: "fixture: the stock feed answered with no rows", cut: false }],
+      firstError: "fixture: the stock feed answered with no rows",
+      blockedByRenderer: { thirdParty: 0, sameOriginAssets: 1 },
+    });
+    // The script the server does not have, failed at the HTTP level, and the
+    // resource pass's 404 for the same file beside it.
+    expect(detailsByPath.get("/p29b/failing-script\nrender.failed-request")).toEqual({
+      pageUrl: `${app.base}/p29b/failing-script`,
+      template: "/p29b/:slug",
+      rendered: true,
+      failedRequestsTotal: 1,
+      failedRequests: [
+        { url: `${app.base}${P29B_MISSING_SCRIPT}`, status: 404, reason: "http 404", cut: false },
+      ],
+      firstFailedUrl: `${app.base}${P29B_MISSING_SCRIPT}`,
+      firstFailedReason: "http 404",
+    });
+    expect(detailsByPath.get("/p29b/failing-script\nresources.broken")).toMatchObject({
+      brokenCount: 1,
+      resources: [
+        {
+          url: `${app.base}${P29B_MISSING_SCRIPT}`,
+          kind: "js",
+          statusCode: 404,
+          fetchClass: "client_error",
+        },
+      ],
+    });
+  });
+
+  it("measures each image page's one image as its markup says, and fires on the three oversized ones", () => {
+    // Clause 1's image half: the 4x, srcset and CDN pages fire; the 1x and the
+    // lazy page do not, and both were rendered (the test above), so their
+    // silence is a measurement.
+    expect(firedOn("images.larger-than-displayed")).toEqual([
+      "/p29b/cdn-image",
+      "/p29b/image-4x",
+      "/p29b/srcset",
+    ]);
+
+    const base = {
+      total: 1,
+      examined: 1,
+      measured: 0,
+      hidden: 0,
+      lazyUnloaded: 0,
+      notRequested: 0,
+      noDimensions: 0,
+      broken: 0,
+      widerThanDisplayed: 0,
+      standIns: 0,
+      kept: [],
+    };
+    const wide = (
+      url: string,
+      displayedWidth: number,
+      displayedHeight: number,
+      widthFrom: "stored" | "srcset-w",
+    ) => ({
+      url,
+      cut: false,
+      intrinsicWidth: P29B_LARGE.width,
+      intrinsicHeight: P29B_LARGE.height,
+      displayedWidth,
+      displayedHeight,
+      wastedPixels: P29B_LARGE.width * P29B_LARGE.height - displayedWidth * displayedHeight,
+      bytes: widthFrom === "stored" ? expect.any(Number) : null,
+      widthFrom,
+    });
+    // A 1600x1200 file in a 400x300 box, stood in from its stored size.
+    expect(pageAt("/p29b/image-4x").renderImages).toEqual({
+      ...base,
+      measured: 1,
+      widerThanDisplayed: 1,
+      standIns: 1,
+      kept: [wide(`${app.base}${P29B_IMAGE_PATHS.fourX}`, 400, 300, "stored")],
+    });
+    // The control: 400 wide in a 400 box is measured and is not wider.
+    expect(pageAt("/p29b/image-1x").renderImages).toEqual({
+      ...base,
+      measured: 1,
+      standIns: 1,
+    });
+    // The browser chose the 1600w candidate at the 1280-wide viewport; nobody
+    // stored it, so its stand-in took its width from the `w` descriptor and its
+    // height from the stored 400w sibling's 4:3 shape. Its bytes are unknown.
+    expect(pageAt("/p29b/srcset").renderImages).toEqual({
+      ...base,
+      measured: 1,
+      widerThanDisplayed: 1,
+      standIns: 1,
+      kept: [wide(`${app.base}${P29B_IMAGE_PATHS.srcset1600}`, 300, 225, "srcset-w")],
+    });
+    // A third-party file, stood in all the same.
+    expect(pageAt("/p29b/cdn-image").renderImages).toEqual({
+      ...base,
+      measured: 1,
+      widerThanDisplayed: 1,
+      standIns: 1,
+      kept: [wide(`${assetHost.base}${P29B_CDN_IMAGE_PATH}`, 400, 300, "stored")],
+    });
+    // Lazy, 5000px down, never requested: counted, not measured, not judged.
+    expect(pageAt("/p29b/lazy").renderImages).toEqual({ ...base, lazyUnloaded: 1 });
+
+    // The finding on the 4x page, end to end: 400% against the 200% default.
+    expect(detailsByPath.get("/p29b/image-4x\nimages.larger-than-displayed")).toEqual({
+      pageUrl: `${app.base}/p29b/image-4x`,
+      template: "/p29b/:slug",
+      oversizedCount: 1,
+      atLeast: false,
+      images: [wide(`${app.base}${P29B_IMAGE_PATHS.fourX}`, 400, 300, "stored")],
+      measured: 1,
+      measuredShare: 1,
+    });
+  });
+
+  it("records the measured-image share across the /p29b/ image pages (Gate 29b clause 1)", () => {
+    // The number the gate document quotes. Summed over the five image pages'
+    // own captures: four images measured (4x, 1x, srcset, CDN), none requested
+    // and left unmeasured (`noDimensions`) or broken, and the lazy one outside
+    // the denominator, because nothing says it was meant to be measured. So the
+    // share is 4 / (4 + 0 + 0) = 1.
+    const sums = { measured: 0, noDimensions: 0, broken: 0, lazyUnloaded: 0 };
+    for (const path of P29B_IMAGE_PAGE_PATHS) {
+      const images = pageAt(path).renderImages;
+      if (images === null) throw new Error(`${path} has no image measurement`);
+      sums.measured += images.measured;
+      sums.noDimensions += images.noDimensions;
+      sums.broken += images.broken;
+      sums.lazyUnloaded += images.lazyUnloaded;
+    }
+    expect(sums).toEqual({ measured: 4, noDimensions: 0, broken: 0, lazyUnloaded: 1 });
+    expect(measuredShare(sums)).toBe(1);
+
+    // And the metric's own row for the `/p29b/:slug` template, which also holds
+    // the three console pages: each carries the shared SVG, which has no stored
+    // pixel size and is therefore requested-and-unmeasured. 4 / (4 + 3) = 0.571.
+    expect(metricsById.get("render.image-measurement")?.get("page_type|/p29b/:slug")).toEqual({
+      pages: 8,
+      keptTruncatedPages: 0,
+      total: 8,
+      measured: 4,
+      hidden: 0,
+      lazyUnloaded: 1,
+      notRequested: 0,
+      noDimensions: 3,
+      broken: 0,
+      standIns: 4,
+      measuredShare: 0.571,
+    });
+  });
+
+  it("asks each image once in the resource pass and never in the render (Gate 29b clause 3)", async () => {
+    // From the servers' own request logs, split where `runCrawl` returned: the
+    // resource pass sent ONE Range GET per image file, the renderer sent NONE
+    // (each measured image was answered with a stand-in from its stored size,
+    // and the lazy one was never requested at all). The 1600w srcset rendition
+    // was asked by nobody: the resource pass stores the first candidate only,
+    // and the renderer stood the chosen one in from its `w` descriptor.
+    const onSite = (log: string[], path: string): string[] =>
+      log.filter((hit) => hit.endsWith(` ${path}`));
+    for (const path of [
+      P29B_IMAGE_PATHS.fourX,
+      P29B_IMAGE_PATHS.oneX,
+      P29B_IMAGE_PATHS.srcset400,
+      P29B_IMAGE_PATHS.lazy,
+    ]) {
+      expect(onSite(crawlAssetRequests, path), `${path}, resource pass`).toEqual([`GET ${path}`]);
+      expect(onSite(renderAssetRequests, path), `${path}, render pass`).toEqual([]);
+    }
+    expect(onSite(crawlAssetRequests, P29B_IMAGE_PATHS.srcset1600)).toEqual([]);
+    expect(onSite(renderAssetRequests, P29B_IMAGE_PATHS.srcset1600)).toEqual([]);
+    expect(onSite(crawlCdnHits, P29B_CDN_IMAGE_PATH)).toEqual([`GET ${P29B_CDN_IMAGE_PATH}`]);
+    expect(onSite(renderCdnHits, P29B_CDN_IMAGE_PATH)).toEqual([]);
+    // The CDN as a whole heard nothing from the renderer: its badge on the hub
+    // is an SVG, aborted, and every other request to that origin is refused.
+    expect(renderCdnHits).toEqual([]);
+
+    // What that one request bought: a 206 and the size from the PNG header,
+    // which is the size every stand-in above was made at.
+    const rows = await db
+      .select()
+      .from(resources)
+      .where(eq(resources.crawlId, summary.crawlId));
+    const row = (url: string) => {
+      const found = rows.find((r) => r.url === url);
+      if (found === undefined) throw new Error(`${url} has no resources row`);
+      return { statusCode: found.statusCode, width: found.width, height: found.height };
+    };
+    expect(row(`${app.base}${P29B_IMAGE_PATHS.fourX}`)).toEqual({ statusCode: 206, ...P29B_LARGE });
+    expect(row(`${app.base}${P29B_IMAGE_PATHS.oneX}`)).toEqual({ statusCode: 206, ...P29B_SMALL });
+    expect(row(`${app.base}${P29B_IMAGE_PATHS.srcset400}`)).toEqual({ statusCode: 206, ...P29B_SMALL });
+    expect(row(`${app.base}${P29B_IMAGE_PATHS.lazy}`)).toEqual({ statusCode: 206, ...P29B_LARGE });
+    expect(row(`${assetHost.base}${P29B_CDN_IMAGE_PATH}`)).toEqual({ statusCode: 206, ...P29B_LARGE });
+    expect(rows.some((r) => r.url === `${app.base}${P29B_IMAGE_PATHS.srcset1600}`)).toBe(false);
+  });
+
+  it("each accessibility page carries exactly one violation, of its own rule", async () => {
+    // Read from `render_a11y` itself, so "exactly one" is the axe run's count
+    // and not the findings': one row per page, its own rule, one element.
+    const rows = await db
+      .select()
+      .from(renderA11y)
+      .where(eq(renderA11y.crawlId, summary.crawlId));
+    const byPage = new Map<string, Array<{ rule: string; nodes: number }>>();
+    const pathOf = new Map([...pageByPath].map(([path, page]) => [page.id, path]));
+    for (const row of rows) {
+      const path = pathOf.get(row.pageId);
+      if (path === undefined) {
+        throw new Error(`render_a11y names page ${row.pageId}, which has no pages row`);
+      }
+      byPage.set(path, [...(byPage.get(path) ?? []), { rule: row.axeRule, nodes: row.nodeCount }]);
+    }
+    for (const { axeId } of A11Y_RULES) {
+      const path = `/p29b/a11y/${axeId}`;
+      // The one rule axe reports as "needs review" and never as a violation
+      // (see its SKIP_HARNESS_CLAIMS entry): the page ran clean of violations.
+      const want = axeId === "duplicate-id-aria" ? [] : [{ rule: axeId, nodes: 1 }];
+      expect(byPage.get(path) ?? [], `${path} violations`).toEqual(want);
+    }
+    // The console and image pages carry none: they are the control recipe.
+    for (const path of p29bPaths().filter((p) => !p.startsWith("/p29b/a11y/"))) {
+      expect(byPage.get(path) ?? [], `${path} violations`).toEqual([]);
+    }
+
+    // And each rule's findings land on its page and, for all but three, on no
+    // other. The three are the existing fixtures Task 7 reconciled, each a page
+    // whose own defect is the same violation, plus `/kitchen-sink`, the absorbed
+    // floor page whose image has no alt (it declares `images.missing-alt`).
+    const elsewhere: Record<string, string[]> = {
+      "document-title": ["/head/missing-title"],
+      "image-alt": ["/content/images-missing-alt", "/kitchen-sink"],
+      "meta-refresh": ["/p26b/meta-refresh"],
+    };
+    for (const { axeId } of A11Y_RULES) {
+      if (axeId === "duplicate-id-aria") continue;
+      expect(firedOn(`a11y.${axeId}`), `a11y.${axeId}`).toEqual(
+        [`/p29b/a11y/${axeId}`, ...(elsewhere[axeId] ?? [])].sort(),
+      );
     }
   });
 });

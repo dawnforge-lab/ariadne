@@ -2550,7 +2550,7 @@ not name", `test/api/query.test.ts:1481` "carries a finding with no page as a
 null url", `test/rules/helpers.test.ts:697` "maps each fetch class to the status
 a reader acts on", `test/rules/helpers.test.ts:717` "names a block a block,
 whatever status the challenge was served with",
-`test/fixtures/harness.test.ts:1356` "declares a column for every evidence key it
+`test/fixtures/harness.test.ts:1364` "declares a column for every evidence key it
 writes, and writes every column it declares",
 `test/rules/registry.test.ts:792` "finds one defining file per rule, and the key
 spelled inside it".
@@ -2721,7 +2721,7 @@ header on the catalog, and only on metric rules",
 and one row per scope",
 `test/rules/metric-table.test.ts:377` "gives every metric rule a table whose
 columns are the catalog's",
-`test/fixtures/harness.test.ts:2559` "renders every metric's table, with no
+`test/fixtures/harness.test.ts:2568` "renders every metric's table, with no
 empty column and no unmapped key".
 
 **`judgementStale`** (Phase 27a) is the answer's last key, `crawl_status`'s flag
@@ -3697,7 +3697,7 @@ threshold";
 `test/rules/coverage.test.ts:646` "site.health is filed under the
 engine-coverage check, and CHECK-32 lost no claimant" (the re-file in both
 directions, and CHECK-83 outside the crawl-derived universe);
-`test/fixtures/harness.test.ts:3506` "the health rollup agrees with a
+`test/fixtures/harness.test.ts:3557` "the health rollup agrees with a
 page-by-page recount" — an independent recount in JavaScript over the end-to-end
 fixture crawl.
 

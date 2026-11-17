@@ -17,7 +17,8 @@
  * THE SECOND HOST is `startAssetHost()`: another `node:http` server on its own
  * port, which is a different origin (and a different `host`) from the fixture
  * site's even though both sit on the loopback. It is the CDN of the fixture
- * world — the hub carries one image from it — and it exists so the crawl's
+ * world — the hub carries one image from it, and since Phase 29b
+ * `/p29b/cdn-image` carries a second, a raster photo — and it exists so the crawl's
  * resource pass has a genuine third-party host to open a second queue for, read
  * a second robots.txt from, and count against `maxResourceHosts`. Like
  * `startOffsiteHost` (test/fixtures/pages/render-p5.ts) it is a singleton the
@@ -99,6 +100,44 @@ export const RASTER_LANDSCAPE = { width: 1200, height: 800 } as const;
 export const RASTER_SQUARE_PATH = "/img/p29b-square.png";
 export const RASTER_SQUARE = { width: 600, height: 600 } as const;
 
+/**
+ * The Phase 29b image pages' files (test/fixtures/pages/authored-p29b.ts), one
+ * URL per case so the request log can say which page's image was asked for and
+ * by which pass. Real PNGs, Range honoured, cached, each well under
+ * `IMAGE_WEIGHT_WARN`, so no weight or format rule has anything to say about
+ * them: the only question they put is how wide each file is against its box.
+ *
+ *  - `fourX`: 1600×1200, shown in a 400×300 box (4×, past the 200% line);
+ *  - `oneX`: 400×300, shown in a 400×300 box (1×);
+ *  - `srcset400` / `srcset1600`: two renditions of one image. The resource pass
+ *    stores only the first `srcset` candidate (and the `src`, the same file), so
+ *    `srcset1600` is never asked for by anyone: the browser picks it at the
+ *    1280-wide viewport and the renderer stands it in from its `w` descriptor
+ *    and `srcset400`'s aspect ratio. It is served all the same, so a request for
+ *    it would be a 200 in the log rather than a 404 nobody noticed;
+ *  - `lazy`: 1600×1200 with `loading=lazy`, 5000px below the fold, so the
+ *    renderer, which does not scroll, never requests it.
+ */
+export const P29B_IMAGE_PATHS = {
+  fourX: "/img/p29b-4x.png",
+  oneX: "/img/p29b-1x.png",
+  srcset400: "/img/p29b-srcset-400.png",
+  srcset1600: "/img/p29b-srcset-1600.png",
+  lazy: "/img/p29b-lazy.png",
+} as const;
+export const P29B_LARGE = { width: 1600, height: 1200 } as const;
+export const P29B_SMALL = { width: 400, height: 300 } as const;
+
+/** One cached, Range-honouring PNG of `size`. */
+function raster(size: { width: number; height: number }): Asset {
+  return {
+    contentType: "image/png",
+    body: pngBytes(size.width, size.height),
+    cacheControl: "public, max-age=3600",
+    raster: true,
+  };
+}
+
 const ASSETS = new Map<string, Asset>([
   [
     SHARED_IMAGE_PATH,
@@ -160,6 +199,12 @@ const ASSETS = new Map<string, Asset>([
       raster: true,
     },
   ],
+  // The Phase 29b image pages' files, described at `P29B_IMAGE_PATHS`.
+  [P29B_IMAGE_PATHS.fourX, raster(P29B_LARGE)],
+  [P29B_IMAGE_PATHS.oneX, raster(P29B_SMALL)],
+  [P29B_IMAGE_PATHS.srcset400, raster(P29B_SMALL)],
+  [P29B_IMAGE_PATHS.srcset1600, raster(P29B_LARGE)],
+  [P29B_IMAGE_PATHS.lazy, raster(P29B_LARGE)],
 ]);
 
 /**
@@ -193,6 +238,13 @@ export function serveAsset(req: IncomingMessage, res: ServerResponse, path: stri
   res.end(req.method === "HEAD" ? undefined : body);
   return true;
 }
+
+/**
+ * The Phase 29b CDN photo: 1600×1200, shown on `/p29b/cdn-image` in a 400×300
+ * box (4×). The asset host's only raster file.
+ */
+export const P29B_CDN_IMAGE_PATH = "/cdn/p29b-photo.png";
+const CDN_PHOTO = pngBytes(P29B_LARGE.width, P29B_LARGE.height);
 
 /** The running asset host, or null before `startAssetHost` is called. */
 let host: { base: string; server: Server; hits: string[] } | null = null;
@@ -234,6 +286,19 @@ export async function startAssetHost(): Promise<AssetHost> {
       res.end(req.method === "HEAD" ? undefined : body);
       return;
     }
+    if (path === P29B_CDN_IMAGE_PATH) {
+      // Phase 29b: a photo on the CDN, served the way a CDN serves one — Range
+      // honoured (206 with a `Content-Range` total) and cached for a year — so
+      // the resource pass reads its size from the first 64 KiB of a third-party
+      // host and the renderer can stand it in without asking that host at all.
+      serveImage(req, res, {
+        bytes: CDN_PHOTO,
+        contentType: "image/png",
+        range: "honour",
+        cacheControl: "public, max-age=31536000, immutable",
+      });
+      return;
+    }
     res.writeHead(404, { "content-type": "text/plain" });
     res.end(req.method === "HEAD" ? undefined : "no asset here");
   });
@@ -269,4 +334,18 @@ export function assetHostImage(): string {
     );
   }
   return `${host.base}/cdn/hub-badge.svg`;
+}
+
+/**
+ * The exact URL of the Phase 29b CDN photo (`P29B_CDN_IMAGE_PATH`). Throws when
+ * the host is not running, for the reason `assetHostImage` does.
+ */
+export function assetHostRaster(): string {
+  if (host === null) {
+    throw new Error(
+      "assetHostRaster: the asset host is not running — call startAssetHost() before " +
+        "starting the fixture app, or /p29b/cdn-image would carry an image from nowhere",
+    );
+  }
+  return `${host.base}${P29B_CDN_IMAGE_PATH}`;
 }
