@@ -218,6 +218,19 @@ function excludePatterns(): string[] {
 }
 
 /**
+ * `--no-accessibility` (Phase 29b memory diagnosis): run the render pass with
+ * `renderAccessibility: false`, so axe never runs and every rendered page
+ * records `disabled`. A DIAGNOSTIC, never the gate: it exists to attribute the
+ * render phase's RSS growth to the accessibility run or away from it, so the
+ * header, the verdict line and `--json-out` all say a run was made with it,
+ * and such a run can never print "GATE PASSED". Combining it with
+ * `GATE_CRAWL_ID` throws: a rules-only run renders nothing for it to change.
+ */
+function accessibilityOff(): boolean {
+  return process.argv.slice(2).includes("--no-accessibility");
+}
+
+/**
  * `--json-out <path>` (Phase 28c): write the run's result as JSON — on success
  * and on failure — for the CI workflow to read and upload. Null when the flag
  * is absent. A flag with no path after it throws (no fallback to "no file").
@@ -778,7 +791,9 @@ function line(label: string, value: string): string {
 async function main(): Promise<number> {
   const pages = pageTarget();
   const reuse = reusedCrawlId();
-  const isGate = pages === GATE_PAGES && reuse === null;
+  const noAccessibility = accessibilityOff();
+  // A run without axe is a diagnostic: the gate's render phase includes it.
+  const isGate = pages === GATE_PAGES && reuse === null && !noAccessibility;
   const exclude = excludePatterns();
   const jsonOut = jsonOutPath();
   /** Every failure the run recorded, for the exit code and for `--json-out`. */
@@ -804,10 +819,19 @@ async function main(): Promise<number> {
   if (exclude.length > 0 && reuse !== null) {
     throw new RangeError("gate: --exclude needs a crawl in this process; GATE_CRAWL_ID runs none");
   }
+  if (noAccessibility && reuse !== null) {
+    throw new RangeError("gate: --no-accessibility needs a render pass in this process; GATE_CRAWL_ID runs none");
+  }
   const scope: CrawlScope = { exclude, include: [] };
 
   if (reuse !== null) {
     console.log(`RULES-ONLY RUN over crawl ${reuse} — NOT the gate (no crawl in this process).`);
+  } else if (noAccessibility) {
+    console.log(
+      `DIAGNOSTIC RUN — crawl + render + rules over ${pages.toLocaleString()} pages with ` +
+        `--no-accessibility (renderAccessibility: false, axe never runs). NOT the gate: ` +
+        `the gate's render phase runs axe.`,
+    );
   } else {
     console.log(
       isGate
@@ -818,6 +842,7 @@ async function main(): Promise<number> {
     );
   }
   console.log(`node ${process.version}, flags ${process.execArgv.join(" ") || "(none)"}`);
+  console.log(line("accessibility", noAccessibility ? "OFF (--no-accessibility)" : "on (axe runs)"));
 
   const registry = timedRegistry();
   const counts = {
@@ -925,6 +950,9 @@ async function main(): Promise<number> {
         // Phase 27c: set only with `--exclude`, so an unflagged run is the config
         // every earlier gate ran.
         ...(exclude.length > 0 ? { exclude } : {}),
+        // Phase 29b: set only with `--no-accessibility` (a diagnostic run), so
+        // an unflagged run is the default-configured crawl the gate measures.
+        ...(noAccessibility ? { renderAccessibility: false } : {}),
       };
 
       sampler.startPhase();
@@ -1488,6 +1516,8 @@ async function main(): Promise<number> {
               node: process.version,
               pages,
               isGate,
+              // False only on a `--no-accessibility` diagnostic run.
+              accessibility: !noAccessibility,
               passed: recorded.length === 0,
               failures: recorded,
               peaks: {
