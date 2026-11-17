@@ -19,8 +19,11 @@
  * that ignores it answers 200 and the body is counted as a counted GET always
  * was, and only a `206` of unknown total or a `416` earns one more plain GET.
  * An image row therefore costs at most 2 requests plus its redirect hops, where
- * the HEAD path cost 1 for a sized file and 2 for an unsized one. Every Range
- * request takes a gate slot like the HEAD did. CSS and JS keep the HEAD.
+ * the HEAD path cost 1 for a sized file and 2 for an unsized one: each hop is
+ * one Range GET, the final answer is one Range GET, and at most one plain GET
+ * follows it. A row that has fallen back to the plain GET stays plain for any
+ * redirect after that, so the fallback is never paid twice. Every Range request
+ * takes a gate slot like the HEAD did. CSS and JS keep the HEAD.
  *
  * ## The politeness arithmetic, which is the point of this module
  *
@@ -816,7 +819,9 @@ export async function fetchCrawlResources(
         }
         url = resolved;
         redirectedTo = resolved;
-        mode = firstMode;
+        // A row that already fell back to the plain GET stays on it: restarting
+        // as `range` would pay the fallback again and break "2 + hops".
+        mode = mode === "plain" ? "plain" : firstMode;
         continue;
       }
 
@@ -914,7 +919,7 @@ export async function fetchCrawlResources(
         cacheControl,
         expires,
         fetchMs: null,
-        ...(isImage ? imageDimensions(attempt.head, contentType) : NO_DIMENSIONS),
+        ...(isImage ? imageDimensions(attempt.head, contentType, headers) : NO_DIMENSIONS),
       });
     }
   };
@@ -1065,6 +1070,7 @@ const NO_DIMENSIONS = { width: null, height: null, dimensionsReason: null } as c
 function imageDimensions(
   head: Buffer | null,
   contentType: string | null,
+  headers: HeaderBag,
 ): Pick<Verdict, "width" | "height" | "dimensionsReason"> {
   if (head === null) {
     // An ok image answer always kept its head: that is this module's bug.
@@ -1072,6 +1078,12 @@ function imageDimensions(
   }
   const bare = (contentType ?? "").split(";")[0]!.trim().toLowerCase();
   if (!bare.startsWith("image/")) return { width: null, height: null, dimensionsReason: "not-image" };
+  // A content-encoded body is compressed bytes: never handed to the format
+  // reader, which would call them `unknown-format` and be wrong about why.
+  const encoding = headerValue(headers, "content-encoding");
+  if (encoding !== null && encoding.trim().toLowerCase() !== "identity") {
+    return { width: null, height: null, dimensionsReason: "encoded" };
+  }
   const size = readImageSize(head, contentType);
   return size.kind === "size"
     ? { width: size.width, height: size.height, dimensionsReason: null }
@@ -1085,11 +1097,20 @@ function imageDimensions(
 function contentRangeTotal(headers: HeaderBag): number | null {
   const raw = headerValue(headers, "content-range");
   if (raw === null) return null;
-  const match = /^\s*bytes\s+\d+-\d+\/(\d+)\s*$/i.exec(raw);
+  const match = /^\s*bytes\s+(\d+)-\d+\/(\d+)\s*$/i.exec(raw);
   if (match === null) return null;
-  const total = Number(match[1]);
-  return Number.isSafeInteger(total) ? total : null;
+  // A window that does not start at 0 is not the header of the file, so it
+  // cannot size the image: unknown, and the plain GET measures it (M3).
+  if (Number(match[1]) !== 0) return null;
+  const total = Number(match[2]);
+  // `bytes` is an int4 column and the total is the server's word: past it, the
+  // total is unknown, and the plain counted GET (capped by MAX_COUNTED_BYTES)
+  // measures it instead of a write throwing and ending the pass.
+  return Number.isSafeInteger(total) && total <= MAX_BYTES_COLUMN ? total : null;
 }
+
+/** The top of the `resources.bytes` integer column. */
+const MAX_BYTES_COLUMN = 2_147_483_647;
 
 /**
  * The next slice of the work list: the crawl's rows whose `fetch_class` is
@@ -1204,6 +1225,8 @@ function contentLength(headers: HeaderBag): number | null {
   // A header we cannot read is not a size to guess at (hard rule 7): the pass
   // spends a GET and counts instead.
   if (!Number.isInteger(value) || value < 0) return null;
+  // Past the int4 `bytes` column: unreadable as a size, so counted instead.
+  if (value > MAX_BYTES_COLUMN) return null;
   return value;
 }
 
@@ -1292,9 +1315,10 @@ async function requestResource(
       // destroyed the moment the window is full (hard rule 6). The size comes
       // from Content-Range, so nothing is counted.
       head = await readHead(response.body, IMAGE_HEADER_BYTES);
-    } else if (mode === "plain" || (mode === "range" && status === 200)) {
+    } else if (mode === "plain" || (mode === "range" && status >= 200 && status < 300)) {
       // A counted GET: either the pass's own plain GET, or a Range the server
-      // ignored (200). The body streams into the counter exactly as before; an
+      // ignored (any 2xx but 206: a 200, or a 204 pixel). Whatever it answers is
+      // server-controlled, so no 2xx may reach a branch that throws. The body streams into the counter exactly as before; an
       // image additionally copies its first IMAGE_HEADER_BYTES aside, and no
       // more than that is held.
       const kept: Buffer[] = [];
@@ -1351,17 +1375,22 @@ async function requestResource(
 type RequestMode = "head" | "range" | "plain";
 
 /**
- * Read at most `limit` bytes of `body` and stop: the rest of the stream is
- * discarded by destroying it, never buffered.
+ * Read at most `limit` bytes of `body`. A well-behaved 206 ends exactly at the
+ * window, and its body is left to end on its own so the socket goes back to the
+ * pool (a fresh TCP/TLS connection per image would be rule 9's cost, on somebody
+ * else's server). Only a server that sends MORE than the window it was asked for
+ * is cut off: its first overflowing byte (or a further chunk after the window)
+ * destroys the stream, and the excess is never buffered.
  */
 async function readHead(body: AsyncIterable<unknown> & { destroy(): unknown }, limit: number): Promise<Buffer> {
   const kept: Buffer[] = [];
   let have = 0;
   for await (const chunk of body) {
-    const piece = (chunk as Buffer).subarray(0, limit - have);
+    const buf = chunk as Buffer;
+    const piece = buf.subarray(0, limit - have);
     kept.push(Buffer.from(piece));
     have += piece.length;
-    if (have >= limit) {
+    if (piece.length < buf.length) {
       body.destroy();
       break;
     }

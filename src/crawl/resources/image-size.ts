@@ -35,9 +35,18 @@ type Format = Extract<ImageSize, { kind: "size" }>["format"];
 
 const none = (reason: NoneReason): ImageSize => ({ kind: "none", reason });
 
-/** A found size, or malformed when either dimension is 0. */
+/**
+ * The largest dimension kept: 2^31-1, the PNG spec's own ceiling and the top of
+ * the `resources.width`/`height` integer columns. A header can say more (PNG
+ * IHDR and AVIF `ispe` are u32 on the wire); a hostile value is malformed here
+ * rather than a write that throws and ends the pass.
+ */
+export const MAX_IMAGE_DIMENSION = 2_147_483_647;
+
+/** A found size, or malformed when either dimension is 0 or past the ceiling. */
 function size(format: Format, width: number, height: number): ImageSize {
   if (width <= 0 || height <= 0) return none("malformed");
+  if (width > MAX_IMAGE_DIMENSION || height > MAX_IMAGE_DIMENSION) return none("malformed");
   return { kind: "size", format, width, height };
 }
 

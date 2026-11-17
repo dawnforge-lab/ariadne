@@ -186,7 +186,11 @@ function fetchedVerdict(
     if (checkAskedNothing) return null;
     return { problem: "not-fetched", fetchClass: row === undefined ? null : row.fetchClass };
   }
-  if (row.statusCode !== 200) return { problem: "status", statusCode: row.statusCode };
+  // 206: the resource pass asks an image with a Range GET (29b), and a server that
+  // honours it answers 206 -- a successful answer, not a status problem.
+  if (row.statusCode !== 200 && row.statusCode !== 206) {
+    return { problem: "status", statusCode: row.statusCode };
+  }
   if (row.bytes !== null && row.bytes > SOCIAL_IMAGE_MAX_BYTES) {
     return { problem: "too-large", bytes: row.bytes };
   }

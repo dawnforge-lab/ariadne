@@ -10,8 +10,9 @@
  * broken-resource path.
  *
  * The bodies are tiny hand-written SVGs. Nothing asserts about their content;
- * what matters is that a HEAD of one answers a size, which is the branch the
- * pass takes for the overwhelming majority of the real web.
+ * what matters is that the Range GET the pass sends an image (29b) is answered
+ * with a body whose length the pass counts, the shape of a server that ignores
+ * Range.
  *
  * THE SECOND HOST is `startAssetHost()`: another `node:http` server on its own
  * port, which is a different origin (and a different `host`) from the fixture
@@ -52,8 +53,8 @@ function svg(label: string): string {
  *
  * 120,000 of them, comfortably past `IMAGE_WEIGHT_WARN` (100,000), and an exact
  * number rather than an approximate one so the harness can assert that the size
- * this server declared is the size that reached the finding — through the HEAD,
- * the fetch pass, the `resources` row and the rule.
+ * this server sent is the size that reached the finding — through the Range
+ * GET, the fetch pass, the `resources` row and the rule.
  */
 export const HEAVY_IMAGE_BYTES = 120_000;
 
@@ -62,10 +63,11 @@ export const HEAVY_IMAGE_BYTES = 120_000;
  *
  * Nothing in this engine decodes an image — metadata only, owner decision 2 —
  * so what makes this fixture load-bearing is its `content-type` and its
- * `content-length`, not its pixels. The body is also never transferred: the
- * resource pass sends a HEAD, this server answers with the headers and no body,
- * and the 120,000 bytes exist only to make the declared length true. Ordinary
- * ASCII, so one character is one byte and the length is the number above.
+ * `content-length`, not its pixels. The server ignores Range, so since 29b the
+ * resource pass's one Range GET gets the whole 200 body and streams it into its
+ * counter (nothing is kept past the first 64 KiB, and no image is decoded).
+ * Ordinary ASCII, so one character is one byte and the length is the number
+ * above.
  */
 function padding(bytes: number): string {
   const unit = "png-padding ";
@@ -165,8 +167,9 @@ const ASSETS = new Map<string, Asset>([
  * is not, so the app's own dispatch continues.
  *
  * A HEAD is answered with the headers and no body, which is what the resource
- * pass asks for and what a server that gets this wrong (no `content-length`)
- * costs an extra request.
+ * pass asks for of css and js. An image is asked with a Range GET (29b): the
+ * raster assets honour it (206), and every other asset ignores it and answers
+ * 200 with the whole body.
  */
 export function serveAsset(req: IncomingMessage, res: ServerResponse, path: string): boolean {
   const asset = ASSETS.get(path);

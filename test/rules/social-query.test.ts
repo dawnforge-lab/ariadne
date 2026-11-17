@@ -385,6 +385,15 @@ describe("social query rules against the database", () => {
       });
     });
 
+    it("is silent on a share image answered 206 by a Range-honouring server", async () => {
+      const RANGED = `${SITE}/og/ranged.png`;
+      const { crawlId } = await seed(
+        [{ path: "/a", social: images(RANGED) }],
+        [{ url: RANGED, statusCode: 206, bytes: 30_000 }],
+      );
+      expect(await imageBroken.run(db, crawlId)).toEqual([]);
+    });
+
     it("is silent on a fetched 200 at exactly the limit, and on a page with no image", async () => {
       const EDGE = `${SITE}/og/edge.png`;
       const { crawlId } = await seed(

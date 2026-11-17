@@ -40,6 +40,20 @@ const avif = (w: number, h: number): Uint8Array =>
     ),
   );
 
+describe("readImageSize: a dimension past int4 is malformed, never a size", () => {
+  it("an AVIF ispe of 0xFFFFFFFF", () => {
+    expect(readImageSize(avif(0xffffffff, 100), "image/avif")).toEqual({ kind: "none", reason: "malformed" });
+    expect(readImageSize(avif(100, 0xffffffff), "image/avif")).toEqual({ kind: "none", reason: "malformed" });
+  });
+  it("a PNG with width 0x80000000, and height 0xFFFFFFFF", () => {
+    expect(readImageSize(png(0x80000000, 10), "image/png")).toEqual({ kind: "none", reason: "malformed" });
+    expect(readImageSize(png(10, 0xffffffff), "image/png")).toEqual({ kind: "none", reason: "malformed" });
+  });
+  it("2^31-1 itself is still a size", () => {
+    expect(readImageSize(png(0x7fffffff, 1), "image/png")).toEqual({ kind: "size", format: "png", width: 2147483647, height: 1 });
+  });
+});
+
 describe("readImageSize: one per format", () => {
   it("PNG 1600x1200", () => {
     expect(readImageSize(png(1600, 1200), "image/png")).toEqual({ kind: "size", format: "png", width: 1600, height: 1200 });

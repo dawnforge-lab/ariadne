@@ -10,6 +10,7 @@
  * refused being fetched anyway.
  */
 import { randomUUID } from "node:crypto";
+import { gzipSync } from "node:zlib";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
@@ -669,9 +670,11 @@ describe("HEAD first, and exactly one GET when it must", () => {
 
     const row = await rowFor(crawlId, `${assets.base}/loop405-1.png`);
     expect(row.fetchClass).toBe("fetch_error");
-    expect(row.fetchReason).toContain("7-request budget");
-    // Two requests per URL (a refused HEAD and a redirecting GET), stopped at
-    // seven — three-and-a-half URLs, not an unbounded conversation.
+    // The refused HEAD falls the row back to the plain GET, and a row that has
+    // fallen back stays on it across redirects (29b), so the chain runs out of
+    // HOPS (six requests after the HEAD) before the 7-request budget bites.
+    expect(row.fetchReason).toContain("more than 5 redirects");
+    // Seven requests either way, not an unbounded conversation.
     expect(assets.hits.filter((hit) => hit.path.startsWith("/loop405-")).length).toBe(7);
   });
 
@@ -1475,7 +1478,13 @@ interface ImageHit {
  * HEAD: chunked, no `content-length`, whatever the method.
  */
 async function startImageServer(
-  routes: Record<string, ServeImageOpts | { missing: true } | { noLength: Buffer; contentType: string }>,
+  routes: Record<
+    string,
+    | ServeImageOpts
+    | { missing: true }
+    | { noLength: Buffer; contentType: string }
+    | { handler: (req: IncomingMessage, res: ServerResponse) => void }
+  >,
 ): Promise<{ base: string; hits: ImageHit[]; close(): Promise<void> }> {
   const hits: ImageHit[] = [];
   const server: Server = createServer((req: IncomingMessage, res: ServerResponse) => {
@@ -1490,6 +1499,10 @@ async function startImageServer(
     if (route === undefined || "missing" in route) {
       res.writeHead(404, { "content-type": "image/png" });
       res.end(req.method === "HEAD" ? undefined : "no");
+      return;
+    }
+    if ("handler" in route) {
+      route.handler(req, res);
       return;
     }
     if ("noLength" in route) {
@@ -1535,6 +1548,79 @@ describe("an image row costs one Range GET and records its intrinsic size (29b)"
       },
       "/page.png": { bytes: Buffer.from("<html>"), contentType: "text/html", range: "honour" },
       "/missing.png": { missing: true },
+      // A redirect to a server that honours Range: the Range GET must be sent at
+      // BOTH hops.
+      "/redir.png": {
+        handler: (_req, res) => {
+          res.writeHead(302, { location: "/honour.png" });
+          res.end();
+        },
+      },
+      // A misbehaving 206: claims the 64 KiB window and writes 100,000 bytes.
+      "/overflow.png": {
+        handler: (_req, res) => {
+          const body = pngBytes(1600, 1200, 100_000);
+          res.writeHead(206, {
+            "content-type": "image/png",
+            "content-range": "bytes 0-65535/200000",
+            "content-length": String(body.length),
+          });
+          res.end(body);
+        },
+      },
+      // A 2xx other than 200/206: a 204 tracking pixel. Server-controlled, so it
+      // must be a row and never a throw.
+      "/pixel204.png": {
+        handler: (_req, res) => {
+          res.writeHead(204, { "content-type": "image/png" });
+          res.end();
+        },
+      },
+      // A total that does not fit the int4 `bytes` column.
+      "/hugetotal.png": {
+        handler: (req, res) => {
+          if (req.headers.range === undefined) {
+            res.writeHead(200, { "content-type": "image/png", "content-length": String(png.length) });
+            res.end(png);
+            return;
+          }
+          res.writeHead(206, {
+            "content-type": "image/png",
+            "content-range": "bytes 0-65535/99999999999",
+            "content-length": String(png.length),
+          });
+          res.end(png);
+        },
+      },
+      // A window that does not start at the head of the file.
+      "/offset.png": {
+        handler: (req, res) => {
+          if (req.headers.range === undefined) {
+            res.writeHead(200, { "content-type": "image/png", "content-length": String(png.length) });
+            res.end(png);
+            return;
+          }
+          const slice = png.subarray(100);
+          res.writeHead(206, {
+            "content-type": "image/png",
+            "content-range": `bytes 100-${png.length - 1}/${png.length}`,
+            "content-length": String(slice.length),
+          });
+          res.end(slice);
+        },
+      },
+      // A gzip-encoded PNG: the bytes on the wire are not a PNG.
+      "/gz.png": {
+        handler: (_req, res) => {
+          const body = gzipSync(png);
+          res.writeHead(200, {
+            "content-type": "image/png",
+            "content-encoding": "gzip",
+            "content-length": String(body.length),
+          });
+          res.end(body);
+        },
+      },
     });
   });
   afterAll(async () => {
@@ -1666,6 +1752,85 @@ describe("an image row costs one Range GET and records its intrinsic size (29b)"
     expect(row.dimensionsReason).toBe("unknown-format");
     expect(hitsFor(assets, "/hop.png").map((h) => h.method)).toEqual(["GET"]);
     expect(hitsFor(assets, "/a.png").map((h) => h.method)).toEqual(["GET"]);
+  });
+
+  it("a redirect to a Range-honouring server sends the Range at both hops and lands as a 206", async () => {
+    const row = await measure("/redir.png");
+    expect(row).toMatchObject({
+      fetchClass: "ok",
+      statusCode: 206,
+      bytes: png.length,
+      bytesSource: "header",
+      width: 1600,
+      height: 1200,
+    });
+    expect(imageHits("/redir.png")).toEqual([
+      { method: "GET", path: "/redir.png", range: "bytes=0-65535" },
+    ]);
+    expect(imageHits("/honour.png")).toEqual([
+      { method: "GET", path: "/honour.png", range: "bytes=0-65535" },
+    ]);
+  });
+
+  it("a 206 that writes more than the 64 KiB window is read to the window and still sizes the image", async () => {
+    const row = await measure("/overflow.png");
+    expect(row).toMatchObject({
+      fetchClass: "ok",
+      statusCode: 206,
+      bytes: 200_000,
+      bytesSource: "header",
+      width: 1600,
+      height: 1200,
+    });
+    expect(imageHits("/overflow.png")).toHaveLength(1);
+  });
+
+  it("a 204 image is an ok row with no body: one request, bytes 0, reason empty", async () => {
+    const row = await measure("/pixel204.png");
+    expect(row).toMatchObject({
+      fetchClass: "ok",
+      statusCode: 204,
+      bytes: 0,
+      bytesSource: "counted",
+      width: null,
+      dimensionsReason: "empty",
+    });
+    expect(imageHits("/pixel204.png")).toHaveLength(1);
+  });
+
+  it("a Content-Range total past int4 is an unknown total: one plain counted GET", async () => {
+    const row = await measure("/hugetotal.png");
+    expect(row).toMatchObject({
+      fetchClass: "ok",
+      statusCode: 200,
+      bytes: png.length,
+      bytesSource: "counted",
+      width: 1600,
+      height: 1200,
+    });
+    expect(imageHits("/hugetotal.png").map((h) => h.range)).toEqual(["bytes=0-65535", null]);
+  });
+
+  it("a Content-Range that does not start at 0 cannot size the image: one plain counted GET", async () => {
+    const row = await measure("/offset.png");
+    expect(row).toMatchObject({
+      statusCode: 200,
+      bytes: png.length,
+      bytesSource: "counted",
+      width: 1600,
+      height: 1200,
+    });
+    expect(imageHits("/offset.png").map((h) => h.range)).toEqual(["bytes=0-65535", null]);
+  });
+
+  it("a gzip-encoded image answer is never parsed: dimensions_reason encoded", async () => {
+    const row = await measure("/gz.png");
+    expect(row.fetchClass).toBe("ok");
+    expect(row.width).toBeNull();
+    expect(row.dimensionsReason).toBe("encoded");
+    // The transferred size, as for any counted body.
+    expect(row.bytes).toBe(gzipSync(png).length);
+    expect(row.bytesSource).toBe("counted");
   });
 
   it("a 404 image is a client_error with all three dimension columns null", async () => {

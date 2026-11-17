@@ -1312,7 +1312,7 @@ export const resources = pgTable("resources", {
   width: integer("width"),
   height: integer("height"),
   // Why `width`/`height` are null on an `ok` image row: `svg` (a vector format
-  // has no intrinsic pixel size), `unknown-format`, `header-beyond-limit` (the
+  // has no intrinsic pixel size), `encoded` (a content-encoded body is compressed bytes, never parsed), `unknown-format`, `header-beyond-limit` (the
   // size lies past the 64 KiB read), `malformed`, `empty`, or `not-image` (a 2xx
   // whose content type is not `image/*`). Null when a size WAS read, and null on
   // css/js and non-ok rows, where no measurement was attempted.

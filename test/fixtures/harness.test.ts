@@ -3557,17 +3557,18 @@ describe("the fixture site end to end", () => {
     // THE END-TO-END CLAIM OF THE WHOLE PHASE, in one test: a number the fixture
     // server declared in a response header travels through the resource fetch
     // pass, the `resources` row and the rule into a finding a client reads.
-    // Nothing between those two ends is stubbed — the pass sends a real HEAD to
-    // a real server for every file these pages reference.
+    // Nothing between those two ends is stubbed — the pass sends a real request
+    // (a Range GET for an image, a HEAD for css/js) to a real server for every
+    // file these pages reference.
     //
     // The heavy image first. `HEAVY_IMAGE_BYTES` is the length
     // test/fixtures/assets.ts declares for `/img/p11-heavy-hero.png`, so
     // asserting the finding's `bytes` against the CONSTANT rather than against a
     // literal is what makes this a claim about the pipeline instead of a
-    // snapshot of it. `bytesSource: "header"` is the second half: the server
-    // answered the HEAD with a `content-length`, so the pass believed the claim
-    // rather than spending a GET to count — which is the branch the overwhelming
-    // majority of the real web takes, and the one the copy calls a claim.
+    // snapshot of it. `bytesSource: "counted"` is the second half: the image is
+    // asked with a Range GET (29b) and this server ignores Range and answers
+    // 200, so the pass streamed the body into its counter and the number is a
+    // measurement. (Before 29b it was a HEAD's `content-length`, `"header"`.)
     expect(detailsByPath.get(`${P11_HEAVY_PATH}\nimages.oversized`)).toEqual({
       pageUrl: `${app.base}${P11_HEAVY_PATH}`,
       resourceUrl: `${app.base}${P11_HEAVY_IMAGE}`,
