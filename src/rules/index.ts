@@ -35,6 +35,7 @@ import { linkTargetRules } from "./query/link-targets.js";
 import { pageFactsRules } from "./query/page-facts.js";
 import { paginationRules } from "./query/pagination.js";
 import { redirectRules } from "./query/redirects.js";
+import { renderConsoleRules } from "./query/render-console.js";
 import { renderDiffRules } from "./query/render-diff.js";
 import { renderRedirectRules } from "./query/render-redirect.js";
 import { resourceRules } from "./query/resources.js";
@@ -109,6 +110,8 @@ export function buildRegistry(): Registry {
     // columns and nothing else; the render pass that filled those columns is a
     // separate stage of the crawl (src/crawl/render), not part of a rule.
     ...renderDiffRules,
+    // Phase 29b: the render pass's console capture (CHECK-51).
+    ...renderConsoleRules,
     ...renderRedirectRules,
     // The resource rules (P11-T3): what the fetch pass learned about the files
     // the pages point at. Query-kind for the reason every rule here is — they

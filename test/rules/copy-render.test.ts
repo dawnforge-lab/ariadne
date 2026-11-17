@@ -57,6 +57,10 @@ const ADDED_SINCE_0_22 = [
   "schema.empty-value",
   "schema.unresolved-reference",
   "schema.property-coverage",
+  // 0.27.0, Phase 29b T5: the render console rules (CHECK-51).
+  "render.js-exception",
+  "render.console-error",
+  "render.failed-request",
 ];
 // Entries whose text was deliberately changed after 0.22.0: the fields that
 // differ from the fixture, spelled out so any other drift still fails.

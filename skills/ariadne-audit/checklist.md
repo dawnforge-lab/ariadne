@@ -3195,9 +3195,25 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
   request, or a budget that claimed every row unasked; its evidence names which.
   When one is present no broken file could have
   been found and the network half of this check is NOT MEASURED rather than clean —
-  re-crawl to answer it. JAVASCRIPT ERRORS are NOT MEASURED whatever the crawl
-  holds: nothing in a crawl records a console, and requests a script makes at runtime
-  are not in the resource table either — both stay browser work.
+  re-crawl to answer it.
+  **JAVASCRIPT ERRORS and the requests a script makes at runtime are measured from the
+  render pass's sample** — the pages the render budget reached, not the whole crawl.
+  Three more rules claim this check, each over every page with a recorded console,
+  a failed render included (errors before a timeout are the point):
+  `render.js-exception` (warning) is an uncaught exception or an unhandled promise
+  rejection; `render.console-error` (info) is an error-level console message, judged
+  from the first 20 console messages the page logged — the capture keeps no per-level
+  totals, so a page whose first 20 messages are all warnings and whose errors come
+  later is not detected; `render.failed-request` (warning) is a request the page
+  itself made that failed at the network level or answered 400 or above (its own
+  scripts, CSS, XHR and fetch). Third-party requests are refused by our browser and
+  never sent, so third-party failures are NOT measured. Our browser also refuses the
+  site's own images, media and fonts, and the evidence's `blockedByRenderer` counts
+  say how much: an error such as an undefined analytics global can be caused by that
+  blocking, so confirm a console error or exception on the live page before reporting
+  it. A page with no capture (never rendered, or an older capture) is not measured
+  here, which is not the same as clean.
+  <!-- 29b T7: name the render not-recorded marker here -->
   A second rule reads the same table: `resources.bad-content-type` (info) — a file the
   server answered 200 for whose content type contradicts what the page called it (a
   stylesheet not served as `text/css`, a script not served as JavaScript, an image

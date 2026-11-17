@@ -552,11 +552,12 @@ describe("checklist coverage", () => {
   //   page    72 / query 110 + 1 = 111 / total 196 + 1 = 197; then the 29a rework
   //   (2026-11-16): query 111 - 3 Google rules + 2 = 110, metric 14 + 1 = 15, total 197.
   //   The new metric is `schema.property-coverage` (see the end of this file).
-  it("pins the ruleset split: 197 rules = 72 page + 110 query + 15 metric", () => {
+  //   Phase 29b T5 adds three query rules (the render console rules): query 113, total 200.
+  it("pins the ruleset split: 200 rules = 72 page + 113 query + 15 metric", () => {
     const registry = buildRegistry();
-    expect(registry.all()).toHaveLength(197);
+    expect(registry.all()).toHaveLength(200);
     expect(registry.byKind("page")).toHaveLength(72);
-    expect(registry.byKind("query")).toHaveLength(110);
+    expect(registry.byKind("query")).toHaveLength(113);
     // The link-graph five, the two content metrics and hreflang coverage, plus
     // the URL-parameter, redirect-volume and sitemap-structure metrics, plus
     // the render pass's coverage, the health rollup, the page-weight table, coverage.

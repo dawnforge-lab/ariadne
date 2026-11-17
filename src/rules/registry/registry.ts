@@ -1031,7 +1031,20 @@ const KINDS = ["page", "query", "metric"] as const satisfies readonly AnyRule["k
 //     `schema_type`). `schema.self-serving-reviews` copy states the fact, not
 //     a policy. A blob in the old shape is refused (re-run the rules); no
 //     migration. 197 rules: 72 page / 110 query / 15 metric.
-export const RULESET_VERSION = "0.26.0";
+// 0.27.0: Phase 29b, render-pass checks. ONE BUMP FOR THE PHASE; later tasks append here.
+//     Tasks 1-4 changed the crawl's capture earlier in the phase WITHOUT a version
+//     bump: the Range GET, the image stand-ins, `render_images`, the axe run and
+//     `render_a11y`, and render capture 3. Their rules arrive in tasks 6-7.
+//     1. Task 5: three query rules read the render pass's console capture
+//        (`pages.render_console`), each claiming CHECK-51, on every page with a
+//        capture, a failed render included: `render.js-exception` (warning;
+//        uncaught exceptions and unhandled rejections), `render.console-error`
+//        (info; an error among the first 20 console messages kept, so errors
+//        logged after twenty warnings are not seen) and `render.failed-request`
+//        (warning; the page's own failed requests, third-party ones not
+//        measured). A `render_console` that is not a RenderConsole throws.
+//        200 rules: 72 page / 113 query / 15 metric.
+export const RULESET_VERSION = "0.27.0";
 
 /**
  * The 47 crawl-derived checks (sf-audit checklist, Pre-Crawl + sections 1–11):

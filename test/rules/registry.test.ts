@@ -534,7 +534,8 @@ describe("check universe", () => {
     // unreachable robots.txt (docsFetched > 0), where it was silent; no copy or other rule moved.
     // 0.26.0: Phase 29a — structured data validated (microdata, RDFa, two thresholds), then the
     // 2026-11-16 rework: judged by web standards, not Google; registry.ts carries the grounds.
-    expect(RULESET_VERSION).toBe("0.26.0");
+    // 0.27.0: Phase 29b — render-pass checks (one bump for the phase); registry.ts carries the grounds.
+    expect(RULESET_VERSION).toBe("0.27.0");
   });
   it("every listed check id is a well-formed CHECK-NN and unique", () => {
     expect(new Set(CRAWL_CHECK_IDS).size).toBe(CRAWL_CHECK_IDS.length);
@@ -642,8 +643,8 @@ describe("severity shape of the ruleset", () => {
   it("holds 33 critical, 71 warning and 93 info rules", () => {
     const counts = { critical: 0, warning: 0, info: 0 };
     for (const r of all) counts[r.severity] += 1;
-    expect(counts).toEqual({ critical: 33, warning: 71, info: 93 });
-    expect(all).toHaveLength(197);
+    expect(counts).toEqual({ critical: 33, warning: 73, info: 94 });
+    expect(all).toHaveLength(200);
   });
 
   it("names exactly the rules that are critical", () => {
@@ -866,9 +867,9 @@ describe("a metric table's declared order", () => {
 
 // 29a rework final review: the severity split, pinned from the registry itself.
 describe("the registry's severity totals", () => {
-  it("197 rules are 33 critical, 71 warning and 93 info", () => {
+  it("200 rules are 33 critical, 73 warning and 94 info", () => {
     const counts: Record<string, number> = {};
     for (const rule of buildRegistry().all()) counts[rule.severity] = (counts[rule.severity] ?? 0) + 1;
-    expect(counts).toEqual({ critical: 33, warning: 71, info: 93 });
+    expect(counts).toEqual({ critical: 33, warning: 73, info: 94 });
   });
 });

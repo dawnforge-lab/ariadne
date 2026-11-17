@@ -199,7 +199,16 @@ export const TRIAGE: Readonly<Record<string, Readonly<TriageRow>>> = {
   "redirect.loop": { type: "issue", priority: "high", sfIssue: "Response Codes: Internal Redirect Loop" },
   "redirect.meta-refresh": { type: "warning", priority: "low", sfIssue: "Response Codes: Internal Redirection (Meta Refresh)" },
   "render.canonical-changed": { type: "issue", priority: "high", sfIssue: "JavaScript: Canonical Mismatch" },
+  // No SF counterpart; from the rubric. A console error is often third-party noise or an
+  // artefact of the renderer's blocking, so it is a warning to check, at hygiene priority.
+  "render.console-error": { type: "warning", priority: "low" },
+  // A site's own script, stylesheet or API call that fails is a defect that can break
+  // how the page appears.
+  "render.failed-request": { type: "issue", priority: "medium" },
   "render.h1-changed": { type: "warning", priority: "medium", sfIssue: "JavaScript: H1 Updated by JavaScript" },
+  // An uncaught exception may be a defect, or a script that needed a request the
+  // renderer refused, so a human confirms it first.
+  "render.js-exception": { type: "warning", priority: "medium" },
   "render.meta-description-changed": { type: "warning", priority: "medium", sfIssue: "JavaScript: Meta Description Updated by JavaScript" },
   // differs from SF: ours reports both directions (noindex removed by
   // JavaScript, or added by it), and either one decides whether the page is

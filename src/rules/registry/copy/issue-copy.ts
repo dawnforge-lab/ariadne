@@ -1244,6 +1244,27 @@ export const COPY_TEMPLATES: Record<string, IssueCopy> = {
     howToFix:
       "Serve the final H1 in the server-side HTML so both versions match.",
   },
+  "render.js-exception": {
+    title: "Rendering: JavaScript exceptions on the page",
+    explanation:
+      "Pages where an uncaught exception or an unhandled promise rejection was thrown while the page was rendered in a browser; the row gives the count and the first message, and the Template column names the page's template. Only the rendered sample is checked, and our browser refuses other origins' requests and the site's own images, media and fonts, so an exception caused by a refused script can be an artefact of the render. Confirm it on the live page before reporting it.",
+    howToFix:
+      "Check the exception in a browser with the console open and fix the script that throws it. Make any call that depends on another script tolerate that script not having loaded.",
+  },
+  "render.console-error": {
+    title: "Rendering: Errors logged to the browser console",
+    explanation:
+      "Pages that logged an error to the browser console while rendered, judged from the first 20 console messages the page logged (errors after 20 warnings are not seen); the row gives the total logged and the first error, and the Template column names the page's template. Only the rendered sample is checked, and an error such as a missing analytics global can be caused by our browser refusing third-party requests. Confirm it on the live page before reporting it.",
+    howToFix:
+      "Read the message in the browser console on the live page and fix the script or resource it names. Ignore an error that appears only in our render.",
+  },
+  "render.failed-request": {
+    title: "Rendering: Requests failed while rendering",
+    explanation:
+      "Pages whose own scripts, stylesheets, XHR or fetch calls failed while rendered in a browser, at the network level or with an HTTP status of 400 or above; the row gives the count, the first failing URL and its reason, and the Template column names the page's template. Only the rendered sample is checked, and requests to other origins are never sent, so third-party failures are not covered.",
+    howToFix:
+      "Request the failing URL and fix it: restore the file, correct the path in the template, or remove the call.",
+  },
   "pagination.canonical-to-other": {
     title: "Pagination: Paginated page canonicalised to another URL",
     explanation:
