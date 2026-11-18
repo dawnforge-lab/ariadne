@@ -130,8 +130,10 @@
  *    globals are not, so a page that replaced `URL` or `Array.prototype` can
  *    neither break nor bend them, and any lookup failure the page could cause
  *    is a miss — one unmeasured image, never a stopped pass. An image whose
- *    lookup is still running when the page is measured has no stand-in yet
- *    and is counted `noDimensions`.
+ *    lookup is still running when the page is measured has no stand-in yet,
+ *    and one whose stand-in has not finished loading has a box laid out
+ *    without it: both are counted `noDimensions`, and the images are sorted
+ *    against what had been requested and answered at that moment, not later.
  *  - **Accessibility (Phase 29b): axe-core, in the isolated world, last.**
  *    With `RendererOptions.accessibility` on, each rendered page gets the
  *    pinned axe-core's WCAG A/AA subset (a11y.ts), injected and run in ONE
@@ -1037,6 +1039,11 @@ class RenderTraffic {
    */
   private readonly requested = new Set<string>();
   private readonly served = new Map<string, ServedImage>();
+  /** `served` and `requested` as they stood when `measureImages` took the boxes. */
+  private imagesAtMeasure: {
+    served: ReadonlyMap<string, ServedImage>;
+    requested: ReadonlySet<string>;
+  } | null = null;
   private readonly standInIds = new Set<string>();
   /**
    * `imageDimensions` behind this render's dedupe and concurrency cap
@@ -1212,7 +1219,11 @@ class RenderTraffic {
    * requested and answered with stand-ins (`classifyImages`).
    */
   images(measurement: ImageMeasurement): RenderImages {
-    return classifyImages(measurement, this.served, this.requested);
+    const atMeasure = this.imagesAtMeasure;
+    if (atMeasure === null) {
+      throw new Error("images() before measureImages(): nothing was measured to sort");
+    }
+    return classifyImages(measurement, atMeasure.served, atMeasure.requested);
   }
 
   /**
@@ -1237,6 +1248,11 @@ class RenderTraffic {
     }
     // The evaluate succeeded, so the world it ran in is the one still held.
     this.measuredContextId = this.isolatedContextId;
+    // What had been requested and answered when the boxes were taken. The
+    // render keeps answering image requests until it shuts (through the HTML
+    // read and the axe run), and an image answered after this was not in the
+    // box measured.
+    this.imagesAtMeasure = { served: new Map(this.served), requested: new Set(this.requested) };
     return readImageMeasurement(reply.result.value ?? null);
   }
 

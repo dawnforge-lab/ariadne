@@ -22,6 +22,7 @@ import {
   srcsetStandIn,
   standInSvg,
   type ImageDimensionLookup,
+  type ImageLoadState,
   type RenderImage,
   type StoredImage,
 } from "../../src/crawl/render/image-stand-in.js";
@@ -65,13 +66,13 @@ describe("classifyImages", () => {
       {
         total: 7,
         rows: [
-          [u("hidden.png"), 0, 0, "eager", false],
-          [u("lazy.png"), 400, 300, "lazy", false],
-          [u("plain.png"), 400, 300, "eager", false],
-          [u("nodims.png"), 400, 300, "eager", false],
-          [u("wide.png"), 400, 300, "eager", false],
-          [u("exact.png"), 800, 600, "eager", false],
-          [u("mid.png"), 600, 450, "eager", false],
+          [u("hidden.png"), 0, 0, "eager", "loaded"],
+          [u("lazy.png"), 400, 300, "lazy", "loaded"],
+          [u("plain.png"), 400, 300, "eager", "loaded"],
+          [u("nodims.png"), 400, 300, "eager", "loaded"],
+          [u("wide.png"), 400, 300, "eager", "loaded"],
+          [u("exact.png"), 800, 600, "eager", "loaded"],
+          [u("mid.png"), 600, 450, "eager", "loaded"],
         ],
       },
       served,
@@ -124,12 +125,43 @@ describe("classifyImages", () => {
     // never be read as an oversized image.
     const url = `${BASE}cors.png`;
     const result = classifyImages(
-      { total: 1, rows: [[url, 16, 16, "eager", true]] },
+      { total: 1, rows: [[url, 16, 16, "eager", "broken"]] },
       new Map<string, Served>([[url, { width: 1600, height: 1200, bytes: 1, widthFrom: "stored" }]]),
       new Set([url]),
     );
     expect(result).toMatchObject({ broken: 1, measured: 0, widerThanDisplayed: 0, standIns: 1 });
     expect(result.kept).toEqual([]);
+  });
+
+  it("counts a served stand-in still loading at measurement as noDimensions, never measured", () => {
+    // Its box (an attribute or CSS size, or an alt-text box) was laid out
+    // without the image, so it is neither judged nor counted as measured.
+    const url = `${BASE}late.png`;
+    const result = classifyImages(
+      { total: 1, rows: [[url, 40, 16, "eager", "loading"]] },
+      new Map<string, Served>([[url, { width: 1600, height: 1200, bytes: 1, widthFrom: "stored" }]]),
+      new Set([url]),
+    );
+    expect(result).toMatchObject({ noDimensions: 1, measured: 0, widerThanDisplayed: 0, standIns: 1 });
+    expect(result.kept).toEqual([]);
+  });
+
+  it("counts an image still loading with no currentSrc yet as noDimensions, not notRequested", () => {
+    // Chromium reports an empty currentSrc until the image's answer arrives:
+    // an image whose stand-in lookup was still running when the page was
+    // measured. A lazy one stays lazyUnloaded, as documented.
+    const result = classifyImages(
+      {
+        total: 2,
+        rows: [
+          ["", 200, 100, "auto", "loading"],
+          ["", 200, 100, "lazy", "loading"],
+        ],
+      },
+      new Map<string, Served>(),
+      new Set([`${BASE}slow.png`]),
+    );
+    expect(result).toMatchObject({ noDimensions: 1, lazyUnloaded: 1, notRequested: 0, measured: 0 });
   });
 
   it("calls a box under 1×1 in either direction hidden, before anything else", () => {
@@ -138,7 +170,7 @@ describe("classifyImages", () => {
       [url, { width: 100, height: 100, bytes: 1, widthFrom: "stored" }],
     ]);
     const result = classifyImages(
-      { total: 2, rows: [[url, 0, 40, "eager", false], [url, 40, 0, "lazy", false]] },
+      { total: 2, rows: [[url, 0, 40, "eager", "loaded"], [url, 40, 0, "lazy", "loaded"]] },
       served,
       new Set([url]),
     );
@@ -149,12 +181,12 @@ describe("classifyImages", () => {
   it("keeps the 50 worst of 60 wider images, and says how many there were", () => {
     const served = new Map<string, Served>();
     const requested = new Set<string>();
-    const rows: [string, number, number, string, boolean][] = [];
+    const rows: [string, number, number, string, ImageLoadState][] = [];
     for (let i = 0; i < 60; i += 1) {
       const url = `${BASE}img-${String(i).padStart(2, "0")}.png`;
       served.set(url, { width: 1000 + i, height: 500, bytes: i, widthFrom: "stored" });
       requested.add(url);
-      rows.push([url, 100, 50, "eager", false]);
+      rows.push([url, 100, 50, "eager", "loaded"]);
     }
     const result = classifyImages({ total: 60, rows }, served, requested);
     expect(result.measured).toBe(60);
@@ -174,7 +206,7 @@ describe("classifyImages", () => {
     ]);
     const urls = [...served.keys()];
     const result = classifyImages(
-      { total: 3, rows: urls.map((u) => [u, 100, 100, "eager", false] as [string, number, number, string, boolean]) },
+      { total: 3, rows: urls.map((u) => [u, 100, 100, "eager", "loaded"] as [string, number, number, string, ImageLoadState]) },
       served,
       new Set(urls),
     );
@@ -184,7 +216,7 @@ describe("classifyImages", () => {
   it("never reports negative waste: an image shown larger than it is wastes nothing", () => {
     const url = `${BASE}up.png`;
     const result = classifyImages(
-      { total: 1, rows: [[url, 400, 400, "eager", false]] },
+      { total: 1, rows: [[url, 400, 400, "eager", "loaded"]] },
       new Map<string, Served>([[url, { width: 100, height: 100, bytes: 1, widthFrom: "stored" }]]),
       new Set([url]),
     );
@@ -196,7 +228,7 @@ describe("classifyImages", () => {
   it("stores a url through the console's cap, and says it was cut", () => {
     const url = `${BASE}${"x".repeat(RENDER_CONSOLE_MAX_CHARS + 50)}.png`;
     const result = classifyImages(
-      { total: 1, rows: [[url, 10, 10, "eager", false]] },
+      { total: 1, rows: [[url, 10, 10, "eager", "loaded"]] },
       new Map<string, Served>([[url, { width: 100, height: 100, bytes: 1, widthFrom: "stored" }]]),
       new Set([url]),
     );
@@ -451,7 +483,7 @@ describe("IMAGES_MEASURE_SCRIPT and readImageMeasurement", () => {
   });
 
   it("accepts the script's shape", () => {
-    const value = { total: 2, rows: [["https://a/b.png", 10, 20, "lazy", false]] };
+    const value = { total: 2, rows: [["https://a/b.png", 10, 20, "lazy", "loaded"], ["https://a/c.png", 0, 0, "eager", "loading"]] };
     expect(readImageMeasurement(value)).toEqual(value);
   });
 
@@ -462,9 +494,10 @@ describe("IMAGES_MEASURE_SCRIPT and readImageMeasurement", () => {
       { total: 1, rows: [["u", 1, 1]] },
       { total: 1, rows: [["u", 1, 1, "eager"]] },
       { total: 1, rows: [["u", 1, 1, "eager", "no"]] },
-      { total: 1, rows: [["u", "1", 1, "eager", false]] },
-      { total: 1, rows: [["u", 1.5, 1, "eager", false]] },
-      { total: 0, rows: [["u", 1, 1, "eager", false]] },
+      { total: 1, rows: [["u", 1, 1, "eager", false]] },
+      { total: 1, rows: [["u", "1", 1, "eager", "loaded"]] },
+      { total: 1, rows: [["u", 1.5, 1, "eager", "loaded"]] },
+      { total: 0, rows: [["u", 1, 1, "eager", "loaded"]] },
     ]) {
       expect(() => readImageMeasurement(bad), JSON.stringify(bad)).toThrow(/image measurement/);
     }

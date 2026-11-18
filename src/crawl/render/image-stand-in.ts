@@ -373,11 +373,16 @@ export function readSrcsetReply(value: unknown): SrcsetMatch | null {
 /**
  * `() => {total, rows}`, as an expression: the first `MAX_RENDER_IMAGES`
  * `<img>` elements of the main document, in document order, each as
- * `[currentSrc without its fragment, box width, box height, loading, broken]`.
+ * `[currentSrc without its fragment, box width, box height, loading, state]`.
  * The box is `getBoundingClientRect`, rounded to whole CSS pixels; `loading`
- * is the reflected IDL value (`lazy` or `eager`); `broken` is
- * `complete && naturalWidth === 0` — the browser finished with the image and
- * has nothing to show (I1).
+ * is the reflected IDL value (`lazy` or `eager`); `state` is what the browser
+ * had done with the image when it was measured:
+ *  - `loaded`: `complete` with a `naturalWidth` — the box is laid out around
+ *    the image;
+ *  - `broken`: `complete` with `naturalWidth` 0 — the browser finished with
+ *    the image and has nothing to show (I1);
+ *  - `loading`: not `complete` yet — whatever box it has (an attribute or CSS
+ *    size, an alt-text box) was laid out without the image.
  *
  * The renderer evaluates it in an ISOLATED WORLD (renderer.ts), so a page
  * that replaced `Array.prototype.push` or `getBoundingClientRect` in its own
@@ -402,16 +407,25 @@ export const IMAGES_MEASURE_SCRIPT = `(() => {
       Math.round(box.width),
       Math.round(box.height),
       String(img.loading),
-      img.complete && img.naturalWidth === 0,
+      !img.complete ? "loading" : img.naturalWidth === 0 ? "broken" : "loaded",
     ]);
   }
   return { total, rows };
 })()`;
 
+/** What the browser had done with a measured `<img>` (`IMAGES_MEASURE_SCRIPT`). */
+export type ImageLoadState = "loaded" | "broken" | "loading";
+
+const IMAGE_LOAD_STATES: ReadonlySet<string> = new Set<ImageLoadState>([
+  "loaded",
+  "broken",
+  "loading",
+]);
+
 /** What `IMAGES_MEASURE_SCRIPT` hands back. */
 export interface ImageMeasurement {
   total: number;
-  rows: [string, number, number, string, boolean][];
+  rows: [string, number, number, string, ImageLoadState][];
 }
 
 function isCount(n: unknown): n is number {
@@ -441,7 +455,8 @@ export function readImageMeasurement(value: unknown): ImageMeasurement {
       !isCount(row[1]) ||
       !isCount(row[2]) ||
       typeof row[3] !== "string" ||
-      typeof row[4] !== "boolean"
+      typeof row[4] !== "string" ||
+      !IMAGE_LOAD_STATES.has(row[4])
     ) {
       throw bad();
     }
@@ -483,7 +498,7 @@ export interface RenderImages {
   total: number;
   /** The ones measured: the first `MAX_RENDER_IMAGES`. */
   examined: number;
-  /** Answered with a stand-in and laid out at a box of at least 1×1. */
+  /** Answered with a stand-in, loaded, and laid out at a box of at least 1×1. */
   measured: number;
   /** A box under 1×1 (display:none, collapsed, zero-sized). */
   hidden: number;
@@ -493,8 +508,9 @@ export interface RenderImages {
   notRequested: number;
   /**
    * Requested, but no size was known for it, so it was aborted as before 29b.
-   * Also an image whose lookup was still running when the page was measured:
-   * it had no stand-in yet, so it is counted here rather than guessed.
+   * Also an image whose lookup was still running when the page was measured
+   * (it had no stand-in yet), or whose stand-in had not finished loading (its
+   * box was laid out without it): counted here rather than guessed.
    */
   noDimensions: number;
   /**
@@ -506,7 +522,10 @@ export interface RenderImages {
   broken: number;
   /** Of `measured`, the images whose intrinsic width exceeds their displayed width. */
   widerThanDisplayed: number;
-  /** Distinct image URLs this render answered with a stand-in (any image, `<img>` or not). */
+  /**
+   * Distinct image URLs answered with a stand-in by the time the page was
+   * measured (any image, `<img>` or not).
+   */
   standIns: number;
   /** The `RENDER_IMAGES_KEPT` worst of `widerThanDisplayed`, by wasted pixels, then bytes, then url. */
   kept: RenderImage[];
@@ -518,16 +537,25 @@ export interface RenderImages {
  *
  *  1. a box under 1×1 → `hidden` (nothing is shown, so nothing is wasted on screen);
  *  2. its `currentSrc` was never requested → `lazyUnloaded` when it is
- *     `loading=lazy`, else `notRequested`;
+ *     `loading=lazy`; `noDimensions` when it is still loading (Chromium
+ *     reports an empty `currentSrc` until the image's answer arrives, so an
+ *     image whose lookup was still running reads as "never requested" by URL,
+ *     while its pending load says otherwise); else `notRequested`;
  *  3. it was answered with a stand-in → `broken` when the browser could not
- *     display it, else `measured`;
- *  4. otherwise → `noDimensions` (requested and aborted).
+ *     display it, `measured` when it had loaded, and `noDimensions` while it
+ *     was still loading (its box is not the image's);
+ *  4. otherwise → `noDimensions` (requested and aborted, or its lookup still
+ *     running).
  *
- * `served` and `requested` are keyed by the request URL without its fragment,
- * which is what `currentSrc` without its fragment is.
+ * `served` and `requested` are what the render had requested and answered
+ * WHEN THE PAGE WAS MEASURED (the renderer copies them then): a stand-in
+ * served later, while the page's HTML is read or axe runs, must not turn a
+ * box measured without it into a `measured` image. Both are keyed by the
+ * request URL without its fragment, which is what `currentSrc` without its
+ * fragment is.
  */
 export function classifyImages(
-  measured: { total: number; rows: [string, number, number, string, boolean][] },
+  measured: ImageMeasurement,
   served: ReadonlyMap<string, StoredImage & { widthFrom: RenderImage["widthFrom"] }>,
   requested: ReadonlySet<string>,
 ): RenderImages {
@@ -544,13 +572,14 @@ export function classifyImages(
     standIns: served.size,
   };
   const wider: Array<Omit<RenderImage, "url" | "cut"> & { rawUrl: string }> = [];
-  for (const [src, displayedWidth, displayedHeight, loading, broken] of measured.rows) {
+  for (const [src, displayedWidth, displayedHeight, loading, state] of measured.rows) {
     if (displayedWidth < 1 || displayedHeight < 1) {
       out.hidden += 1;
       continue;
     }
     if (!requested.has(src)) {
       if (loading === "lazy") out.lazyUnloaded += 1;
+      else if (state === "loading") out.noDimensions += 1;
       else out.notRequested += 1;
       continue;
     }
@@ -559,8 +588,12 @@ export function classifyImages(
       out.noDimensions += 1;
       continue;
     }
-    if (broken) {
+    if (state === "broken") {
       out.broken += 1;
+      continue;
+    }
+    if (state === "loading") {
+      out.noDimensions += 1;
       continue;
     }
     out.measured += 1;

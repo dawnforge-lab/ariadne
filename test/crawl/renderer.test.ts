@@ -3167,8 +3167,12 @@ describe("PageRenderer image stand-ins (Phase 29b)", () => {
   const stored = new Map<string, StoredImage>();
   /** When set, the lookup rejects with it — our defect, which must stop the render. */
   let lookupFault: Error | null = null;
+  /** Normalised URLs whose lookup answers only after this long (a slow database). */
+  const lookupDelayMs = new Map<string, number>();
   const lookup: ImageDimensionLookup = async (urls) => {
     if (lookupFault !== null) throw lookupFault;
+    const delay = Math.max(0, ...urls.map((url) => lookupDelayMs.get(url) ?? 0));
+    if (delay > 0) await new Promise((resolve) => setTimeout(resolve, delay));
     const out = new Map<string, StoredImage>();
     for (const url of urls) {
       const hit = stored.get(url);
@@ -3211,6 +3215,9 @@ describe("PageRenderer image stand-ins (Phase 29b)", () => {
       "/img/hidden": () =>
         pageHtml(`<div style="display:none"><img src="/hid.png" alt="h"></div><p>shown</p>`),
       "/img/no-dims": () => pageHtml(`<img src="/nodims.png" alt="n" width="200" height="100">`),
+      // A stored image whose lookup answers after the page is measured: its
+      // attribute-sized box was laid out without it.
+      "/img/slow-lookup": () => pageHtml(`<img src="/slow.png" alt="s" width="200" height="100">`),
       // The same <img> as /img/same-origin, and a script that writes the
       // length of what its own fetch got into the title: the real PNG's byte
       // count, never an SVG's.
@@ -3260,6 +3267,8 @@ describe("PageRenderer image stand-ins (Phase 29b)", () => {
     store(`${origin.base}/img/a-400.png`, { width: 400, height: 300, bytes: 9_000 });
     store(`${origin.base}/lazy.png`, { width: 800, height: 800, bytes: 1_000 });
     store(`${origin.base}/hid.png`, { width: 800, height: 800, bytes: 1_000 });
+    store(`${origin.base}/slow.png`, { width: 1600, height: 800, bytes: 1_000 });
+    lookupDelayMs.set(normalizeUrl(`${origin.base}/slow.png`)!, SETTLE_MS + 300);
     htmlDir = await mkdtemp(join(tmpdir(), "ariadne-render-images-"));
     renderer = await PageRenderer.launch({
       origin: origin.base,
@@ -3379,6 +3388,27 @@ describe("PageRenderer image stand-ins (Phase 29b)", () => {
     expect(result.skippedPaintRequests).toBe(1);
     expect(result.console!.blockedByRenderer.sameOriginAssets).toBe(1);
     expect(origin.count("/nodims.png")).toBe(0);
+  });
+
+  it("(g2) counts an image whose lookup outlived the measurement as no-dimensions, never measured", async () => {
+    // The page is measured SETTLE_MS after DOMContentLoaded; the lookup answers
+    // 300 ms after that. The box (200×100 from its attributes) was laid out
+    // without the image, and Chromium reports no currentSrc for it yet: it is
+    // requested-and-unmeasured, never "not requested", and a stand-in served
+    // afterwards must not make it a measured, oversized image.
+    const result = await renderer.render(`${origin.base}/img/slow-lookup`);
+
+    expect(result.error).toBeNull();
+    expect(result.images).toMatchObject({
+      total: 1,
+      examined: 1,
+      measured: 0,
+      noDimensions: 1,
+      notRequested: 0,
+      widerThanDisplayed: 0,
+      standIns: 0,
+    });
+    expect(result.images!.kept).toEqual([]);
   });
 
   it("(h) never lets a stand-in be served from the cache for the real URL", async () => {
