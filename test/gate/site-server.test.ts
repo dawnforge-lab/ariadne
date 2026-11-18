@@ -10,7 +10,7 @@
  */
 import { describe, expect, it } from "vitest";
 import { SITEMAP_MAX_BYTES } from "../../src/crawl/sitemap-stream.js";
-import { siteFixture, sitemapHreflangSwitch, startSiteServer } from "./site-server.js";
+import { plantSwitch, portSwitch, siteFixture, sitemapHreflangSwitch, startSiteServer } from "./site-server.js";
 
 const PAGES = 1_000;
 const BASE = "http://127.0.0.1:9999";
@@ -230,5 +230,157 @@ ${urls.join("\n")}
       await off.close();
       await on.close();
     }
+  });
+});
+
+/**
+ * The Phase 29c plant, `GATE_PLANT=1` (R12): three index sets whose answers a
+ * crawl diff can be checked against. Off is the baseline fixture; on changes
+ * only what R12 names.
+ */
+describe("gate site fixture: planted variant", () => {
+  const SMALL = 2_500;
+  const small = siteFixture.layout(SMALL);
+  const planted = siteFixture.layout(SMALL, true);
+  const sets = siteFixture.plantedSets(SMALL);
+  const OFF_PLAIN = { sitemapHreflang: false, plant: false };
+  const ON_PLANT = { sitemapHreflang: false, plant: true };
+
+  const titleOf = (html: string): string => /<title>([^<]*)<\/title>/.exec(html)?.[1] ?? "";
+
+  it("reads the switch from GATE_PLANT, and refuses anything but 1, 0 or unset", () => {
+    expect(plantSwitch({})).toBe(false);
+    expect(plantSwitch({ GATE_PLANT: "" })).toBe(false);
+    expect(plantSwitch({ GATE_PLANT: "0" })).toBe(false);
+    expect(plantSwitch({ GATE_PLANT: "1" })).toBe(true);
+    expect(() => plantSwitch({ GATE_PLANT: "yes" })).toThrow(/GATE_PLANT must be 1, 0 or unset/);
+  });
+
+  it("reads GATE_PORT: unset is ephemeral, an integer 1..65535 is the port, anything else is refused", () => {
+    expect(portSwitch({})).toBe(0);
+    expect(portSwitch({ GATE_PORT: "" })).toBe(0);
+    expect(portSwitch({ GATE_PORT: "45791" })).toBe(45_791);
+    for (const bad of ["0", "70000", "abc", "1.5"]) {
+      expect(() => portSwitch({ GATE_PORT: bad })).toThrow(/GATE_PORT must be an integer/);
+    }
+  });
+
+  it("plants R12's index sets: 5 titles, 2 statuses, 1 removed at 2,500 pages, disjoint", () => {
+    expect(sets.titles).toHaveLength(5);
+    expect(sets.statuses).toHaveLength(2);
+    expect(sets.removed).toHaveLength(1);
+    const indices = (paths: string[]): number[] =>
+      paths.map((path) => siteFixture.indexOfPath(path, small) as number);
+    expect(indices(sets.titles)).toEqual([250, 750, 1250, 1750, 2250]);
+    expect(indices(sets.statuses)).toEqual([500, 1500]);
+    expect(indices(sets.removed)).toEqual([1000]);
+    expect(new Set([...sets.titles, ...sets.statuses, ...sets.removed]).size).toBe(8);
+    expect(siteFixture.plantedSets(50_000).titles).toHaveLength(100);
+    expect(siteFixture.plantedSets(50_000).statuses).toHaveLength(50);
+    expect(siteFixture.plantedSets(50_000).removed).toHaveLength(25);
+  });
+
+  it("changes only <title> on a retitled page, to `Retitled <original>`", () => {
+    for (const path of sets.titles) {
+      const before = siteFixture.page(path, small, BASE) as string;
+      const after = siteFixture.page(path, planted, BASE) as string;
+      expect(titleOf(after)).toBe(`Retitled ${titleOf(before)}`);
+      expect(after.replace(/<title>[^<]*<\/title>/, "")).toBe(before.replace(/<title>[^<]*<\/title>/, ""));
+    }
+  });
+
+  it("leaves every other page byte-identical to the baseline", () => {
+    const touched = new Set(sets.titles);
+    for (const index of [0, 1, 249, 251, 499, 501, 999, 1001, 2499]) {
+      const path = siteFixture.pathOfIndex(index, small);
+      if (touched.has(path)) continue;
+      // Pages that link to the removed page lose one anchor; compare the rest.
+      const strip = (html: string): string => html.replace(/<li><a href="[^"]*">[^<]*<\/a><\/li>\n?/g, "");
+      expect(strip(siteFixture.page(path, planted, BASE) as string), path).toBe(
+        strip(siteFixture.page(path, small, BASE) as string),
+      );
+    }
+  });
+
+  it("answers 410 for the status set, 404 for the removed set, and 200 otherwise", async () => {
+    const server = await startSiteServer(SMALL, ON_PLANT);
+    try {
+      for (const path of sets.statuses) {
+        const response = await fetch(`${server.base}${path}`);
+        expect(response.status, path).toBe(410);
+        await response.text();
+      }
+      for (const path of sets.removed) {
+        const response = await fetch(`${server.base}${path}`);
+        expect(response.status, path).toBe(404);
+        await response.text();
+      }
+      for (const path of [...sets.titles, "/", "/products/p3"]) {
+        const response = await fetch(`${server.base}${path}`);
+        expect(response.status, path).toBe(200);
+        await response.text();
+      }
+    } finally {
+      await server.close();
+    }
+  });
+
+  it("answers the baseline when plant is off, 410 and 404 sets included", async () => {
+    const server = await startSiteServer(SMALL, OFF_PLAIN);
+    try {
+      for (const path of [...sets.statuses, ...sets.removed]) {
+        const response = await fetch(`${server.base}${path}`);
+        expect(response.status, path).toBe(200);
+        await response.text();
+      }
+    } finally {
+      await server.close();
+    }
+  });
+
+  it("lists a removed page in no link and no sitemap shard", () => {
+    const removed = new Set(sets.removed.map((path) => `${BASE}${path}`));
+    const removedIndex = siteFixture.indexOfPath(sets.removed[0] as string, small) as number;
+    for (let index = 0; index < SMALL; index++) {
+      expect(siteFixture.linkTargets(index, planted)).not.toContain(removedIndex);
+    }
+    for (let shard = 0; shard < siteFixture.sitemapShards; shard++) {
+      const xml = siteFixture.sitemapShard(shard, planted, BASE, OFF_PLAIN);
+      for (const match of xml.matchAll(/<loc>([^<]+)<\/loc>/g)) {
+        expect(removed.has(match[1] as string)).toBe(false);
+      }
+    }
+    // Pages elsewhere still link: the plant removes anchors to one page only.
+    expect(siteFixture.linkTargets(0, planted).length).toBeGreaterThanOrEqual(siteFixture.linksPerPage - 1);
+  });
+
+  it("declares every non-removed URL exactly once across the planted shards", () => {
+    const declared = new Set<string>();
+    for (let shard = 0; shard < siteFixture.sitemapShards; shard++) {
+      for (const match of siteFixture.sitemapShard(shard, planted, BASE, OFF_PLAIN).matchAll(/<loc>([^<]+)<\/loc>/g)) {
+        expect(declared.has(match[1] as string)).toBe(false);
+        declared.add(match[1] as string);
+      }
+    }
+    expect(declared.size).toBe(SMALL - sets.removed.length);
+  });
+
+  it("reaches every non-removed page from / through links alone", () => {
+    const removed = new Set(sets.removed.map((path) => siteFixture.indexOfPath(path, small) as number));
+    const seen = new Uint8Array(SMALL);
+    const queue = [0];
+    seen[0] = 1;
+    let reached = 1;
+    while (queue.length > 0) {
+      const index = queue.pop() as number;
+      for (const target of siteFixture.linkTargets(index, planted)) {
+        if (seen[target] === 1) continue;
+        seen[target] = 1;
+        reached++;
+        queue.push(target);
+      }
+    }
+    expect(reached).toBe(SMALL - removed.size);
+    for (const index of removed) expect(seen[index]).toBe(0);
   });
 });
