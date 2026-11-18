@@ -1,14 +1,34 @@
 # The Ariadne surface Talos codes against
 
 **Status:** the contract as of Phase 29c, in progress (ruleset 0.28.0, migrations 0000–0060,
-35 MCP tools / 35 HTTP routes; every column label in this document is served
+38 MCP tools / 38 HTTP routes; every column label in this document is served
 under the ruleset version the engine reports — `rules_catalog`'s
 `rulesetVersion`, which the metric-table pass moves).
 `docs/talos-integration.md` says *why* the seam exists and what obligations bind
 it; this document says *what the seam is*.
 
-**What Phase 29c has changed here so far: the link graph is summarised per page.** No
-tool or route is added and no response shape changes. The ruleset moves to **0.28.0**
+**What Phase 29c has changed here so far: the link graph is summarised per page, and
+two crawls can be diffed field by field.** Three tools and three routes are added
+(35 → 38 / 38), and existing answers gain fields:
+
+- **New tools and routes:** `anchors_by_target` (`GET /crawls/:id/anchors-by-target`,
+  §4.6b: per linked page, its inlinks, distinct anchors, top anchors, empty and
+  non-descriptive anchor counts and `genericShare`), `crawl_diff` (`GET /diff`, §7.6:
+  per field, how many pages changed between two judged crawls of one site) and
+  `crawl_diff_urls` (`GET /diff/urls`, §7.6: the URLs behind each of those counts,
+  with the value on each side).
+- **`pages_query` rows and the pages export** gain four link facts, written by the rules
+  run: `inlinksInternal`, `outlinksInternal`, `outlinksExternal` and `linkScore`. They
+  are null on a crawl never judged and on one judged before 29c, never zero.
+- **The `internal_urls` CSV view** gains the same four columns (`inlinks`,
+  `outlinksInternal`, `outlinksExternal`, `linkScore`), inserted after `clickDepth`, not
+  appended.
+- **`crawl_overview`** gains a `link-counts` section (§4.3b), after `click-depth`; on a
+  crawl not judged, or judged before 29c, it is absent and named in `notMeasured`.
+- **A thirteenth CSV view,** `anchors_by_target` (§12).
+- **The `crawl_rules` summary** gains `derivedMs`, the milliseconds each derivation took.
+
+The ruleset moves to **0.28.0**
 (229 rules: 72 page / 140 query / 17 metric; 33 critical / 97 warning / 99 info, the
 metric rules counting as info; 24 overridable thresholds). Migration 0060 stamps the
 new threshold onto every stored run stamp. The new metric `links.score-distribution` (CHECK-33)
@@ -23,7 +43,9 @@ empty or a generic English phrase (the list `links.non-descriptive-anchor` uses)
 anchor text is judged, not an aria-label. Evidence: `inlinks` (distinct linking pages,
 the page's own links excluded, nofollow counted), `minInlinks` (the threshold in force)
 and `anchors` (up to 10 distinct normalised anchors, `""` for empty). It fails loudly
-on a crawl whose counts were never derived. `GENERIC_ANCHOR_MIN_INLINKS` is the
+on a crawl whose counts were never derived. Like `links.only-from-non-indexable` it
+needs the whole site's link graph, so it does not run on a list crawl and
+`crawl.list-mode` names it. `GENERIC_ANCHOR_MIN_INLINKS` is the
 twenty-fourth overridable threshold (integer, 1–1000, default 3).
 
 **What Phase 29b changed here: the render pass reads the page's own errors, its image
@@ -4173,14 +4195,16 @@ limit?, cursor?}` → `{items, nextCursor, field, state, thresholds}`, each item
 - **`state`** is `changed` (the default) or `notComparable`, and is a 400 for
   `added` and `removed`, which have none (the answer's `state` is then null).
 - **`before` / `after`** are the stored values, so text is capped as stored.
+  `title`, `metaDescription`, `h1`, `fetchClass` and `metaRobots` are strings,
   `canonical` is `{html, header}`, `schemaTypes` a sorted array, `linkScore` and
   the other numbers are numbers, and a null side is null. For `added` and
   `removed` both are null.
 - **One definition.** The listing and the summary use the same two predicates
   (`fieldChangedWhere`, `fieldNotComparableWhere` in `src/api/crawl-diff.ts`), so
   a field walked to its end has exactly as many URLs as `crawl_diff` counted.
-  Pass the same thresholds to both. Refusals are `crawl_diff`'s, in its order,
-  with the listing's own `field` / `state` / `limit` / `cursor` checks first.
+  Pass the same thresholds to both. The listing's own checks come first, in the
+  order thresholds, `field`, `state`, `limit`, `cursor`, all before any read; then
+  `crawl_diff`'s refusals, in its order.
 
 Pinned: `test/api/crawl-diff.test.ts:259` ("counts changed and notComparable per
 field as the fixture header derives"), whose header derives every count from its

@@ -1703,8 +1703,11 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "a fetched-OK page. linkScore is 0-100: the share of internal link weight " +
         "the page holds (random-surfer model, damping 0.85), log-scaled so 100 is " +
         "the crawl's top page; null for a page outside the link graph. Every one is " +
-        "null on a crawl judged before these existed, which is not measured and " +
-        "never zero: re-run crawl_rules.\n\n" +
+        "null on a crawl the rules have never judged and on one judged before these " +
+        "existed, which is not measured and never zero: run crawl_rules " +
+        "(crawl_status's rulesRunAt tells an unjudged crawl apart). On a judged " +
+        "crawl a non-null inlinksInternal beside a null linkScore means the page is " +
+        "outside the link graph (not fetched OK), a value, not a gap.\n\n" +
         "TWO WORD COUNTS, AND THEY MEAN DIFFERENT THINGS. wordCount is every word " +
         "of visible text in the HTML. renderableWordCount is that count minus the " +
         "words the page's own markup says are not displayed (hidden attributes, " +
@@ -2286,7 +2289,9 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "the two crawls. Answers {items, nextCursor, field, state, thresholds}; each " +
         "item is {url, before, after}, ordered by URL. before is the BASE crawl's " +
         "stored value and after the HEAD crawl's, as stored (text is capped as it " +
-        "was stored): a string for title, metaDescription and h1; a number for " +
+        "was stored): a string for title, metaDescription, h1, fetchClass (the " +
+        "fetch class, e.g. ok, client_error) and metaRobots (the robots meta content " +
+        "as stored); a number for " +
         "status, wordCount, inlinks, clickDepth and linkScore; true or false for " +
         "indexable; {html, header} for canonical; a sorted array of schema types " +
         "for schemaTypes; null where the page had no value.\n\n" +
