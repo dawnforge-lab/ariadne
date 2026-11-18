@@ -27,7 +27,7 @@ texts"). Style:
   Sitemaps, Canonicals, Directives, Page titles, Meta description, H1,
   Headings, Content, Images, Links, Hreflang, Redirects, URL, Security,
   Structured data, Pagination, Site, Crawl, Resources, Mobile, Performance,
-  Rendering), the condition stated with its threshold or status class.
+  Rendering, Robots.txt, Social, HTML, Accessibility), the condition stated with its threshold or status class.
 - **Description** = one to three sentences: what the rows are, why it matters.
   SEO vocabulary as practitioners use it (indexable, canonicalised, noindex,
   4xx, crawl budget, return link). No hedging, no "we", no engine words.

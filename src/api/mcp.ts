@@ -1101,7 +1101,7 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "overridden}: value is what the NEXT rules run will use, overridden is true " +
         "where the block sets it.\n\n" +
         "judgedWith is the stamp of the last completed rules run — {disabledRules, " +
-        "thresholds (all 20, at the effective values that run used), findingCap?} — " +
+        "thresholds (every one, at the effective values that run used), findingCap?} — " +
         "or null on a crawl nobody has " +
         "judged. judgementStale {stale, reasons} compares it with the current block " +
         "(reasons: overrides | thresholds | findingCap).",
@@ -1121,7 +1121,7 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "crawl_start validates it, and null is refused — a crawl field has no " +
         "unset. Only the fields crawl_config_get marks whenPaused can be changed " +
         "(maxPages, maxDepth, perHostDelayMs, maxConcurrency, renderBudgetPct, " +
-        "renderMaxPages, renderSamplePerType, exclude, include, maxRedirectHops, " +
+        "renderMaxPages, renderSamplePerType, renderAccessibility, exclude, include, maxRedirectHops, " +
         "requestHeaders, httpAuth, cookies), and only while the crawl is queued " +
         "or paused: pause a running crawl with crawl_pause, set, then " +
         "crawl_resume. A never field (siteUrl, userAgent, the host lists, " +
@@ -1204,8 +1204,8 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "rulesetVersion}. Every field carries its description, its default where " +
         "it has one, and x-ariadne-mutable — never (fixed for the crawl's life: " +
         "siteUrl, userAgent, probeHosts, legacyHosts, sitemapUrls, fetchResources), " +
-        "whenPaused (maxPages, maxDepth, perHostDelayMs, maxConcurrency and the " +
-        "render budgets) or always (findingCap and the judgement block). The " +
+        "whenPaused (maxPages, maxDepth, perHostDelayMs, maxConcurrency, the " +
+        "render budgets and renderAccessibility) or always (findingCap and the judgement block). The " +
         "judgement block lists every rule id it may name and every overridable " +
         "threshold with its minimum, maximum and default; rulesetVersion says which " +
         "ruleset those ids are from.\n\n" +

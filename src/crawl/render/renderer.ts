@@ -41,7 +41,10 @@
  *    burst landed on the very host the crawl had been asked to treat gently.
  *    What is still aborted, unpaced and uncounted: paint-only requests
  *    (`Image`, `Media`, `Font` — `PAINT_ONLY_RESOURCES`), which cannot move a
- *    measurement, and every third-party request (below).
+ *    measurement, and every third-party request (below). An image whose size
+ *    is known is not aborted but it is not paced either: it is answered by
+ *    the interception itself and never reaches any host (the stand-ins,
+ *    below).
  *  - **The HTTP cache is kept, the session is not.** A render worker reuses
  *    one browser context across URLs, so a theme's scripts are fetched once
  *    per worker rather than once per page; between URLs its cookies,
@@ -55,7 +58,10 @@
  *        pauses every request of the page, its iframes (same- and
  *        cross-origin documents) and its dedicated workers, redirect hops
  *        included. Each is failed unless it is same-origin, not paint-only,
- *        and (documents) allowed by url-policy; what survives is paced.
+ *        and (documents) allowed by url-policy; what survives is paced. The
+ *        one request ANSWERED rather than failed or released is an image
+ *        stand-in (below) — answered where it was paused, so it is not
+ *        traffic to anyone.
  *     2. FENCED — the browser's proxy is a local listener that drops every
  *        connection (`NetworkFence`), with ONE exception: `http(s)://` to the
  *        crawl's origin AT ITS PORT (pinned even when it is the default one —
@@ -87,6 +93,62 @@
  *    gate, and claims a slot after the fact. Chrome caps them per page. A
  *    blocked request never fails the render: the page is measured as the
  *    site's own bytes render it.
+ *  - **Image stand-ins (Phase 29b): an image is answered, never fetched.**
+ *    The resource pass read each image's intrinsic size from its header
+ *    (`resources.width/height`). An `Image` request whose URL has a stored
+ *    size — looked up per request through `RendererOptions.imageDimensions`,
+ *    so an image a script injected, or another page's `srcset` rendition, is
+ *    found too (ruling R5) — is answered with `Fetch.fulfillRequest`: a blank
+ *    SVG of exactly that size (image-stand-in.ts). The browser then lays the
+ *    page out as the real image would, and after the settle every `<img>` box
+ *    is measured against the stored size (`RenderResult.images`,
+ *    `pages.render_images`). A `srcset` candidate the browser picked whose
+ *    own size was never stored is found by asking the main frame which
+ *    `srcset` named it: its `w` descriptor is its width, and a stored
+ *    sibling's aspect ratio gives the height (R6). THIS IS THE ONE EXCEPTION
+ *    to "every cross-origin request is failed", and it is still no
+ *    third-party traffic: the answer comes from this process, a CDN image
+ *    included, and nothing reaches any host. So a stand-in takes NO gate
+ *    slot, is reported to no gate, never enters the `FreshnessLedger`, and is
+ *    counted as neither blocked nor skipped; it carries `cache-control:
+ *    no-store`, so the context's shared HTTP cache can never hand it to a
+ *    later page in place of the real file (a script's `fetch` of the same
+ *    URL goes to the site, paced). The branch runs before the cross-origin
+ *    check and only for `resourceType === "Image"`; an image with no known
+ *    size falls through to exactly the old path (cross-origin: blocked;
+ *    same-origin: skipped as paint-only), and so does every image when
+ *    `imageDimensions` is null. A lookup that rejects is OURS: it shuts the
+ *    render and `render` throws, like any protocol command of ours that
+ *    failed. Per render, each URL is looked up once and at most
+ *    `IMAGE_LOOKUP_CONCURRENCY` lookups wait on the database at a time
+ *    (`perRenderLookup`), so a page that loops image requests cannot flood
+ *    the pass's pool. A cors-mode image (`crossorigin`) gets
+ *    `Access-Control-Allow-Origin` set to its own request's `Origin`, with
+ *    credentials allowed: still answered here, still sent nowhere. The
+ *    srcset lookup and the `<img>` measurement run in an ISOLATED WORLD of
+ *    the main frame (`Page.createIsolatedWorld`): the DOM is the page's, the
+ *    globals are not, so a page that replaced `URL` or `Array.prototype` can
+ *    neither break nor bend them, and any lookup failure the page could cause
+ *    is a miss — one unmeasured image, never a stopped pass. An image whose
+ *    lookup is still running when the page is measured has no stand-in yet,
+ *    and one whose stand-in has not finished loading has a box laid out
+ *    without it: both are counted `noDimensions`, and the images are sorted
+ *    against what had been requested and answered at that moment, not later.
+ *  - **Accessibility (Phase 29b): axe-core, in the isolated world, last.**
+ *    With `RendererOptions.accessibility` on, each rendered page gets the
+ *    pinned axe-core's WCAG A/AA subset (a11y.ts), injected and run in ONE
+ *    evaluation in the same isolated world the images were measured in — the
+ *    page's DOM, not its globals, so a page that broke `Array.prototype` or
+ *    `Promise` cannot stop or bend it. It runs after the document is
+ *    serialised, analysed and written, so it costs no other measurement.
+ *    Whatever the PAGE does to it is a status on the row, never a stopped
+ *    pass: a run past `AXE_TIMEOUT_MS` is terminated (`timeout`), a document
+ *    that navigated away under it is `interrupted`, an axe its DOM made throw
+ *    is `error`. It makes no request: the source comes from the package.
+ *    The console and request evidence is snapshotted BEFORE it runs, and
+ *    console calls and exceptions from our isolated worlds' contexts are
+ *    never counted, so neither axe's own output nor the page's during the
+ *    run reaches `render_console` (29b final review M1).
  *  - **No silent fallbacks (rule 7).** A timeout, a navigation error and a
  *    policy refusal are three different classified strings on the page row, and
  *    every one of them leaves `rendered = false` with the five measurement
@@ -156,6 +218,33 @@ import { headerValue, type HeaderBag } from "../http.js";
 import { HostGate, type HostSpacingEntry, type HostThrottle } from "../politeness.js";
 import { RENDER_CAPTURE_VERSION } from "../versions.js";
 import { RenderConsoleCollector, type RenderConsole } from "./console-capture.js";
+import {
+  IMAGES_MEASURE_SCRIPT,
+  SRCSET_LOOKUP_SCRIPT,
+  checkStoredImage,
+  classifyImages,
+  perRenderLookup,
+  readImageMeasurement,
+  readSrcsetReply,
+  srcsetStandIn,
+  standInSvg,
+  type ImageDimensionLookup,
+  type ImageMeasurement,
+  type RenderImage,
+  type RenderImages,
+  type SrcsetMatch,
+  type StoredImage,
+} from "./image-stand-in.js";
+import {
+  AXE_TERMINATE_GRACE_MS,
+  AXE_TIMEOUT_MS,
+  a11yDisabled,
+  a11yErrorLine,
+  axeRunExpression,
+  shapeAxeResults,
+  type AxeFault,
+  type RenderA11y,
+} from "./a11y.js";
 import { analyzeHtml, type RawPageAnalysis } from "../parse/page-analyzer.js";
 import { hostnameSpellings, isSameOrigin, normalizeUrl } from "../parse/url-utils.js";
 import { credentialHeadersOf, type CredentialTarget } from "../credentials.js";
@@ -256,6 +345,28 @@ export interface RendererOptions {
    * `htmlPath` stays null.
    */
   htmlDir: string | null;
+  /**
+   * Where an image's intrinsic size comes from (Phase 29b, ruling R5): called
+   * per image request with normalised URLs, it answers the ones this crawl's
+   * `resources` sized. An image it answers is given a true-size stand-in
+   * instead of being aborted (module header). `runRenderPass` builds it over
+   * the crawl's own rows (`resourceImageLookup`).
+   *
+   * REQUIRED, on the `htmlDir` precedent: a caller that wants no stand-ins says
+   * `null` — every image is then aborted as before 29b and measured as
+   * `noDimensions` — rather than getting that by forgetting the key. A lookup
+   * that REJECTS is a defect of ours and stops the render (it throws).
+   */
+  imageDimensions: ImageDimensionLookup | null;
+  /**
+   * Run the pinned axe-core WCAG A/AA subset in every rendered page (Phase
+   * 29b, a11y.ts; the crawl's `renderAccessibility`). False records
+   * `{status: "disabled"}` on each rendered page and runs nothing.
+   *
+   * REQUIRED, on the `htmlDir` and `imageDimensions` precedent: whether a page
+   * is checked is said by the caller, never inherited from a forgotten key.
+   */
+  accessibility: boolean;
   /** The crawl's branded UA, so a site sees one client, not two (rule 9). */
   userAgent: string;
   /** Minimum spacing between two requests to one host: the configured base. */
@@ -433,6 +544,27 @@ export interface RenderResult {
    * was looked at.
    */
   console: RenderConsole | null;
+  /**
+   * The page's `<img>` boxes measured against the intrinsic sizes the
+   * stand-ins gave them (Phase 29b, `pages.render_images`): counts per bucket
+   * and the images shown narrower than they are. See image-stand-in.ts.
+   *
+   * Non-null on every successful render — `total: 0` on a page with no image —
+   * and null on EVERY failed one, a refusal before the browser included: a
+   * page that did not finish rendering has no layout worth measuring.
+   */
+  images: RenderImages | null;
+  /**
+   * The accessibility run (Phase 29b, `pages.render_a11y_*` and the
+   * `render_a11y` rows): how it ended, how long it took, what it found. See
+   * a11y.ts for the five statuses.
+   *
+   * Non-null on every successful render — `disabled` when the crawl turned it
+   * off, and `timeout`, `interrupted` or `error` when the page stopped it,
+   * with every other measurement kept — and null on EVERY failed one: a page
+   * that did not finish rendering was not checked.
+   */
+  a11y: RenderA11y | null;
 }
 
 /**
@@ -448,6 +580,83 @@ type TrafficEvidence = Pick<
   | "unpacedNetworkRequests"
   | "console"
 >;
+
+/** A stand-in the interception answered an image request with, and where its width came from. */
+type ServedImage = StoredImage & { widthFrom: RenderImage["widthFrom"] };
+
+/**
+ * The page navigated, or its document went away, while the srcset lookup ran
+ * in it: no answer, and nothing of ours broke.
+ */
+const CONTEXT_GONE =
+  /Execution context was destroyed|Cannot find context with specified id|Inspected target navigated or closed/i;
+
+/**
+ * The isolated world the srcset lookup, the image measurement and (Phase 29b)
+ * the accessibility run happen in. The name predates the third; it is a label.
+ */
+const ISOLATED_WORLD_NAME = "ariadne-render-images";
+
+/** The slice of a `Runtime.evaluate` reply the image code reads. */
+interface EvaluateReply {
+  result: { value?: unknown };
+  exceptionDetails?: {
+    text: string;
+    exception?: { type?: string; value?: unknown; description?: string };
+  };
+}
+
+/**
+ * What one axe evaluation came to, before `render` names it a status, and
+ * the run's own wall time — taken before any termination, so a `timeout`'s
+ * `ms` is the run's, never the cleanup's.
+ */
+type AxeOutcome = { ms: number } & (
+  | { kind: "ran"; value: unknown }
+  | { kind: "threw"; message: string }
+  | { kind: "timeout" }
+  | { kind: "gone" }
+);
+
+/**
+ * The evaluation's promise was dropped by the page's context before it
+ * settled — the document it belonged to went away under it, as with
+ * `CONTEXT_GONE`.
+ */
+const PROMISE_COLLECTED = /Promise was collected/i;
+
+/**
+ * The message of a value a page threw or rejected with: the runtime's own
+ * description of it (an Error's message and stack), else the value itself
+ * when it is a string (`Promise.reject("x")` has no description), else the
+ * runtime's label for the exception.
+ */
+function exceptionText(d: NonNullable<EvaluateReply["exceptionDetails"]>): string {
+  if (d.exception?.description !== undefined) return d.exception.description;
+  if (typeof d.exception?.value === "string") return d.exception.value;
+  return d.text;
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+/**
+ * OUR CDP session or target is gone — not the page's document. A context
+ * destroyed by a navigation says "navigated or closed" too, so it is ruled
+ * out first.
+ */
+function isSessionGone(error: unknown): boolean {
+  return !CONTEXT_GONE.test(errorMessage(error)) && isTargetClosed(error);
+}
+
+/** A request header by name, in any case, or null. */
+function headerOf(headers: Record<string, string>, name: string): string | null {
+  for (const [key, value] of Object.entries(headers)) {
+    if (key.toLowerCase() === name) return value;
+  }
+  return null;
+}
 
 /** What `MEASURE_SCRIPT` hands back. Counts only — no HTML crosses the seam. */
 interface Measurement {
@@ -820,6 +1029,48 @@ class RenderTraffic {
   private gotoNetworkId: string | null = null;
   /** What the page reported going wrong — see console-capture.ts. Per render. */
   private readonly reported = new RenderConsoleCollector();
+  /**
+   * IMAGE STAND-INS (Phase 29b, module header), per render and freed with it
+   * — O(one page's requests), the `pausedIds` precedent (rule 6):
+   * `requested` is the URL (without its fragment) of every `Image` request
+   * this render paused, answered or not; `served` the ones answered with a
+   * stand-in, with the size it carried; `standInIds` their network ids, so
+   * the local response each produces is never read as the site's.
+   */
+  private readonly requested = new Set<string>();
+  private readonly served = new Map<string, ServedImage>();
+  /** `served` and `requested` as they stood when `measureImages` took the boxes. */
+  private imagesAtMeasure: {
+    served: ReadonlyMap<string, ServedImage>;
+    requested: ReadonlySet<string>;
+  } | null = null;
+  private readonly standInIds = new Set<string>();
+  /**
+   * `imageDimensions` behind this render's dedupe and concurrency cap
+   * (`perRenderLookup`, M2), or null when there are no stand-ins. Per render.
+   */
+  private readonly imageLookup: ImageDimensionLookup | null;
+  /**
+   * The execution context of this render's isolated world in the main frame
+   * (`isolatedEvaluate`), or null until it is made — and again after a
+   * navigation destroyed it.
+   */
+  private isolatedContextId: number | null = null;
+  /**
+   * The isolated world's context in which `measureImages` measured the page —
+   * the document phase 2 then serialised. The accessibility run is evaluated
+   * in exactly this context (`runAxe`) and never in a world made afterwards,
+   * which could belong to a document the page navigated to since.
+   */
+  private measuredContextId: number | null = null;
+  /**
+   * Every execution context id this render's isolated worlds were given, kept
+   * for the render (a handful at most: one per navigation that destroyed the
+   * last). Console calls and exceptions from these contexts are OURS — the
+   * srcset lookup, the image measurement, axe and anything axe logs or throws
+   * asynchronously — and are never counted as the site's (29b final review M1).
+   */
+  private readonly ownContextIds = new Set<number>();
 
   constructor(
     private readonly cdp: CDPSession,
@@ -836,7 +1087,10 @@ class RenderTraffic {
     private readonly testFaults: RenderTestFaults | null,
     /** The crawl's credentials, decided per released request (Phase 27c). */
     private readonly credentials: CredentialTarget | null,
+    /** Stored image sizes (Phase 29b); null: no stand-ins, every image aborted. */
+    imageDimensions: ImageDimensionLookup | null,
   ) {
+    this.imageLookup = imageDimensions === null ? null : perRenderLookup(imageDimensions);
     this.broken = new Promise<never>((_, reject) => {
       this.breakWith = reject;
     });
@@ -890,8 +1144,14 @@ class RenderTraffic {
     // blocking dressed as the site's console. `consoleAPICalled` is only what
     // the page's script logged.
     this.cdp.on("Runtime.consoleAPICalled", (event) => {
-      const e = event as unknown as { type: string; args: RemoteObject[] };
+      const e = event as unknown as {
+        type: string;
+        args: RemoteObject[];
+        executionContextId: number;
+      };
       if (!this.open) return;
+      // Our isolated world's own output is not the page's (M1).
+      if (this.ownContextIds.has(e.executionContextId)) return;
       const level = consoleLevel(e.type);
       if (level === null) return;
       this.reported.addConsole(level, e.args.map(remoteText).join(" "));
@@ -899,6 +1159,7 @@ class RenderTraffic {
     this.cdp.on("Runtime.exceptionThrown", (event) => {
       const d = (event as unknown as { exceptionDetails: ExceptionDetails }).exceptionDetails;
       if (!this.open) return;
+      if (d.executionContextId !== undefined && this.ownContextIds.has(d.executionContextId)) return;
       // `text` is the runtime's label ("Uncaught", "Uncaught (in promise)");
       // the exception itself is the page's value, its stack the page's URLs.
       this.reported.addException(
@@ -953,6 +1214,149 @@ class RenderTraffic {
     await this.cdp.send("Emulation.setScriptExecutionDisabled", { value: true });
   }
 
+  /**
+   * The page's measured `<img>` rows, sorted against what this render
+   * requested and answered with stand-ins (`classifyImages`).
+   */
+  images(measurement: ImageMeasurement): RenderImages {
+    const atMeasure = this.imagesAtMeasure;
+    if (atMeasure === null) {
+      throw new Error("images() before measureImages(): nothing was measured to sort");
+    }
+    return classifyImages(measurement, atMeasure.served, atMeasure.requested);
+  }
+
+  /**
+   * Every `<img>` box of the document now in the main frame
+   * (`IMAGES_MEASURE_SCRIPT`), read in the isolated world so the page's own
+   * globals can neither break nor falsify it. Throws on anything else —
+   * `render` calls it in phase 1, where a navigation under it is classified.
+   */
+  async measureImages(): Promise<ImageMeasurement> {
+    const noise = this.testFaults?.isolatedNoise;
+    const reply = await this.isolatedEvaluate(
+      noise === undefined
+        ? IMAGES_MEASURE_SCRIPT
+        : `console.error(${JSON.stringify(noise)});\n` +
+            `setTimeout(function () { throw new Error(${JSON.stringify(noise)}); }, 0);\n` +
+            IMAGES_MEASURE_SCRIPT,
+    );
+    if (reply.exceptionDetails !== undefined) {
+      throw new Error(
+        `image measurement threw in the isolated world: ${reply.exceptionDetails.text}`,
+      );
+    }
+    // The evaluate succeeded, so the world it ran in is the one still held.
+    this.measuredContextId = this.isolatedContextId;
+    // What had been requested and answered when the boxes were taken. The
+    // render keeps answering image requests until it shuts (through the HTML
+    // read and the axe run), and an image answered after this was not in the
+    // box measured.
+    this.imagesAtMeasure = { served: new Map(this.served), requested: new Set(this.requested) };
+    return readImageMeasurement(reply.result.value ?? null);
+  }
+
+  /**
+   * Evaluate the accessibility run (`axeRunExpression`: the axe source and
+   * the run, as one expression) in the isolated world of the document
+   * `measureImages` measured, and say how it ended (Phase 29b, ruling A).
+   *
+   *  - `ran` — axe resolved; `value` is its cut-down result.
+   *  - `threw` — the evaluation came back with `exceptionDetails`: axe threw
+   *    or `axe.run` rejected inside the page. The page's doing.
+   *  - `gone` — the context is gone: the page navigated (or its document was
+   *    replaced) before or during the run. The page's doing.
+   *  - `timeout` — no answer in `timeoutMs`: the run is terminated
+   *    (`terminateAxe`) and abandoned.
+   *
+   * Anything else the protocol answers — our session gone while the render is
+   * open, a command the browser refused — propagates: it is ours. NO RETRY on
+   * a fresh world: a world made now could be in a document the page navigated
+   * to, and checking that one would report another page's violations as this
+   * page's.
+   */
+  async runAxe(expression: string, timeoutMs: number): Promise<AxeOutcome> {
+    const contextId = this.measuredContextId;
+    if (contextId === null) {
+      throw new Error("runAxe: no measured document to run in — measureImages has not succeeded");
+    }
+    const started = Date.now();
+    const evaluation = this.cdp.send("Runtime.evaluate", {
+      expression,
+      contextId,
+      returnByValue: true,
+      awaitPromise: true,
+    }) as Promise<EvaluateReply>;
+    let timer: NodeJS.Timeout | undefined;
+    const expired = new Promise<"timeout">((resolve) => {
+      timer = setTimeout(() => resolve("timeout"), timeoutMs);
+    });
+    let settled: EvaluateReply | "timeout";
+    try {
+      // `Promise.race` subscribes to the evaluation, so when the run is
+      // abandoned below its late answer — or late rejection — is handled: a
+      // run we terminated has nothing left to say.
+      settled = await Promise.race([evaluation, expired]);
+    } catch (error) {
+      const message = errorMessage(error);
+      // The document went away under the run: a navigation destroyed the
+      // context, or the context dropped the run's promise with it.
+      if (CONTEXT_GONE.test(message) || PROMISE_COLLECTED.test(message)) {
+        return { kind: "gone", ms: Date.now() - started };
+      }
+      throw error;
+    } finally {
+      clearTimeout(timer);
+    }
+    const ms = Date.now() - started;
+    if (settled === "timeout") {
+      await this.terminateAxe();
+      return { kind: "timeout", ms };
+    }
+    if (settled.exceptionDetails !== undefined) {
+      return { kind: "threw", message: exceptionText(settled.exceptionDetails), ms };
+    }
+    return { kind: "ran", value: settled.result.value ?? null, ms };
+  }
+
+  /**
+   * Stop whatever is holding the page's thread (ruling R10): axe itself, or a
+   * page script that never yields — the isolated world shares the main
+   * world's thread, so a busy loop in the page blocks the run before it
+   * starts.
+   *
+   * `Runtime.terminateExecution` ends the CURRENT execution, or the NEXT one
+   * when the thread is idle (axe waiting between rules). So one trivial
+   * evaluation follows it and is waited for: it either is that "next" and
+   * takes the termination itself, or runs after whatever took it — either
+   * way no termination is left armed for a later script (the next render's
+   * measurement included). Its answer is not read; "terminated" and a gone
+   * context are what is expected of it, and anything else propagates. The
+   * wait is bounded (`AXE_TERMINATE_GRACE_MS`): a thread still busy past it
+   * is busy with something that already took the termination, and the run is
+   * `timeout` either way.
+   */
+  private async terminateAxe(): Promise<void> {
+    await this.cdp.send("Runtime.terminateExecution");
+    const flush = (this.cdp.send("Runtime.evaluate", { expression: "0" }) as Promise<unknown>).then(
+      () => undefined,
+      (error: unknown) => {
+        const message = errorMessage(error);
+        if (/Execution was terminated/i.test(message) || CONTEXT_GONE.test(message)) return;
+        throw error;
+      },
+    );
+    let timer: NodeJS.Timeout | undefined;
+    const grace = new Promise<void>((resolve) => {
+      timer = setTimeout(resolve, AXE_TERMINATE_GRACE_MS);
+    });
+    try {
+      await Promise.race([flush, grace]);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
   /** The counters, and a snapshot of what the page reported so far. */
   evidence(): TrafficEvidence {
     return {
@@ -991,6 +1395,32 @@ class RenderTraffic {
       return;
     }
     const target = event.request.url;
+
+    // IMAGE STAND-INS (Phase 29b, module header) — BEFORE the cross-origin
+    // check, because a CDN image with a known size is answered here too, and
+    // only for `Image`: `Media` and `Font` are untouched. An image with no
+    // known size continues to exactly the old path below.
+    if (event.resourceType === "Image") {
+      const requestUrl = withoutFragment(target);
+      this.requested.add(requestUrl);
+      const networkId = event.networkId;
+      // Without a network id the stand-in's local answer could not be told
+      // from the site's in `onResponse`, and reporting it into the gate as the
+      // site's 200 is what a stand-in must never do: such a request (the
+      // protocol gives every Request-stage pause one in practice) is aborted
+      // as before and is counted as `noDimensions` — visible, not guessed.
+      if (this.imageLookup !== null && networkId !== undefined) {
+        const standIn = await this.standInFor(this.imageLookup, event, requestUrl);
+        if (!this.open) {
+          await this.fail(event);
+          return;
+        }
+        if (standIn !== null) {
+          await this.serveStandIn(event, networkId, requestUrl, standIn);
+          return;
+        }
+      }
+    }
 
     // EVERY DOCUMENT goes through url-policy (rule 5): the top-level one we
     // navigated to, each of its redirect hops, a page sending itself somewhere
@@ -1068,6 +1498,153 @@ class RenderTraffic {
     if (!this.pumping) this.guard(this.pump());
   }
 
+  /**
+   * The stand-in for one image request, or null when no size is known for it.
+   * Its own stored size first; then, for a request of the MAIN frame only
+   * (R6 — an iframe's image gets stored sizes only), the `srcset` candidate
+   * the page named it by, sized by its `w` descriptor and a stored sibling's
+   * aspect ratio (`srcsetStandIn`). A lookup that rejects propagates: it is
+   * ours, and `guard` shuts the render on it.
+   */
+  private async standInFor(
+    lookup: ImageDimensionLookup,
+    event: PausedRequest,
+    requestUrl: string,
+  ): Promise<ServedImage | null> {
+    const key = normalizeUrl(requestUrl);
+    // Not http(s) (a `data:` or `blob:` image is never paused anyway): nothing
+    // the resource pass could have sized.
+    if (key === null) return null;
+    const stored = (await lookup([key])).get(key);
+    if (stored !== undefined) return { ...checkStoredImage(stored, key), widthFrom: "stored" };
+    if (event.frameId !== this.mainFrameId || !this.open) return null;
+    const match = await this.srcsetMatch(requestUrl);
+    if (match === null || match.w === null || !this.open) return null;
+    const siblings = [
+      ...new Set(
+        match.candidates.map((c) => normalizeUrl(c)).filter((c): c is string => c !== null),
+      ),
+    ];
+    if (siblings.length === 0) return null;
+    const found = await lookup(siblings);
+    for (const sibling of siblings) {
+      const image = found.get(sibling);
+      if (image !== undefined) return srcsetStandIn(match.w, checkStoredImage(image, sibling));
+    }
+    return null;
+  }
+
+  /**
+   * Ask the main frame which `srcset` candidate `requestUrl` is
+   * (`SRCSET_LOOKUP_SCRIPT`), in this render's isolated world, with the URL
+   * passed as a JSON string literal — never spliced into the script as raw
+   * text.
+   *
+   * ANY FAILURE OF THE LOOKUP IS A MISS, NOT A FAILED RENDER (S1), with one
+   * exception. What can make it fail is the page's doing: a navigation
+   * destroys the context the script ran in, a document can be gone, a page
+   * can make the DOM it reads strange. That costs one unmeasured image — the
+   * request is aborted as before and counted as `noDimensions` — and never the
+   * pass, which is what a hostile page could otherwise stop by making this
+   * throw. The exception is clearly ours: our own CDP session closed while the
+   * render is still open, which propagates like any broken command of ours.
+   *
+   * `awaitPromise`: while the document is still being parsed, a miss waits for
+   * the parser to finish and searches once more (the preload scanner asks for
+   * an image before its element exists — see `SRCSET_LOOKUP_SCRIPT`). Only
+   * this image's request waits; nothing else is held behind it, and a render
+   * that ends first fails the request and closes the page under the lookup.
+   */
+  private async srcsetMatch(requestUrl: string): Promise<SrcsetMatch | null> {
+    let reply: EvaluateReply;
+    try {
+      reply = await this.isolatedEvaluate(
+        `(${SRCSET_LOOKUP_SCRIPT})(${JSON.stringify(requestUrl)})`,
+      );
+    } catch (error) {
+      if (this.open && isSessionGone(error)) throw error;
+      return null;
+    }
+    if (reply.exceptionDetails !== undefined) return null;
+    return readSrcsetReply(reply.result.value ?? null);
+  }
+
+  /**
+   * Evaluate `expression` in this render's isolated world of the main frame —
+   * same DOM, separate globals and prototypes, so nothing the page assigns
+   * reaches it. The world is made on first use and made again when a
+   * navigation has destroyed its context (one retry, on a fresh world).
+   */
+  private async isolatedEvaluate(expression: string): Promise<EvaluateReply> {
+    for (;;) {
+      const fresh = this.isolatedContextId === null;
+      if (fresh) {
+        const world = await this.cdp.send("Page.createIsolatedWorld", {
+          frameId: this.mainFrameId,
+          worldName: ISOLATED_WORLD_NAME,
+        });
+        this.isolatedContextId = world.executionContextId;
+        this.ownContextIds.add(world.executionContextId);
+      }
+      const contextId = this.isolatedContextId;
+      try {
+        return await this.cdp.send("Runtime.evaluate", {
+          expression,
+          contextId: contextId ?? undefined,
+          returnByValue: true,
+          awaitPromise: true,
+        });
+      } catch (error) {
+        if (!CONTEXT_GONE.test(errorMessage(error))) throw error;
+        // That document is gone; the next evaluate makes a world in the new
+        // one. A world made a moment ago and already gone is not retried.
+        if (this.isolatedContextId === contextId) this.isolatedContextId = null;
+        if (fresh) throw error;
+      }
+    }
+  }
+
+  /**
+   * Answer a paused image request with its stand-in — never released, never
+   * paced, never reported to the gate or the ledger, counted as neither
+   * blocked nor skipped (module header).
+   */
+  private async serveStandIn(
+    event: PausedRequest,
+    networkId: string,
+    requestUrl: string,
+    image: ServedImage,
+  ): Promise<void> {
+    if (!this.pending.delete(event.requestId)) return; // already answered (failed by shut)
+    // Recorded BEFORE the answer, so the response it produces is recognised.
+    this.standInIds.add(networkId);
+    this.served.set(requestUrl, image);
+    const headers = [
+      { name: "content-type", value: "image/svg+xml" },
+      // NEVER STORED: the context's HTTP cache outlives this page, and a
+      // later page's request for the real file must go to the site.
+      { name: "cache-control", value: "no-store" },
+    ];
+    // A CORS-MODE image (`crossorigin`, I1) carries an `Origin`, and the
+    // browser refuses an answer that does not allow it — a broken-image box
+    // that would then be measured as the image. So the stand-in allows
+    // exactly that origin, with credentials (`use-credentials` needs both).
+    // Only the headers change: it is still answered here and sent nowhere.
+    const requestOrigin = headerOf(event.request.headers, "origin");
+    if (requestOrigin !== null) {
+      headers.push(
+        { name: "access-control-allow-origin", value: requestOrigin },
+        { name: "access-control-allow-credentials", value: "true" },
+      );
+    }
+    await this.command("Fetch.fulfillRequest", {
+      requestId: event.requestId,
+      responseCode: 200,
+      responseHeaders: headers,
+      body: Buffer.from(standInSvg(image.width, image.height), "utf8").toString("base64"),
+    });
+  }
+
   private pinned(url: string): boolean {
     return this.pinnedHosts.has(new URL(url).hostname.toLowerCase());
   }
@@ -1137,10 +1714,13 @@ class RenderTraffic {
     });
   }
 
-  private async command(method: "Fetch.continueRequest" | "Fetch.failRequest", params: object) {
+  private async command(
+    method: "Fetch.continueRequest" | "Fetch.failRequest" | "Fetch.fulfillRequest",
+    params: object,
+  ) {
     try {
       // The protocol's typed overloads want a literal method name per call;
-      // both commands here take `{requestId, …}` and answer nothing.
+      // all three commands here take `{requestId, …}` and answer nothing.
       await (this.cdp.send as (m: string, p: object) => Promise<unknown>)(method, params);
     } catch (error) {
       if (REQUEST_GONE.test(error instanceof Error ? error.message : String(error))) return;
@@ -1166,6 +1746,9 @@ class RenderTraffic {
    * request still waits a spacing behind it.
    */
   private onResponse(requestId: string, response: NetworkResponse): void {
+    // A STAND-IN'S ANSWER came from this process, not the site: it is
+    // reported to no gate, recorded in no ledger and counted nowhere.
+    if (this.standInIds.has(requestId)) return;
     if (!isHttpUrl(response.url)) return;
     const sent = this.inFlight.get(requestId);
     this.inFlight.delete(requestId);
@@ -1318,6 +1901,8 @@ interface RemoteObject {
 interface ExceptionDetails {
   text: string;
   exception?: RemoteObject;
+  /** The context the exception was thrown in; ours are dropped (M1). */
+  executionContextId?: number;
 }
 
 /**
@@ -1349,6 +1934,15 @@ function unpinnedReason(
   return known === undefined
     ? `${host} is not a spelling of this crawl's origin the render pass can reach`
     : `${host} was not approved for this pass (${known.reason})`;
+}
+
+/**
+ * A request URL without its fragment, by the same string cut the in-page
+ * measurement applies to `currentSrc`, so the two key the same image alike.
+ */
+function withoutFragment(url: string): string {
+  const hash = url.indexOf("#");
+  return hash === -1 ? url : url.slice(0, hash);
 }
 
 /** A URL as the browser puts it on the wire: parsed, serialised, without its fragment. */
@@ -1400,6 +1994,35 @@ export interface RenderTestFaults {
    * arrives after it (it must still be reported to the gate).
    */
   holdAfterShut?: () => Promise<void>;
+  /**
+   * Replaces `AXE_TIMEOUT_MS` for the accessibility run (Phase 29b), so a
+   * suite can watch a run time out without waiting thirty seconds. Read on
+   * every render.
+   */
+  axeTimeoutMs?: number;
+  /**
+   * Awaited just before the accessibility run is evaluated, with the render's
+   * page, so a suite can make the page do something deterministic at exactly
+   * that moment — start a loop that never yields (a timeout), or navigate and
+   * wait for the commit (an interruption) — instead of racing a timer in the
+   * page against `page.content()`.
+   */
+  beforeAxe?: (page: Page) => Promise<void>;
+  /**
+   * When set, the accessibility run injects the axe source and then rejects,
+   * in the isolated world, in place of `axe.run` — with `new Error(error)`,
+   * or with the bare string `value`: the shape of an axe a page's DOM made
+   * throw (status `error`). See `axeRunExpression`.
+   */
+  axeFault?: AxeFault;
+  /**
+   * When set, the image measurement's evaluation in the isolated world first
+   * logs `console.error(isolatedNoise)` and schedules an uncaught
+   * `throw new Error(isolatedNoise)`, then measures as normal: output of OURS
+   * that lands BEFORE the console evidence is snapshotted, so only the
+   * context-id filter keeps it out of `render_console` (29b final review M1).
+   */
+  isolatedNoise?: string;
 }
 
 /** Where the network fence listens. */
@@ -1705,6 +2328,8 @@ export class PageRenderer {
       {
         origin: options.origin,
         htmlDir: options.htmlDir,
+        imageDimensions: options.imageDimensions,
+        accessibility: options.accessibility,
         userAgent: options.userAgent,
         perHostDelayMs: options.perHostDelayMs,
         navigationTimeoutMs,
@@ -1814,6 +2439,7 @@ export class PageRenderer {
         this.opts.onRequestBlocked,
         this.opts.testFaults,
         this.opts.credentials,
+        this.opts.imageDimensions,
       );
       await traffic.start();
     } catch (error) {
@@ -1834,7 +2460,7 @@ export class PageRenderer {
       // about the page (rule 7). It ends either by returning a classified
       // `RenderResult` or by handing phase 2 the document it built.
       // ---------------------------------------------------------------------
-      let navigated: { finalUrl: string; measured: Measurement };
+      let navigated: { finalUrl: string; measured: Measurement; imageRows: ImageMeasurement };
       try {
         // The DOCUMENT's wait is spent HERE, after the page and its
         // interception exist (that setup is ours and must not be spent out of
@@ -1888,7 +2514,13 @@ export class PageRenderer {
         // the way it fails in practice is a page navigating away underneath it
         // ("Execution context was destroyed"), which is the site doing
         // something and is right to classify.
-        navigated = { finalUrl, measured: (await page.evaluate(MEASURE_SCRIPT)) as Measurement };
+        const measured = (await page.evaluate(MEASURE_SCRIPT)) as Measurement;
+        // Every `<img>` box (Phase 29b), after the settle and in the same
+        // document — in the isolated world, so the page's globals cannot
+        // break or bend it, and here for the same reason as the line above:
+        // a navigation under it is the page's doing and is classified.
+        const imageRows = await traffic.measureImages();
+        navigated = { finalUrl, measured, imageRows };
       } catch (error) {
         // Ours first: a protocol command the interception could not issue
         // shut the render, and whatever failed after it is our defect, not
@@ -1913,7 +2545,7 @@ export class PageRenderer {
         }
         return failure(url, `navigation error: ${firstLine(error)}`, null, traffic.evidence());
       }
-      const { finalUrl, measured } = navigated;
+      const { finalUrl, measured, imageRows } = navigated;
 
       // ---------------------------------------------------------------------
       // PHASE 2 — what WE do to a document the browser already built. Outside
@@ -1955,6 +2587,19 @@ export class PageRenderer {
         this.opts.htmlDir === null
           ? null
           : await writeSerialisedDom(this.opts.htmlDir, url, serialised);
+
+      // THE CONSOLE AND REQUEST WINDOW CLOSES HERE, before the accessibility
+      // run (29b final review M1): the counters and what the page reported are
+      // snapshotted with every other measurement, so the window is the render
+      // and never grows by the up-to-35 s axe may take.
+      const trafficEvidence = traffic.evidence();
+
+      // THE ACCESSIBILITY RUN (Phase 29b), last: every measurement above is
+      // already taken, so nothing axe does — or a page does to axe — can cost
+      // one (ruling R10). How it can end is `accessibility`'s to say.
+      const a11y = this.opts.accessibility
+        ? await this.accessibility(page, traffic, () => crashed)
+        : a11yDisabled();
       if (traffic.failure !== null) throw traffic.failure;
 
       return {
@@ -1989,7 +2634,9 @@ export class PageRenderer {
         // is about.
         redirectUrl: traffic.offSite ?? navigatedTo(url, finalUrl),
         error: null,
-        ...traffic.evidence(),
+        images: traffic.images(imageRows),
+        a11y,
+        ...trafficEvidence,
       };
     } finally {
       // Shut FIRST — every queued request failed, every later one failed on
@@ -2004,6 +2651,68 @@ export class PageRenderer {
       } finally {
         await this.release(slot, page, traffic, crashed);
       }
+    }
+  }
+
+  /**
+   * Run the pinned axe subset in the page's isolated world and name how it
+   * ended (Phase 29b; a11y.ts has the five statuses).
+   *
+   * THE PAGE'S DOING IS A STATUS, NEVER A STOPPED PASS (controller ruling B):
+   * a run the page blocked past the budget is `timeout` (terminated, see
+   * `RenderTraffic.terminateAxe`); a document that went away under it — a
+   * navigation, or a page that crashed — is `interrupted`; an axe the page's
+   * DOM made throw is `error`, its first line kept. OURS PROPAGATES: the axe
+   * source that cannot be read, a result shape `shapeAxeResults` does not
+   * know, our session gone, and any protocol command of ours that broke the
+   * render (`traffic.broken`, raced here as in phase 1).
+   *
+   * `ms` is wall time around the one evaluation (source injection included),
+   * whatever its end — on a timeout, up to the moment it timed out: the
+   * termination and its grace are cleanup, not the run.
+   */
+  private async accessibility(
+    page: Page,
+    traffic: RenderTraffic,
+    crashed: () => boolean,
+  ): Promise<RenderA11y> {
+    const faults = this.opts.testFaults;
+    const expression = axeRunExpression(faults?.axeFault ?? null);
+    await faults?.beforeAxe?.(page);
+    const timeoutMs = faults?.axeTimeoutMs ?? AXE_TIMEOUT_MS;
+    const started = Date.now();
+    let outcome: AxeOutcome;
+    try {
+      outcome = await Promise.race([traffic.runAxe(expression, timeoutMs), traffic.broken]);
+    } catch (error) {
+      if (traffic.failure !== null) throw traffic.failure;
+      // A renderer process that crashed under the run took the document with
+      // it: the page's doing, as a crash in phase 1 is.
+      //
+      // THE ORDERING THIS ASSUMES, and it is an assumption, not a measured
+      // fact (no test crashes a renderer): Playwright raises
+      // `page.on("crash")` from `Inspector.targetCrashed` on ITS OWN page
+      // session, while the run's `Runtime.evaluate` is pending on OURS
+      // (`newCDPSession`). Both arrive over the one browser connection, and
+      // the crash is announced before the target detaches, so `crashed()`
+      // is expected to be true by the time our command is rejected. Were the
+      // order ever the other way, the crash propagates as ours and stops the
+      // pass — loud, never a silent mislabel.
+      if (crashed()) {
+        return { status: "interrupted", ms: Date.now() - started, error: null, violations: [] };
+      }
+      throw error;
+    }
+    const ms = outcome.ms;
+    switch (outcome.kind) {
+      case "ran":
+        return { status: "ran", ms, error: null, violations: shapeAxeResults(outcome.value) };
+      case "threw":
+        return { status: "error", ms, error: a11yErrorLine(outcome.message), violations: [] };
+      case "timeout":
+        return { status: "timeout", ms, error: null, violations: [] };
+      case "gone":
+        return { status: "interrupted", ms, error: null, violations: [] };
     }
   }
 
@@ -2024,6 +2733,10 @@ export class PageRenderer {
       // a different width, and a render whose word count depended on an
       // unstated viewport would not be evidence of anything.
       viewport: { width: 1280, height: 900 },
+      // Density 1, pinned (Phase 29b): it decides which `srcset` candidate the
+      // browser picks, and an image box is judged against the file at 1 CSS
+      // px per image px. Left to the host it would follow the machine.
+      deviceScaleFactor: 1,
       // A service worker is a client outside the page's interception, and one
       // registered by page N would answer page N+1's requests from ITS cache.
       // None controls a first load anyway, so blocking them changes no DOM.
@@ -2144,6 +2857,8 @@ function failure(
     htmlPath: null,
     redirectUrl,
     error,
+    images: null,
+    a11y: null,
     ...evidence,
   };
 }
@@ -2208,6 +2923,17 @@ function firstLine(error: unknown): string {
  * pre-browser refusal included, for the same reason: it says which render
  * capture wrote the row, so its `render_console` null ("nothing was looked
  * at") is never read as a pre-25 row's null ("nobody captured it").
+ *
+ * `render_images` (Phase 29b, capture 3) is written from `RenderResult.images`
+ * through the same `storableDeep` boundary: null on every failed render and on
+ * a pre-browser refusal, and the stamp tells that null from a pre-29b row's.
+ *
+ * The accessibility run (Phase 29b, capture 3) writes `render_a11y_status`,
+ * `_ms` and `_error` from `RenderResult.a11y` — all three null on a failed
+ * render — and REPLACES the page's `render_a11y` rows: the ones there are
+ * deleted, then this render's violations inserted, keyed by the page id the
+ * update returned. The caller holds the transaction (`runWorker`), so the
+ * page row and its rows land together or not at all.
  */
 export async function writeRenderResult(
   db: Pick<Db, "execute">,
@@ -2240,6 +2966,10 @@ export async function writeRenderResult(
       rendered_redirect_url = ${row.redirectUrl},
       render_error = ${row.error},
       render_console = ${row.console === null ? null : JSON.stringify(row.console)}::jsonb,
+      render_images = ${row.images === null ? null : JSON.stringify(row.images)}::jsonb,
+      render_a11y_status = ${row.a11y?.status ?? null},
+      render_a11y_ms = ${row.a11y?.ms ?? null},
+      render_a11y_error = ${row.a11y?.error ?? null},
       render_version = ${RENDER_CAPTURE_VERSION}
     where crawl_id = ${crawlId} and url = ${result.url}
     returning id`);
@@ -2249,5 +2979,25 @@ export async function writeRenderResult(
       `writeRenderResult: no page row for '${result.url}' in crawl ${crawlId} ` +
         `(${res.rows.length} rows updated)`,
     );
+  }
+  const pageId = (res.rows[0] as { id: string }).id;
+
+  // THE PAGE'S `render_a11y` ROWS ARE REPLACED, never accumulated: an older
+  // run's violation must not outlive a re-render that no longer finds it, and
+  // a failed or incomplete run leaves none. In the caller's transaction
+  // (`runWorker` holds one), so no reader sees the page between the two.
+  await db.execute(sql`
+    delete from render_a11y where crawl_id = ${crawlId} and page_id = ${pageId}`);
+  const violations = row.a11y?.violations ?? [];
+  if (violations.length > 0) {
+    await db.execute(sql`
+      insert into render_a11y (crawl_id, page_id, axe_rule, impact, node_count, targets)
+      values ${sql.join(
+        violations.map(
+          (v) =>
+            sql`(${crawlId}, ${pageId}, ${v.rule}, ${v.impact}, ${v.nodeCount}, ${JSON.stringify(v.targets)}::jsonb)`,
+        ),
+        sql`, `,
+      )}`);
   }
 }

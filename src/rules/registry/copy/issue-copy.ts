@@ -1093,6 +1093,20 @@ export const COPY_TEMPLATES: Record<string, IssueCopy> = {
     howToFix:
       "Set width and height attributes to the image's intrinsic pixel dimensions, or set an aspect-ratio in CSS. Verify against the rendered page before treating it as a defect.",
   },
+  "images.larger-than-displayed": {
+    title: "Images: Served wider than displayed",
+    explanation:
+      "Pages with an image whose file is more than {IMAGE_OVERSIZE_PERCENT}% as wide as the space it is shown in. Judged from the rendered sample only, at a fixed 1280×900 desktop viewport with a device-pixel ratio of 1; the default allows for high-density screens. Each row gives the page's template, how many images were over the line (a floor when more than the 50 widest were kept) and up to 20 of them with file and displayed widths, and Share Measured says how much of the page's images could be judged at all, since hidden, lazy, never-requested, broken and unknown-size images are not.",
+    howToFix:
+      "Serve the image at about the width it is displayed at, with srcset and sizes so larger screens still get a larger file, and re-export the source at that size rather than scaling it in CSS.",
+  },
+  "render.image-measurement": {
+    title: "Rendering: Image measurement coverage",
+    explanation:
+      "How much of the rendered sample's images the browser could measure against their displayed size, for the whole crawl and per template: pages with a measurement, images in the page's main document, how many were measured, hidden, lazy-loaded and never loaded, never requested, of unknown size, or broken, and how many stand-in images were served. Share Measured is measured divided by measured plus unknown-size plus broken, empty when there were none, and Pages With Truncated Image List counts pages where only the widest images were kept and judged. Measured at a fixed 1280×900 desktop viewport, device-pixel ratio 1.",
+    howToFix:
+      "Read this before quoting the oversized-image finding. A low share means the finding is silent on most images because they could not be judged, not because they are the right size. Lazy images below the fold are never measured by this render.",
+  },
   "images.oversized": {
     title: "Images: Over {IMAGE_WEIGHT_WARN:n} bytes",
     explanation:
@@ -1243,6 +1257,207 @@ export const COPY_TEMPLATES: Record<string, IssueCopy> = {
       "Pages rendered in a browser whose first H1 is different once JavaScript runs, or exists only in one of the two versions. Only the pages chosen for rendering are checked. A heading that appears only after rendering is read late, or not at all, by crawlers that index the HTML first.",
     howToFix:
       "Serve the final H1 in the server-side HTML so both versions match.",
+  },
+  "render.js-exception": {
+    title: "Rendering: JavaScript exceptions on the page",
+    explanation:
+      "Pages where an uncaught exception or an unhandled promise rejection was thrown while the page was rendered in a browser; the row gives the count and the first message, and the Template column names the page's template. Only the rendered sample is checked, and our browser refuses other origins' requests, the site's own media and fonts, and its images whose size is unknown, so an exception caused by a refused request can be an artefact of the render. Confirm it on the live page before reporting it.",
+    howToFix:
+      "Check the exception in a browser with the console open and fix the script that throws it. Make any call that depends on another script tolerate that script not having loaded.",
+  },
+  "render.console-error": {
+    title: "Rendering: Errors logged to the browser console",
+    explanation:
+      "Pages that logged an error to the browser console while rendered, judged from the first 20 console messages the page logged (errors after 20 warnings are not seen); the row gives the total logged and the first error, and the Template column names the page's template. Only the rendered sample is checked, and an error such as a missing analytics global can be caused by our browser refusing third-party requests. Confirm it on the live page before reporting it.",
+    howToFix:
+      "Read the message in the browser console on the live page and fix the script or resource it names. Ignore an error that appears only in our render.",
+  },
+  "render.failed-request": {
+    title: "Rendering: Requests failed while rendering",
+    explanation:
+      "Pages whose own scripts, stylesheets, XHR or fetch calls failed while rendered in a browser, at the network level or with an HTTP status of 400 or above; the row gives the count, the first failing URL and its reason, and the Template column names the page's template. Only the rendered sample is checked, and requests to other origins are never sent, so third-party failures are not covered.",
+    howToFix:
+      "Request the failing URL and fix it: restore the file, correct the path in the template, or remove the call.",
+  },
+  // ---------------------------------------------------- accessibility (29b)
+  // One entry per `A11Y_RULES` row (src/crawl/render/a11y.ts), keyed by its
+  // rule id; a row with no entry fails registry load. Each names its WCAG
+  // success criterion and level and says the page comes from the rendered
+  // sample. Written for this engine, not taken from axe-core's help text.
+  "a11y.image-alt": {
+    title: "Accessibility: Images without a text alternative",
+    explanation:
+      "Pages with an image element that has no alt attribute and no other accessible name, so a screen reader announces its file name or skips it; this fails WCAG success criterion 1.1.1 Non-text Content, level A. Judged on the rendered sample only, in the page as our browser built it; the row gives the template, how many elements failed and up to five of their selectors.",
+    howToFix:
+      "Add an alt attribute to every image the template outputs: a short description of what the image shows, or an empty alt when the image is decoration.",
+  },
+  "a11y.input-image-alt": {
+    title: "Accessibility: Image buttons without a text alternative",
+    explanation:
+      "Pages with an image button (an input of type image) that has no alt text or other accessible name, so a screen-reader user hears a button with no stated purpose; this fails WCAG success criteria 1.1.1 and 4.1.2, level A. Judged on the rendered sample only, in the page as our browser built it; the row gives the template, how many elements failed and up to five of their selectors.",
+    howToFix:
+      "Add an alt attribute naming the action, such as Search or Place order, to every image button in the template.",
+  },
+  "a11y.role-img-alt": {
+    title: "Accessibility: Elements shown as images but unnamed",
+    explanation:
+      "Pages with an element given the ARIA image role that has no aria-label, aria-labelledby or title, so assistive technology announces an image with no description; this fails WCAG success criterion 1.1.1 Non-text Content, level A. Judged on the rendered sample only, in the page as our browser built it; the row gives the template, how many elements failed and up to five of their selectors.",
+    howToFix:
+      "Give each such element in the template an aria-label or aria-labelledby describing the image, or remove the image role if the element is decoration.",
+  },
+  "a11y.area-alt": {
+    title: "Accessibility: Image map areas without a text alternative",
+    explanation:
+      "Pages with a clickable area of an image map that has no alt text, so a screen-reader user cannot tell where the link goes; this fails WCAG success criteria 2.4.4 and 4.1.2, level A. Judged on the rendered sample only, in the page as our browser built it; the row gives the template, how many elements failed and up to five of their selectors.",
+    howToFix:
+      "Add an alt attribute naming the destination to every area element in the template's image maps.",
+  },
+  "a11y.object-alt": {
+    title: "Accessibility: Embedded objects without a text alternative",
+    explanation:
+      "Pages with an object element that has no text alternative, so assistive technology cannot say what the embedded content is; this fails WCAG success criterion 1.1.1 Non-text Content, level A. Judged on the rendered sample only, in the page as our browser built it; the row gives the template, how many elements failed and up to five of their selectors.",
+    howToFix:
+      "Add an aria-label, aria-labelledby or title describing the content to each object element in the template, or replace the object with a native element that can carry a description.",
+  },
+  "a11y.link-name": {
+    title: "Accessibility: Links without a discernible name",
+    explanation:
+      "Pages with a link that has no text, image alt text or other accessible name, often an icon link, so a screen reader announces only that there is a link; this fails WCAG success criteria 2.4.4 and 4.1.2, level A. Judged on the rendered sample only, in the page as our browser built it; the row gives the template, how many elements failed and up to five of their selectors.",
+    howToFix:
+      "Add visible link text, an aria-label, or alt text on the linked image to each nameless link in the template.",
+  },
+  "a11y.button-name": {
+    title: "Accessibility: Buttons without a discernible name",
+    explanation:
+      "Pages with a button that has no text or other accessible name, often an icon-only button, so a screen-reader user cannot tell what it does; this fails WCAG success criterion 4.1.2 Name, Role, Value, level A. Judged on the rendered sample only, in the page as our browser built it; the row gives the template, how many elements failed and up to five of their selectors.",
+    howToFix:
+      "Add text inside each nameless button in the template, or an aria-label describing its action when the button shows only an icon.",
+  },
+  "a11y.input-button-name": {
+    title: "Accessibility: Input buttons without a discernible name",
+    explanation:
+      "Pages with an input of type button, submit or reset that has an empty value and no other accessible name, so the button is announced without a purpose; this fails WCAG success criterion 4.1.2 Name, Role, Value, level A. Judged on the rendered sample only, in the page as our browser built it; the row gives the template, how many elements failed and up to five of their selectors.",
+    howToFix:
+      "Set a value or an aria-label naming the action on each such input in the template.",
+  },
+  "a11y.select-name": {
+    title: "Accessibility: Select menus without a label",
+    explanation:
+      "Pages with a select menu that has no associated label or other accessible name, so a screen-reader user does not know what the choice is for; this fails WCAG success criterion 4.1.2 Name, Role, Value, level A. Judged on the rendered sample only, in the page as our browser built it; the row gives the template, how many elements failed and up to five of their selectors.",
+    howToFix:
+      "Link each select in the template to a visible label element through for and id, or give it an aria-label.",
+  },
+  "a11y.label": {
+    title: "Accessibility: Form fields without a label",
+    explanation:
+      "Pages with a text field, checkbox or other form input that has no associated label or other accessible name, so assistive technology cannot say what to enter; this fails WCAG success criterion 4.1.2 Name, Role, Value, level A. Judged on the rendered sample only, in the page as our browser built it; the row gives the template, how many elements failed and up to five of their selectors.",
+    howToFix:
+      "Add a label element tied to each field in the template through for and id, or an aria-label where no visible label fits; placeholder text alone is not a label.",
+  },
+  "a11y.frame-title": {
+    title: "Accessibility: Frames without an accessible name",
+    explanation:
+      "Pages with an iframe or frame that has no title or other accessible name, so a screen-reader user cannot tell an embedded video, map or widget from any other; this fails WCAG success criterion 4.1.2 Name, Role, Value, level A. Judged on the rendered sample only, in the page as our browser built it; the row gives the template, how many elements failed and up to five of their selectors.",
+    howToFix:
+      "Add a title attribute describing its content to each iframe the template outputs, embeds from other services included.",
+  },
+  "a11y.document-title": {
+    title: "Accessibility: Page has no title",
+    explanation:
+      "Pages whose document has no title element, or an empty one, so assistive technology and browser tabs have no name to announce for the page; this fails WCAG success criterion 2.4.2 Page Titled, level A. Judged on the rendered sample only, in the page as our browser built it; the row gives the template, how many elements failed and up to five of their selectors.",
+    howToFix:
+      "Add a title element with a unique, descriptive page title to the template's head.",
+  },
+  "a11y.html-has-lang": {
+    title: "Accessibility: Page language not declared",
+    explanation:
+      "Pages whose html element has no lang attribute, so a screen reader reads the text with its own default voice and pronunciation; this fails WCAG success criterion 3.1.1 Language of Page, level A. Judged on the rendered sample only, in the page as our browser built it; the row gives the template, how many elements failed and up to five of their selectors.",
+    howToFix:
+      "Add a lang attribute with the page's language code, such as en or en-GB, to the template's html element.",
+  },
+  "a11y.html-lang-valid": {
+    title: "Accessibility: Page language code is not valid",
+    explanation:
+      "Pages whose html element carries a lang attribute that is not a valid language code, so a screen reader cannot choose the right voice and pronunciation; this fails WCAG success criterion 3.1.1 Language of Page, level A. Judged on the rendered sample only, in the page as our browser built it; the row gives the template, how many elements failed and up to five of their selectors.",
+    howToFix:
+      "Set the lang attribute of the template's html element to a valid BCP 47 language code, such as en, fr or de-AT.",
+  },
+  "a11y.valid-lang": {
+    title: "Accessibility: Passage language code is not valid",
+    explanation:
+      "Pages with an element inside the body whose lang attribute is not a valid language code, so a screen reader cannot switch pronunciation for that passage; this fails WCAG success criterion 3.1.2 Language of Parts, level AA. Judged on the rendered sample only, in the page as our browser built it; the row gives the template, how many elements failed and up to five of their selectors.",
+    howToFix:
+      "Correct each lang attribute inside the template's body to a valid BCP 47 language code, or remove it where the passage is in the page's own language.",
+  },
+  "a11y.meta-viewport": {
+    title: "Accessibility: Zooming is disabled",
+    explanation:
+      "Pages whose viewport meta tag sets user-scalable to no or a maximum-scale below 2, which stops people with low vision enlarging the page on a phone; this fails WCAG success criterion 1.4.4 Resize Text, level AA. Judged on the rendered sample only, in the page as our browser built it; the row gives the template, how many elements failed and up to five of their selectors.",
+    howToFix:
+      "Remove user-scalable=no and any maximum-scale below 2 from the template's viewport meta tag.",
+  },
+  "a11y.meta-refresh": {
+    title: "Accessibility: Page reloads or redirects on a timer",
+    explanation:
+      "Pages with a meta refresh tag that reloads the page or moves to another one after a delay, which the reader cannot stop or extend; this fails WCAG success criterion 2.2.1 Timing Adjustable, level A. Judged on the rendered sample only, in the page as our browser built it; the row gives the template, how many elements failed and up to five of their selectors.",
+    howToFix:
+      "Remove the timed meta refresh from the template: send an HTTP redirect when the page has moved, and let the reader choose when to reload.",
+  },
+  "a11y.aria-hidden-focus": {
+    title: "Accessibility: Hidden content can still take keyboard focus",
+    explanation:
+      "Pages with an element marked aria-hidden that contains a link, button or field a keyboard can still reach, so focus lands on something a screen reader does not announce; this fails WCAG success criterion 4.1.2 Name, Role, Value, level A. Judged on the rendered sample only, in the page as our browser built it; the row gives the template, how many elements failed and up to five of their selectors.",
+    howToFix:
+      "Remove aria-hidden from the element in the template if its content should be read, or take its links, buttons and fields out of the tab order with tabindex=-1 or the inert attribute.",
+  },
+  "a11y.aria-required-attr": {
+    title: "Accessibility: ARIA roles missing a required attribute",
+    explanation:
+      "Pages with an element whose ARIA role needs an attribute it does not have, such as a checkbox role without aria-checked, so assistive technology cannot report its state; this fails WCAG success criterion 4.1.2 Name, Role, Value, level A. Judged on the rendered sample only, in the page as our browser built it; the row gives the template, how many elements failed and up to five of their selectors.",
+    howToFix:
+      "Add the attributes each role requires to those elements in the template, or use the native HTML element, which carries its state itself.",
+  },
+  "a11y.aria-valid-attr": {
+    title: "Accessibility: Misspelled or unknown ARIA attributes",
+    explanation:
+      "Pages with an element carrying an aria- attribute that the WAI-ARIA specification does not define, usually a misspelling, so the property it was meant to set is ignored; this fails WCAG success criterion 4.1.2 Name, Role, Value, level A. Judged on the rendered sample only, in the page as our browser built it; the row gives the template, how many elements failed and up to five of their selectors.",
+    howToFix:
+      "Correct each unknown aria- attribute in the template to its name in the WAI-ARIA specification, or remove it.",
+  },
+  "a11y.aria-valid-attr-value": {
+    title: "Accessibility: ARIA attributes with invalid values",
+    explanation:
+      "Pages with an aria- attribute whose value is not one the WAI-ARIA specification allows, such as a reference to an id that does not exist, so assistive technology ignores it or reports the wrong state; this fails WCAG success criterion 4.1.2 Name, Role, Value, level A. Judged on the rendered sample only, in the page as our browser built it; the row gives the template, how many elements failed and up to five of their selectors.",
+    howToFix:
+      "Set each such attribute in the template to an allowed value, and make id references such as aria-labelledby point to ids that exist on the page.",
+  },
+  "a11y.list": {
+    title: "Accessibility: Lists with invalid children",
+    explanation:
+      "Pages with a ul or ol element whose direct children include something other than li, script or template elements, so a screen reader can miscount or skip the list's items; this fails WCAG success criterion 1.3.1 Info and Relationships, level A. Judged on the rendered sample only, in the page as our browser built it; the row gives the template, how many elements failed and up to five of their selectors.",
+    howToFix:
+      "Make every direct child of the template's ul and ol elements an li, and move any other wrapper inside the list items.",
+  },
+  "a11y.listitem": {
+    title: "Accessibility: List items outside a list",
+    explanation:
+      "Pages with an li element that is not inside a ul, ol or menu, so assistive technology cannot present it as part of a list; this fails WCAG success criterion 1.3.1 Info and Relationships, level A. Judged on the rendered sample only, in the page as our browser built it; the row gives the template, how many elements failed and up to five of their selectors.",
+    howToFix:
+      "Move each stray li in the template into a ul or ol, or change it to another element if it is not part of a list.",
+  },
+  "a11y.color-contrast": {
+    title: "Accessibility: Text with too little colour contrast",
+    explanation:
+      "Pages with text whose colour contrast against its background is below 4.5 to 1, or 3 to 1 for large text, which makes it hard to read for people with low vision; this fails WCAG success criterion 1.4.3 Contrast (Minimum), level AA. Judged on the rendered sample only, in the page as our browser built it; the row gives the template, how many elements failed and up to five of their selectors.",
+    howToFix:
+      "Make the text darker or its background lighter in the template's styles until normal text reaches 4.5 to 1 and large text 3 to 1.",
+  },
+  "render.not-recorded": {
+    title: "Rendering: Console, image or accessibility checks not run",
+    explanation:
+      "Some rendered pages in this crawl lack what the console, image-size or accessibility checks read: they were rendered before those were recorded, or with the accessibility check turned off, timed out, interrupted (the page navigated away, or the renderer crashed), or stopped by an error the page caused, or the crawl never read its image files' sizes (file fetching was turned off, or the files were fetched before sizes were recorded), so those checks were left unrun on them rather than reported clean. The row counts the rendered pages and how many lack each record, and Checks Not Run names the checks affected.",
+    howToFix:
+      "Re-crawl the site with file fetching and accessibility checking turned on. If the check keeps timing out or being interrupted on one template, check that its pages finish loading and do not navigate away on their own.",
   },
   "pagination.canonical-to-other": {
     title: "Pagination: Paginated page canonicalised to another URL",

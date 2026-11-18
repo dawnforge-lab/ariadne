@@ -386,6 +386,34 @@
       "when": 1794577634334,
       "tag": "0054_schema_template_thresholds",
       "breakpoints": true
+    },
+    {
+      "idx": 55,
+      "version": "7",
+      "when": 1794911691607,
+      "tag": "0055_resources_image_size",
+      "breakpoints": true
+    },
+    {
+      "idx": 56,
+      "version": "7",
+      "when": 1794914923022,
+      "tag": "0056_pages_render_images",
+      "breakpoints": true
+    },
+    {
+      "idx": 57,
+      "version": "7",
+      "when": 1794919234609,
+      "tag": "0057_render_a11y",
+      "breakpoints": true
+    },
+    {
+      "idx": 58,
+      "version": "7",
+      "when": 1794924757909,
+      "tag": "0058_image_oversize_threshold",
+      "breakpoints": true
     }
   ]
 }

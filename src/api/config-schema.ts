@@ -66,6 +66,7 @@ import {
   MIN_URL_LENGTH,
 } from "../crawl/loop.js";
 import { INDEXED_URL_MAX } from "../crawl/parse/url-utils.js";
+import { A11Y_RULES } from "../crawl/render/a11y.js";
 import { MAX_PATTERN_LENGTH, MAX_SCOPE_PATTERNS } from "../crawl/url-scope.js";
 import {
   JUDGEMENT_BLOCK_KEYS,
@@ -408,6 +409,24 @@ export const CRAWL_FIELDS = {
     mutable: "whenPaused",
     description: "How many pages of each template cohort the render pass samples.",
     default: CRAWL_DEFAULTS.renderSamplePerType,
+  },
+  renderAccessibility: {
+    schema: booleanField("renderAccessibility"),
+    mutable: "whenPaused",
+    description:
+      "Whether the render pass checks each page it renders for accessibility: " +
+      // The count is the table's own (29b final review F1): a literal here
+      // told every agent 25 after the subset had become 24.
+      `a fixed set of ${A11Y_RULES.length} WCAG A and AA checks (axe-core 4.14.0) run in the ` +
+      "browser after the page is measured — text alternatives, accessible names, " +
+      "language, viewport and refresh, ARIA, list structure and colour contrast. " +
+      "Defaults to true. It adds no request to the site: the checker runs " +
+      "inside the page already rendered. Pass false to render without it; each " +
+      "rendered page then records the check as disabled, so an audit with no " +
+      "accessibility findings still says whether anything was checked. Only " +
+      "rendered pages are checked, so findings come from the render sample, not " +
+      "the whole site.",
+    default: true,
   },
   findingCap: {
     schema: findingCapSchema("field 'findingCap' must be"),
@@ -850,6 +869,7 @@ function buildStartBodySchema(registry: Registry) {
       renderBudgetPct: onTheWire(f.renderBudgetPct).optional(),
       renderMaxPages: onTheWire(f.renderMaxPages).optional(),
       renderSamplePerType: onTheWire(f.renderSamplePerType).optional(),
+      renderAccessibility: onTheWire(f.renderAccessibility).optional(),
       findingCap: onTheWire(f.findingCap).optional(),
       fetchResources: onTheWire(f.fetchResources).optional(),
       mode: onTheWire(f.mode).optional(),

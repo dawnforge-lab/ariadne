@@ -376,7 +376,7 @@ describe("expandMap", () => {
 describe("the ruleset's own declarations", () => {
   it("gives every metric rule a table whose columns are the catalog's", () => {
     const metrics = registry.byKind("metric");
-    expect(metrics).toHaveLength(15);
+    expect(metrics).toHaveLength(16);
     for (const rule of metrics) {
       expect(rule.table, `${rule.id} declares no table`).toBeDefined();
       const shaped = shapeMetricTable(rule.id, rule.table, []);

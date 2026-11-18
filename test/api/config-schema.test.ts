@@ -24,6 +24,7 @@ import {
   type ConfigError,
 } from "../../src/api/config-schema.js";
 import { MAX_SUPPLIED_SITEMAPS, MIN_PER_HOST_DELAY_MS } from "../../src/api/service.js";
+import { A11Y_RULES } from "../../src/crawl/render/a11y.js";
 import { buildRegistry } from "../../src/rules/index.js";
 import { OVERRIDABLE_THRESHOLDS } from "../../src/rules/judgement.js";
 import { RULESET_VERSION } from "../../src/rules/registry/registry.js";
@@ -84,6 +85,8 @@ describe("the published schema", () => {
       renderBudgetPct: "whenPaused",
       renderMaxPages: "whenPaused",
       renderSamplePerType: "whenPaused",
+      // Phase 29b.
+      renderAccessibility: "whenPaused",
       findingCap: "always",
       judgement: "always",
       // Phase 27c.
@@ -117,7 +120,7 @@ describe("the published schema", () => {
     const thresholds =
       props["judgement"]?.properties?.["thresholds"]?.properties ?? {};
     expect(Object.keys(thresholds).sort()).toEqual(Object.keys(OVERRIDABLE_THRESHOLDS).sort());
-    expect(Object.keys(thresholds)).toHaveLength(22);
+    expect(Object.keys(thresholds)).toHaveLength(23);
     for (const [name, row] of Object.entries(OVERRIDABLE_THRESHOLDS)) {
       expect(thresholds[name]?.minimum, `${name}.minimum`).toBe(row.min);
       expect(thresholds[name]?.maximum, `${name}.maximum`).toBe(row.max);
@@ -133,7 +136,7 @@ describe("the published schema", () => {
       .filter((rule) => rule.kind !== "metric")
       .map((rule) => rule.id);
     expect([...names].sort()).toEqual([...findingRules].sort());
-    expect(names).toHaveLength(182); // 72 page + 110 query since the 29a rework
+    expect(names).toHaveLength(211); // 72 page + 139 query since 29b T8 (24 a11y rules and render.not-recorded)
     for (const metric of registry.byKind("metric")) {
       expect(names, metric.id).not.toContain(metric.id);
     }
@@ -310,6 +313,23 @@ describe("parseStartBody: the refusals the transport suites used to pin", () => 
       expect(error.path).toBe("fetchResources");
       expect(error.message).toBe("field 'fetchResources' must be a boolean");
     }
+  });
+
+  it("refuses a renderAccessibility that is not a boolean, and publishes its default (Phase 29b)", () => {
+    for (const bad of ["false", 0, null]) {
+      const error = first({ siteUrl: SITE, renderAccessibility: bad });
+      expect(error.code, JSON.stringify(bad)).toBe("invalid_type");
+      expect(error.path).toBe("renderAccessibility");
+      expect(error.message).toBe("field 'renderAccessibility' must be a boolean");
+    }
+    expect(props["renderAccessibility"]).toMatchObject({ type: "boolean", default: true });
+  });
+
+  it("states the accessibility subset's size from the table the renderer runs (29b final review F1)", () => {
+    // Served to Talos through `config_schema`: a count that drifts from
+    // `A11Y_RULES` tells an agent the crawl checks something it does not.
+    const description = props["renderAccessibility"]!.description ?? "";
+    expect(description).toContain(`a fixed set of ${A11Y_RULES.length} WCAG A and AA checks`);
   });
 
   it("refuses a body that is not a JSON object", () => {

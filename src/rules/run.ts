@@ -222,14 +222,15 @@ export async function runRules(
   // One statement over every table a rule or a derivation reads —
   // `structured_data` included, since the schema query rules select
   // from it and `deriveSchemaValidation` scans it, and `sitemap_hreflang`, which
-  // only `deriveSitemapHreflang` reads. `metrics` is deliberately absent: no
-  // rule reads it — the metric phase only writes it.
+  // only `deriveSitemapHreflang` reads, and `render_a11y`, which the 24
+  // accessibility rules (Phase 29b) join to `pages` by axe rule. `metrics` is
+  // deliberately absent: no rule reads it — the metric phase only writes it.
   //
   // Loud by construction: no catch, so a failed ANALYZE aborts the run rather
   // than leaving it to judge the site on whatever plan it gets (hard rule 7).
   await db.execute(
     sql`ANALYZE pages, links, sitemap_urls, url_params, hreflang, issues, structured_data,
-                sitemap_hreflang`,
+                sitemap_hreflang, render_a11y`,
   );
 
   // THIS CRAWL'S JUDGEMENT IS RECOMPUTED, NOT ACCUMULATED. Every issue row the

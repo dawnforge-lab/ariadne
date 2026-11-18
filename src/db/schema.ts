@@ -8,6 +8,8 @@ import type { ScheduleCrawl } from "../schedule/store.js";
 import type { StoredHostSpacing } from "../crawl/politeness.js";
 import type { StoredPlatformProfile } from "../crawl/platform.js";
 import type { RenderConsole } from "../crawl/render/console-capture.js";
+import type { A11yStatus } from "../crawl/render/a11y.js";
+import type { RenderImages } from "../crawl/render/image-stand-in.js";
 import type { StoredResponseHeaders } from "../crawl/response-headers.js";
 import type { StructuredDataFormat, StructuredDataSkips } from "../crawl/parse/page-analyzer.js";
 import type { BlockValidation } from "../rules/schema-org/validate.js";
@@ -1040,6 +1042,49 @@ export const pages = pgTable("pages", {
   // console is a non-null capture with zero counts. Shape: `RenderConsole`
   // (src/crawl/render/console-capture.ts).
   renderConsole: jsonb("render_console").$type<RenderConsole>(),
+  // THE RENDERED PAGE'S IMAGES, MEASURED (Phase 29b, migration 0056; render
+  // capture 3). The browser answered each image request whose URL this crawl's
+  // `resources` had sized with a blank SVG of that intrinsic size, then measured
+  // every `<img>` box (the first `MAX_RENDER_IMAGES` in document order) at the
+  // fixed 1280×900 viewport, device-pixel ratio 1, without scrolling. Counts of
+  // hidden, lazy-unloaded, never-requested and unsized images, and the
+  // `RENDER_IMAGES_KEPT` images whose intrinsic width most exceeds their box.
+  //
+  // NULLABLE: null means the page was not rendered, its render failed (or was
+  // refused before a browser page opened), or it was rendered before capture 3
+  // (`render_version` < 3). It never means "no images": a page without any is a
+  // non-null capture with `total: 0`. Shape: `RenderImages`
+  // (src/crawl/render/image-stand-in.ts).
+  renderImages: jsonb("render_images").$type<RenderImages>(),
+  // THE ACCESSIBILITY RUN (Phase 29b, migration 0057; render capture 3). After
+  // the document is serialised, the renderer runs the pinned axe-core's WCAG
+  // A/AA subset (`A11Y_RULES`, src/crawl/render/a11y.ts) in an isolated world
+  // of the page; the violations are rows of `render_a11y`.
+  //
+  // `render_a11y_status` (ruling R3, widened by controller ruling B) is text,
+  // not a boolean:
+  //  - `ran`: axe finished; the page's rows in `render_a11y` are its
+  //    violations, and none means none.
+  //  - `disabled`: the crawl's `renderAccessibility` was false; axe never ran.
+  //  - `timeout`: axe did not finish inside `AXE_TIMEOUT_MS` and was terminated.
+  //  - `interrupted`: the page's document went away under it (it navigated, or
+  //    its target closed).
+  //  - `error`: axe threw or rejected inside the page; `render_a11y_error` says
+  //    how.
+  // `timeout`, `interrupted` and `error` are INCOMPLETE runs: no rows, and that
+  // is "not measured", never "no violations".
+  //
+  // NULLABLE: null means the page was not rendered, its render failed (or was
+  // refused before a browser page opened), or it was rendered before capture 3
+  // (`render_version` < 3).
+  renderA11yStatus: text("render_a11y_status").$type<A11yStatus>(),
+  // Wall time of the axe run in ms (injection included), so the gate can report
+  // its median and p95. Set for every status but `disabled`; null exactly when
+  // `render_a11y_status` is null or `disabled`.
+  renderA11yMs: integer("render_a11y_ms"),
+  // The first line of what axe threw, through `storableText(…, 500)`: set only
+  // when `render_a11y_status` is `error`, null otherwise.
+  renderA11yError: text("render_a11y_error"),
 }, (t) => [
   uniqueIndex("pages_crawl_url").on(t.crawlId, t.url),
   index("pages_crawl_normalised").on(t.crawlId, t.urlNormalised),
@@ -1211,6 +1256,34 @@ export const structuredData = pgTable("structured_data", {
 ]);
 
 /**
+ * ONE ROW PER AXE RULE A RENDERED PAGE VIOLATES (Phase 29b, migration 0057).
+ *
+ * Written by the render writer (`writeRenderResult`) for a page whose
+ * `render_a11y_status` is `ran`, and REPLACED on every write of that page: its
+ * rows are deleted and this render's inserted in the same transaction, so a
+ * re-render never leaves an older run's violation behind, and a failed or
+ * incomplete render leaves none. `axe_rule` is one of `A11Y_RULES`
+ * (src/crawl/render/a11y.ts); `impact` is axe's own for the rule on this page
+ * (null when axe gave none). `node_count` counts every element that failed;
+ * `targets` keeps the CSS selectors of the first `A11Y_TARGETS_MAX`, each cut
+ * to `A11Y_TARGET_CHARS` (a shadow DOM path joined with ` >>> `). No HTML
+ * snippet is stored: the selector finds the element in the kept document.
+ *
+ * No row for a rule means "not violated" ONLY on a page whose status is `ran`.
+ */
+export const renderA11y = pgTable("render_a11y", {
+  crawlId: text("crawl_id").notNull().references(() => crawls.id, { onDelete: "cascade" }),
+  pageId: text("page_id").notNull(),
+  axeRule: text("axe_rule").notNull(),
+  impact: text("impact"),
+  nodeCount: integer("node_count").notNull(),
+  targets: jsonb("targets").notNull().$type<string[]>(),
+}, (t) => [
+  uniqueIndex("render_a11y_crawl_page_rule").on(t.crawlId, t.pageId, t.axeRule),
+  index("render_a11y_crawl_rule").on(t.crawlId, t.axeRule),
+]);
+
+/**
  * ONE ROW PER DISTINCT RESOURCE URL PER CRAWL — the images, stylesheets and
  * scripts the crawled pages point at (P11-T1, migration 0013). The per-page
  * fan-out lives next door in `page_resources`; this table is about FILES, and
@@ -1303,6 +1376,22 @@ export const resources = pgTable("resources", {
   // twitter:image. The resource pass fetches share images too, so the row
   // keeps counting in `crawl_status.resources`; this flag tells them apart.
   shareImage: boolean("share_image").notNull().default(false),
+  // Phase 29b (migration 0055): an image's INTRINSIC size in pixels, read from
+  // the format's own header in the first 64 KiB of the body the resource pass's
+  // one Range GET returned (`readImageSize`, src/crawl/resources/image-size.ts),
+  // as DISPLAYED: a JPEG's or PNG's EXIF orientation 5-8 or an AVIF's `irot` 1/3 swaps
+  // the stored pair, as the browser does.
+  // Null means NOT MEASURED and `dimensions_reason` says why; a size is never
+  // guessed or defaulted (hard rule 7). Both are null on css/js rows and on
+  // every row that is not `ok`.
+  width: integer("width"),
+  height: integer("height"),
+  // Why `width`/`height` are null on an `ok` image row: `svg` (a vector format
+  // has no intrinsic pixel size), `encoded` (a content-encoded body is compressed bytes, never parsed), `unknown-format`, `header-beyond-limit` (the
+  // size lies past the 64 KiB read), `malformed`, `empty`, or `not-image` (a 2xx
+  // whose content type is not `image/*`). Null when a size WAS read, and null on
+  // css/js and non-ok rows, where no measurement was attempted.
+  dimensionsReason: text("dimensions_reason"),
 }, (t) => [
   // The dedup, and the upsert target. One row per URL per crawl: the writer
   // inserts with `on conflict do nothing`, so the second page to reference an

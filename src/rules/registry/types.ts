@@ -93,7 +93,9 @@ export type RuleCategory =
   | "url"
   | "host"
   | "content"
-  | "structured-data";
+  | "structured-data"
+  // Phase 29b: the WCAG A/AA subset axe-core runs on the rendered sample.
+  | "accessibility";
 
 /**
  * One column of a rule's report, as `RuleMeta.columns` declares it.

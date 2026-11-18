@@ -115,6 +115,8 @@ export async function runRenderLink(
   let summary: RenderPassSummary;
   try {
     summary = await runRenderPass(db, crawlId, {
+      // The crawl's own render knobs ride in here: the budgets and, from
+      // Phase 29b, `renderAccessibility` (`RenderPassConfig`).
       ...config,
       ...(credentials === undefined ? {} : { credentials }),
       robotsCrawlDelaySec,

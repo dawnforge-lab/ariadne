@@ -56,9 +56,14 @@ describe("0054 — a stamp names the schema template thresholds", () => {
     // The pre-0054 shape: every threshold but the two new ones.
     const twenty: Record<string, number> = Object.fromEntries(
       THRESHOLD_NAMES.filter(
-        (n) => n !== "SCHEMA_TEMPLATE_SHARE" && n !== "SCHEMA_TEMPLATE_MIN_PAGES",
+        (n) =>
+          n !== "SCHEMA_TEMPLATE_SHARE" &&
+          n !== "SCHEMA_TEMPLATE_MIN_PAGES" &&
+          n !== "IMAGE_OVERSIZE_PERCENT",
       ).map((n) => [n, DEFAULT_THRESHOLDS[n]]),
     );
+    // The shape 0054 leaves: 22 thresholds. 0058 adds the 23rd.
+    const { IMAGE_OVERSIZE_PERCENT: _image, ...defaultsAt0054 } = DEFAULT_THRESHOLDS;
     let asserted = false;
 
     const outcome = await db
@@ -101,15 +106,16 @@ describe("0054 — a stamp names the schema template thresholds", () => {
         // The SQL writes the defaults out literally; today's code agrees.
         expect(stamp.get(ids.old)).toEqual({
           disabledRules: [],
-          thresholds: { ...DEFAULT_THRESHOLDS },
+          thresholds: defaultsAt0054,
         });
         expect(stamp.get(ids.overridden)).toEqual({
           disabledRules: [],
-          thresholds: { ...DEFAULT_THRESHOLDS, SLOW_MS: 500 },
+          thresholds: { ...defaultsAt0054, SLOW_MS: 500 },
         });
         expect(stamp.get(ids.unjudged)).toBeNull();
+        // readStamp wants all 23 and the 23rd is 0058's, so it still refuses here.
         for (const id of [ids.old, ids.overridden]) {
-          expect(() => readStamp(stamp.get(id), id)).not.toThrow();
+          expect(() => readStamp(stamp.get(id), id)).toThrow();
         }
 
         // Idempotent: a second application changes nothing.

@@ -497,6 +497,28 @@ describe("resourceRules against the database", () => {
       });
     });
 
+    it("fires on an image answered 206 (a Range GET) whose content type is not an image", async () => {
+      const { crawlId } = await seed(
+        [{ path: "/a" }],
+        [
+          {
+            url: "/img/ranged.png",
+            kind: "image",
+            statusCode: 206,
+            contentType: "text/html",
+            on: ["/a"],
+          },
+        ],
+      );
+      const found = await run("resources.bad-content-type", crawlId);
+      expect(found).toHaveLength(1);
+      expect(found[0]!.evidence).toMatchObject({
+        resourceUrl: `${SITE}/img/ranged.png`,
+        kind: "image",
+        contentType: "text/html",
+      });
+    });
+
     it("does not fire on correctly typed files, whatever the parameters or case", async () => {
       const { crawlId } = await seed(
         [{ path: "/a" }],

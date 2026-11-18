@@ -1031,12 +1031,63 @@ const KINDS = ["page", "query", "metric"] as const satisfies readonly AnyRule["k
 //     `schema_type`). `schema.self-serving-reviews` copy states the fact, not
 //     a policy. A blob in the old shape is refused (re-run the rules); no
 //     migration. 197 rules: 72 page / 110 query / 15 metric.
-export const RULESET_VERSION = "0.26.0";
+// 0.27.0: Phase 29b, render-pass checks. ONE BUMP FOR THE PHASE; later tasks append here.
+//     Tasks 1-4 changed the crawl's capture earlier in the phase WITHOUT a version
+//     bump: the Range GET, the image stand-ins, `render_images`, the axe run and
+//     `render_a11y`, and render capture 3. Their rules arrive in tasks 6-7.
+//     1. Task 5: three query rules read the render pass's console capture
+//        (`pages.render_console`), each claiming CHECK-51, on every page with a
+//        capture, a failed render included: `render.js-exception` (warning;
+//        uncaught exceptions and unhandled rejections), `render.console-error`
+//        (info; an error among the first 20 console messages kept, so errors
+//        logged after twenty warnings are not seen) and `render.failed-request`
+//        (warning; the page's own failed requests, third-party ones not
+//        measured). A `render_console` that is not a RenderConsole throws.
+//        200 rules: 72 page / 113 query / 15 metric.
+//     2. Task 6: `images.larger-than-displayed` (warning; CHECK-49) reads the
+//        render pass's image measurement (`pages.render_images`, capture 3) and
+//        fires on a page where some kept image is wider than
+//        `IMAGE_OVERSIZE_PERCENT` percent of its displayed box (default 200,
+//        overridable 101-1000, so 23 thresholds in all; migration 0058 adds it
+//        to every stored run stamp). Judged from the rendered sample at a fixed
+//        1280x900 viewport, device-pixel ratio 1; `atLeast` when the capture's
+//        kept list was truncated. The metric `render.image-measurement` (crawl
+//        and per template) counts measured, hidden, lazy, never-requested,
+//        size-unknown and broken images and a `measuredShare`. A
+//        `render_images` that is not a RenderImages throws.
+//        202 rules: 72 page / 114 query / 16 metric.
+//     3. Task 7: 24 query rules `a11y.<axe-id>`, one per row of `A11Y_RULES`
+//        (generated from that table), read the render pass's accessibility run
+//        (`render_a11y`, capture 3) on pages whose run finished
+//        (`render_a11y_status = 'ran'`): one finding per page that violates the
+//        rule, with its impact, element count, up to five selectors and WCAG
+//        level. Severity from the table (23 warning, `a11y.meta-viewport`
+//        info); category `accessibility` (new); triage issue / low. All claim
+//        CHECK-89, "Accessibility — WCAG A/AA subset (rendered sample)", new in
+//        the checklist and in `CRAWL_CHECK_IDS` (48 checks now). The NOT
+//        MEASURED marker `render.not-recorded` (info; CHECK-49, CHECK-51,
+//        CHECK-89) fires once on a crawl whose rendered pages include one with
+//        no console capture, one captured before capture 3, or one whose
+//        accessibility run was disabled, timed out, interrupted or errored;
+//        silent on a crawl with no rendered page. A `render_a11y` row of an
+//        unknown axe rule, a node count below one or bad targets throws.
+//        The subset was 25 until Task 8 dropped `duplicate-id-aria`: axe-core
+//        4.14.0 marks it `reviewOnFail`, so it reports "needs review" and never
+//        a violation, and WCAG 2.2 removed the criterion it tested (4.1.1).
+//        227 rules: 72 page / 139 query / 16 metric.
+export const RULESET_VERSION = "0.27.0";
 
 /**
- * The 47 crawl-derived checks (sf-audit checklist, Pre-Crawl + sections 1–11):
- * the universe a crawl can speak to. CI compares this against the registry's
- * claimed checks, so an unclaimed check is visible rather than silently absent.
+ * The 48 crawl-derived checks (sf-audit checklist, Pre-Crawl + sections 1–11,
+ * and CHECK-89): the universe a crawl can speak to. CI compares this against
+ * the registry's claimed checks, so an unclaimed check is visible rather than
+ * silently absent.
+ *
+ * CHECK-89 (Phase 29b, accessibility on the rendered sample) is the one id
+ * added since the build plan drew the 47: unlike the section-12 checks, which
+ * the engine answers in part beside a browser recipe, it was written for the
+ * engine and is answered by its rules alone, so it belongs in the universe the
+ * coverage pin guards.
  */
 export const CRAWL_CHECK_IDS: readonly string[] = [
   "CHECK-01","CHECK-02","CHECK-03","CHECK-04","CHECK-05","CHECK-06","CHECK-07",
@@ -1045,7 +1096,7 @@ export const CRAWL_CHECK_IDS: readonly string[] = [
   "CHECK-22","CHECK-23","CHECK-24","CHECK-25","CHECK-26","CHECK-27","CHECK-28",
   "CHECK-29","CHECK-30","CHECK-31","CHECK-32","CHECK-33","CHECK-33b","CHECK-34",
   "CHECK-35","CHECK-36","CHECK-37","CHECK-38","CHECK-39","CHECK-40","CHECK-41",
-  "CHECK-42","CHECK-43","CHECK-44","CHECK-45","CHECK-46",
+  "CHECK-42","CHECK-43","CHECK-44","CHECK-45","CHECK-46","CHECK-89",
 ];
 
 /**

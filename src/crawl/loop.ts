@@ -351,6 +351,18 @@ export interface CrawlConfig extends RenderSelectionConfig {
    */
   platformProfiles?: boolean;
   /**
+   * Run the pinned axe-core WCAG A/AA subset in every page the render pass
+   * renders (Phase 29b, src/crawl/render/a11y.ts). Absent means on. `false`
+   * renders the page and measures everything else, and records
+   * `render_a11y_status = 'disabled'`, so a crawl with no accessibility
+   * findings says whether it was checked.
+   *
+   * A RENDER knob beside the render budgets: stored on the row, read back by
+   * `parseStoredConfig`, handed to the pass as `RenderPassConfig`, and
+   * changeable while the crawl is queued or paused (`whenPaused`).
+   */
+  renderAccessibility?: boolean;
+  /**
    * THE CRAWL'S SCOPE (Phase 27c): anchored wildcard patterns over the whole
    * normalised URL (`src/crawl/url-scope.ts`). A URL an `exclude` pattern
    * matches, or — with a non-empty `include` — one no `include` pattern
@@ -1215,6 +1227,7 @@ export function parseStoredConfig(value: unknown, crawlId: string): CrawlConfig 
     renderBudgetPct: raw["renderBudgetPct"],
     renderMaxPages: raw["renderMaxPages"],
     renderSamplePerType: raw["renderSamplePerType"],
+    renderAccessibility: raw["renderAccessibility"],
     findingCap: raw["findingCap"],
     maxResources: raw["maxResources"],
     maxResourceHosts: raw["maxResourceHosts"],
@@ -1254,7 +1267,15 @@ export function parseStoredConfig(value: unknown, crawlId: string): CrawlConfig 
   // `platformProfiles` joins them on the same terms: a stored `"false"` that
   // resumed as "on" would clamp a crawl its operator opted out, and one that
   // resumed as "off" would crawl a Shopify store at full width.
-  for (const field of ["probeHosts", "fetchResources", "platformProfiles"] as const) {
+  // `renderAccessibility` (Phase 29b) on the same terms: a stored `"false"`
+  // read as on would check pages the operator said not to, and read as off
+  // would record every page `disabled` for a crawl that asked for the check.
+  for (const field of [
+    "probeHosts",
+    "fetchResources",
+    "platformProfiles",
+    "renderAccessibility",
+  ] as const) {
     if (config[field] !== undefined && typeof config[field] !== "boolean") {
       throw new Error(`crawl ${crawlId}: stored config.${field} is not a boolean`);
     }

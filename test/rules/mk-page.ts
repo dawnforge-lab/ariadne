@@ -207,6 +207,10 @@ export function mkPage(overrides: Partial<PageRecord> = {}): PageRecord {
     overlongUrls: { links: 0, resources: 0, hreflang: 0 },
     renderVersion: null,
     renderConsole: null,
+    renderImages: null,
+    renderA11yStatus: null,
+    renderA11yMs: null,
+    renderA11yError: null,
     ...overrides,
   };
 }

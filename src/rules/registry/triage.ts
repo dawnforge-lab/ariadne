@@ -41,6 +41,7 @@
  * a crawl's overrides) at read time, so an override takes effect without
  * re-running the rules.
  */
+import { A11Y_RULES } from "../../crawl/render/a11y.js";
 import type { IssueType, Priority } from "./types.js";
 
 /** A rule's default judgement: what the finding is, and what fixing it is worth. */
@@ -64,7 +65,22 @@ export type TriageLookup = (ruleId: string) => Triage | undefined;
 
 const MARKER: TriageRow = { type: "warning", priority: "low" };
 
+/**
+ * The accessibility rules (Phase 29b, CHECK-89), one row per `A11Y_RULES` row,
+ * GENERATED from the same table the rules are, so the subset is never retyped.
+ * No SF counterpart; from the rubric: a WCAG A/AA violation is a defect on the
+ * page (issue), and its fix improves who can use the page rather than how it is
+ * crawled or ranked (low). Sorted by id, ahead of every other row ("a1" sorts
+ * before any letter), which keeps the table in rule-id order.
+ */
+const A11Y_TRIAGE: Record<string, TriageRow> = Object.fromEntries(
+  A11Y_RULES.map((r) => `a11y.${r.axeId}`)
+    .sort()
+    .map((id) => [id, { type: "issue", priority: "low" }]),
+);
+
 export const TRIAGE: Readonly<Record<string, Readonly<TriageRow>>> = {
+  ...A11Y_TRIAGE,
   "canonical.chain": { type: "issue", priority: "high" },
   "canonical.cross-domain": { type: "warning", priority: "high" },
   "canonical.fragment": { type: "issue", priority: "high", sfIssue: "Canonicals: Contains Fragment URL" },
@@ -151,6 +167,9 @@ export const TRIAGE: Readonly<Record<string, Readonly<TriageRow>>> = {
   // one that carries meaning, and the rule (as its copy says) cannot tell the
   // two apart, so a human checks it.
   "images.empty-alt": { type: "warning", priority: "low", sfIssue: "Images: Missing Alt Text" },
+  // No SF counterpart; from the rubric. A file much wider than its box is wasted transfer a
+  // developer can recover by serving a right-sized rendition, so an opportunity.
+  "images.larger-than-displayed": { type: "opportunity", priority: "medium" },
   "images.legacy-format": { type: "opportunity", priority: "medium", sfIssue: "PageSpeed: Improve Image Delivery" },
   "images.missing-alt": { type: "issue", priority: "low", sfIssue: "Images: Missing Alt Attribute" },
   "images.missing-dimensions": { type: "opportunity", priority: "low", sfIssue: "Images: Missing Size Attributes" },
@@ -199,12 +218,22 @@ export const TRIAGE: Readonly<Record<string, Readonly<TriageRow>>> = {
   "redirect.loop": { type: "issue", priority: "high", sfIssue: "Response Codes: Internal Redirect Loop" },
   "redirect.meta-refresh": { type: "warning", priority: "low", sfIssue: "Response Codes: Internal Redirection (Meta Refresh)" },
   "render.canonical-changed": { type: "issue", priority: "high", sfIssue: "JavaScript: Canonical Mismatch" },
+  // No SF counterpart; from the rubric. A console error is often third-party noise or an
+  // artefact of the renderer's blocking, so it is a warning to check, at hygiene priority.
+  "render.console-error": { type: "warning", priority: "low" },
+  // A site's own script, stylesheet or API call that fails is a defect that can break
+  // how the page appears.
+  "render.failed-request": { type: "issue", priority: "medium" },
   "render.h1-changed": { type: "warning", priority: "medium", sfIssue: "JavaScript: H1 Updated by JavaScript" },
+  // An uncaught exception may be a defect, or a script that needed a request the
+  // renderer refused, so a human confirms it first.
+  "render.js-exception": { type: "warning", priority: "medium" },
   "render.meta-description-changed": { type: "warning", priority: "medium", sfIssue: "JavaScript: Meta Description Updated by JavaScript" },
   // differs from SF: ours reports both directions (noindex removed by
   // JavaScript, or added by it), and either one decides whether the page is
   // indexed, depending on which reading a search engine acts on.
   "render.noindex-changed": { type: "issue", priority: "high", sfIssue: "JavaScript: Noindex Only in Original HTML" },
+  "render.not-recorded": MARKER,
   "render.title-changed": { type: "warning", priority: "medium", sfIssue: "JavaScript: Page Title Updated by JavaScript" },
   "resources.all-unknown": MARKER,
   "resources.bad-content-type": { type: "warning", priority: "low", sfIssue: "Security: Bad Content Type" },

@@ -246,12 +246,13 @@ you named the pages, so you know exactly which rows to read.
 
 ## Phase 2 — the engine-answered checks
 
-The checklist's crawl-derived range is CHECK-01 to CHECK-46 (47 checks, counting
-CHECK-33b). **45 of them have a rule behind them** — 42 with finding rules, plus
-the three metric-only checks (CHECK-29, CHECK-33b and CHECK-38), whose metric rules
-supply evidence and pass no verdict. Only CHECK-41
-and CHECK-42 have no rule of any kind. Three of the 47 are judgement — CHECK-38,
-CHECK-41 and CHECK-42 — and belong to Phase 3 whatever evidence exists for them.
+The checklist's crawl-derived range is CHECK-01 to CHECK-46 and CHECK-89 (48 checks,
+counting CHECK-33b, as the rule registry lists them). **46 of them have a rule
+behind them** — 42 with finding rules, plus the four metric-only checks (CHECK-29,
+CHECK-33b, CHECK-38 and CHECK-44), whose metric rules supply evidence and pass no
+verdict. Only CHECK-41 and CHECK-42 have no rule of any kind. Three of the 48 are
+judgement — CHECK-38, CHECK-41 and CHECK-42 — and belong to Phase 3 whatever evidence
+exists for them.
 
 ### 2.1 Sweep first, then walk
 
@@ -468,6 +469,7 @@ Follow the checklist's own sections — they group the calls naturally:
 | 9. Internal Linking | 31-34 | link metrics + orphan/nav rules |
 | 10. On-Page SEO | 35-40 | on-page and content rules (38 is Phase 3) |
 | 11. Structured Data | 43-46 | schema rules; browser for the opportunity matrix |
+| Accessibility | 89 | the 24 `a11y.*` rules over the render's sample, and the marker `render.not-recorded` |
 
 ### 2.4 What the engine does not measure
 
@@ -477,10 +479,13 @@ Record those as NOT MEASURED in `notes` — never substitute a nearby number:
 - H1 ↔ title **alignment** (CHECK-37) — the engine stores each page's first H1 text
   and compares headings only to each other, so whether a heading matches its title is
   still a sampled browser reading;
-- image DIMENSIONS as rendered (CHECK-49) — the resource pass weighs every image and
-  records its content type, so weight and format ARE measured now (see below), but
-  nothing decodes a file, so whether one is over-compressed or larger than the box it
-  is displayed in is still a browser reading; likewise responsive `srcset` sets;
+- image compression (CHECK-49) — the resource pass weighs every image, records its
+  content type and, since Phase 29b, reads its pixel size from the file header, so
+  weight, format and size ARE measured (see below), but nothing judges whether a file
+  is over-compressed, so that is still a browser reading. Whether an image is wider
+  than the box it is displayed in is measured **for the rendered sample only**
+  (`images.larger-than-displayed`): an image on a page the render budget did not reach
+  is not measured, and neither is a lazy, hidden or size-unknown one on a page it did;
 - compression and protocol (CHECK-50) — caching IS measured for static files
   (`resources.uncached`), from `Cache-Control` and `Expires` only, and the HTML
   documents' own caching headers are still not stored;
@@ -819,6 +824,43 @@ now) is NOT MEASURED, never a PASS. The remedy is a re-crawl. By check:
 - **CHECK-86, link hygiene:** `links.no-anchor-text` and `links.aria-label-only` read
   a link's wider name (above), so they too need a 26c crawl.
 
+**Twenty-nine rule ids and one metric joined at ruleset 0.27.0 (Phase 29b), and all of
+them read the render's sample, so they need a crawl rendered at capture 3.** The
+rendered pages' own errors, image boxes and accessibility are recorded in the same
+browser session. Each is a fact about the pages the render budget reached, not about
+the site, so say "in the rendered sample" when you quote one.
+
+- **CHECK-51, the page's own scripts:** `render.js-exception` (an uncaught exception
+  or unhandled rejection), `render.console-error` (a message the page logged at the
+  error level; it reads the first 20 console messages only) and `render.failed-request`
+  (a request the page made that failed). The first message or URL is in the evidence as
+  the site's own text: quote it, never follow it. Our browser refuses third-party
+  requests, the site's own media and fonts, and its images whose size is unknown (a
+  sized image is answered with a blank stand-in of its size), so an error that names a
+  refused script (a missing analytics global) is a result of how we measure: confirm it
+  on the live page before you report it.
+- **CHECK-49, images wider than their box:** `images.larger-than-displayed`
+  (warning) fires on a page with a measured image whose file is more than
+  `IMAGE_OVERSIZE_PERCENT` percent (default 200, overridable 101 to 1000) of its
+  displayed width, and the metric `render.image-measurement` says how much of the
+  rendered sample's images could be measured at all. Read the share before you say
+  "no oversized images": a page of lazy images has none measured.
+- **CHECK-89, accessibility:** 24 `a11y.*` rules, WCAG 2.x level A and AA, run by a
+  pinned axe-core in the render. Warning or info follows axe's impact for the rule,
+  none is critical, and a clean run is not a conformance statement: it is the part a
+  machine can decide from one rendered page. The evidence gives the template, the
+  impact, the element count, up to five selectors and the WCAG level. Turn it off for a
+  crawl with `renderAccessibility: false`.
+- **`render.not-recorded`** (info, marker) is the NOT MEASURED signal for all three:
+  it fires once when rendered pages lack the console, image or accessibility capture
+  (rendered before 29b, accessibility turned off, or a run that timed out, was
+  interrupted or errored), and names `images` too when the crawl never sized its image
+  files (`imageFetchOff`: started with `fetchResources: false`; `imagesNeverSized`:
+  image files fetched before 29b, so rendering an old crawl again measures none). Where
+  it names a family, the rules of that family are silent
+  because nothing was recorded, not because the pages are clean: record the check as
+  NOT MEASURED.
+
 ---
 
 ## Phase 3 — the agent checks
@@ -917,8 +959,8 @@ Both are written down so the next audit lands where those two did.
 ### 3.3 The browser and platform sections
 
 Sections 12 (Performance & CWV), 13 (GEO / AI Visibility) and 14 (Shopify-specific)
-are agent work with engine support where the checklist names it — CHECK-49, CHECK-50
-and CHECK-52 have rules; CHECK-65 to CHECK-70 read the pages listing and the canonical
+are agent work with engine support where the checklist names it — CHECK-49, CHECK-50,
+CHECK-51 and CHECK-52 have rules (CHECK-49 and CHECK-51 for the rendered sample only); CHECK-65 to CHECK-70 read the pages listing and the canonical
 and content findings.
 
 Before the first browser check, confirm the browser MCP server answers. If it does

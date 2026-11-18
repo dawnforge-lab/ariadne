@@ -108,6 +108,8 @@ import {
   type RenderResult,
   type UnpinnedHost,
 } from "./renderer.js";
+import type { ImageDimensionLookup, StoredImage } from "./image-stand-in.js";
+import { AXE_TERMINATE_GRACE_MS, AXE_TIMEOUT_MS } from "./a11y.js";
 import { parseStoredPlatformProfile, type StoredPlatformProfile } from "../platform.js";
 import { DEFAULT_MAX_DELAY_MS, HostGate, throttleRecordOf } from "../politeness.js";
 import { UrlPolicyError, type AddressResolver } from "../url-policy.js";
@@ -182,6 +184,18 @@ export const RENDER_PASS_DEFAULTS = {
 export const RENDER_POST_SETTLE_ALLOWANCE_MS = 30_000;
 
 /**
+ * The most the accessibility run can add to one render (Phase 29b): axe's own
+ * budget, then the grace the renderer waits after terminating it
+ * (`AXE_TIMEOUT_MS` + `AXE_TERMINATE_GRACE_MS`, a11y.ts) — 35 s. It is a
+ * page-controlled wait (a page that blocks its thread runs it out), so it is
+ * its own term in the lease rather than folded into the local allowance
+ * above. Counted ALWAYS, also when the crawl turned the run off: one fewer
+ * branch, and a longer lease is the polite direction (it only delays a
+ * CRASHED worker's URL).
+ */
+export const RENDER_AXE_ALLOWANCE_MS = AXE_TIMEOUT_MS + AXE_TERMINATE_GRACE_MS;
+
+/**
  * A render's lease, DERIVED from what one render can take — never a guess.
  *
  * The lease is a crash-resume deadline (frontier module header), and it must
@@ -202,10 +216,13 @@ export const RENDER_POST_SETTLE_ALLOWANCE_MS = 30_000;
  *     more than 120 s unless a caller configured more).
  *  3. **The settle** (3 s).
  *  4. **`RENDER_POST_SETTLE_ALLOWANCE_MS`.**
+ *  5. **`RENDER_AXE_ALLOWANCE_MS`** (Phase 29b): the accessibility run after
+ *     the document is written, up to its 30 s budget and the 5 s grace after
+ *     terminating it — 35 s.
  *
  * So four workers at the default 1 s spacing (a 45 s budget): (9 × 30) + 45 +
- * 3 + 30 = 348 s; four at the 120 s cap: 423 s; a Shopify profile's one worker
- * at 60 s: (3 × 30) + 60 + 3 + 30 = 183 s. The 120 s this replaced
+ * 3 + 30 + 35 = 383 s; four at the 120 s cap: 458 s; a Shopify profile's one
+ * worker at 60 s: (3 × 30) + 60 + 3 + 30 + 35 = 218 s. The 120 s this replaced
  * covered neither the profile's 60 s budget behind a 30 s wait nor four
  * workers queued on one escalated host. The cost of a long lease is only how
  * long a CRASHED worker's URL waits before a re-run may take it.
@@ -283,7 +300,11 @@ export function renderLeaseSeconds(pacing: {
 }): number {
   const gateWaitMs = (2 * pacing.renderConcurrency + 1) * DEFAULT_MAX_DELAY_MS;
   return Math.ceil(
-    (gateWaitMs + pacing.navigationTimeoutMs + pacing.settleMs + RENDER_POST_SETTLE_ALLOWANCE_MS) /
+    (gateWaitMs +
+      pacing.navigationTimeoutMs +
+      pacing.settleMs +
+      RENDER_POST_SETTLE_ALLOWANCE_MS +
+      RENDER_AXE_ALLOWANCE_MS) /
       1000,
   );
 }
@@ -328,6 +349,13 @@ export interface RenderPassConfig extends RenderSelectionConfig {
    * refusals, the same pacing, the same earned spacing, the same evidence.
    */
   renderUrls?: readonly string[];
+  /**
+   * Run the accessibility subset in each rendered page (Phase 29b,
+   * `RendererOptions.accessibility`), on `CrawlConfig.renderAccessibility`'s
+   * terms so a stored config still satisfies this: absent means on, `false`
+   * records every rendered page `disabled`.
+   */
+  renderAccessibility?: boolean;
   /** TEST ONLY — the fixture-server escape hatch. See `CrawlConfig`. */
   allowPrivate?: boolean;
   /**
@@ -496,6 +524,37 @@ export async function refuseLiveCrawl(db: Db, crawlId: string): Promise<Awaited<
 }
 
 /**
+ * The renderer's image-size lookup over THIS crawl's `resources` (Phase 29b,
+ * ruling R5): the rows whose URL is one of `normalisedUrls` and whose size the
+ * resource pass read (`width is not null` — `height` is set with it), with
+ * their transferred bytes. One query per call, keyed by the table's unique
+ * `(crawl_id, url)` index, so the renderer asks per image request and holds
+ * nothing crawl-wide (rule 6). A failed query rejects, and the renderer lets
+ * that stop the render: it is ours, not the site's.
+ */
+export function resourceImageLookup(db: Pick<Db, "execute">, crawlId: string): ImageDimensionLookup {
+  return async (normalisedUrls) => {
+    const found = new Map<string, StoredImage>();
+    if (normalisedUrls.length === 0) return found;
+    const res = await db.execute(sql`
+      select url, width, height, bytes
+      from resources
+      where crawl_id = ${crawlId}
+        and url = any(${sql.param([...normalisedUrls])}::text[])
+        and width is not null`);
+    for (const row of res.rows as Array<{
+      url: string;
+      width: number;
+      height: number;
+      bytes: number | null;
+    }>) {
+      found.set(row.url, { width: row.width, height: row.height, bytes: row.bytes });
+    }
+    return found;
+  };
+}
+
+/**
  * Run the render pass for `crawlId`.
  *
  * Throws — loudly, before touching the frontier — if the crawl is still live,
@@ -629,6 +688,11 @@ export async function runRenderPass(
     renderer = await PageRenderer.launch({
       origin,
       htmlDir,
+      // Image stand-ins (Phase 29b): sizes from this crawl's own resources.
+      imageDimensions: resourceImageLookup(db, crawlId),
+      // The accessibility run (Phase 29b): on unless the crawl said false —
+      // the documented default of `renderAccessibility`, not a guess.
+      accessibility: cfg.renderAccessibility !== false,
       userAgent: cfg.userAgent,
       perHostDelayMs: profiled.perHostDelayMs,
       robotsCrawlDelaySec: cfg.robotsCrawlDelaySec ?? null,

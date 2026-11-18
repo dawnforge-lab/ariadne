@@ -373,6 +373,45 @@ export async function assertCrawl(db: Db, crawlId: string, ruleId: string): Prom
   if (rows.length === 0) throw new Error(`${ruleId}: no such crawl '${crawlId}'`);
 }
 
+/**
+ * Whether the crawl asked the site about its files: `fetchResources` off the
+ * crawl's `config_jsonb`, read as ONE KEY on `storedFindingCap`'s terms and
+ * with the meaning `crawl_status` gives it (`configFetchResources`,
+ * src/api/service.ts). ABSENT OR NULL IS TRUE, a fact rather than a fallback:
+ * the pass is on unless the operator turned it off, and a crawl written before
+ * the field existed ran it. A stored value that is not a boolean is refused,
+ * naming the rule and the crawl: `"false"` is truthy, and either guess would
+ * tell the reader the wrong thing about what was asked (hard rule 7).
+ *
+ * Opens with the existence gate `assertCrawl` gives, so a rule that reads this
+ * needs no second one.
+ */
+export async function readStoredFetchResources(
+  db: Db,
+  crawlId: string,
+  ruleId: string,
+): Promise<boolean> {
+  const rows = await db
+    .select({ config: crawls.config })
+    .from(crawls)
+    .where(eq(crawls.id, crawlId))
+    .limit(1);
+  const row = rows[0];
+  if (row === undefined) throw new Error(`${ruleId}: no such crawl '${crawlId}'`);
+  if (!isRecord(row.config)) {
+    throw new Error(`${ruleId}: crawl '${crawlId}' config is not an object`);
+  }
+  const value = row.config["fetchResources"];
+  if (value === undefined || value === null) return true;
+  if (typeof value !== "boolean") {
+    throw new Error(
+      `${ruleId}: crawl '${crawlId}' stored config.fetchResources is ${JSON.stringify(value)}, ` +
+        "not a boolean — the rules cannot tell whether this crawl asked the site about its files",
+    );
+  }
+  return value;
+}
+
 /** The crawl row the host rules read: the seed URL, and the probe or its absence. */
 export interface HostProbeEvidence {
   siteUrl: string;

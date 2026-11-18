@@ -54,7 +54,9 @@ const missingTitle: Fixture = {
   path: "/head/missing-title",
   category: HEAD,
   name: "Missing <title> tag",
-  expectedIssues: ["title.missing"],
+  // The rendered page has no title either, which WCAG 2.4.2 reads as the same
+  // defect (Phase 29b, CHECK-89).
+  expectedIssues: ["title.missing", "a11y.document-title"],
   handler: (req, res) =>
     serve(req, res, () => ({
       // title intentionally omitted
@@ -327,7 +329,9 @@ const imagesMissingAlt: Fixture = {
   path: "/content/images-missing-alt",
   category: CONTENT,
   name: "Images missing alt text",
-  expectedIssues: ["images.missing-alt"],
+  // An image with no alt is WCAG 1.1.1's own failure on the rendered page too
+  // (Phase 29b, CHECK-89).
+  expectedIssues: ["images.missing-alt", "a11y.image-alt"],
   handler: (req, res) =>
     serve(req, res, () => ({
       title: "A page with an image that has no alt text",
@@ -1131,6 +1135,9 @@ const kitchenSink: Fixture = {
     "headings.h1-multiple",
     "headings.level-skip",
     "images.missing-alt",
+    // The same alt-less image, read by the render's axe run: a genuine WCAG
+    // 1.1.1 violation, not an incidental one (Phase 29b, CHECK-89).
+    "a11y.image-alt",
     "performance.slow-response",
   ],
   handler: (req, res) =>

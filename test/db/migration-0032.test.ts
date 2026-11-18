@@ -104,6 +104,11 @@ describe("0032 — crawls judged before 27a carry a stamp", () => {
           new URL("../../drizzle/0054_schema_template_thresholds.sql", import.meta.url),
           "utf8",
         )));
+        // And 0058, which names the image oversize threshold.
+        await tx.execute(sql.raw(readFileSync(
+          new URL("../../drizzle/0058_image_oversize_threshold.sql", import.meta.url),
+          "utf8",
+        )));
         const effective = await tx
           .select({ id: crawls.id, stamp: crawls.rulesJudgedWith })
           .from(crawls)

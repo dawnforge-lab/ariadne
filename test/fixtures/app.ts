@@ -59,6 +59,15 @@ export interface FixtureApp {
    * (`null` when absent). Phase 27c's no-crossing proof reads it.
    */
   gatedRequests: GatedRequest[];
+  /**
+   * `method path` for every request under `/img/` this server received, in
+   * arrival order, served or 404'd alike (Phase 29b). The same shape as the
+   * asset host's `hits`. The harness snapshots it when the crawl (and with it
+   * the resource pass) ends and again after the render pass, which is how gate
+   * clause 3 is counted: one request per image from the resource pass, none from
+   * the renderer, which stands the image in.
+   */
+  assetRequests: string[];
   close(): Promise<void>;
 }
 
@@ -252,6 +261,7 @@ export async function startFixtureApp(
   secrets: GateSecrets = DEFAULT_GATE_SECRETS,
 ): Promise<FixtureApp> {
   const gatedRequests: GatedRequest[] = [];
+  const assetRequests: string[] = [];
   const legacyPortHolder: { port: number } = { port: 0 };
   const byPath = new Map<string, Fixture>();
   for (const fixture of fixtures) {
@@ -336,6 +346,7 @@ export async function startFixtureApp(
     // the canonical-conflict page is asked for with `?via=…` and must still be
     // itself.
     const path = target.split("?")[0] ?? "/";
+    if (path.startsWith("/img/")) assetRequests.push(`${req.method ?? "?"} ${path}`);
 
     // THE GATED AREAS (Phase 27c). Not linked from the hub and in no sitemap, so
     // a spider crawl of the site never reaches them and the harness's counts are
@@ -420,6 +431,7 @@ export async function startFixtureApp(
     base: `http://127.0.0.1:${address.port}`,
     legacyBase: legacyOriginOf(address.port),
     gatedRequests,
+    assetRequests,
     close: () => new Promise<void>((resolve, reject) =>
       server.close((error) => (error === undefined ? resolve() : reject(error))),
     ),

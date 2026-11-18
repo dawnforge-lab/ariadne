@@ -36,7 +36,7 @@ import { and, eq, sql } from "drizzle-orm";
 
 import { closeDb, createDb, type Db } from "../../src/db/client.js";
 import { runMigrations } from "../../src/db/migrate.js";
-import { crawls, frontier, pages } from "../../src/db/schema.js";
+import { crawls, frontier, pages, renderA11y, resources } from "../../src/db/schema.js";
 import { throttleRecordOf, type HostSpacingEntry } from "../../src/crawl/politeness.js";
 import {
   completeUrls,
@@ -56,15 +56,25 @@ import {
   renderedHtmlFilename,
   writeRenderResult,
   type RenderResult,
+  type RenderTestFaults,
 } from "../../src/crawl/render/renderer.js";
 import type { RenderConsole } from "../../src/crawl/render/console-capture.js";
+import type { RenderA11y } from "../../src/crawl/render/a11y.js";
 import { analyzeHtml } from "../../src/crawl/parse/page-analyzer.js";
-import { isSameOrigin } from "../../src/crawl/parse/url-utils.js";
+import { isSameOrigin, normalizeUrl } from "../../src/crawl/parse/url-utils.js";
+import type {
+  ImageDimensionLookup,
+  RenderImages,
+  StoredImage,
+} from "../../src/crawl/render/image-stand-in.js";
+import { pngBytes } from "../fixtures/images.js";
 import { UrlPolicyError } from "../../src/crawl/url-policy.js";
 import {
   RENDER_PASS_DEFAULTS,
   RenderPassRefusal,
+  RENDER_AXE_ALLOWANCE_MS,
   renderLeaseSeconds,
+  resourceImageLookup,
   runRenderPass,
 } from "../../src/crawl/render/run-render.js";
 import { LOCAL_TENANT } from "../../src/tenant.js";
@@ -478,6 +488,22 @@ async function startSite(otherOrigin: () => string): Promise<Site> {
       return;
     }
     if (path === "/reset-script") return html(resetScriptHtml());
+    if (path === "/img-page") {
+      // Phase 29b: one image the crawl's resources sized, one it could not.
+      return html(
+        `<!doctype html><html lang="en"><head><title>Img</title></head><body>` +
+          `<img src="/sized.png" alt="s" style="width:100px">` +
+          `<img src="/unsized.png" alt="u" width="20" height="20"></body></html>`,
+      );
+    }
+    if (path === "/a11y-page") {
+      // Phase 29b: two of the subset's violations, one node each — a
+      // document without `lang` and an image without `alt`.
+      return html(
+        `<!doctype html><html><head><title>A11y</title></head><body>` +
+          `<main><h1>Heading</h1><img src="/plain.png" width="20" height="20"></main></body></html>`,
+      );
+    }
     if (path === "/reset.js") {
       // No response at all: the socket goes before a status line is written.
       req.socket.destroy();
@@ -651,6 +677,8 @@ describe("PageRenderer", () => {
     renderer = await PageRenderer.launch({
       origin: site.base,
       htmlDir,
+      imageDimensions: null,
+      accessibility: false,
       userAgent: "AriadneBot/0.1 (render test)",
       perHostDelayMs: 0,
       // No `navigationTimeoutMs`: the production 15s. Every page this renderer
@@ -803,6 +831,8 @@ describe("PageRenderer", () => {
     const doomed = await PageRenderer.launch({
       origin: site.base,
       htmlDir: missing,
+      imageDimensions: null,
+      accessibility: false,
       userAgent: "AriadneBot/0.1 (render test)",
       perHostDelayMs: 0,
       settleMs: SETTLE_MS,
@@ -886,6 +916,8 @@ describe("PageRenderer", () => {
     expect(result.rendered).toBe(false);
     expect(result.error).toBe(`off-site navigation: ${third.base}/elsewhere`);
     expect(result.wordCount).toBeNull();
+    // Phase 29b: no image measurement on a failed render.
+    expect(result.images).toBeNull();
   });
 
   it("classifies a URL the policy refuses, without opening a page", async () => {
@@ -897,6 +929,7 @@ describe("PageRenderer", () => {
     expect(result.wordCount).toBeNull();
     // No page was opened, so nothing was looked at: null, not zero counts.
     expect(result.console).toBeNull();
+    expect(result.images).toBeNull();
   });
 
   // -------------------------------------------------------------------------
@@ -1029,6 +1062,8 @@ describe("PageRenderer", () => {
     const hangRenderer = await PageRenderer.launch({
       origin: site.base,
       htmlDir,
+      imageDimensions: null,
+      accessibility: false,
       userAgent: "AriadneBot/0.1 (render test)",
       perHostDelayMs: 0,
       navigationTimeoutMs: NAV_TIMEOUT_MS,
@@ -1063,6 +1098,8 @@ describe("PageRenderer", () => {
     const hangRenderer = await PageRenderer.launch({
       origin: site.base,
       htmlDir,
+      imageDimensions: null,
+      accessibility: false,
       userAgent: "AriadneBot/0.1 (render test)",
       perHostDelayMs: 0,
       navigationTimeoutMs: NAV_TIMEOUT_MS,
@@ -1080,6 +1117,7 @@ describe("PageRenderer", () => {
       );
       expect(result.wordCount).toBeNull();
       expect(result.redirectUrl).toBeNull();
+      expect(result.images).toBeNull();
     } finally {
       await hangRenderer.close();
     }
@@ -1128,6 +1166,8 @@ describe("PageRenderer under the crawl's pacing (Phase 24a)", () => {
     return PageRenderer.launch({
       origin: site.base,
       htmlDir,
+      imageDimensions: null,
+      accessibility: false,
       userAgent: "AriadneBot/0.1 (render pacing test)",
       perHostDelayMs: 0,
       settleMs: SETTLE_MS,
@@ -1494,6 +1534,8 @@ describe("PageRenderer under the crawl's pacing (Phase 24a)", () => {
     const renderer = await PageRenderer.launch({
       origin,
       htmlDir,
+      imageDimensions: null,
+      accessibility: false,
       userAgent: "AriadneBot/0.1 (render pin test)",
       perHostDelayMs: 0,
       settleMs: SETTLE_MS,
@@ -1534,6 +1576,8 @@ describe("PageRenderer under the crawl's pacing (Phase 24a)", () => {
     const renderer = await PageRenderer.launch({
       origin: `http://shop.test:${port}`,
       htmlDir,
+      imageDimensions: null,
+      accessibility: false,
       userAgent: "AriadneBot/0.1 (render pin test)",
       perHostDelayMs: 0,
       settleMs: SETTLE_MS,
@@ -1565,6 +1609,8 @@ describe("PageRenderer under the crawl's pacing (Phase 24a)", () => {
     const renderer = await PageRenderer.launch({
       origin: `http://shop.test:${port}`,
       htmlDir,
+      imageDimensions: null,
+      accessibility: false,
       userAgent: "AriadneBot/0.1 (render pin test)",
       perHostDelayMs: 0,
       settleMs: SETTLE_MS,
@@ -1606,6 +1652,8 @@ describe("PageRenderer under the crawl's pacing (Phase 24a)", () => {
       PageRenderer.launch({
         origin: "http://shop.test:8080",
         htmlDir,
+        imageDimensions: null,
+        accessibility: false,
         userAgent: "AriadneBot/0.1 (render pin test)",
         perHostDelayMs: 0,
         allowPrivate: true,
@@ -1622,6 +1670,8 @@ describe("PageRenderer under the crawl's pacing (Phase 24a)", () => {
       PageRenderer.launch({
         origin: "http://shop.test:8080",
         htmlDir,
+        imageDimensions: null,
+        accessibility: false,
         userAgent: "AriadneBot/0.1 (render pin test)",
         perHostDelayMs: 0,
         resolve: async (_host, type) => (type === "A" ? ["93.184.216.34", "127.0.0.1"] : []),
@@ -1848,6 +1898,52 @@ describe("runRenderPass", () => {
       .from(pages)
       .where(and(eq(pages.crawlId, crawlId), eq(pages.url, `${site.base}${path}`)));
     return rows[0]!;
+  }
+
+  /** One page's `render_a11y` rows (Phase 29b), in rule order. */
+  async function a11yRows(crawlId: string, pageId: string) {
+    return db
+      .select({
+        axeRule: renderA11y.axeRule,
+        impact: renderA11y.impact,
+        nodeCount: renderA11y.nodeCount,
+        targets: renderA11y.targets,
+      })
+      .from(renderA11y)
+      .where(and(eq(renderA11y.crawlId, crawlId), eq(renderA11y.pageId, pageId)))
+      .orderBy(renderA11y.axeRule);
+  }
+
+  /** A successful render of `path` carrying `a11y`, every other column filled. */
+  function renderedWith(path: string, a11y: RenderA11y | null): RenderResult {
+    return {
+      url: `${site.base}${path}`,
+      rendered: true,
+      wordCount: 1,
+      linkCount: 0,
+      navLinkCount: 0,
+      footerLinkCount: 0,
+      filterLinkCount: 0,
+      analyzerWordCount: 1,
+      renderableWordCount: 1,
+      title: "A page",
+      h1Count: 0,
+      canonical: null,
+      robotsMeta: null,
+      metaDescription: null,
+      h1Text: null,
+      htmlPath: "/dev/null",
+      redirectUrl: null,
+      error: null,
+      blockedRequests: 0,
+      skippedPaintRequests: 0,
+      pacedRequests: 0,
+      cachedResponses: 0,
+      unpacedNetworkRequests: 0,
+      console: null,
+      images: null,
+      a11y,
+    };
   }
 
   it("pins the pass defaults", () => {
@@ -2471,15 +2567,22 @@ describe("runRenderPass", () => {
     expect(record[wwwHost]!.escalations).toBe(2);
   }, 90_000);
 
-  it("derives the render lease from the gate cap, the navigation budget and the settle", () => {
-    // (2W + 1) × 30 s of gate wait + navigation + settle + 30 s allowance.
+  it("derives the render lease from the gate cap, the navigation budget, the settle and the axe run", () => {
+    // (2W + 1) × 30 s of gate wait + navigation + settle + 30 s allowance
+    // + 35 s for the accessibility run (Phase 29b: its 30 s budget and the
+    // 5 s grace after terminating it).
+    expect(RENDER_AXE_ALLOWANCE_MS).toBe(35_000);
     expect(
       renderLeaseSeconds({ renderConcurrency: 4, navigationTimeoutMs: 15_000, settleMs: 3_000 }),
-    ).toBe(318);
+    ).toBe(353);
+    // The defaults the docblock works through: four workers, a 45 s budget.
+    expect(
+      renderLeaseSeconds({ renderConcurrency: 4, navigationTimeoutMs: 45_000, settleMs: 3_000 }),
+    ).toBe(383);
     // The Shopify profile: one browser, a 60 s budget.
     expect(
       renderLeaseSeconds({ renderConcurrency: 1, navigationTimeoutMs: 60_000, settleMs: 3_000 }),
-    ).toBe(183);
+    ).toBe(218);
   });
 
   it("leaves its selection alone when the pass is aborted before it starts", async () => {
@@ -2525,6 +2628,8 @@ describe("runRenderPass", () => {
       cachedResponses: 0,
       unpacedNetworkRequests: 0,
       console: null,
+      images: null,
+      a11y: null,
     };
 
     await expect(writeRenderResult(db, crawlId, ghost)).rejects.toThrow(/no page row/i);
@@ -2557,6 +2662,40 @@ describe("runRenderPass", () => {
       cachedResponses: 0,
       unpacedNetworkRequests: 0,
       console: null,
+      // Phase 29b: an image URL is the site's string too; the writer's
+      // `storableDeep` is the boundary for it as for every other.
+      images: {
+        total: 1,
+        examined: 1,
+        measured: 1,
+        hidden: 0,
+        lazyUnloaded: 0,
+        notRequested: 0,
+        noDimensions: 0,
+        broken: 0,
+        widerThanDisplayed: 1,
+        standIns: 1,
+        kept: [
+          {
+            url: "https://x/a\u0000\uD800.png",
+            cut: false,
+            intrinsicWidth: 20,
+            intrinsicHeight: 10,
+            displayedWidth: 10,
+            displayedHeight: 5,
+            wastedPixels: 150,
+            bytes: 7,
+            widthFrom: "stored",
+          },
+        ],
+      },
+      // Phase 29b: a selector and an axe error are the site's strings too.
+      a11y: {
+        status: "ran",
+        ms: 12,
+        error: null,
+        violations: [{ rule: "label", impact: "critical", nodeCount: 1, targets: ["#a\u0000\uD800"] }],
+      },
     };
 
     await writeRenderResult(db, crawlId, result);
@@ -2566,20 +2705,24 @@ describe("runRenderPass", () => {
     expect(row.renderedRobotsMeta).toBe("noindex␀");
     expect(row.renderedMetaDescription).toBe("d�");
     expect(row.renderedH1Text).toBe("H␀�");
+    expect((row.renderImages as RenderImages).kept[0]!.url).toBe("https://x/a␀�.png");
+    expect(await a11yRows(crawlId, row.id)).toEqual([
+      { axeRule: "label", impact: "critical", nodeCount: 1, targets: ["#a␀�"] },
+    ]);
   });
 
   // -------------------------------------------------------------------------
   // Phase 25: render_console and render_version on the page row.
   // -------------------------------------------------------------------------
 
-  it("writes render_console and render_version 2", async () => {
+  it("writes render_console and render_version 3", async () => {
     const crawlId = await newCrawl(["/console-errors", "/console-clean"]);
 
     const summary = await runRenderPass(db, crawlId, passConfig());
 
     expect(summary.failures).toBe(0);
     const errors = await pageRow(crawlId, "/console-errors");
-    expect(errors.renderVersion).toBe(2);
+    expect(errors.renderVersion).toBe(3);
     const stored = errors.renderConsole as RenderConsole;
     expect(stored.exceptionsTotal).toBeGreaterThanOrEqual(1);
     expect(stored.console).toContainEqual({ level: "error", text: "site says no", cut: false });
@@ -2592,7 +2735,7 @@ describe("runRenderPass", () => {
     expect(stored.blockedByRenderer.thirdParty).toBeGreaterThanOrEqual(1);
 
     const clean = await pageRow(crawlId, "/console-clean");
-    expect(clean.renderVersion).toBe(2);
+    expect(clean.renderVersion).toBe(3);
     expect(clean.renderConsole).toEqual({
       console: [],
       consoleTotal: 0,
@@ -2613,7 +2756,7 @@ describe("runRenderPass", () => {
 
     expect(summary.rendered).toBe(1);
     const row = await pageRow(crawlId, "/console-hostile");
-    expect(row.renderVersion).toBe(2);
+    expect(row.renderVersion).toBe(3);
     const stored = row.renderConsole as RenderConsole;
     // The NUL is marked as U+2400 (␀), never dropped; the lone surrogate is U+FFFD.
     expect(stored.console).toEqual([
@@ -2623,7 +2766,7 @@ describe("runRenderPass", () => {
     expect(stored.exceptions[0]!.text).toContain("thrown nul:\u2400 lone:\uFFFD");
   });
 
-  it("a pre-browser policy refusal writes render_version 2 with render_console null", async () => {
+  it("a pre-browser policy refusal writes render_version 3 with render_console and render_images null", async () => {
     // `www.` answers a metadata address, so it is left out of the pin at
     // launch and a page on it is refused before any browser page opens.
     const port = new URL(site.base).port;
@@ -2652,8 +2795,162 @@ describe("runRenderPass", () => {
     expect(row.renderError).toMatch(/^policy refusal: www\.shop\.test was not approved/);
     // The render writer wrote this row (its stamp says so), and nothing was
     // looked at: null, which `render_version` tells apart from a pre-25 null.
-    expect(row.renderVersion).toBe(2);
+    expect(row.renderVersion).toBe(3);
     expect(row.renderConsole).toBeNull();
+    expect(row.renderImages).toBeNull();
+  });
+
+  // -------------------------------------------------------------------------
+  // Phase 29b: image sizes from this crawl's resources, and render_images.
+  // -------------------------------------------------------------------------
+
+  it("looks image sizes up in this crawl's resources and writes render_images", async () => {
+    const crawlId = await newCrawl(["/img-page"]);
+    await db.insert(resources).values([
+      {
+        crawlId,
+        url: `${site.base}/sized.png`,
+        kind: "image",
+        fetchClass: "ok",
+        width: 640,
+        height: 480,
+        bytes: 12_345,
+        bytesSource: "header",
+      },
+      // Fetched, but no size could be read: never a stand-in.
+      { crawlId, url: `${site.base}/unsized.png`, kind: "image", fetchClass: "ok", dimensionsReason: "svg" },
+    ]);
+
+    const lookup = resourceImageLookup(db, crawlId);
+    const found = await lookup([
+      `${site.base}/sized.png`,
+      `${site.base}/unsized.png`,
+      `${site.base}/absent.png`,
+    ]);
+    expect([...found.entries()]).toEqual([
+      [`${site.base}/sized.png`, { width: 640, height: 480, bytes: 12_345 }],
+    ]);
+    // Another crawl's rows never answer.
+    expect((await resourceImageLookup(db, `crawl_${randomUUID()}`)([`${site.base}/sized.png`])).size).toBe(0);
+
+    const summary = await runRenderPass(db, crawlId, passConfig());
+
+    expect(summary.failures).toBe(0);
+    const row = await pageRow(crawlId, "/img-page");
+    expect(row.renderVersion).toBe(3);
+    const images = row.renderImages as RenderImages;
+    expect(images).toMatchObject({ total: 2, measured: 1, noDimensions: 1, standIns: 1 });
+    expect(images.kept).toEqual([
+      {
+        url: `${site.base}/sized.png`,
+        cut: false,
+        intrinsicWidth: 640,
+        intrinsicHeight: 480,
+        displayedWidth: 100,
+        displayedHeight: 75,
+        wastedPixels: 640 * 480 - 100 * 75,
+        bytes: 12_345,
+        widthFrom: "stored",
+      },
+    ]);
+  });
+
+  // -------------------------------------------------------------------------
+  // Phase 29b: the accessibility run, render_a11y and renderAccessibility.
+  // -------------------------------------------------------------------------
+
+  it("runs axe on each rendered page and writes its status, time and violations", async () => {
+    const crawlId = await newCrawl(["/a11y-page", "/console-clean"]);
+
+    const summary = await runRenderPass(db, crawlId, passConfig());
+
+    expect(summary.failures).toBe(0);
+    const row = await pageRow(crawlId, "/a11y-page");
+    expect(row.renderA11yStatus).toBe("ran");
+    expect(row.renderA11yMs).toBeGreaterThanOrEqual(0);
+    expect(row.renderA11yError).toBeNull();
+    expect(await a11yRows(crawlId, row.id)).toEqual([
+      { axeRule: "html-has-lang", impact: "serious", nodeCount: 1, targets: ["html"] },
+      { axeRule: "image-alt", impact: "critical", nodeCount: 1, targets: ["img"] },
+    ]);
+    const clean = await pageRow(crawlId, "/console-clean");
+    expect(clean.renderA11yStatus).toBe("ran");
+    expect(await a11yRows(crawlId, clean.id)).toEqual([]);
+  });
+
+  it("renderAccessibility: false runs no axe and says so", async () => {
+    const crawlId = await newCrawl(["/a11y-page"]);
+
+    await runRenderPass(db, crawlId, passConfig({ renderAccessibility: false }));
+
+    const row = await pageRow(crawlId, "/a11y-page");
+    expect(row.rendered).toBe(true);
+    expect(row.renderA11yStatus).toBe("disabled");
+    expect(row.renderA11yMs).toBeNull();
+    expect(row.renderA11yError).toBeNull();
+    expect(await a11yRows(crawlId, row.id)).toEqual([]);
+  });
+
+  it("replaces a page's render_a11y rows on every write, and a failed render clears them", async () => {
+    const crawlId = await newCrawl(["/csr"]);
+    const id = (await pageRow(crawlId, "/csr")).id;
+
+    await writeRenderResult(db, crawlId, renderedWith("/csr", {
+      status: "ran",
+      ms: 40,
+      error: null,
+      violations: [
+        { rule: "list", impact: "serious", nodeCount: 3, targets: ["ul", "ol"] },
+        { rule: "label", impact: "critical", nodeCount: 1, targets: ["#q"] },
+      ],
+    }));
+    expect(await a11yRows(crawlId, id)).toEqual([
+      { axeRule: "label", impact: "critical", nodeCount: 1, targets: ["#q"] },
+      { axeRule: "list", impact: "serious", nodeCount: 3, targets: ["ul", "ol"] },
+    ]);
+
+    // A re-render: the old rows go, the new ones are the page's.
+    await writeRenderResult(db, crawlId, renderedWith("/csr", {
+      status: "ran",
+      ms: 41,
+      error: null,
+      violations: [{ rule: "image-alt", impact: null, nodeCount: 2, targets: ["img"] }],
+    }));
+    expect(await a11yRows(crawlId, id)).toEqual([
+      { axeRule: "image-alt", impact: null, nodeCount: 2, targets: ["img"] },
+    ]);
+
+    // An axe the page broke: `error` with its first line, and no rows.
+    await writeRenderResult(db, crawlId, renderedWith("/csr", {
+      status: "error",
+      ms: 5,
+      error: "Error: axe broke",
+      violations: [],
+    }));
+    let row = await pageRow(crawlId, "/csr");
+    expect([row.renderA11yStatus, row.renderA11yMs, row.renderA11yError]).toEqual([
+      "error",
+      5,
+      "Error: axe broke",
+    ]);
+    expect(await a11yRows(crawlId, id)).toEqual([]);
+
+    // A failed render measured nothing: every column null, no row left.
+    await writeRenderResult(db, crawlId, renderedWith("/csr", {
+      status: "ran",
+      ms: 7,
+      error: null,
+      violations: [{ rule: "label", impact: "critical", nodeCount: 1, targets: ["#q"] }],
+    }));
+    await writeRenderResult(db, crawlId, {
+      ...renderedWith("/csr", null),
+      rendered: false,
+      error: "navigation error: gone",
+      wordCount: null,
+    });
+    row = await pageRow(crawlId, "/csr");
+    expect([row.renderA11yStatus, row.renderA11yMs, row.renderA11yError]).toEqual([null, null, null]);
+    expect(await a11yRows(crawlId, id)).toEqual([]);
   });
 });
 
@@ -2701,6 +2998,8 @@ describe("PageRenderer credentials", () => {
     renderer = await PageRenderer.launch({
       origin: credBase,
       htmlDir,
+      imageDimensions: null,
+      accessibility: false,
       userAgent: "AriadneBot/0.1 (render credentials test)",
       perHostDelayMs: 0,
       settleMs: SETTLE_MS,
@@ -2794,6 +3093,8 @@ describe("PageRenderer credentials: one line per request header (27c M6)", () =>
     renderer = await PageRenderer.launch({
       origin: echoBase,
       htmlDir,
+      imageDimensions: null,
+      accessibility: false,
       userAgent: "AriadneBot/0.1 (render header lines test)",
       perHostDelayMs: 0,
       settleMs: SETTLE_MS,
@@ -2820,5 +3121,671 @@ describe("PageRenderer credentials: one line per request header (27c M6)", () =>
       expect(lines.filter((l) => l.startsWith("authorization:"))).toEqual(["authorization: Bearer cred"]);
       expect(lines.filter((l) => l.startsWith("x-own:"))).toEqual(["x-own: one"]);
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Phase 29b Task 3: image stand-ins and the per-<img> measurement.
+// ---------------------------------------------------------------------------
+
+/**
+ * A server that answers each path from a table and counts every request it
+ * receives by path — the evidence that a stand-in was answered inside the
+ * browser and nothing reached the host.
+ */
+async function startCounting(
+  answer: (path: string, res: ServerResponse) => void,
+): Promise<{ base: string; count: (path: string) => number; close(): Promise<void> }> {
+  const counts = new Map<string, number>();
+  const server: Server = createServer((req: IncomingMessage, res: ServerResponse) => {
+    const path = (req.url ?? "/").split("?")[0] ?? "/";
+    counts.set(path, (counts.get(path) ?? 0) + 1);
+    answer(path, res);
+  });
+  server.on("upgrade", (req: IncomingMessage, socket) => {
+    const path = `UPGRADE ${(req.url ?? "/").split("?")[0]}`;
+    counts.set(path, (counts.get(path) ?? 0) + 1);
+    socket.destroy();
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  return {
+    base: siteBase(server),
+    count: (path) => counts.get(path) ?? 0,
+    close: () =>
+      new Promise<void>((resolve, reject) =>
+        server.close((error) => (error === undefined ? resolve() : reject(error))),
+      ),
+  };
+}
+
+describe("PageRenderer image stand-ins (Phase 29b)", () => {
+  let origin: Awaited<ReturnType<typeof startCounting>>;
+  let cdn: Awaited<ReturnType<typeof startCounting>>;
+  let htmlDir: string;
+  let renderer: PageRenderer;
+  /** What the resource pass "stored": normalised URL → intrinsic size. */
+  const stored = new Map<string, StoredImage>();
+  /** When set, the lookup rejects with it — our defect, which must stop the render. */
+  let lookupFault: Error | null = null;
+  /** Normalised URLs whose lookup answers only after this long (a slow database). */
+  const lookupDelayMs = new Map<string, number>();
+  const lookup: ImageDimensionLookup = async (urls) => {
+    if (lookupFault !== null) throw lookupFault;
+    const delay = Math.max(0, ...urls.map((url) => lookupDelayMs.get(url) ?? 0));
+    if (delay > 0) await new Promise((resolve) => setTimeout(resolve, delay));
+    const out = new Map<string, StoredImage>();
+    for (const url of urls) {
+      const hit = stored.get(url);
+      if (hit !== undefined) out.set(url, hit);
+    }
+    return out;
+  };
+  const store = (url: string, image: StoredImage): void => {
+    stored.set(normalizeUrl(url)!, image);
+  };
+  const BIG_PNG = pngBytes(1600, 1200);
+
+  function pageHtml(body: string): string {
+    return `<!doctype html><html lang="en"><head><title>Images</title>
+<style>body { margin: 0 }</style></head><body>${body}</body></html>`;
+  }
+
+  beforeAll(async () => {
+    cdn = await startCounting((_path, res) => {
+      res.writeHead(200, { "content-type": "text/plain" });
+      res.end("cdn");
+    });
+    const pages: Record<string, () => string> = {
+      "/img/same-origin": () => pageHtml(`<img src="/big.png" alt="big" style="width:400px">`),
+      "/img/cdn": () => pageHtml(`<img src="${cdn.base}/hero.png" alt="hero" style="width:300px">`),
+      "/img/cdn-script": () =>
+        pageHtml(
+          `<script src="${cdn.base}/lib.js"></script>` +
+            `<img src="${cdn.base}/unsized.png" alt="u" width="50" height="50">`,
+        ),
+      "/img/srcset": () =>
+        pageHtml(
+          `<img srcset="a-400.png 400w, a-1600.png 1600w" sizes="100vw" alt="s" style="width:300px">`,
+        ),
+      "/img/lazy": () =>
+        pageHtml(
+          `<p>top</p><div style="position:absolute;top:5000px">` +
+            `<img loading="lazy" src="/lazy.png" alt="l" width="100" height="100"></div>`,
+        ),
+      "/img/hidden": () =>
+        pageHtml(`<div style="display:none"><img src="/hid.png" alt="h"></div><p>shown</p>`),
+      "/img/no-dims": () => pageHtml(`<img src="/nodims.png" alt="n" width="200" height="100">`),
+      // A stored image whose lookup answers after the page is measured: its
+      // attribute-sized box was laid out without it.
+      "/img/slow-lookup": () => pageHtml(`<img src="/slow.png" alt="s" width="200" height="100">`),
+      // The same <img> as /img/same-origin, and a script that writes the
+      // length of what its own fetch got into the title: the real PNG's byte
+      // count, never an SVG's.
+      "/img/fetch-big": () =>
+        pageHtml(
+          `<img src="/big.png" alt="big" style="width:400px">` +
+            `<script>fetch("/big.png").then(function (r) { return r.arrayBuffer(); })` +
+            `.then(function (b) { document.title = "bytes " + b.byteLength; });</script>`,
+        ),
+      // I1: cors-mode images from the CDN. Without an
+      // `Access-Control-Allow-Origin` on the stand-in the browser refuses it
+      // and draws a broken-image box.
+      "/img/cors": () =>
+        pageHtml(
+          `<img crossorigin="anonymous" src="${cdn.base}/cors-a.png" alt="a" style="width:300px">` +
+            `<img crossorigin="use-credentials" src="${cdn.base}/cors-c.png" alt="c" style="width:300px">`,
+        ),
+      // S1: a page that breaks the globals a main-world lookup would use, and
+      // a srcset candidate whose own size was never stored.
+      "/img/hostile": () =>
+        pageHtml(
+          `<script>Array.prototype.map = function () { throw new Error("no map"); };` +
+            `window.URL = function () { throw new Error("no URL"); };</script>` +
+            `<img srcset="h-400.png 400w, h-1600.png 1600w" sizes="100vw" alt="h" style="width:300px">`,
+        ),
+    };
+    origin = await startCounting((path, res) => {
+      const page = pages[path];
+      if (page !== undefined) {
+        res.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" });
+        res.end(page());
+        return;
+      }
+      if (path === "/big.png") {
+        res.writeHead(200, { "content-type": "image/png", "cache-control": "max-age=3600" });
+        res.end(BIG_PNG);
+        return;
+      }
+      res.writeHead(404, { "content-type": "text/plain" });
+      res.end("no");
+    });
+    store(`${origin.base}/big.png`, { width: 1600, height: 1200, bytes: BIG_PNG.length });
+    store(`${cdn.base}/hero.png`, { width: 1200, height: 800, bytes: 70_000 });
+    store(`${cdn.base}/cors-a.png`, { width: 1200, height: 800, bytes: 70_000 });
+    store(`${cdn.base}/cors-c.png`, { width: 1200, height: 800, bytes: 70_000 });
+    store(`${origin.base}/img/h-400.png`, { width: 400, height: 300, bytes: 9_000 });
+    store(`${origin.base}/img/a-400.png`, { width: 400, height: 300, bytes: 9_000 });
+    store(`${origin.base}/lazy.png`, { width: 800, height: 800, bytes: 1_000 });
+    store(`${origin.base}/hid.png`, { width: 800, height: 800, bytes: 1_000 });
+    store(`${origin.base}/slow.png`, { width: 1600, height: 800, bytes: 1_000 });
+    lookupDelayMs.set(normalizeUrl(`${origin.base}/slow.png`)!, SETTLE_MS + 300);
+    htmlDir = await mkdtemp(join(tmpdir(), "ariadne-render-images-"));
+    renderer = await PageRenderer.launch({
+      origin: origin.base,
+      htmlDir,
+      imageDimensions: lookup,
+      accessibility: false,
+      userAgent: "AriadneBot/0.1 (render image test)",
+      perHostDelayMs: 0,
+      settleMs: SETTLE_MS,
+      allowPrivate: true,
+    });
+  }, 120_000);
+
+  afterAll(async () => {
+    await renderer.close();
+    await origin.close();
+    await cdn.close();
+    await rm(htmlDir, { recursive: true, force: true });
+  });
+
+  it("(a) answers a same-origin image with a true-size stand-in and measures its box", async () => {
+    const result = await renderer.render(`${origin.base}/img/same-origin`);
+
+    expect(result.error).toBeNull();
+    expect(result.images).toMatchObject({
+      total: 1,
+      examined: 1,
+      measured: 1,
+      widerThanDisplayed: 1,
+      standIns: 1,
+      noDimensions: 0,
+    });
+    expect(result.images!.kept[0]).toEqual({
+      url: `${origin.base}/big.png`,
+      cut: false,
+      intrinsicWidth: 1600,
+      intrinsicHeight: 1200,
+      displayedWidth: 400,
+      displayedHeight: 300,
+      wastedPixels: 1600 * 1200 - 400 * 300,
+      bytes: BIG_PNG.length,
+      widthFrom: "stored",
+    });
+    // NOTHING WENT TO THE SITE for it, and nothing was counted for it: no
+    // gate slot (only the document was paced), not skipped, not blocked.
+    expect(origin.count("/big.png")).toBe(0);
+    expect(result.pacedRequests).toBe(1);
+    expect(result.skippedPaintRequests).toBe(0);
+    expect(result.blockedRequests).toBe(0);
+    expect(result.unpacedNetworkRequests).toBe(0);
+  });
+
+  it("(b) answers a CDN image with stored dimensions locally: no byte reaches the CDN", async () => {
+    const result = await renderer.render(`${origin.base}/img/cdn`);
+
+    expect(result.error).toBeNull();
+    expect(result.images).toMatchObject({ measured: 1, standIns: 1 });
+    expect(result.images!.kept[0]).toMatchObject({
+      url: `${cdn.base}/hero.png`,
+      intrinsicWidth: 1200,
+      displayedWidth: 300,
+      displayedHeight: 200,
+    });
+    expect(cdn.count("/hero.png")).toBe(0);
+    expect(result.blockedRequests).toBe(0);
+  });
+
+  it("(c) still fails every other cross-origin request, a CDN image without a size included", async () => {
+    const result = await renderer.render(`${origin.base}/img/cdn-script`);
+
+    expect(result.error).toBeNull();
+    expect(cdn.count("/lib.js")).toBe(0);
+    expect(cdn.count("/unsized.png")).toBe(0);
+    expect(result.console!.blockedByRenderer.thirdParty).toBe(2);
+    expect(result.images).toMatchObject({ measured: 0, noDimensions: 1, standIns: 0 });
+  });
+
+  it("(d) takes a srcset candidate's width descriptor and a stored sibling's aspect ratio", async () => {
+    const result = await renderer.render(`${origin.base}/img/srcset`);
+
+    expect(result.error).toBeNull();
+    // At 1280 CSS px and density 1, `sizes="100vw"` picks the 1600w candidate.
+    expect(result.images).toMatchObject({ measured: 1, standIns: 1, noDimensions: 0 });
+    expect(result.images!.kept[0]).toMatchObject({
+      url: `${origin.base}/img/a-1600.png`,
+      intrinsicWidth: 1600,
+      intrinsicHeight: 1200,
+      displayedWidth: 300,
+      displayedHeight: 225,
+      bytes: null,
+      widthFrom: "srcset-w",
+    });
+    expect(origin.count("/img/a-1600.png")).toBe(0);
+    expect(origin.count("/img/a-400.png")).toBe(0);
+  });
+
+  it("(e) counts a lazy image the renderer never scrolled to as lazy-unloaded", async () => {
+    const result = await renderer.render(`${origin.base}/img/lazy`);
+
+    expect(result.error).toBeNull();
+    expect(result.images).toMatchObject({ total: 1, lazyUnloaded: 1, measured: 0, standIns: 0 });
+    expect(origin.count("/lazy.png")).toBe(0);
+  });
+
+  it("(f) counts an image under a display:none parent as hidden", async () => {
+    const result = await renderer.render(`${origin.base}/img/hidden`);
+
+    expect(result.error).toBeNull();
+    expect(result.images).toMatchObject({ total: 1, hidden: 1, measured: 0 });
+  });
+
+  it("(g) aborts an image with no stored size as today, and counts it as no-dimensions", async () => {
+    const result = await renderer.render(`${origin.base}/img/no-dims`);
+
+    expect(result.error).toBeNull();
+    expect(result.images).toMatchObject({ total: 1, noDimensions: 1, measured: 0, standIns: 0 });
+    expect(result.skippedPaintRequests).toBe(1);
+    expect(result.console!.blockedByRenderer.sameOriginAssets).toBe(1);
+    expect(origin.count("/nodims.png")).toBe(0);
+  });
+
+  it("(g2) counts an image whose lookup outlived the measurement as no-dimensions, never measured", async () => {
+    // The page is measured SETTLE_MS after DOMContentLoaded; the lookup answers
+    // 300 ms after that. The box (200×100 from its attributes) was laid out
+    // without the image, and Chromium reports no currentSrc for it yet: it is
+    // requested-and-unmeasured, never "not requested", and a stand-in served
+    // afterwards must not make it a measured, oversized image.
+    const result = await renderer.render(`${origin.base}/img/slow-lookup`);
+
+    expect(result.error).toBeNull();
+    expect(result.images).toMatchObject({
+      total: 1,
+      examined: 1,
+      measured: 0,
+      noDimensions: 1,
+      notRequested: 0,
+      widerThanDisplayed: 0,
+      standIns: 0,
+    });
+    expect(result.images!.kept).toEqual([]);
+  });
+
+  it("(h) never lets a stand-in be served from the cache for the real URL", async () => {
+    // Review Focus 1. P1 gets a stand-in for /big.png; P2, next on the SAME
+    // context (the one idle slot), carries the same <img> and also fetches
+    // /big.png from script.
+    const p1 = await renderer.render(`${origin.base}/img/same-origin`);
+    expect(p1.images!.standIns).toBe(1);
+    const before = origin.count("/big.png");
+
+    const p2 = await renderer.render(`${origin.base}/img/fetch-big`);
+
+    expect(p2.error).toBeNull();
+    // P2's <img> made its OWN request, answered by its own stand-in: neither
+    // the HTTP cache nor the in-process image cache handed it P1's.
+    expect(p2.images).toMatchObject({ total: 1, measured: 1, standIns: 1, notRequested: 0 });
+    // The script's fetch went to the site, paced — the only /big.png request.
+    expect(origin.count("/big.png")).toBe(before + 1);
+    expect(p2.pacedRequests).toBe(2); // the document and the fetch
+    expect(p2.cachedResponses).toBe(0);
+    // The script read the REAL file's bytes, not an SVG's.
+    expect(p2.title).toBe(`bytes ${BIG_PNG.length}`);
+  });
+
+  it("(I1) satisfies a cors-mode image's CORS check, anonymous and with credentials", async () => {
+    const result = await renderer.render(`${origin.base}/img/cors`);
+
+    expect(result.error).toBeNull();
+    expect(result.images).toMatchObject({ total: 2, measured: 2, broken: 0, standIns: 2 });
+    for (const kept of result.images!.kept) {
+      expect(kept).toMatchObject({ intrinsicWidth: 1200, displayedWidth: 300, displayedHeight: 200 });
+    }
+    expect(cdn.count("/cors-a.png")).toBe(0);
+    expect(cdn.count("/cors-c.png")).toBe(0);
+    expect(result.blockedRequests).toBe(0);
+  });
+
+  it("(S1) a page that breaks the globals cannot stop the render through the srcset lookup", async () => {
+    const result = await renderer.render(`${origin.base}/img/hostile`);
+
+    expect(result.error).toBeNull();
+    expect(result.rendered).toBe(true);
+    // The lookup ran in an isolated world, untouched by the page's globals.
+    expect(result.images).toMatchObject({ total: 1, measured: 1, noDimensions: 0 });
+    expect(result.images!.kept[0]).toMatchObject({
+      url: `${origin.base}/img/h-1600.png`,
+      intrinsicWidth: 1600,
+      intrinsicHeight: 1200,
+      widthFrom: "srcset-w",
+    });
+  });
+
+  it("(i) with no lookup, every image is aborted as before and counted as no-dimensions", async () => {
+    const plain = await PageRenderer.launch({
+      origin: origin.base,
+      htmlDir,
+      imageDimensions: null,
+      accessibility: false,
+      userAgent: "AriadneBot/0.1 (render image test)",
+      perHostDelayMs: 0,
+      settleMs: SETTLE_MS,
+      allowPrivate: true,
+    });
+    try {
+      const before = origin.count("/big.png");
+      const result = await plain.render(`${origin.base}/img/same-origin`);
+
+      expect(result.error).toBeNull();
+      expect(result.images).toMatchObject({
+        total: 1,
+        measured: 0,
+        noDimensions: 1,
+        standIns: 0,
+        kept: [],
+      });
+      expect(result.skippedPaintRequests).toBe(1);
+      expect(origin.count("/big.png")).toBe(before);
+    } finally {
+      await plain.close();
+    }
+  });
+
+  it("throws when the dimension lookup rejects: that is our defect, not the site's", async () => {
+    lookupFault = new Error("lookup broke");
+    try {
+      await expect(renderer.render(`${origin.base}/img/same-origin`)).rejects.toThrow(
+        "lookup broke",
+      );
+    } finally {
+      lookupFault = null;
+    }
+    // The renderer is still usable afterwards: the context was released clean.
+    const next = await renderer.render(`${origin.base}/img/same-origin`);
+    expect(next.images!.measured).toBe(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Phase 29b Task 4: the accessibility run (axe-core, in the isolated world).
+// ---------------------------------------------------------------------------
+
+describe("PageRenderer accessibility (Phase 29b)", () => {
+  let origin: Awaited<ReturnType<typeof startCounting>>;
+  let htmlDir: string;
+  let renderer: PageRenderer;
+  /**
+   * The renderer's TEST-ONLY faults, mutated per test (and restored in a
+   * `finally`): the hooks are read on every render, so one renderer serves
+   * the ordinary cases and the deterministic timeout, interruption and error.
+   */
+  const faults: RenderTestFaults = {};
+  /** `a11y.ms` of every `ran` render here, for the report's median. */
+  const ranMs: number[] = [];
+
+  const PAGES: Record<string, string> = {
+    // No `lang`, one `<img>` without `alt`: exactly two of the subset's rules.
+    "/a11y/violations":
+      `<!doctype html><html><head><title>Violations</title></head><body>` +
+      `<main><h1>Heading</h1><p>Some words.</p><img src="/plain.png" width="20" height="20"></main>` +
+      `</body></html>`,
+    // Seven images without `alt`: one rule, seven nodes, five selectors kept.
+    "/a11y/many":
+      `<!doctype html><html lang="en"><head><title>Many</title></head><body><main>` +
+      [1, 2, 3, 4, 5, 6, 7].map((i) => `<img src="/${i}.png" width="10" height="10">`).join("") +
+      `</main></body></html>`,
+    "/a11y/clean":
+      `<!doctype html><html lang="en"><head><title>Clean</title></head><body>` +
+      `<main><h1>Clean</h1><p>Every word here is readable.</p></main></body></html>`,
+    // RULING A: the page breaks the globals a main-world axe would lean on.
+    // Its text is grey on grey, so `color-contrast` must still work — it reads
+    // computed styles and the layout through the isolated world's own DOM
+    // bindings — and it has no `lang`.
+    "/a11y/hostile":
+      `<!doctype html><html><head><title>Hostile</title></head><body>` +
+      `<p style="color:#777;background-color:#888">Grey on grey</p>` +
+      `<script>` +
+      `Array.prototype.map = function () { throw new Error("no map"); };` +
+      `Array.prototype.forEach = function () { throw new Error("no forEach"); };` +
+      `Element.prototype.matches = function () { throw new Error("no matches"); };` +
+      `Node.prototype.contains = function () { throw new Error("no contains"); };` +
+      `window.getComputedStyle = function () { throw new Error("no styles"); };` +
+      `window.Promise = function () { throw new Error("no Promise"); };` +
+      `</script></body></html>`,
+  };
+
+  function launch(overrides: Partial<Parameters<typeof PageRenderer.launch>[0]> = {}) {
+    return PageRenderer.launch({
+      origin: origin.base,
+      htmlDir,
+      imageDimensions: null,
+      accessibility: true,
+      userAgent: "AriadneBot/0.1 (render a11y test)",
+      perHostDelayMs: 0,
+      settleMs: SETTLE_MS,
+      allowPrivate: true,
+      testFaults: faults,
+      ...overrides,
+    });
+  }
+
+  beforeAll(async () => {
+    origin = await startCounting((path, res) => {
+      const page = PAGES[path];
+      if (page !== undefined) {
+        res.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" });
+        res.end(page);
+        return;
+      }
+      res.writeHead(404, { "content-type": "text/plain" });
+      res.end("no");
+    });
+    htmlDir = await mkdtemp(join(tmpdir(), "ariadne-render-a11y-"));
+    renderer = await launch();
+  }, 120_000);
+
+  afterAll(async () => {
+    await renderer.close();
+    await origin.close();
+    await rm(htmlDir, { recursive: true, force: true });
+    const sorted = [...ranMs].sort((a, b) => a - b);
+    // The report's figure (Task 4): the median axe time on this machine.
+    console.log(
+      `[a11y] axe ran ${sorted.length} times; median ${sorted[Math.floor(sorted.length / 2)]} ms, ` +
+        `max ${sorted[sorted.length - 1]} ms`,
+    );
+  });
+
+  async function render(path: string): Promise<RenderResult> {
+    const result = await renderer.render(`${origin.base}${path}`);
+    if (result.a11y?.status === "ran" && result.a11y.ms !== null) ranMs.push(result.a11y.ms);
+    return result;
+  }
+
+  it("finds exactly a missing alt and a missing lang, one node each", async () => {
+    const result = await render("/a11y/violations");
+
+    expect(result.error).toBeNull();
+    expect(result.a11y).toMatchObject({ status: "ran", error: null });
+    expect(result.a11y!.ms).toBeGreaterThanOrEqual(0);
+    expect(result.a11y!.violations.map((v) => [v.rule, v.nodeCount]).sort()).toEqual([
+      ["html-has-lang", 1],
+      ["image-alt", 1],
+    ]);
+  });
+
+  it("finds nothing on a clean page", async () => {
+    const result = await render("/a11y/clean");
+
+    expect(result.a11y).toMatchObject({ status: "ran", error: null, violations: [] });
+  });
+
+  it("runs in the isolated world: a page that breaks the globals cannot stop or bend it", async () => {
+    const result = await render("/a11y/hostile");
+
+    expect(result.error).toBeNull();
+    expect(result.a11y).toMatchObject({ status: "ran", error: null });
+    expect(result.a11y!.violations.map((v) => [v.rule, v.nodeCount]).sort()).toEqual([
+      ["color-contrast", 1],
+      ["html-has-lang", 1],
+    ]);
+  });
+
+  it("accessibility: false runs no axe", async () => {
+    const off = await launch({ accessibility: false });
+    try {
+      const result = await off.render(`${origin.base}/a11y/violations`);
+
+      expect(result.rendered).toBe(true);
+      expect(result.a11y).toEqual({ status: "disabled", ms: null, error: null, violations: [] });
+    } finally {
+      await off.close();
+    }
+  });
+
+  it("times out a run the page blocks, terminates it, keeps every other measurement, and renders on", async () => {
+    // P1: deterministic. Just before axe runs, the page's MAIN world starts a
+    // loop that never yields; the isolated world shares its thread, so axe
+    // cannot start until `Runtime.terminateExecution` frees it.
+    faults.axeTimeoutMs = 1_000;
+    faults.beforeAxe = async (page) => {
+      await page.evaluate("setTimeout(function () { for (;;) {} }, 0)");
+    };
+    let result: RenderResult;
+    try {
+      result = await render("/a11y/violations");
+    } finally {
+      delete faults.axeTimeoutMs;
+      delete faults.beforeAxe;
+    }
+
+    expect(result.error).toBeNull();
+    expect(result.rendered).toBe(true);
+    expect(result.a11y).toMatchObject({ status: "timeout", error: null, violations: [] });
+    expect(result.a11y!.ms).toBeGreaterThanOrEqual(1_000);
+    // M1: the run's own time, up to the moment it timed out — never the
+    // termination, the queued run that follows it, or the grace.
+    expect(result.a11y!.ms).toBeLessThan(1_000 + 250);
+    expect(result.wordCount).toBe(3);
+    expect(result.images).toMatchObject({ total: 1 });
+    expect(result.htmlPath).not.toBeNull();
+
+    // The page was released cleanly and the context renders the next page.
+    const next = await render("/a11y/violations");
+    expect(next.a11y).toMatchObject({ status: "ran" });
+    expect(next.a11y!.violations).toHaveLength(2);
+  });
+
+  it("records a run whose document navigated away under it as interrupted", async () => {
+    faults.beforeAxe = async (page) => {
+      await page.evaluate(`location.href = "/a11y/clean"`);
+      await page.waitForURL(/\/a11y\/clean$/, { waitUntil: "commit" });
+    };
+    let result: RenderResult;
+    try {
+      result = await render("/a11y/violations");
+    } finally {
+      delete faults.beforeAxe;
+    }
+
+    expect(result.error).toBeNull();
+    expect(result.rendered).toBe(true);
+    expect(result.a11y).toMatchObject({ status: "interrupted", error: null, violations: [] });
+    expect(result.a11y!.ms).not.toBeNull();
+    // Measured from the document that was serialised, before it left.
+    expect(result.title).toBe("Violations");
+    expect(result.wordCount).toBe(3);
+  });
+
+  it("records an axe the page made throw as error, with its first line, and keeps every other measurement", async () => {
+    faults.axeFault = { error: "axe broke on this page\nsecond line of it" };
+    let result: RenderResult;
+    try {
+      result = await render("/a11y/violations");
+    } finally {
+      delete faults.axeFault;
+    }
+
+    expect(result.error).toBeNull();
+    expect(result.rendered).toBe(true);
+    expect(result.a11y).toMatchObject({
+      status: "error",
+      error: "Error: axe broke on this page",
+      violations: [],
+    });
+    expect(result.wordCount).toBe(3);
+    expect(result.images).toMatchObject({ total: 1 });
+  });
+
+  it("never counts our isolated world's console or exceptions as the site's (29b final review M1)", async () => {
+    // The isolated world logs (and schedules a throw) during the image
+    // measurement, BEFORE the evidence is snapshotted: the snapshot cannot
+    // hide it, only the context-id filter can. Removing the filter fails this.
+    faults.isolatedNoise = "ours";
+    let result: RenderResult;
+    try {
+      result = await render("/a11y/violations");
+    } finally {
+      delete faults.isolatedNoise;
+    }
+
+    expect(result.error).toBeNull();
+    expect(result.images).toMatchObject({ total: 1 });
+    expect(result.a11y).toMatchObject({ status: "ran", error: null });
+    const evidence = result.console!;
+    expect(evidence.console.map((e) => e.text)).not.toContain("ours");
+    expect(evidence.exceptions.filter((e) => e.text.includes("ours"))).toEqual([]);
+    expect(evidence.consoleTotal).toBe(0);
+    expect(evidence.exceptionsTotal).toBe(0);
+  });
+
+  it("closes the console window before the accessibility run (29b final review M1)", async () => {
+    // The page's MAIN world logs just before axe runs: that is after every
+    // measurement, inside the up-to-35 s axe window the console no longer spans.
+    faults.beforeAxe = async (page) => {
+      await page.evaluate(`console.error("logged during the accessibility run")`);
+    };
+    let result: RenderResult;
+    try {
+      result = await render("/a11y/violations");
+    } finally {
+      delete faults.beforeAxe;
+    }
+
+    expect(result.a11y).toMatchObject({ status: "ran" });
+    expect(result.console!.console).toEqual([]);
+    expect(result.console!.consoleTotal).toBe(0);
+  });
+
+  it("keeps the message of a rejection that is not an Error", async () => {
+    faults.axeFault = { value: "x" };
+    let result: RenderResult;
+    try {
+      result = await render("/a11y/violations");
+    } finally {
+      delete faults.axeFault;
+    }
+
+    expect(result.a11y).toMatchObject({ status: "error", error: "x", violations: [] });
+  });
+
+  it("counts every failing element and sends only the first five selectors", async () => {
+    const result = await render("/a11y/many");
+
+    expect(result.a11y).toMatchObject({ status: "ran", error: null });
+    expect(result.a11y!.violations).toEqual([
+      {
+        rule: "image-alt",
+        impact: "critical",
+        nodeCount: 7,
+        targets: [1, 2, 3, 4, 5].map((i) => `img[src="/${i}.png"]`),
+      },
+    ]);
+  });
+
+  it("carries no accessibility on a render refused before the browser", async () => {
+    const refused = await renderer.render("http://169.254.169.254/");
+    expect(refused.rendered).toBe(false);
+    expect(refused.a11y).toBeNull();
   });
 });
