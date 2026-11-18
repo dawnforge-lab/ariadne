@@ -103,11 +103,13 @@ export async function deriveLinkScore(db: Db, crawlId: string): Promise<LinkScor
   return db.transaction(async (tx) => {
     await tx.execute(sql`
       create temporary table ls_nodes (
-        n int primary key, page_id text not null, outdeg int not null default 0
+        n int primary key, page_id text not null, outdeg int not null default 0,
+        nofollow boolean not null default false
       ) on commit drop`);
     await tx.execute(sql`
-      insert into ls_nodes (n, page_id)
-      select (row_number() over (order by p.url))::int, p.id
+      insert into ls_nodes (n, page_id, nofollow)
+      select (row_number() over (order by p.url))::int, p.id,
+             ${sql.raw(SAYS_NOFOLLOW("p.robots_meta"))} or ${sql.raw(SAYS_NOFOLLOW("p.x_robots_tag"))}
       from pages p
       where p.crawl_id = ${crawlId} and ${FETCHED_OK("p")}`);
 
@@ -131,14 +133,12 @@ export async function deriveLinkScore(db: Db, crawlId: string): Promise<LinkScor
       select distinct s.n, d.n
       from links l
       join ls_nodes s on s.page_id = l.source_page_id
-      join pages sp on sp.id = s.page_id
       join pages t on t.crawl_id = ${crawlId} and t.url = l.target_url
       join ls_nodes d on d.page_id = t.id
       where l.crawl_id = ${crawlId}
         and l.is_internal and not l.is_nofollow
         and s.n <> d.n
-        and not ${sql.raw(SAYS_NOFOLLOW("sp.robots_meta"))}
-        and not ${sql.raw(SAYS_NOFOLLOW("sp.x_robots_tag"))}`);
+        and not s.nofollow`);
     await tx.execute(sql`
       update ls_nodes nd set outdeg = o.c
       from (select src, count(*)::int as c from ls_edges group by src) o

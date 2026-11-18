@@ -282,9 +282,10 @@ describe("deriveLinkScore against the database", () => {
   //
   // The iteration cap (20) stops this graph before the 1e-6 tolerance (the error
   // contracts by 0.85 a step and the start is far from the answer: about 6e-3 left
-  // at the cap), so the comparison uses RAW_SLACK. The two hypotheses differ by
+  // at the cap), so the KEPT control uses KEPT_SLACK (the dropped graph leaves about 3e-6 and uses the tight DROPPED_SLACK). The two hypotheses differ by
   // 0.044 or more per page, so the slack cannot hide a wrong edge set.
-  const RAW_SLACK = 1.5e-2;
+  const KEPT_SLACK = 1.5e-2;
+  const DROPPED_SLACK = 1e-5;
   const DROPPED = { "/a": 27 / 47, "/b": 10 / 47, "/c": 10 / 47 };
   const KEPT = { "/a": 18 / 37, "/b": 19 / 74, "/c": 19 / 74 };
 
@@ -308,10 +309,10 @@ describe("deriveLinkScore against the database", () => {
     return crawlId;
   }
 
-  async function expectRaw(crawlId: string, want: Record<string, number>) {
+  async function expectRaw(crawlId: string, want: Record<string, number>, slack: number) {
     const got = await scores(crawlId);
     for (const [path, exact] of Object.entries(want)) {
-      expect(Math.abs(got[path]!.raw! - exact), path).toBeLessThan(RAW_SLACK);
+      expect(Math.abs(got[path]!.raw! - exact), path).toBeLessThan(slack);
     }
     return got;
   }
@@ -320,7 +321,7 @@ describe("deriveLinkScore against the database", () => {
     const crawlId = await triangle({ "/a": { robotsMeta: "index, nofollow" } });
     const derived = await deriveLinkScore(db, crawlId);
     expect(derived).toMatchObject({ nodes: 3, edges: 2, dangling: 1 });
-    const got = await expectRaw(crawlId, DROPPED);
+    const got = await expectRaw(crawlId, DROPPED, DROPPED_SLACK);
     expect(got["/a"]!.score).toBe(100);
     expect(got["/b"]!.score).toBe(0);
     expect(got["/c"]!.score).toBe(0);
@@ -329,14 +330,14 @@ describe("deriveLinkScore against the database", () => {
   it("drops the edges of a page whose X-Robots-Tag header says nofollow", async () => {
     const crawlId = await triangle({ "/a": { xRobotsTag: "nofollow" } });
     expect(await deriveLinkScore(db, crawlId)).toMatchObject({ edges: 2, dangling: 1 });
-    await expectRaw(crawlId, DROPPED);
+    await expectRaw(crawlId, DROPPED, DROPPED_SLACK);
   });
 
   it("treats none (noindex, nofollow) as nofollow in either channel", async () => {
     for (const mark of [{ robotsMeta: "none" }, { xRobotsTag: "googlebot: none" }]) {
       const crawlId = await triangle({ "/a": mark });
       expect(await deriveLinkScore(db, crawlId)).toMatchObject({ edges: 2, dangling: 1 });
-      await expectRaw(crawlId, DROPPED);
+      await expectRaw(crawlId, DROPPED, DROPPED_SLACK);
     }
   });
 
@@ -344,10 +345,13 @@ describe("deriveLinkScore against the database", () => {
     const crawlId = await triangle({
       "/a": { robotsMeta: "nofollowing" },
       "/b": { robotsMeta: "noindex" },
-      "/c": { xRobotsTag: "noindex, follow" },
+      "/c": { xRobotsTag: "noindex, follow, max-image-preview:none" },
     });
+    await db.execute(
+      sql`update pages set robots_meta = 'max-image-preview: none, max-snippet:-1' where crawl_id = ${crawlId} and url = ${url("/b")}`,
+    );
     expect(await deriveLinkScore(db, crawlId)).toMatchObject({ edges: 4, dangling: 0 });
-    await expectRaw(crawlId, KEPT);
+    await expectRaw(crawlId, KEPT, KEPT_SLACK);
   });
 
   // ---- max = min within a tolerance (owner change, 29c) ---------------------
@@ -356,7 +360,7 @@ describe("deriveLinkScore against the database", () => {
     expect(LINK_SCORE_EQUAL_TOLERANCE).toBe(1e-9);
   });
 
-  it("scores 100 for a symmetric graph whose true scores are equal", async () => {
+  it("sanity check: a symmetric 3-cycle scores 100 (the tolerance itself is pinned by the scaling test below)", async () => {
     const crawlId = await newCrawl();
     const ids = await addPages(crawlId, [["/a", "ok"], ["/b", "ok"], ["/c", "ok"]]);
     await addLinks(crawlId, ids, [

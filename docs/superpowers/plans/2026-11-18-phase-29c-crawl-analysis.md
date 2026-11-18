@@ -226,6 +226,14 @@ and Gates §29c. The owner approved it on 2026-11-13 and said "let's go" on 2026
   - **removed:** `i % 2000 === 1000`, giving 25 pages. No page links to them, no sitemap
     lists them, and the server answers 404.
 
+## Owner amendments (2026-11-18)
+
+The owner amended two rulings after this plan was written; the original lines above are unchanged.
+- R3's open item (page-level nofollow) is closed: a page whose `robots_meta` or `x_robots_tag` says
+  `nofollow` or `none` passes no link score (its outgoing edges are dropped; link counts are unchanged).
+- R5 / Global Constraints' "max = min" is "equal within tolerance": every page scores 100 when
+  `max - min <= 1e-9 * max` (`LINK_SCORE_EQUAL_TOLERANCE`).
+
 ## File map
 
 | File | Responsibility |

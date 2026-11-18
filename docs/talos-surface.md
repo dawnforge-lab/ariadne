@@ -35,7 +35,7 @@ new threshold onto every stored run stamp. The new metric `links.score-distribut
 gives the eight distribution numbers of the link score, the share of internal link
 weight a page holds (random-surfer model, damping 0.85), scaled 0 to 100 (every page 100
 when max and min agree within 1e-9 relative), for the site and each template. A page whose
-robots meta or X-Robots-Tag says nofollow (or none) passes no link score. `links.high-outlinks` now reads the per-page outlink counts the
+robots meta or X-Robots-Tag says nofollow (or none) passes no link score through its links (its weight is shared evenly, as for a page with no links). The edge rule reads the two stored columns `robots_meta` and `x_robots_tag` only, so a bot-specific `<meta name=somebot>` (stored elsewhere) does not drop edges. `links.high-outlinks` now reads the per-page outlink counts the
 rules run derives before any rule runs; its findings are unchanged, and a fetched page
 whose counts were never derived makes the rule fail loudly instead of reading as zero.
 The new rule `links.anchors-generic-only` (info, CHECK-86) names an indexable page with
