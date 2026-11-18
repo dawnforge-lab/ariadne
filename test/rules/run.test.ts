@@ -512,6 +512,12 @@ describe("runRules against the database", () => {
       "deriveLinkCounts.pages": 2,
       "deriveLinkCounts.withInlinks": 0,
       "deriveLinkCounts.analysed": 2,
+      // Two analysed pages and no links: every page dangles, one iteration is exact.
+      "deriveLinkScore.nodes": 2,
+      "deriveLinkScore.edges": 0,
+      "deriveLinkScore.dangling": 2,
+      "deriveLinkScore.iterations": 1,
+      "deriveLinkScore.converged": 1,
       // No sitemap alternate was staged, so no `source = 'sitemap'` row.
       "deriveSitemapHreflang.rows": 0,
     });

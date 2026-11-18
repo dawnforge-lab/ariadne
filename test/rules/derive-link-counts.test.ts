@@ -216,6 +216,7 @@ describe("deriveLinkCounts against the database", () => {
     expect(Object.keys(summary.derivedMs).sort()).toEqual([
       "deriveClickDepth",
       "deriveLinkCounts",
+      "deriveLinkScore",
       "deriveSchemaValidation",
       "deriveSitemapHreflang",
       "deriveUrlParams",

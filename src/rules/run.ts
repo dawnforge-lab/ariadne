@@ -3,6 +3,7 @@ import type { Db } from "../db/client.js";
 import { crawls, issues, metrics, pages } from "../db/schema.js";
 import { deriveClickDepth } from "./derive/click-depth.js";
 import { deriveLinkCounts } from "./derive/link-counts.js";
+import { deriveLinkScore } from "./derive/link-score.js";
 import { deriveSchemaValidation } from "./derive/schema-validation.js";
 import { deriveSitemapHreflang } from "./derive/sitemap-hreflang.js";
 import { deriveUrlParams } from "./derive/url-params.js";
@@ -112,6 +113,7 @@ const derivations: Derivation[] = [
   deriveSchemaValidation,
   deriveClickDepth,
   deriveLinkCounts,
+  deriveLinkScore,
   deriveSitemapHreflang,
 ];
 
