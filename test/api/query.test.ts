@@ -2945,8 +2945,8 @@ describe("GET /crawls/:id/export?format=csv", () => {
     expect(rowWhere(internal, "url", `${SITE}/csv-end`)).toEqual([
       `${SITE}/csv-end`, "200", "ok", "true", "2", "1", "", "", "", "product", "title of csv-end", "", "", "",
     ]);
-    // An empty cell is "the engine has no value", never a zero: this page has
-    // no click depth because nothing links to it.
+    // An empty cell is "the engine has no value", never a zero: a 404 is not a
+    // node of the click-depth walk, so it has no depth although a page links to it.
     expect(rowWhere(internal, "url", `${SITE}/csv-gone`)).toEqual([
       `${SITE}/csv-gone`, "404", "client_error", "", "", "1", "", "", "", "", "title of csv-gone", "", "", "",
     ]);

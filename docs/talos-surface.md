@@ -3127,13 +3127,13 @@ emptyAnchors, nonDescriptiveAnchors, genericShare
   no page links to. An unknown crawl and another tenant's crawl are the same 404.
 - The same rows are the `anchors_by_target` CSV view (§12).
 
-Pinned: `test/api/anchors-by-target.test.ts:162` ("answers the brief's fixture"),
-`test/api/anchors-by-target.test.ts:194` ("counts distinct source pages"),
-`test/api/anchors-by-target.test.ts:207` ("keeps genericShare at or below 1"),
-`test/api/anchors-by-target.test.ts:228` ("a cursor walk returns every row exactly
-once"), `test/api/anchors-by-target.test.ts:262` ("writes the header and the same
-rows"), `test/api/anchors-by-target.test.ts:280` ("a crawl judged before 29c is a
-CONFLICT"), `test/api/anchors-by-target.test.ts:294` ("an unknown crawl is NOT_FOUND,
+Pinned: `test/api/anchors-by-target.test.ts:184` ("answers the brief's fixture"),
+`test/api/anchors-by-target.test.ts:216` ("counts distinct source pages"),
+`test/api/anchors-by-target.test.ts:229` ("keeps genericShare at or below 1"),
+`test/api/anchors-by-target.test.ts:281` ("a cursor walk returns every row exactly
+once"), `test/api/anchors-by-target.test.ts:315` ("writes the header and the same
+rows"), `test/api/anchors-by-target.test.ts:334` ("a crawl judged before 29c is a
+CONFLICT"), `test/api/anchors-by-target.test.ts:348` ("an unknown crawl is NOT_FOUND,
 and so is another tenant's").
 
 ### 4.7 `robots_get` → the robots.txt this crawl obeyed

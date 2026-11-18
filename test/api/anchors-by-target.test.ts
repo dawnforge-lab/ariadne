@@ -17,11 +17,12 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { eq } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 
-import { ANCHORS_TOP_N } from "../../src/api/anchors.js";
+import { ANCHORS_TOP_N, anchorsByTargetSql } from "../../src/api/anchors.js";
+import { CSV_VIEW_DEFS } from "../../src/api/csv.js";
 import { createApiServer, type ApiServer } from "../../src/api/http.js";
 import { createMcpServer, type AriadneMcpServer } from "../../src/api/mcp.js";
 import type { ServiceConfig } from "../../src/api/config.js";
@@ -70,9 +71,15 @@ const EDGES: Edge[] = [
   ["/s2", "/t2", ""],
   ["/s2", "/t2", "read more"],
   ["/target", "/t3", null],
+  // /top: six distinct anchors, a tie at ranks 5 and 6 ("echo" and "foxtrot").
+  ["/s1", "/top", "alpha"], ["/s2", "/top", "alpha"], ["/s3", "/top", "bravo"],
+  ["/s4", "/top", "charlie"], ["/s5", "/top", "delta"], ["/s6", "/top", "foxtrot"],
+  ["/s7", "/top", "echo"],
   ["/t3", "/t3", "self link"],
 ];
-const PATHS = [...SOURCES, "/target", "/t2", "/t3", "/lonely"];
+const PATHS = [...SOURCES, "/target", "/t2", "/t3", "/top", "/lonely"];
+/** The s3 -> /target link carries rel=nofollow: it still counts as an inlink. */
+const NOFOLLOW_FROM = "/s3";
 
 async function seed(id: string, judge: boolean): Promise<void> {
   await db.insert(crawls).values({
@@ -87,6 +94,7 @@ async function seed(id: string, judge: boolean): Promise<void> {
     PATHS.map((path, i) =>
       mkPage({
         id: ids.get(path)!, crawlId: id, url: url(path), urlNormalised: url(path), pageType: typeOf(path),
+        ...(path === "/t2" ? { statusCode: 404, fetchClass: "client_error" as const } : {}),
         ...(i === 0 ? { depth: 0, clickDepth: 0, discoveredVia: "seed" } : {}),
       }),
     ),
@@ -94,7 +102,8 @@ async function seed(id: string, judge: boolean): Promise<void> {
   await db.insert(links).values(
     EDGES.map(([from, to, anchor], position) => ({
       crawlId: id, sourcePageId: ids.get(from)!, targetUrl: url(to), targetPageId: null,
-      anchor, rel: null, isInternal: true, isNofollow: false, position,
+      anchor, rel: null, isInternal: true,
+      isNofollow: from === NOFOLLOW_FROM && to === "/target", position,
     })),
   );
   if (judge) await service.runRulesForCrawl(LOCAL_TENANT, id);
@@ -111,6 +120,19 @@ async function tool(name: string, args: Record<string, unknown>): Promise<{ erro
   const result = await client.callTool({ name, arguments: args });
   const text = (result.content as { text: string }[])[0]?.text ?? "";
   return { error: result.isError === true, body: JSON.parse(text) as Record<string, unknown> };
+}
+
+interface Plan { "Node Type": string; Plans?: Plan[] }
+/** True when a Nested Loop's outer (first) child holds a Limit: the lateral runs per limited row. */
+function limitBelowNestedLoop(plan: Plan): boolean {
+  const hasLimit = (p: Plan): boolean => p["Node Type"] === "Limit" || (p.Plans ?? []).some(hasLimit);
+  const loops: Plan[] = [];
+  const walk = (p: Plan): void => {
+    if (p["Node Type"] === "Nested Loop") loops.push(p);
+    (p.Plans ?? []).forEach(walk);
+  };
+  walk(plan);
+  return loops.some((l) => l.Plans?.[0] !== undefined && hasLimit(l.Plans[0]));
 }
 
 type Row = Record<string, unknown>;
@@ -179,7 +201,7 @@ describe("anchors_by_target rows", () => {
 
   it("lists only pages with internal inlinks, ordered by url", async () => {
     const rows = items((await tool("anchors_by_target", { crawlId: judgedId })).body);
-    expect(rows.map((r) => String(r["url"]).slice(SITE.length))).toEqual(["/t2", "/t3", "/target"]);
+    expect(rows.map((r) => String(r["url"]).slice(SITE.length))).toEqual(["/t2", "/t3", "/target", "/top"]);
   });
 
   it("inlinks equals pages.inlinks_internal, and a self-link is not an inlink", async () => {
@@ -219,8 +241,39 @@ describe("anchors_by_target rows", () => {
     });
   });
 
-  it("lists at most the top N anchors", () => {
+  it("lists at most the top N anchors, ties broken by text ascending", async () => {
     expect(ANCHORS_TOP_N).toBe(5);
+    const rows = byPath(items((await tool("anchors_by_target", { crawlId: judgedId })).body));
+    expect(rows.get("/top")).toMatchObject({
+      inlinks: 7,
+      distinctAnchors: 6,
+      topAnchors: [
+        { text: "alpha", count: 2 }, { text: "bravo", count: 1 }, { text: "charlie", count: 1 },
+        { text: "delta", count: 1 }, { text: "echo", count: 1 },
+      ],
+    });
+  });
+
+  it("lists a 404 target, and counts a nofollow link", async () => {
+    const rows = byPath(items((await tool("anchors_by_target", { crawlId: judgedId })).body));
+    expect(rows.get("/t2")).toBeDefined(); // fetchClass client_error, still listed
+    expect(rows.get("/target")?.["inlinks"]).toBe(7); // s3's link is nofollow
+    const nofollow = await db.select({ n: links.isNofollow }).from(links)
+      .where(and(eq(links.crawlId, judgedId), eq(links.isNofollow, true)));
+    expect(nofollow).toHaveLength(1);
+  });
+
+  it("runs the per-target aggregate under the LIMIT, in the listing and the CSV view", async () => {
+    const shapes = [
+      anchorsByTargetSql(judgedId, null, 2),
+      CSV_VIEW_DEFS.anchors_by_target.query(judgedId, [""], 2, null, []),
+    ];
+    for (const statement of shapes) {
+      const plan = await db.execute<{ "QUERY PLAN": { Plan: Plan }[] }>(sql`explain (format json) ${statement}`);
+      const root = plan.rows[0]?.["QUERY PLAN"]?.[0]?.Plan;
+      if (root === undefined) throw new Error("EXPLAIN answered no plan");
+      expect(limitBelowNestedLoop(root)).toBe(true);
+    }
   });
 });
 
@@ -235,8 +288,8 @@ describe("anchors_by_target paging and filters", () => {
       cursor = res.nextCursor ?? undefined;
       pagesRead++;
     } while (cursor !== undefined && pagesRead < 10);
-    expect(seen).toEqual(["/t2", "/t3", "/target"]);
-    expect(pagesRead).toBe(3);
+    expect(seen).toEqual(["/t2", "/t3", "/target", "/top"]);
+    expect(pagesRead).toBe(4);
   });
 
   it("filters by pageType, (untyped) included, and refuses a cohort that names no page", async () => {
@@ -267,6 +320,7 @@ describe("anchors_by_target CSV view", () => {
       `${url("/t2")},product,2,3,1,2,1,click here (1); read more (1)`,
       `${url("/t3")},,1,1,1,0,1,`,
       `${url("/target")},content,7,4,1,1,0.2857,blue widgets (4); click here (1); red (1)`,
+      `${url("/top")},content,7,6,0,0,0,alpha (2); bravo (1); charlie (1); delta (1); echo (1)`,
     ]);
   });
 

@@ -1037,8 +1037,11 @@ export const CSV_VIEW_DEFS: Record<CsvQueryViewName, CsvView> = {
     ],
     keyset: ["url"],
     start: [""],
-    query: (crawlId, cursor, limit) =>
-      anchorsByTargetSql(crawlId, cursor[0] ?? "", limit),
+    query: (crawlId, cursor, limit) => {
+      const after = cursor[0];
+      if (after === undefined) throw new Error("anchors_by_target: the keyset cursor has no url part");
+      return anchorsByTargetSql(crawlId, after, limit);
+    },
     next: (row) => [row.url],
     cells: (raw) => {
       const row = anchorsByTargetRow(raw);

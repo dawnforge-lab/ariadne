@@ -9,8 +9,8 @@
  *
  * WHAT IS COUNTED: DISTINCT SOURCE PAGES, throughout. `inlinks` is
  * `pages.inlinks_internal` (R1: distinct sources, self excluded, nofollow
- * counted), recomputed here from the links so the row cannot drift from the
- * column it is gated on. Every anchor count is the number of distinct source
+ * counted), checked against a count of distinct sources taken from the links
+ * in the same statement: a row where the two differ throws, never lists. Every anchor count is the number of distinct source
  * pages that use that anchor on a link to the target, so a page linking twice
  * with the same text counts once, and `topAnchors[].count` never exceeds
  * `inlinks`. A page linking with two different texts counts once under each.
@@ -64,6 +64,7 @@ export type AnchorsByTargetRaw = {
   empty_anchors: number;
   non_descriptive: number;
   generic_sources: number;
+  source_count: number;
 };
 
 /**
@@ -82,8 +83,18 @@ export function anchorsByTargetSql(
   if (cursor !== null) where.push(sql`p.url > ${cursor}::text`);
   return sql`
     select p.url, p.page_type, p.inlinks_internal as inlinks,
-           a.distinct_anchors, a.top, a.empty_anchors, a.non_descriptive, a.generic_sources
-      from pages p
+           a.distinct_anchors, a.top, a.empty_anchors, a.non_descriptive, a.generic_sources,
+           a.source_count
+      from (
+        -- THE LIMIT IS TAKEN BEFORE THE LATERAL: the page keys are chosen, ordered
+        -- and cut first, so at most the limit per-target aggregates run whatever the
+        -- planner estimates (hard rule 6: never O(all links) per page of the listing).
+        select p.id, p.url, p.page_type, p.inlinks_internal
+          from pages p
+         where ${sql.join(where, sql` and `)}
+         order by p.url asc
+         limit ${limit}
+      ) p
      cross join lateral (
        with sa as (
          select distinct l.source_page_id as sid, coalesce(${NORMALISED_ANCHOR}, '') as anchor
@@ -93,6 +104,7 @@ export function anchorsByTargetSql(
          select anchor, count(*)::int as n from sa group by anchor
        )
        select (select count(*) from pa)::int as distinct_anchors,
+              (select count(distinct sid) from sa)::int as source_count,
               (select coalesce(sum(n), 0) from pa where anchor = '')::int as empty_anchors,
               (select coalesce(sum(n), 0) from pa
                 where anchor <> '' and anchor in (${anchorList()}))::int as non_descriptive,
@@ -104,9 +116,7 @@ export function anchorsByTargetSql(
                                  order by n desc, anchor asc limit ${ANCHORS_TOP_N}) t),
                        '[]'::jsonb) as top
      ) a
-     where ${sql.join(where, sql` and `)}
-     order by p.url asc
-     limit ${limit}`;
+     order by p.url asc`;
 }
 
 /** The share, 4 places. A target with no inlinks is never selected, so no zero divisor. */
@@ -119,6 +129,12 @@ function share(row: AnchorsByTargetRaw): number {
 
 /** A raw row as the surface's shape; throws on a top list this query could not write. */
 export function anchorsByTargetRow(row: AnchorsByTargetRaw): AnchorsByTargetRow {
+  if (row.source_count !== row.inlinks) {
+    throw new Error(
+      `anchors_by_target: ${row.url} has inlinks_internal ${row.inlinks} but ${row.source_count} distinct ` +
+        "linking pages in links: re-run the rules (crawl_rules)",
+    );
+  }
   const top = row.top;
   if (!Array.isArray(top)) {
     throw new Error(`anchors_by_target: ${row.url} has a top-anchors value that is not a list`);
