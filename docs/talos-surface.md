@@ -408,7 +408,7 @@ index that keeps `renderDocuments` from scanning a crawl's pages. Gate evidence:
   and leaves rendered_html_path null"), `test/events/crawl-events.test.ts:206` ("(a) reads
   queued, claimed, started, paused{request}, resumed{auto:false}"),
   `test/api/no-key-echo.test.ts:633` ("no event detail carries any of it"),
-  `test/api/tenant-isolation.test.ts:566` ("an invalid body against a foreign schedule is
+  `test/api/tenant-isolation.test.ts:571` ("an invalid body against a foreign schedule is
   still the missing answer"), `test/api/schedules.test.ts:401` ("a URL the URL policy
   refuses is a 403 FORBIDDEN at create"), `test/api/schedules.test.ts:436` ("an update's
   crawl is checked against the stored render.urls"), `test/worker/chain.test.ts:529` ("a
@@ -1667,7 +1667,7 @@ config_validate ──▶ crawl_start ──▶ crawl_status (poll until status 
                             └─▶ issues_list · issues_overview · issue_urls · metrics_get
                                 crawl_overview (also before the rules: what it cannot measure is named)
                                 pages_query · structured_data · anchors_by_target · robots_get · rules_catalog (with crawlId) · export_crawl
-                                crawl_compare · compare_urls · crawl_diff (two judged crawls of one site)
+                                crawl_compare · compare_urls · crawl_diff · crawl_diff_urls (two judged crawls of one site)
 ```
 
 Crawls run on worker processes (Phase 28b): a worker runs `ARIADNE_WORKER_CONCURRENCY`
@@ -1720,10 +1720,11 @@ webhooks**: polling `crawl_status` is the contract until Talos asks otherwise.
 | `crawl_compare` | `GET /compare` | `baseCrawlId`, `headCrawlId` (both required) |
 | `compare_urls` | `GET /compare/urls` | `baseCrawlId`, `headCrawlId`, `ruleId`, `set` (all required), `limit`, `cursor` |
 | `crawl_diff` | `GET /diff` | `baseCrawlId`, `headCrawlId` (both required), `wordCountChangePct`, `inlinksChangePct`, `inlinksChangeMin`, `linkScoreChangePoints` (§7.6) |
+| `crawl_diff_urls` | `GET /diff/urls` | `baseCrawlId`, `headCrawlId`, `field` (all required), `state`, the four diff thresholds, `limit`, `cursor` (§7.6) |
 | `export_crawl` | `GET /crawls/:id/export` | `format` (`jsonl.gz` \| `csv`), `dataset` (jsonl.gz only), `view` + `ruleId` \| `metricId` (csv only) |
 
 Pinned: the tool list and every schema — `test/api/mcp.test.ts:673`
-("advertises exactly the thirty-seven tools of the agent surface"),
+("advertises exactly the thirty-eight tools of the agent surface"),
 `test/api/mcp.test.ts:700` ("closes every input schema and describes every
 field"), `test/api/mcp.test.ts:732` ("names every member of the closed
 vocabulary each field enumerates"). `crawl_start`'s field set is not a second
@@ -4112,7 +4113,7 @@ inlinksChangeMin?, linkScoreChangePoints?}` →
 `{base, head, thresholds, urls, fields}`. Where `crawl_compare` counts findings,
 this counts stored facts: for each field, how many pages common to both crawls
 changed. Not paginated; the summary is one SQL statement, so memory does not
-grow with the crawl. The URLs behind a count are not on this answer.
+grow with the crawl. The URLs behind a count are on `crawl_diff_urls`, below.
 
 ```json
 {"base":{"crawlId":"crawl_a","siteUrl":"https://example.com/","rulesRunAt":"…","pages":20},
@@ -4147,8 +4148,31 @@ grow with the crawl. The URLs behind a count are not on this answer.
   a rules run is refused as never judged.
 - It is evidence: no rule judges a change and it claims no check id.
 
-Pinned: `test/api/crawl-diff.test.ts`, whose header derives every count from its
-fixture.
+**`crawl_diff_urls`** (`GET /diff/urls`): `{baseCrawlId, headCrawlId, field, state?,
+wordCountChangePct?, inlinksChangePct?, inlinksChangeMin?, linkScoreChangePoints?,
+limit?, cursor?}` → `{items, nextCursor, field, state, thresholds}`, each item
+`{url, before, after}`, ordered by the stored URL and keyset-paged.
+
+- **`field`** is one of the thirteen diff fields, or `added` / `removed`.
+  Anything else is a 400 listing the accepted names.
+- **`state`** is `changed` (the default) or `notComparable`, and is a 400 for
+  `added` and `removed`, which have none (the answer's `state` is then null).
+- **`before` / `after`** are the stored values, so text is capped as stored.
+  `canonical` is `{html, header}`, `schemaTypes` a sorted array, `linkScore` and
+  the other numbers are numbers, and a null side is null. For `added` and
+  `removed` both are null.
+- **One definition.** The listing and the summary use the same two predicates
+  (`fieldChangedWhere`, `fieldNotComparableWhere` in `src/api/crawl-diff.ts`), so
+  a field walked to its end has exactly as many URLs as `crawl_diff` counted.
+  Pass the same thresholds to both. Refusals are `crawl_diff`'s, in its order,
+  with the listing's own `field` / `state` / `limit` / `cursor` checks first.
+
+Pinned: `test/api/crawl-diff.test.ts:259` ("counts changed and notComparable per
+field as the fixture header derives"), whose header derives every count from its
+fixture; the listing, by `test/api/crawl-diff.test.ts:423` ("crawl_diff_urls agrees
+with crawl_diff"), `test/api/crawl-diff.test.ts:511` ("limit 1 returns every url
+exactly once") and `test/api/crawl-diff.test.ts:572` ("GET /diff/urls answers what
+crawl_diff_urls answers").
 
 ---
 

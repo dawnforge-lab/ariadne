@@ -117,6 +117,10 @@ const SCOPED_ROUTES: Record<string, HttpBuilder> = {
   "GET /rules": (c) => ({ method: "GET", path: `/rules?crawlId=${c}` }),
   "GET /compare": (c, o) => ({ method: "GET", path: `/compare?baseCrawlId=${c}&headCrawlId=${o}` }),
   "GET /diff": (c, o) => ({ method: "GET", path: `/diff?baseCrawlId=${c}&headCrawlId=${o}` }),
+  "GET /diff/urls": (c, o) => ({
+    method: "GET",
+    path: `/diff/urls?baseCrawlId=${c}&headCrawlId=${o}&field=title`,
+  }),
   "GET /compare/urls": (c, o) => ({
     method: "GET",
     path: `/compare/urls?baseCrawlId=${c}&headCrawlId=${o}&ruleId=title.missing&set=new`,
@@ -151,6 +155,7 @@ const SCOPED_TOOLS: Record<string, ToolBuilder> = {
   rules_catalog: only,
   crawl_compare: (c, o) => ({ baseCrawlId: c, headCrawlId: o }),
   crawl_diff: (c, o) => ({ baseCrawlId: c, headCrawlId: o }),
+  crawl_diff_urls: (c, o) => ({ baseCrawlId: c, headCrawlId: o, field: "title" }),
   compare_urls: (c, o) => ({ baseCrawlId: c, headCrawlId: o, ruleId: "title.missing", set: "new" }),
 };
 
@@ -604,6 +609,7 @@ describe("compare, three ways", () => {
     for (const path of [
       (x: string, y: string) => `/compare?baseCrawlId=${x}&headCrawlId=${y}`,
       (x: string, y: string) => `/diff?baseCrawlId=${x}&headCrawlId=${y}`,
+      (x: string, y: string) => `/diff/urls?baseCrawlId=${x}&headCrawlId=${y}&field=title`,
       (x: string, y: string) => `/compare/urls?baseCrawlId=${x}&headCrawlId=${y}&ruleId=title.missing&set=new`,
     ]) {
       const foreign = await http(BETA, { method: "GET", path: path(b, h) });
@@ -623,6 +629,7 @@ describe("compare, three ways", () => {
     for (const [name, extra] of [
       ["crawl_compare", {}],
       ["crawl_diff", {}],
+      ["crawl_diff_urls", { field: "title" }],
       ["compare_urls", { ruleId: "title.missing", set: "new" }],
     ] as const) {
       const foreign = await tool(betaClient, name, { baseCrawlId: b, headCrawlId: h, ...extra });

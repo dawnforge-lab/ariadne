@@ -1,5 +1,5 @@
 /**
- * The MCP transport: thirty-seven tools over the same service layer the HTTP
+ * The MCP transport: thirty-eight tools over the same service layer the HTTP
  * routes use. Twelve of them change something (`crawl_start`, `crawl_resume`,
  * `crawl_pause`, `crawl_cancel`, `crawl_delete`, `crawl_render`, `crawl_rules`,
  * `crawl_mark_failed`, `crawl_config_set`, `schedule_create`, `schedule_update`,
@@ -78,7 +78,7 @@ import { METRIC_SCOPES } from "../rules/registry/types.js";
 import type { McpServerConfig } from "./config.js";
 import { credentialInputSchemas } from "./config-schema.js";
 import { ANCHORS_TOP_N } from "./anchors.js";
-import { DIFF_FIELD_NAMES, DIFF_THRESHOLD_SPECS } from "./crawl-diff.js";
+import { DIFF_FIELD_NAMES, DIFF_STATES, DIFF_THRESHOLD_SPECS, DIFF_URL_SETS } from "./crawl-diff.js";
 import { CSV_VIEWS, EXPORT_FORMATS } from "./csv.js";
 import { strictInput } from "./mcp-input.js";
 import { STRUCTURED_DATA_FORMATS, STRUCTURED_DATA_PROBLEMS } from "./structured-data.js";
@@ -148,6 +148,7 @@ export const TOOL_NAMES = [
   "crawl_compare",
   "compare_urls",
   "crawl_diff",
+  "crawl_diff_urls",
 ] as const;
 
 export type ToolName = (typeof TOOL_NAMES)[number];
@@ -213,6 +214,8 @@ The order of operations is fixed by what the evidence means:
                    pages changed each stored field (status, title, word count,
                    inlinks, link score, ...), and how many could not be
                    compared, which is not the same as unchanged.
+                   crawl_diff_urls lists the URLs behind any of those counts,
+                   with the value on each side.
 
 An empty findings or metrics answer is only 'nothing found' on a crawl that was
 judged. crawl_status's rulesRunAt is the check: a timestamp means a rules pass
@@ -2255,7 +2258,7 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "tenant or one that does not exist (404), the same crawl twice, two crawls " +
         "of different sites, and a crawl that has never been judged (rulesRunAt " +
         "null). This is evidence, not a verdict: no rule judges a change here. The " +
-        "URLs behind each count are not here.",
+        "URLs behind each count are not here: crawl_diff_urls lists them.",
       inputSchema: strictInput({
         baseCrawlId: compareIdField("base", "the earlier crawl — what the site was"),
         headCrawlId: compareIdField("head", "the later crawl — what the site is now"),
@@ -2267,6 +2270,64 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
     },
     async ({ baseCrawlId, headCrawlId, ...thresholds }) =>
       run("crawl_diff", () => service.crawlDiff(tenant, baseCrawlId, headCrawlId, defined(thresholds))),
+  );
+
+  server.registerTool(
+    named("crawl_diff_urls"),
+    {
+      title: "The URLs behind a crawl_diff count",
+      description:
+        "The pages behind one of crawl_diff's counts, with what each looked like in " +
+        "the two crawls. Answers {items, nextCursor, field, state, thresholds}; each " +
+        "item is {url, before, after}, ordered by URL. before is the BASE crawl's " +
+        "stored value and after the HEAD crawl's, as stored (text is capped as it " +
+        "was stored): a string for title, metaDescription and h1; a number for " +
+        "status, wordCount, inlinks, clickDepth and linkScore; true or false for " +
+        "indexable; {html, header} for canonical; a sorted array of schema types " +
+        "for schemaTypes; null where the page had no value.\n\n" +
+        `field is one of ${DIFF_FIELD_NAMES.join(", ")}, or ${DIFF_URL_SETS.join(" or ")}. ` +
+        "added is URLs only the head crawl holds and removed is URLs only the base " +
+        "held; both have a null before and after and no state. For any other field, " +
+        `state is ${DIFF_STATES.join(" or ")}, default changed. changed lists the ` +
+        "pages crawl_diff counted as changed for that field and notComparable the " +
+        "pages it could not compare, which is NOT 'unchanged' (crawl_diff says why " +
+        "for each field). The listing is defined by the same predicates as the " +
+        "counts, so a field walked to its end has exactly as many URLs as " +
+        "crawl_diff counted. Pass the same threshold parameters you gave " +
+        "crawl_diff, or the two will count different pages; they are echoed here.\n\n" +
+        "REFUSED: a field or state not listed above, a state given with added or " +
+        "removed, a threshold outside its range, and every refusal crawl_diff makes " +
+        "(another tenant's or a missing crawl, the same crawl twice, two sites, a " +
+        "crawl never judged).\n\n" +
+        `Paginated: {items, nextCursor}; limit defaults to ${PAGE_SIZE_DEFAULT}, ` +
+        `maximum ${PAGE_SIZE_MAX}. Pass nextCursor back as cursor, with the SAME ` +
+        "baseCrawlId, headCrawlId, field, state and thresholds, until nextCursor is null.",
+      inputSchema: strictInput({
+        baseCrawlId: compareIdField("base", "the earlier crawl — what the site was"),
+        headCrawlId: compareIdField("head", "the later crawl — what the site is now"),
+        field: z
+          .string()
+          .describe(
+            `Which count to list: ${DIFF_FIELD_NAMES.join(", ")}, ${DIFF_URL_SETS.join(", ")}.`,
+          ),
+        state: z
+          .string()
+          .describe(
+            `${DIFF_STATES.join(" or ")}. Defaults to changed. Not allowed with added or removed.`,
+          )
+          .optional(),
+        wordCountChangePct: diffThresholdField("wordCountChangePct"),
+        inlinksChangePct: diffThresholdField("inlinksChangePct"),
+        inlinksChangeMin: diffThresholdField("inlinksChangeMin"),
+        linkScoreChangePoints: diffThresholdField("linkScoreChangePoints"),
+        limit: limitField(),
+        cursor: cursorField(),
+      }),
+    },
+    async ({ baseCrawlId, headCrawlId, field, ...rest }) =>
+      run("crawl_diff_urls", () =>
+        service.listDiffUrls(tenant, baseCrawlId, headCrawlId, field, defined(rest)),
+      ),
   );
 
   server.registerTool(

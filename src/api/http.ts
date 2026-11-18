@@ -185,6 +185,10 @@
  *                                      could not be compared (never "unchanged").
  *                                      Integer thresholds are query parameters and
  *                                      echoed. Refused as /compare is
+ *   GET  /diff/urls                    the URLs behind one of those counts, paginated,
+ *                                      with the value on each side: field (a diff
+ *                                      field, added or removed), state (changed |
+ *                                      notComparable), the same thresholds
  *
  * ## What a caller can never be told
  *
@@ -862,6 +866,32 @@ function buildRoutes(): Route[] {
             ...optionalNumber(ctx.query, "inlinksChangePct"),
             ...optionalNumber(ctx.query, "inlinksChangeMin"),
             ...optionalNumber(ctx.query, "linkScoreChangePoints"),
+          },
+        ),
+      }),
+    },
+    {
+      method: "GET",
+      pattern: ["diff", "urls"],
+      query: [
+        "baseCrawlId", "headCrawlId", "field", "state",
+        ...Object.keys(DIFF_THRESHOLD_SPECS), ...PAGINATION_PARAMS,
+      ],
+      handler: async (service, ctx) => ({
+        status: 200,
+        body: await service.listDiffUrls(
+          ctx.tenant,
+          requiredString(ctx.query, "baseCrawlId"),
+          requiredString(ctx.query, "headCrawlId"),
+          requiredString(ctx.query, "field"),
+          {
+            ...optionalString(ctx.query, "state"),
+            ...optionalNumber(ctx.query, "wordCountChangePct"),
+            ...optionalNumber(ctx.query, "inlinksChangePct"),
+            ...optionalNumber(ctx.query, "inlinksChangeMin"),
+            ...optionalNumber(ctx.query, "linkScoreChangePoints"),
+            ...optionalNumber(ctx.query, "limit"),
+            ...optionalString(ctx.query, "cursor"),
           },
         ),
       }),

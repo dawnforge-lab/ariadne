@@ -288,7 +288,8 @@ crawler inside Talos. The intended shape:
   Phase 29c also adds `crawl_diff` / `GET /diff`: a field-level diff of two judged crawls of
   one site, read-only and tenant-scoped, refusing exactly as `crawl_compare` does
   (a foreign crawl is a missing one, obligation 9). It is evidence and claims no check id
-  (obligation 6).
+  (obligation 6). `crawl_diff_urls` / `GET /diff/urls` lists the URLs behind each count on the
+  same terms.
 - Talos repo pointer to this project: `docs/talos/crawler-engine.md` in the
   talos repo (`github.com/dawnforge-lab/talos`, local `/home/eugen-dev/Documents/Workflows/talos`).
 - Talos deep history: serena memory `talos-rewrite-status` in the talos

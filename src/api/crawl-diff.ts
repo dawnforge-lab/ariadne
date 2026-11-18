@@ -10,7 +10,7 @@
  *
  * ONE STATEMENT (`diffSummarySql`): a `count(*) filter (where ...)` per field
  * over `diffJoinSql`, so memory is O(1) in pages and the answer is one
- * snapshot. Task 8's URL listing reuses `diffJoinSql` and `DIFF_FIELDS`.
+ * snapshot. The url listing (`crawl_diff_urls`) reuses `diffJoinSql` and `DIFF_FIELDS`.
  *
  * COMPARABILITY (R10), stated per field, never silent: a pair that cannot be
  * compared for a field is counted as `notComparable`, not as unchanged.
@@ -85,15 +85,22 @@ export function parseDiffThresholds(raw: Partial<Record<keyof DiffThresholds, un
   return out;
 }
 
+export const DIFF_FIELD_NAMES = [
+  "status", "fetchClass", "indexable", "title", "metaDescription", "h1", "canonical",
+  "metaRobots", "wordCount", "schemaTypes", "inlinks", "clickDepth", "linkScore",
+] as const;
+
+export type DiffFieldName = (typeof DIFF_FIELD_NAMES)[number];
+
 export interface DiffField {
-  name: string;
+  name: DiffFieldName;
   /** True when this pair of rows can be compared for the field. Never null. */
   comparable(b: DiffSide, h: DiffSide): SQL;
   /** True when the field differs. Only meaningful where `comparable` is true. */
   changed(b: DiffSide, h: DiffSide, t: DiffThresholds): SQL;
-  /** The base side's value, for Task 8's listing. */
+  /** The base side's value, for the url listing. */
   before(b: DiffSide): SQL;
-  /** The head side's value, for Task 8's listing. */
+  /** The head side's value, for the url listing. */
   after(h: DiffSide): SQL;
 }
 
@@ -107,7 +114,7 @@ const bothMeasured = (b: DiffSide, h: DiffSide): SQL =>
   sql`(${col(b, "inlinks_internal")} is not null and ${col(h, "inlinks_internal")} is not null)`;
 
 /** A field compared by `is distinct from` on one column. */
-function exact(name: string, column: string, comparable: DiffField["comparable"] = always): DiffField {
+function exact(name: DiffFieldName, column: string, comparable: DiffField["comparable"] = always): DiffField {
   return {
     name,
     comparable,
@@ -142,7 +149,7 @@ export const DIFF_FIELDS: readonly DiffField[] = [
     comparable: (b, h) =>
       sql`(${bothOk(b, h)} and ${col(b, "word_count")} is not null and ${col(h, "word_count")} is not null)`,
     changed: (b, h, t) =>
-      sql`(abs(${col(h, "word_count")} - ${col(b, "word_count")}) * 100 > ${t.wordCountChangePct}::int * ${col(b, "word_count")})`,
+      sql`(abs(${col(h, "word_count")}::bigint - ${col(b, "word_count")}::bigint) * 100 > ${t.wordCountChangePct}::bigint * ${col(b, "word_count")}::bigint)`,
     before: (b) => col(b, "word_count"),
     after: (h) => col(h, "word_count"),
   },
@@ -158,7 +165,7 @@ export const DIFF_FIELDS: readonly DiffField[] = [
     comparable: bothMeasured,
     changed: (b, h, t) =>
       sql`(abs(${col(h, "inlinks_internal")} - ${col(b, "inlinks_internal")}) >= ${t.inlinksChangeMin}::int
-        and abs(${col(h, "inlinks_internal")} - ${col(b, "inlinks_internal")}) * 100 > ${t.inlinksChangePct}::int * ${col(b, "inlinks_internal")})`,
+        and abs(${col(h, "inlinks_internal")}::bigint - ${col(b, "inlinks_internal")}::bigint) * 100 > ${t.inlinksChangePct}::bigint * ${col(b, "inlinks_internal")}::bigint)`,
     before: (b) => col(b, "inlinks_internal"),
     after: (h) => col(h, "inlinks_internal"),
   },
@@ -176,10 +183,6 @@ export const DIFF_FIELDS: readonly DiffField[] = [
   },
 ];
 
-export const DIFF_FIELD_NAMES = [
-  "status", "fetchClass", "indexable", "title", "metaDescription", "h1", "canonical",
-  "metaRobots", "wordCount", "schemaTypes", "inlinks", "clickDepth", "linkScore",
-] as const;
 
 /**
  * The two crawls' pages, full-joined on `url`, each side's schema-type set as a
@@ -210,6 +213,16 @@ export interface CrawlDiffField {
   notComparable: number;
 }
 
+/**
+ * THE ONE DEFINITION of "changed" and "notComparable" per field, shared by the
+ * summary's counts and the url listing (`crawl_diff_urls`), so a listing walked
+ * to its end has exactly as many urls as the summary said.
+ */
+export const fieldChangedWhere = (f: DiffField, t: DiffThresholds): SQL =>
+  sql`(${COMMON_SQL} and ${f.comparable(BASE_SIDE, HEAD_SIDE)} and ${f.changed(BASE_SIDE, HEAD_SIDE, t)})`;
+export const fieldNotComparableWhere = (f: DiffField): SQL =>
+  sql`(${COMMON_SQL} and not ${f.comparable(BASE_SIDE, HEAD_SIDE)})`;
+
 /** The one statement: url sets, per-side page counts, and a changed / notComparable pair per field. */
 export function diffSummarySql(baseId: string, headId: string, t: DiffThresholds): SQL {
   const parts: SQL[] = [
@@ -221,8 +234,8 @@ export function diffSummarySql(baseId: string, headId: string, t: DiffThresholds
   ];
   DIFF_FIELDS.forEach((f, i) => {
     parts.push(
-      sql`count(*) filter (where ${COMMON_SQL} and ${f.comparable(BASE_SIDE, HEAD_SIDE)} and ${f.changed(BASE_SIDE, HEAD_SIDE, t)})::int as ${sql.raw(`changed_${i}`)}`,
-      sql`count(*) filter (where ${COMMON_SQL} and not ${f.comparable(BASE_SIDE, HEAD_SIDE)})::int as ${sql.raw(`nc_${i}`)}`,
+      sql`count(*) filter (where ${fieldChangedWhere(f, t)})::int as ${sql.raw(`changed_${i}`)}`,
+      sql`count(*) filter (where ${fieldNotComparableWhere(f)})::int as ${sql.raw(`nc_${i}`)}`,
     );
   });
   return sql`select ${sql.join(parts, sql`, `)} from ${diffJoinSql(baseId, headId)}`;
@@ -240,4 +253,87 @@ export function diffFieldsOf(row: DiffSummaryRow): CrawlDiffField[] {
     }
     return { field: f.name, changed, notComparable };
   });
+}
+
+export const DIFF_URL_SETS = ["added", "removed"] as const;
+export const DIFF_STATES = ["changed", "notComparable"] as const;
+export type DiffState = (typeof DIFF_STATES)[number];
+
+/** What `field` of `crawl_diff_urls` accepts: every diff field, then the two url sets. */
+export const DIFF_URL_FIELDS: readonly string[] = [...DIFF_FIELD_NAMES, ...DIFF_URL_SETS];
+
+/** One url behind a count. `before` and `after` are null for `added` and `removed`. */
+export type DiffUrl = {
+  url: string;
+  before: unknown;
+  after: unknown;
+};
+
+export interface DiffUrlsRequest {
+  field: DiffFieldName | (typeof DIFF_URL_SETS)[number];
+  /** Null for `added` and `removed`, which have no state. */
+  state: DiffState | null;
+}
+
+/** A refusal of `field` / `state`, naming the accepted values. Thrown before any read. */
+export function parseDiffUrlsRequest(field: string, state: string | undefined): DiffUrlsRequest {
+  const isSet = (DIFF_URL_SETS as readonly string[]).includes(field);
+  const isField = (DIFF_FIELD_NAMES as readonly string[]).includes(field);
+  if (!isSet && !isField) {
+    throw new ServiceError(
+      "VALIDATION",
+      `field must be one of ${DIFF_URL_FIELDS.join(", ")}, got ${clip(JSON.stringify(field))}`,
+    );
+  }
+  if (isSet) {
+    if (state !== undefined) {
+      throw new ServiceError("VALIDATION", `state does not apply to '${field}': added and removed have no state`);
+    }
+    return { field: field as DiffUrlsRequest["field"], state: null };
+  }
+  const chosen = state === undefined ? "changed" : state;
+  if (!(DIFF_STATES as readonly string[]).includes(chosen)) {
+    throw new ServiceError(
+      "VALIDATION",
+      `state must be one of ${DIFF_STATES.join(", ")}, got ${clip(JSON.stringify(state))}`,
+    );
+  }
+  return { field: field as DiffUrlsRequest["field"], state: chosen as DiffState };
+}
+
+/**
+ * One page of the urls behind a count: keyset on the stored url, `limit + 1`
+ * rows so the caller can tell whether a next page exists. The predicates are
+ * `fieldChangedWhere` / `fieldNotComparableWhere`, the summary's own.
+ */
+export function diffUrlsSql(
+  baseId: string,
+  headId: string,
+  req: DiffUrlsRequest,
+  t: DiffThresholds,
+  cursor: string | null,
+  limit: number,
+): SQL {
+  let where: SQL;
+  let before: SQL = sql`null::jsonb`;
+  let after: SQL = sql`null::jsonb`;
+  if (req.field === "added") {
+    where = sql`b.id is null`;
+  } else if (req.field === "removed") {
+    where = sql`h.id is null`;
+  } else {
+    const name = req.field;
+    const f = DIFF_FIELDS.find((x) => x.name === name);
+    if (f === undefined) throw new Error(`crawl diff: no field definition for '${name}'`);
+    where = req.state === "changed" ? fieldChangedWhere(f, t) : fieldNotComparableWhere(f);
+    before = sql`to_jsonb(${f.before(BASE_SIDE)})`;
+    after = sql`to_jsonb(${f.after(HEAD_SIDE)})`;
+  }
+  const key = sql`coalesce(b.url, h.url)`;
+  return sql`
+    select ${key} as url, ${before} as before, ${after} as after
+      from ${diffJoinSql(baseId, headId)}
+     where ${where} ${cursor === null ? sql`` : sql`and ${key} > ${cursor}`}
+     order by ${key} asc
+     limit ${limit + 1}`;
 }

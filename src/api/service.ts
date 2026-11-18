@@ -258,10 +258,14 @@ import { ServiceError, clip, unknownKeysMessage } from "./errors.js";
 import {
   diffFieldsOf,
   diffSummarySql,
+  diffUrlsSql,
   parseDiffThresholds,
+  parseDiffUrlsRequest,
   type CrawlDiffField,
+  type DiffState,
   type DiffSummaryRow,
   type DiffThresholds,
+  type DiffUrl,
 } from "./crawl-diff.js";
 import {
   blockInfos,
@@ -6593,6 +6597,46 @@ export class ApiService {
           thresholds: t,
           urls: { common: count("common"), added: count("added"), removed: count("removed") },
           fields: diffFieldsOf(row),
+        };
+      },
+      { isolationLevel: "repeatable read", accessMode: "read only" },
+    );
+  }
+
+  /**
+   * `GET /diff/urls` and `crawl_diff_urls` (Phase 29c T8): the urls behind one
+   * of `crawlDiff`'s counts, keyset-paged on the stored url, with the value on
+   * each side. The listing and the summary share `fieldChangedWhere` and
+   * `fieldNotComparableWhere`, so a listing walked to its end has exactly as
+   * many urls as the count said. `comparePair` runs first, in the same
+   * repeatable-read snapshot, so the refusals are `crawlDiff`'s own.
+   * `field` / `state` / thresholds are parsed before any read.
+   */
+  async listDiffUrls(
+    tenant: TenantId,
+    baseCrawlId: string,
+    headCrawlId: string,
+    field: string,
+    opts: { state?: string; limit?: number; cursor?: string } & Partial<Record<keyof DiffThresholds, unknown>> = {},
+  ): Promise<Page<DiffUrl> & { field: string; state: DiffState | null; thresholds: DiffThresholds }> {
+    const { state, limit: rawLimit, cursor: rawCursor, ...rawThresholds } = opts;
+    const t = parseDiffThresholds(rawThresholds);
+    const req = parseDiffUrlsRequest(field, state);
+    const limit = parseLimit(rawLimit);
+    const cursor = rawCursor === undefined ? null : decodeCursor(rawCursor, 1)[0];
+    return await this.db.transaction(
+      async (tx) => {
+        await comparePair(tx, tenant, baseCrawlId, headCrawlId);
+        const result = await tx.execute<DiffUrl>(diffUrlsSql(baseCrawlId, headCrawlId, req, t, cursor, limit));
+        const rows = result.rows;
+        const items = rows.slice(0, limit);
+        const last = rows.length > limit ? rows[limit - 1] : undefined;
+        return {
+          items,
+          nextCursor: last === undefined ? null : encodeCursor(last.url),
+          field: req.field,
+          state: req.state,
+          thresholds: t,
         };
       },
       { isolationLevel: "repeatable read", accessMode: "read only" },

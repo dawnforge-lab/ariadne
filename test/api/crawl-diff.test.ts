@@ -274,14 +274,19 @@ describe("crawl_diff counts", () => {
     // Both exist in both crawls and share url_normalised: added and removed are
     // only /new and /old.
     const { body } = await tool("crawl_diff", { baseCrawlId: baseId, headCrawlId: headId });
-    expect(body["urls"]).toMatchObject({ added: 1, removed: 1 });
+    expect(body["urls"]).toMatchObject({ common: 19, added: 1, removed: 1 });
   });
 
   it("does not read an absent page as a change in any field", async () => {
-    // /old and /new are in one crawl only: the field counts above (status 2)
-    // exclude them, so a 'removed' page is never also a status change.
+    // /old and /new are in one crawl only: no field count includes them, so a
+    // 'removed' page is never also a change. Every count is the fixture
+    // header's, which names only common urls.
     const f = fieldsOf((await tool("crawl_diff", { baseCrawlId: baseId, headCrawlId: headId })).body);
-    expect(f.get("status")?.changed).toBe(2);
+    const want: Record<string, number> = {
+      status: 2, fetchClass: 2, indexable: 2, title: 1, metaDescription: 1, h1: 1, canonical: 1,
+      metaRobots: 1, wordCount: 1, schemaTypes: 1, inlinks: 1, clickDepth: 1, linkScore: 3,
+    };
+    for (const [field, changed] of Object.entries(want)) expect(f.get(field)?.changed, field).toBe(changed);
   });
 });
 
@@ -327,6 +332,10 @@ describe("crawl_diff thresholds", () => {
     expect(h.status).toBe(400);
     expect(h.body).toMatchObject({ code: "VALIDATION" });
     expect(JSON.stringify(h.body)).toContain("wordCountChangePct");
+    const abc = await http(`/diff?baseCrawlId=${baseId}&headCrawlId=${headId}&wordCountChangePct=abc`);
+    expect(abc.status).toBe(400);
+    expect(abc.body).toMatchObject({ code: "VALIDATION" });
+    expect(JSON.stringify(abc.body)).toContain("wordCountChangePct");
   });
 });
 
@@ -384,5 +393,206 @@ describe("transports", () => {
     });
     expect(h.status).toBe(200);
     expect(h.body).toEqual(t.body);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// crawl_diff_urls (Phase 29c T8): the urls behind each count.
+// ---------------------------------------------------------------------------
+
+interface DiffUrlRow { url: string; before: unknown; after: unknown }
+
+async function walk(
+  field: string,
+  opts: { state?: string; limit?: number } & Record<string, unknown> = {},
+  pair: [string, string] = [baseId, headId],
+): Promise<DiffUrlRow[]> {
+  const out: DiffUrlRow[] = [];
+  let cursor: string | undefined;
+  for (let guard = 0; guard < 100; guard++) {
+    const page = (await service.listDiffUrls(LOCAL_TENANT, pair[0], pair[1], field, {
+      ...opts, ...(cursor === undefined ? {} : { cursor }),
+    }));
+    out.push(...page.items);
+    if (page.nextCursor === null) return out;
+    cursor = page.nextCursor;
+  }
+  throw new Error("walk: a listing did not end in 100 pages");
+}
+
+describe("crawl_diff_urls agrees with crawl_diff", () => {
+  it.each([["base", "head"], ["legacy", "head"]])(
+    "pages exactly the summary's changed and notComparable counts for every field (%s, %s)",
+    async (bKey, hKey) => {
+      const ids: Record<string, string> = { base: baseId, head: headId, legacy: legacyId };
+      const b = ids[bKey] as string;
+      const h = ids[hKey] as string;
+      const summary = fieldsOf((await tool("crawl_diff", { baseCrawlId: b, headCrawlId: h })).body);
+      for (const name of DIFF_FIELD_NAMES) {
+        const want = summary.get(name);
+        if (want === undefined) throw new Error(`no summary for ${name}`);
+        const changed = await walk(name, { state: "changed", limit: 2 }, [b, h]);
+        const notComparable = await walk(name, { state: "notComparable", limit: 2 }, [b, h]);
+        expect(changed.length, `${name} changed`).toBe(want.changed);
+        expect(notComparable.length, `${name} notComparable`).toBe(want.notComparable);
+      }
+      expect((await walk("added", {}, [b, h])).length).toBe(1);
+      expect((await walk("removed", {}, [b, h])).length).toBe(1);
+    },
+  );
+
+  it("agrees under a non-default threshold", async () => {
+    const t = { wordCountChangePct: 10, inlinksChangeMin: 3, linkScoreChangePoints: 9 };
+    const summary = fieldsOf((await tool("crawl_diff", { baseCrawlId: baseId, headCrawlId: headId, ...t })).body);
+    for (const name of ["wordCount", "inlinks", "linkScore"]) {
+      expect((await walk(name, { limit: 3, ...t })).length, name).toBe(summary.get(name)?.changed);
+    }
+  });
+});
+
+describe("crawl_diff_urls values", () => {
+  const by = (rows: DiffUrlRow[], path: string): DiffUrlRow => {
+    const row = rows.find((r) => r.url === url(path));
+    if (row === undefined) throw new Error(`${path} is not in the listing`);
+    return row;
+  };
+
+  it("title: the stored text on each side", async () => {
+    const rows = await walk("title");
+    expect(rows).toEqual([{
+      url: url("/title"), before: "A perfectly reasonable page title here", after: "A different page title entirely",
+    }]);
+  });
+
+  it("canonical: {html, header} on each side", async () => {
+    expect(await walk("canonical")).toEqual([{
+      url: url("/canon"),
+      before: { html: url("/canon"), header: null },
+      after: { html: url("/canon"), header: `${SITE}/elsewhere` },
+    }]);
+  });
+
+  it("schemaTypes: a sorted array on each side", async () => {
+    expect(await walk("schemaTypes")).toEqual([
+      { url: url("/schema"), before: ["Product"], after: ["Offer", "Product"] },
+    ]);
+  });
+
+  it("linkScore: a null side is a value", async () => {
+    const rows = await walk("linkScore");
+    expect(rows.map((r) => r.url)).toEqual([url("/gone"), url("/ls50"), url("/status")]);
+    expect(by(rows, "/ls50")).toMatchObject({ before: 40, after: 50 });
+    expect(by(rows, "/gone")).toMatchObject({ before: null, after: 30 });
+    expect(by(rows, "/status")).toMatchObject({ before: 30, after: null });
+  });
+
+  it("notComparable lists the pairs a field could not be compared over", async () => {
+    const rows = await walk("metaRobots", { state: "notComparable" });
+    expect(rows.map((r) => r.url)).toEqual([url("/gone"), url("/robots-old"), url("/status")]);
+  });
+
+  it("added and removed carry a null before and after", async () => {
+    expect(await walk("added")).toEqual([{ url: url("/new"), before: null, after: null }]);
+    expect(await walk("removed")).toEqual([{ url: url("/old"), before: null, after: null }]);
+  });
+
+  it("echoes field, state and thresholds", async () => {
+    const page = (await service.listDiffUrls(LOCAL_TENANT, baseId, headId, "wordCount", {
+      wordCountChangePct: 10,
+    }));
+    expect(page).toMatchObject({ field: "wordCount", state: "changed", thresholds: { wordCountChangePct: 10 } });
+    expect(page.items.map((r) => r.url)).toEqual([url("/wc19"), url("/wc21")]);
+    const added = (await service.listDiffUrls(LOCAL_TENANT, baseId, headId, "added"));
+    expect(added.state).toBeNull();
+  });
+});
+
+describe("crawl_diff_urls paging", () => {
+  it("limit 1 returns every url exactly once, in url order", async () => {
+    const all = await walk("status", { limit: 10 });
+    const one = await walk("status", { limit: 1 });
+    expect(one).toEqual(all);
+    expect(one.length).toBe(2);
+    expect(one.map((r) => r.url)).toEqual([url("/gone"), url("/status")]);
+  });
+
+  it("refuses a cursor that is not one of ours", async () => {
+    const e = await refusal(service.listDiffUrls(LOCAL_TENANT, baseId, headId, "status", { cursor: "nonsense" }));
+    expect(e.code).toBe("VALIDATION");
+  });
+});
+
+describe("crawl_diff_urls refusals", () => {
+  it("refuses a field it does not know, listing the accepted names", async () => {
+    const e = await refusal(service.listDiffUrls(LOCAL_TENANT, baseId, headId, "colour"));
+    expect(e.code).toBe("VALIDATION");
+    for (const name of [...DIFF_FIELD_NAMES, "added", "removed"]) expect(e.message).toContain(name);
+  });
+
+  it("refuses a state it does not know", async () => {
+    const e = await refusal(service.listDiffUrls(LOCAL_TENANT, baseId, headId, "title", { state: "gone" }));
+    expect(e.code).toBe("VALIDATION");
+    expect(e.message).toContain("notComparable");
+  });
+
+  it("refuses a state for added and removed", async () => {
+    for (const field of ["added", "removed"]) {
+      const e = await refusal(service.listDiffUrls(LOCAL_TENANT, baseId, headId, field, { state: "changed" }));
+      expect(e.code).toBe("VALIDATION");
+      expect(e.message).toContain(field);
+    }
+  });
+
+  it("refuses a bad threshold, naming it", async () => {
+    const e = await refusal(service.listDiffUrls(LOCAL_TENANT, baseId, headId, "wordCount", { wordCountChangePct: 0 }));
+    expect(e.code).toBe("VALIDATION");
+    expect(e.message).toContain("wordCountChangePct");
+  });
+
+  it("makes crawl_diff's pairing refusals", async () => {
+    expect((await refusal(service.listDiffUrls(LOCAL_TENANT, baseId, unjudgedId, "title"))).message)
+      .toContain("never been judged");
+    expect((await refusal(service.listDiffUrls(LOCAL_TENANT, baseId, elsewhereId, "title"))).code).toBe("VALIDATION");
+    expect((await refusal(service.listDiffUrls(LOCAL_TENANT, baseId, baseId, "title"))).code).toBe("VALIDATION");
+  });
+
+  it("answers a foreign tenant exactly as crawls that do not exist", async () => {
+    const foreign = await refusal(service.listDiffUrls(OTHER, baseId, headId, "title"));
+    const missingBase = `crawl_${randomUUID()}`;
+    const missingHead = `crawl_${randomUUID()}`;
+    const absent = await refusal(service.listDiffUrls(LOCAL_TENANT, missingBase, missingHead, "title"));
+    expect(foreign.code).toBe("NOT_FOUND");
+    expect(foreign.message.replaceAll(baseId, "X").replaceAll(headId, "Y")).toBe(
+      absent.message.replaceAll(missingBase, "X").replaceAll(missingHead, "Y"),
+    );
+  });
+});
+
+describe("crawl_diff_urls transports", () => {
+  it("GET /diff/urls answers what crawl_diff_urls answers, page by page", async () => {
+    const args = { baseCrawlId: baseId, headCrawlId: headId, field: "linkScore", limit: 2 };
+    const t = await tool("crawl_diff_urls", args);
+    const h = await http(`/diff/urls?baseCrawlId=${baseId}&headCrawlId=${headId}&field=linkScore&limit=2`);
+    expect(h.status).toBe(200);
+    expect(h.body).toEqual(t.body);
+    const cursor = t.body["nextCursor"];
+    if (typeof cursor !== "string") throw new Error("expected a second page");
+    const t2 = await tool("crawl_diff_urls", { ...args, cursor });
+    const h2 = await http(
+      `/diff/urls?baseCrawlId=${baseId}&headCrawlId=${headId}&field=linkScore&limit=2&cursor=${cursor}`,
+    );
+    expect(h2.body).toEqual(t2.body);
+    expect(t2.body["nextCursor"]).toBeNull();
+  });
+
+  it("refuses a bad or missing field over both", async () => {
+    const t = await tool("crawl_diff_urls", { baseCrawlId: baseId, headCrawlId: headId, field: "colour" });
+    expect(t.error).toBe(true);
+    expect(t.body).toMatchObject({ code: "VALIDATION" });
+    const h = await http(`/diff/urls?baseCrawlId=${baseId}&headCrawlId=${headId}&field=colour`);
+    expect(h.status).toBe(400);
+    const missing = await http(`/diff/urls?baseCrawlId=${baseId}&headCrawlId=${headId}`);
+    expect(missing.status).toBe(400);
+    expect(JSON.stringify(missing.body)).toContain("field");
   });
 });
