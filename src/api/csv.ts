@@ -751,6 +751,10 @@ export const CSV_VIEW_DEFS: Record<CsvQueryViewName, CsvView> = {
     fetch_class: string;
     is_indexable: boolean | null;
     click_depth: number | null;
+    inlinks_internal: number | null;
+    outlinks_internal: number | null;
+    outlinks_external: number | null;
+    link_score: number | null;
     page_type: string | null;
     title: string | null;
     recheck_fetch_class: string | null;
@@ -764,7 +768,11 @@ export const CSV_VIEW_DEFS: Record<CsvQueryViewName, CsvView> = {
     recheck_at: string | null;
   }>({
     header: [
-      "url", "status", "fetchClass", "indexable", "clickDepth", "pageType", "title",
+      "url", "status", "fetchClass", "indexable", "clickDepth",
+      // Link facts (29c). Empty is not measured (judged before 29c, or a page
+      // outside the link graph for the score and outlinks), never zero.
+      "inlinks", "outlinksInternal", "outlinksExternal", "linkScore",
+      "pageType", "title",
       // THE SECOND OBSERVATION, three columns wide (Phase 17). A list of server
       // errors that cannot be sorted by "still broken" is the wrong list: the
       // 5xx re-verification pass is what separates a confirmed outage from a
@@ -777,7 +785,8 @@ export const CSV_VIEW_DEFS: Record<CsvQueryViewName, CsvView> = {
     start: [""],
     query: (crawlId, cursor, limit) => sql`
       select p.url, p.status_code, p.fetch_class, p.is_indexable,
-             p.click_depth, p.page_type, p.title,
+             p.click_depth, p.inlinks_internal, p.outlinks_internal,
+             p.outlinks_external, p.link_score, p.page_type, p.title,
              p.recheck_fetch_class, p.recheck_status_code, p.recheck_at
       from pages p
       where p.crawl_id = ${crawlId} and p.url > ${cursor[0] ?? ""}::text
@@ -790,6 +799,10 @@ export const CSV_VIEW_DEFS: Record<CsvQueryViewName, CsvView> = {
       row.fetch_class,
       orEmpty(row.is_indexable),
       orEmpty(row.click_depth),
+      orEmpty(row.inlinks_internal),
+      orEmpty(row.outlinks_internal),
+      orEmpty(row.outlinks_external),
+      orEmpty(row.link_score),
       orEmpty(row.page_type),
       orEmpty(row.title),
       orEmpty(row.recheck_fetch_class),

@@ -2260,6 +2260,7 @@ describe("pages_query", () => {
     // and CHECK-31 asks for buckets and for the URLs in them.
     expect(Object.keys(rows[0] ?? {}).sort()).toEqual([
       "clickDepth", "depth", "discoveredVia", "fetchClass", "fetchReason", "indexable",
+      "inlinksInternal", "linkScore", "outlinksExternal", "outlinksInternal",
       "pageType", "renderError", "renderableWordCount", "rendered", "renderedWordCount",
       // See the same assertion in test/api/query.test.ts: the analyzer's count
       // over the post-JavaScript DOM, which is the column the CSR rule reads.
@@ -2542,7 +2543,8 @@ describe("export_crawl — the CSV views", () => {
       crawlId: liveCrawlId, format: "csv", view: "internal_urls",
     });
     expect(read(pagesCsv).split("\r\n")[0]).toBe(
-      "url,status,fetchClass,indexable,clickDepth,pageType,title," +
+      "url,status,fetchClass,indexable,clickDepth,inlinks,outlinksInternal," +
+        "outlinksExternal,linkScore,pageType,title," +
         "recheckFetchClass,recheckStatus,recheckAt",
     );
   });

@@ -2002,6 +2002,26 @@ export interface PageRow {
    * derivation that computes it runs there.
    */
   clickDepth: number | null;
+  /**
+   * Distinct internal pages that link to this URL (nofollow included, self-links
+   * excluded). Set on every row by a rules run, a 0 included; null only on a
+   * crawl judged before 29c, which means not measured and never zero.
+   */
+  inlinksInternal: number | null;
+  /**
+   * Distinct internal / external link targets on this page (self-links and
+   * nofollow included). Set on fetched-OK pages by a rules run; null on every
+   * other row and on a crawl judged before 29c.
+   */
+  outlinksInternal: number | null;
+  outlinksExternal: number | null;
+  /**
+   * The share of internal link weight the page holds (random-surfer model,
+   * damping 0.85), scaled 0-100 on a log scale so 100 is the crawl's top page.
+   * Null for a page outside the link graph (not fetched-OK) and on a crawl
+   * judged before 29c.
+   */
+  linkScore: number | null;
   /** How the crawler found this URL: seed, link, sitemap or redirect. */
   discoveredVia: string;
   wordCount: number | null;
@@ -8998,6 +9018,11 @@ export const PAGE_FIELDS = {
    * distribution and could not name a single page in it.
    */
   clickDepth: pages.clickDepth,
+  /** Link facts (29c): see `PageRow`. The raw score is deliberately not published. */
+  inlinksInternal: pages.inlinksInternal,
+  outlinksInternal: pages.outlinksInternal,
+  outlinksExternal: pages.outlinksExternal,
+  linkScore: pages.linkScore,
   /**
    * How the crawler reached this URL — seed, link, sitemap or redirect.
    *

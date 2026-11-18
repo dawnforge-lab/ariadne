@@ -1662,7 +1662,8 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
       title: "The crawled pages",
       description:
         "The crawl's pages, slim and filtered: {url, statusCode, fetchClass, " +
-        "fetchReason, pageType, indexable, depth, clickDepth, discoveredVia, " +
+        "fetchReason, pageType, indexable, depth, clickDepth, inlinksInternal, " +
+        "outlinksInternal, outlinksExternal, linkScore, discoveredVia, " +
         "wordCount, renderableWordCount, rendered, renderedWordCount, " +
         "renderedRenderableWordCount, renderError}. " +
         "Use it to answer questions about the site itself — how deep the blog is, " +
@@ -1679,6 +1680,14 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "also null on every page of a crawl the rules have not run over, since the " +
         "search that computes it runs with them; crawl_status's rulesRunAt is what " +
         "tells the two nulls apart.\n\n" +
+        "LINK FACTS, written by crawl_rules. inlinksInternal is the number of distinct " +
+        "internal pages linking to the URL (nofollow counted, self-links not), a 0 " +
+        "included. outlinksInternal and outlinksExternal are the distinct targets on " +
+        "a fetched-OK page. linkScore is 0-100: the share of internal link weight " +
+        "the page holds (random-surfer model, damping 0.85), log-scaled so 100 is " +
+        "the crawl's top page; null for a page outside the link graph. Every one is " +
+        "null on a crawl judged before these existed, which is not measured and " +
+        "never zero: re-run crawl_rules.\n\n" +
         "TWO WORD COUNTS, AND THEY MEAN DIFFERENT THINGS. wordCount is every word " +
         "of visible text in the HTML. renderableWordCount is that count minus the " +
         "words the page's own markup says are not displayed (hidden attributes, " +

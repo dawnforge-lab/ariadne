@@ -255,6 +255,7 @@ describe("crawl_overview on a judged, unrendered crawl", () => {
       "content",
       "indexability",
       "click-depth",
+      "link-counts",
       "discovery",
       "response-time",
       "issues-grid",
