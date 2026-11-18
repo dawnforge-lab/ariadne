@@ -18,8 +18,9 @@ Code under test: `2c1f0a7`. That is Tasks 1–9, the final-review fix wave (`20d
 
 - **Clause 1 passes.**
 - **Clause 3 passes** for the three servers the clause names.
-- **Clause 2 passes the 512 MB contract.** It exceeds the 290.2 MB local bound by 1.6 MB
-  (291.8 MB). That excess waits for the owner's ruling (§3.3).
+- **Clause 2 passes** at **291.8 MB**, under the 512 MB contract. That is 1.6 MB over the old
+  290.2 MB local bound. The owner re-baselined the bound to **306.4 MB** for render passes that
+  run axe (§3.3).
 
 The full suite on `2c1f0a7` is 191 files and 5,154 tests, all green, and `npx tsc --noEmit` is
 clean.
@@ -162,8 +163,14 @@ added at most +1.5 MB. The owner chose "diagnose first".
 - **The caveat.** Run 4 is a single sample, and 29a's render phase alone ranged from 226 to
   283 MB across three runs.
 
-**Owner ruling:** _pending. The choice is to re-baseline the local bound for the render pass with
-accessibility, or to ask for one of the options in §3.2._
+**Owner ruling (2026-11-18): re-baseline.** The new local bound follows the method behind
+290.2 MB, which was 27b's 276.4 MB plus 5%: this run's 291.8 MB plus 5% gives **306.4 MB**.
+
+- **Scope.** It applies to the whole-process peak of a gate run whose render pass runs axe.
+- **CI unchanged.** `gate.yml`'s advisory warning watches the crawl phase only, which stayed at
+  282.6 MB, so it keeps 290.2 MB.
+- **Code unchanged.** No limit in code was raised, and the 512 MB contract (hard rule 6) is
+  untouched.
 
 ### 3.4 Per-page axe time
 
@@ -225,12 +232,11 @@ A lossless fix would be a chunk-hop Range GET, left for a later phase.
 
 - Gate database `ariadne_gate29b`: "Yes, create and run".
 - PNG eXIf orientation: "Fix in 29b".
-- Gate memory: "Diagnose first". Diagnosed and halved (§3.2); the local bound is still pending
-  (§3.3).
+- Gate memory: "Diagnose first". Diagnosed and halved (§3.2).
+- Local bound: "Re-baseline", to 306.4 MB (§3.3).
 
 ## 8. Open items
 
-- **The local memory bound** (§3.3). It awaits the owner.
 - **Square PNG past 64 KiB.** Its IHDR size is right whichever way it is rotated, so it could be
   reported losslessly instead of `header-beyond-limit`. Cheap.
 - **Chunk-hop Range GET** for PNGs with more than 64 KiB before IDAT (§6).
