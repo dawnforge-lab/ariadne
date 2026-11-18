@@ -602,7 +602,7 @@ export const COPY_TEMPLATES: Record<string, IssueCopy> = {
   "links.score-distribution": {
     title: "Links: Link score distribution",
     explanation:
-      "For the site and for each template: the link score of each indexable, self-canonical 200 page, as count, min, max, mean, quartiles and 95th percentile. The link score is the share of internal link weight a page holds (random-surfer model, damping 0.85), scaled 0 to 100 on a logarithmic scale so that 100 is the crawl's top page. Only followed internal links between pages that answered 200 are counted; self-links are not.",
+      "For the site and for each template: the link score of each indexable, self-canonical 200 page, as count, min, max, mean, quartiles and 95th percentile. The link score is the share of internal link weight a page holds (random-surfer model, damping 0.85), scaled 0 to 100 on a logarithmic scale so that 100 is the crawl's top page (every page scores 100 when the highest and lowest agree within one part in a billion). Only followed internal links between pages that answered 200 are counted; self-links are not, and a page whose robots meta or X-Robots-Tag says nofollow (or none) passes no link score.",
     howToFix:
       "Read the bottom quartile first: those pages hold little of the site's internal link weight. A template whose median sits well below the site's receives less weight than the rest of the site. Add internal links to the pages that matter from pages that hold more weight.",
   },

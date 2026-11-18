@@ -13,9 +13,12 @@
  * `(source, target)` pair over internal, link-level followed `links` whose
  * target URL is another node. So an edge to a 404, to a redirecting URL, or to
  * a URL that was never crawled is dropped (the target is not a node), as is a
- * self-loop and an external link. A page-level `<meta name=robots
- * content=nofollow>` does not exclude its edges yet: that is an open item for
- * the gate record, not a silent choice. Out-degree counts kept edges only.
+ * self-loop and an external link. A page whose robots meta or
+ * `X-Robots-Tag` says `nofollow` (or `none`, "noindex, nofollow"; whole-token,
+ * `SAYS_NOFOLLOW`) passes no link score: all its outgoing edges are dropped
+ * (owner ruling, 29c). It stays a node and can still receive weight; with no
+ * kept edge out it is dangling like any such page. Link counts are unchanged
+ * (R2: outlinks include nofollow). Out-degree counts kept edges only.
  *
  * THE ITERATION. Start vector 1/N. Each iteration:
  *   v' = (1-d)/N + d*dangling/N + d * sum over edges (s -> p) of v_s / outdeg_s
@@ -26,7 +29,8 @@
  *
  * THE SCORE (R5). `link_score` is an integer 0-100, `round(100 * ln(raw/min) /
  * ln(max/min))` over the graph's pages, so 100 is the crawl's top page. When
- * max = min (or the ratio is not above 1) every page scores 100. Rows outside
+ * max = min within `LINK_SCORE_EQUAL_TOLERANCE` (relative: `max - min <=
+ * 1e-9 * max`) every page scores 100. Rows outside
  * the graph keep null in both columns.
  *
  * THE WRITES (final review M1, M2). The rank vector alternates between two temp
@@ -38,11 +42,11 @@
  * rewritten (`pages` carries many indexes, and every rewritten row touches each
  * of them).
  */
-import { eq, sql } from "drizzle-orm";
+import { eq, sql, type SQL } from "drizzle-orm";
 
 import type { Db } from "../../db/client.js";
 import { crawls } from "../../db/schema.js";
-import { FETCHED_OK } from "../helpers.js";
+import { FETCHED_OK, SAYS_NOFOLLOW } from "../helpers.js";
 
 /** Random-surfer damping. Fixed by the spec (§29c); not a tool parameter. */
 export const LINK_SCORE_DAMPING = 0.85;
@@ -50,6 +54,24 @@ export const LINK_SCORE_DAMPING = 0.85;
 export const LINK_SCORE_MAX_ITERATIONS = 20;
 /** Stop once the L1 change of one iteration is below this. Fixed by the spec. */
 export const LINK_SCORE_TOLERANCE = 1e-6;
+/**
+ * Relative tolerance for "max = min": when `(max - min) <= this * max` every
+ * page scores 100, so float noise of a few ulps on a truly-equal graph does not
+ * spread the scores over 0-100. Owner ruling (29c); not a tool parameter.
+ */
+export const LINK_SCORE_EQUAL_TOLERANCE = 1e-9;
+
+/**
+ * The 0-100 score of raw value `v` given the graph's `lo` (min) and `hi` (max),
+ * as a SQL expression: 100 for everyone when `hi - lo <= tolerance * hi`, else
+ * `round(100 * ln(v/lo) / ln(hi/lo))`. Exported so a test can pin the scaling
+ * with crafted values.
+ */
+export const LINK_SCORE_SCALE = (v: SQL, lo: SQL, hi: SQL): SQL => sql`(
+  case
+    when (${hi} - ${lo}) <= ${LINK_SCORE_EQUAL_TOLERANCE}::float8 * ${hi} then 100
+    else round(100 * ln(${v} / ${lo}) / ln(${hi} / ${lo}))::int
+  end)`;
 
 export interface LinkScoreDerivation extends Record<string, number> {
   /** Graph pages (FETCHED_OK). */
@@ -109,11 +131,14 @@ export async function deriveLinkScore(db: Db, crawlId: string): Promise<LinkScor
       select distinct s.n, d.n
       from links l
       join ls_nodes s on s.page_id = l.source_page_id
+      join pages sp on sp.id = s.page_id
       join pages t on t.crawl_id = ${crawlId} and t.url = l.target_url
       join ls_nodes d on d.page_id = t.id
       where l.crawl_id = ${crawlId}
         and l.is_internal and not l.is_nofollow
-        and s.n <> d.n`);
+        and s.n <> d.n
+        and not ${sql.raw(SAYS_NOFOLLOW("sp.robots_meta"))}
+        and not ${sql.raw(SAYS_NOFOLLOW("sp.x_robots_tag"))}`);
     await tx.execute(sql`
       update ls_nodes nd set outdeg = o.c
       from (select src, count(*)::int as c from ls_edges group by src) o
@@ -189,14 +214,13 @@ export async function deriveLinkScore(db: Db, crawlId: string): Promise<LinkScor
       with b as (
         select min(v) as lo, max(v) as hi from ${cur}
       ), s as (
-        select r.n, r.v, b.lo, b.hi, ln(b.hi / b.lo) as span from ${cur} r cross join b
+        select r.n, r.v, b.lo, b.hi from ${cur} r cross join b
       ), fin as (
         select p.id,
                s.v as raw,
                case
                  when s.n is null then null
-                 when s.span > 0 then round(100 * ln(s.v / s.lo) / s.span)::int
-                 else 100
+                 else ${LINK_SCORE_SCALE(sql`s.v`, sql`s.lo`, sql`s.hi`)}
                end as score
         from pages p
         left join ls_nodes nd on nd.page_id = p.id

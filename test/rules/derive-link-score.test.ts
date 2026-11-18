@@ -15,8 +15,10 @@ import { crawls, links, pages } from "../../src/db/schema.js";
 import {
   deriveLinkScore,
   LINK_SCORE_DAMPING,
+  LINK_SCORE_EQUAL_TOLERANCE,
   LINK_SCORE_MAX_ITERATIONS,
   LINK_SCORE_TOLERANCE,
+  LINK_SCORE_SCALE,
 } from "../../src/rules/derive/link-score.js";
 import { buildRegistry } from "../../src/rules/index.js";
 import { runRules } from "../../src/rules/run.js";
@@ -257,5 +259,133 @@ describe("deriveLinkScore against the database", () => {
     expect(summary.derived["deriveLinkScore.edges"]).toBe(6);
     expect(summary.derived["deriveLinkScore.converged"]).toBe(1);
     expect(Object.keys(summary.derivedMs)).toContain("deriveLinkScore");
+  });
+
+  // ---- Page-level nofollow (owner change, 29c) ------------------------------
+  //
+  // Graph: A links to B and C; B and C each link back to A. Nodes 3, d = 0.85.
+  //
+  // With A's links DROPPED (A says nofollow) the kept edges are B->A and C->A
+  // (outdeg 1 each) and A has none out, so A is dangling and its weight is spread
+  // over all three pages. By symmetry b = c, and a + 2b = 1:
+  //   a = 0.15/3 + 0.85*a/3 + 0.85*(b + c)
+  //   a = 0.05 + (0.85/3)*a + 0.85*(1 - a)
+  //   a * (1 + 0.85 - 0.85/3) = 0.05 + 0.85 = 0.9
+  //   a * (47/30) = 9/10  =>  a = 27/47,  b = c = (1 - 27/47)/2 = 10/47.
+  // Check b: 0.05 + 0.85*(27/47)/3 = 1/20 + 153/(20*47)... = (47 + 153)/(20*47)
+  //   = 200/940 = 10/47. Scores: B = C = the minimum -> 0; A -> 100.
+  //
+  // With A's links KEPT (control, a "nofollowing" or noindex-only page) the edges
+  // are A->B, A->C (outdeg 2), B->A, C->A; nobody is dangling:
+  //   a = 0.05 + 0.85*(b + c),  b = c = 0.05 + 0.85*a/2,  a + 2b = 1
+  //   a = 0.05 + 0.85*(1 - a)  =>  a * 1.85 = 0.9  =>  a = 18/37,  b = c = 19/74.
+  //
+  // The iteration cap (20) stops this graph before the 1e-6 tolerance (the error
+  // contracts by 0.85 a step and the start is far from the answer: about 6e-3 left
+  // at the cap), so the comparison uses RAW_SLACK. The two hypotheses differ by
+  // 0.044 or more per page, so the slack cannot hide a wrong edge set.
+  const RAW_SLACK = 1.5e-2;
+  const DROPPED = { "/a": 27 / 47, "/b": 10 / 47, "/c": 10 / 47 };
+  const KEPT = { "/a": 18 / 37, "/b": 19 / 74, "/c": 19 / 74 };
+
+  async function triangle(
+    marks: Partial<Record<"/a" | "/b" | "/c", { robotsMeta?: string; xRobotsTag?: string }>>,
+  ) {
+    const crawlId = await newCrawl();
+    const ids = await addPages(crawlId, [["/a", "ok"], ["/b", "ok"], ["/c", "ok"]]);
+    await addLinks(crawlId, ids, [
+      { from: "/a", to: "/b" },
+      { from: "/a", to: "/c" },
+      { from: "/b", to: "/a" },
+      { from: "/c", to: "/a" },
+    ]);
+    for (const [path, m] of Object.entries(marks)) {
+      await db
+        .update(pages)
+        .set({ robotsMeta: m.robotsMeta ?? null, xRobotsTag: m.xRobotsTag ?? null })
+        .where(eq(pages.id, ids.get(path)!));
+    }
+    return crawlId;
+  }
+
+  async function expectRaw(crawlId: string, want: Record<string, number>) {
+    const got = await scores(crawlId);
+    for (const [path, exact] of Object.entries(want)) {
+      expect(Math.abs(got[path]!.raw! - exact), path).toBeLessThan(RAW_SLACK);
+    }
+    return got;
+  }
+
+  it("drops every outgoing edge of a page whose robots meta says nofollow", async () => {
+    const crawlId = await triangle({ "/a": { robotsMeta: "index, nofollow" } });
+    const derived = await deriveLinkScore(db, crawlId);
+    expect(derived).toMatchObject({ nodes: 3, edges: 2, dangling: 1 });
+    const got = await expectRaw(crawlId, DROPPED);
+    expect(got["/a"]!.score).toBe(100);
+    expect(got["/b"]!.score).toBe(0);
+    expect(got["/c"]!.score).toBe(0);
+  });
+
+  it("drops the edges of a page whose X-Robots-Tag header says nofollow", async () => {
+    const crawlId = await triangle({ "/a": { xRobotsTag: "nofollow" } });
+    expect(await deriveLinkScore(db, crawlId)).toMatchObject({ edges: 2, dangling: 1 });
+    await expectRaw(crawlId, DROPPED);
+  });
+
+  it("treats none (noindex, nofollow) as nofollow in either channel", async () => {
+    for (const mark of [{ robotsMeta: "none" }, { xRobotsTag: "googlebot: none" }]) {
+      const crawlId = await triangle({ "/a": mark });
+      expect(await deriveLinkScore(db, crawlId)).toMatchObject({ edges: 2, dangling: 1 });
+      await expectRaw(crawlId, DROPPED);
+    }
+  });
+
+  it("keeps the edges for nofollowing, noindex alone, and noindex, follow", async () => {
+    const crawlId = await triangle({
+      "/a": { robotsMeta: "nofollowing" },
+      "/b": { robotsMeta: "noindex" },
+      "/c": { xRobotsTag: "noindex, follow" },
+    });
+    expect(await deriveLinkScore(db, crawlId)).toMatchObject({ edges: 4, dangling: 0 });
+    await expectRaw(crawlId, KEPT);
+  });
+
+  // ---- max = min within a tolerance (owner change, 29c) ---------------------
+
+  it("pins the equal-score tolerance", () => {
+    expect(LINK_SCORE_EQUAL_TOLERANCE).toBe(1e-9);
+  });
+
+  it("scores 100 for a symmetric graph whose true scores are equal", async () => {
+    const crawlId = await newCrawl();
+    const ids = await addPages(crawlId, [["/a", "ok"], ["/b", "ok"], ["/c", "ok"]]);
+    await addLinks(crawlId, ids, [
+      { from: "/a", to: "/b" },
+      { from: "/b", to: "/c" },
+      { from: "/c", to: "/a" },
+    ]);
+    await deriveLinkScore(db, crawlId);
+    for (const r of Object.values(await scores(crawlId))) expect(r.score).toBe(100);
+  });
+
+  it("the scaling expression treats float noise as equal and a real gap as a log scale", async () => {
+    const run = async (v: number, lo: number, hi: number): Promise<number> => {
+      const r = await db.execute<{ s: number }>(
+        sql`select ${LINK_SCORE_SCALE(sql`${v}::float8`, sql`${lo}::float8`, sql`${hi}::float8`)} as s`,
+      );
+      return Number(r.rows[0]!.s);
+    };
+    const third = 1 / 3;
+    const noisy = third + 1e-17; // under one ulp of 1/3: the same double
+    const nudged = third * (1 + 4e-16); // a couple of ulps
+    // Within tolerance: every page is 100, including the lowest.
+    expect(await run(third, third, noisy)).toBe(100);
+    expect(await run(third, third, nudged)).toBe(100);
+    expect(await run(third, third, third * (1 + 0.9e-9))).toBe(100);
+    // Beyond tolerance the log scale applies: lowest 0, highest 100.
+    const hi = third * (1 + 2e-9);
+    expect(await run(third, third, hi)).toBe(0);
+    expect(await run(hi, third, hi)).toBe(100);
+    expect(await run(0.2, 0.1, 0.4)).toBe(50);
   });
 });

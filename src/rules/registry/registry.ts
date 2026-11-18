@@ -1091,6 +1091,10 @@ const KINDS = ["page", "query", "metric"] as const satisfies readonly AnyRule["k
 //        `links.anchors-generic-only` is `needsSpider`: a list crawl knows only
 //        the links among the listed pages, so it is not run in list mode and
 //        `crawl.list-mode` names it (as `links.only-from-non-indexable`).
+//        Link score, owner rulings: a page whose robots meta / `X-Robots-Tag` says
+//        `nofollow` or `none` (whole token, `SAYS_NOFOLLOW`) contributes no edges to
+//        the graph (link counts unchanged); every page scores 100 when `max - min <=
+//        LINK_SCORE_EQUAL_TOLERANCE (1e-9) * max`, not only when max = min exactly.
 export const RULESET_VERSION = "0.28.0";
 
 /**

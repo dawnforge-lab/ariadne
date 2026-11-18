@@ -33,8 +33,9 @@ The ruleset moves to **0.28.0**
 metric rules counting as info; 24 overridable thresholds). Migration 0060 stamps the
 new threshold onto every stored run stamp. The new metric `links.score-distribution` (CHECK-33)
 gives the eight distribution numbers of the link score, the share of internal link
-weight a page holds (random-surfer model, damping 0.85), scaled 0 to 100, for the site
-and each template. `links.high-outlinks` now reads the per-page outlink counts the
+weight a page holds (random-surfer model, damping 0.85), scaled 0 to 100 (every page 100
+when max and min agree within 1e-9 relative), for the site and each template. A page whose
+robots meta or X-Robots-Tag says nofollow (or none) passes no link score. `links.high-outlinks` now reads the per-page outlink counts the
 rules run derives before any rule runs; its findings are unchanged, and a fetched page
 whose counts were never derived makes the rule fail loudly instead of reading as zero.
 The new rule `links.anchors-generic-only` (info, CHECK-86) names an indexable page with
@@ -2992,8 +2993,10 @@ would be an export in listing clothes (obligation 1). `clickDepth: null` means
 counted, self-links not), set on every row, a `0` included; `outlinksInternal` and
 `outlinksExternal` are the distinct targets on a fetched-OK page (null elsewhere);
 `linkScore` is 0 to 100, the share of internal link weight a page holds
-(random-surfer model, damping 0.85), log-scaled so 100 is the crawl's top page, null
-outside the link graph. All four are null on a crawl judged before 29c: not
+(random-surfer model, damping 0.85), log-scaled so 100 is the crawl's top page (all 100
+when max and min agree within 1e-9 relative), null outside the link graph; a page whose
+robots meta or X-Robots-Tag says nofollow or none passes none (its edges are dropped;
+counts above are unchanged). All four are null on a crawl judged before 29c: not
 measured, never zero. The raw score is not published. `renderError` is why an **attempted** render produced
 nothing; null there is not "it worked".
 
