@@ -39,7 +39,7 @@ function rule(id: string): QueryRule {
 }
 
 describe("linkHygieneRules metadata", () => {
-  it("defines the seven rules, with their checks, severities and category", () => {
+  it("defines the eight rules, with their checks, severities and category", () => {
     expect(
       Object.fromEntries(linkHygieneRules.map((r) => [r.id, [r.checkIds, r.severity, r.category]])),
     ).toEqual({
@@ -52,6 +52,7 @@ describe("linkHygieneRules metadata", () => {
       "links.no-anchor-text": [["CHECK-86"], "warning", "links"],
       "links.aria-label-only": [["CHECK-86"], "info", "links"],
       "links.high-outlinks": [["CHECK-33"], "info", "links"],
+      "links.anchors-generic-only": [["CHECK-86"], "info", "links"],
     });
   });
 

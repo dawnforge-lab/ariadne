@@ -43,6 +43,24 @@ describe("a threshold measured against a capped value stays below the cap", () =
   }
 });
 
+describe("the generic anchor threshold (Phase 29c)", () => {
+  it("is overridable from 1 to 1000, refusing anything outside and accepting the bounds", () => {
+    const registry = buildRegistry();
+    const name = "GENERIC_ANCHOR_MIN_INLINKS";
+    expect(THRESHOLD_ROWS.GENERIC_ANCHOR_MIN_INLINKS).toEqual({ min: 1, max: 1000, default: 3 });
+    expect(() => parseJudgement({ thresholds: { [name]: 0 } }, registry)).toThrow(`thresholds.${name}`);
+    expect(() => parseJudgement({ thresholds: { [name]: 1001 } }, registry)).toThrow(
+      `thresholds.${name}`,
+    );
+    expect(parseJudgement({ thresholds: { [name]: 1 } }, registry)).toEqual({
+      thresholds: { [name]: 1 },
+    });
+    expect(parseJudgement({ thresholds: { [name]: 1000 } }, registry)).toEqual({
+      thresholds: { [name]: 1000 },
+    });
+  });
+});
+
 describe("the schema template thresholds (Phase 29a)", () => {
   it("are overridable with the ranges and defaults the rule is specified with", () => {
     expect(THRESHOLD_ROWS.SCHEMA_TEMPLATE_SHARE).toEqual({

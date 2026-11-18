@@ -15,6 +15,7 @@ import {
   H2_MAX,
   HIGH_EXTERNAL_OUTLINKS,
   HIGH_INTERNAL_OUTLINKS,
+  GENERIC_ANCHOR_MIN_INLINKS,
   IMAGE_OVERSIZE_PERCENT,
   IMAGE_WEIGHT_WARN,
   META_MAX,
@@ -71,6 +72,7 @@ export const THRESHOLD_ROWS = {
   SCHEMA_TEMPLATE_SHARE: { min: 50, max: 100, default: SCHEMA_TEMPLATE_SHARE },
   SCHEMA_TEMPLATE_MIN_PAGES: { min: 2, max: 100_000, default: SCHEMA_TEMPLATE_MIN_PAGES },
   IMAGE_OVERSIZE_PERCENT: { min: 101, max: 1000, default: IMAGE_OVERSIZE_PERCENT },
+  GENERIC_ANCHOR_MIN_INLINKS: { min: 1, max: 1000, default: GENERIC_ANCHOR_MIN_INLINKS },
 } as const satisfies Record<string, ThresholdRow>;
 
 /** A threshold an agent may override on a crawl. */

@@ -9,13 +9,22 @@ it; this document says *what the seam is*.
 
 **What Phase 29c has changed here so far: the link graph is summarised per page.** No
 tool or route is added and no response shape changes. The ruleset moves to **0.28.0**
-(228 rules: 72 page / 139 query / 17 metric; 33 critical / 97 warning / 98 info, the
-metric rules counting as info). The new metric `links.score-distribution` (CHECK-33)
+(229 rules: 72 page / 140 query / 17 metric; 33 critical / 97 warning / 99 info, the
+metric rules counting as info; 24 overridable thresholds). Migration 0060 stamps the
+new threshold onto every stored run stamp. The new metric `links.score-distribution` (CHECK-33)
 gives the eight distribution numbers of the link score, the share of internal link
 weight a page holds (random-surfer model, damping 0.85), scaled 0 to 100, for the site
 and each template. `links.high-outlinks` now reads the per-page outlink counts the
 rules run derives before any rule runs; its findings are unchanged, and a fetched page
 whose counts were never derived makes the rule fail loudly instead of reading as zero.
+The new rule `links.anchors-generic-only` (info, CHECK-86) names an indexable page with
+`GENERIC_ANCHOR_MIN_INLINKS` or more internal inlinks, every one of whose anchors is
+empty or a generic English phrase (the list `links.non-descriptive-anchor` uses). The
+anchor text is judged, not an aria-label. Evidence: `inlinks` (distinct linking pages,
+the page's own links excluded, nofollow counted), `minInlinks` (the threshold in force)
+and `anchors` (up to 10 distinct normalised anchors, `""` for empty). It fails loudly
+on a crawl whose counts were never derived. `GENERIC_ANCHOR_MIN_INLINKS` is the
+twenty-fourth overridable threshold (integer, 1–1000, default 3).
 
 **What Phase 29b changed here: the render pass reads the page's own errors, its image
 boxes and its accessibility, and the resource pass measures images.** No tool or route
@@ -992,7 +1001,8 @@ produces them without a re-crawl (§11). By family:
   `pagination.loop` (warning), `pagination.sequence-error` (info).
 - **Links** (CHECK-32, CHECK-33, CHECK-86): `links.internal-nofollow`,
   `links.only-from-non-indexable` and `links.localhost` (warning),
-  `links.non-descriptive-anchor` and `links.high-outlinks` (info). `links.localhost`
+  `links.non-descriptive-anchor`, `links.anchors-generic-only` and `links.high-outlinks`
+  (info). `links.localhost`
   judges external links only, so a site crawled on a private address does not report
   itself. The outlink limits are 1,000 distinct internal or 10 distinct external
   targets.
@@ -2696,9 +2706,9 @@ not name", `test/api/query.test.ts:1481` "carries a finding with no page as a
 null url", `test/rules/helpers.test.ts:697` "maps each fetch class to the status
 a reader acts on", `test/rules/helpers.test.ts:717` "names a block a block,
 whatever status the challenge was served with",
-`test/fixtures/harness.test.ts:1350` "declares a column for every evidence key it
+`test/fixtures/harness.test.ts:1351` "declares a column for every evidence key it
 writes, and writes every column it declares",
-`test/rules/registry.test.ts:798` "finds one defining file per rule, and the key
+`test/rules/registry.test.ts:801` "finds one defining file per rule, and the key
 spelled inside it".
 
 **A rule the crawl's judgement disables is refused, 409** (Deviation 3), and so
@@ -2867,7 +2877,7 @@ header on the catalog, and only on metric rules",
 and one row per scope",
 `test/rules/metric-table.test.ts:377` "gives every metric rule a table whose
 columns are the catalog's",
-`test/fixtures/harness.test.ts:2555` "renders every metric's table, with no
+`test/fixtures/harness.test.ts:2557` "renders every metric's table, with no
 empty column and no unmapped key".
 
 **`judgementStale`** (Phase 27a) is the answer's last key, `crawl_status`'s flag
@@ -3120,7 +3130,7 @@ made it 22, and Phase 29b 23):
   200 applies. It is stored where it always was, `config_jsonb.findingCap`
   (Deviation 1), so `crawl_status.findingCap`, `crawl_start`'s top-level key and
   this block read and write one value.
-- **`thresholds`** lists ALL 23 overridable thresholds as `{value, default, min,
+- **`thresholds`** lists ALL 24 overridable thresholds as `{value, default, min,
   max, overridden}`: `value` is what the NEXT rules run will use, `overridden` is
   true where the block sets it, and `min` / `max` are the inclusive bounds. The
   names: `TITLE_MIN`, `TITLE_MAX`, `META_MIN`, `META_MAX`, `H1_MAX`, `H2_MAX`,
@@ -3130,13 +3140,14 @@ made it 22, and Phase 29b 23):
   `HIGH_EXTERNAL_OUTLINKS`, `UNAVAILABLE_AFTER_WARN_DAYS` (20, not the 19 the
   plan's prose counted: ruling 5), and, from Phase 29a, `SCHEMA_TEMPLATE_SHARE`
   (percent, 50–100, default 70) and `SCHEMA_TEMPLATE_MIN_PAGES` (2–100000, default
-  10), and, from Phase 29b, `IMAGE_OVERSIZE_PERCENT` (percent, 101–1000, default 200),
-  23 in all. Extraction-time limits, similarity distances,
+  10), from Phase 29b, `IMAGE_OVERSIZE_PERCENT` (percent, 101–1000, default 200),
+  and, from Phase 29c, `GENERIC_ANCHOR_MIN_INLINKS` (inlinks, 1–1000, default 3),
+  24 in all. Extraction-time limits, similarity distances,
   render heuristics, walk bounds and protocol limits are engine internals and
   are not overridable.
 - **`judgedWith`** is the stamp the last completed rules run wrote of what it
   used, `{disabledRules, thresholds, findingCap?}`, or `null` on a crawl nobody
-  has judged. Its `thresholds` holds ALL 23 names at the EFFECTIVE values that
+  has judged. Its `thresholds` holds ALL 24 names at the EFFECTIVE values that
   run used (its override, else the default then in force), not only the
   overrides, so it stays true when a later ruleset moves a default: the copy is
   rendered from these values, and a moved default reads stale `thresholds`. **`judgementStale`** compares it with the
@@ -3841,10 +3852,10 @@ canonicalises under noindex", `test/rules/health-metrics.test.ts:414`
 are over", `test/rules/copy.test.ts:1540` "says the counts are the authority, not the
 ratio", `test/rules/copy.test.ts:1557` "grades nothing: no score, no label, no
 threshold";
-`test/rules/coverage.test.ts:649` "site.health is filed under the
+`test/rules/coverage.test.ts:650` "site.health is filed under the
 engine-coverage check, and CHECK-32 lost no claimant" (the re-file in both
 directions, and CHECK-83 outside the crawl-derived universe);
-`test/fixtures/harness.test.ts:3548` "the health rollup agrees with a
+`test/fixtures/harness.test.ts:3568` "the health rollup agrees with a
 page-by-page recount" — an independent recount in JavaScript over the end-to-end
 fixture crawl.
 
@@ -4198,9 +4209,11 @@ without changing a verdict — `metrics` rows carry no version column at all —
 which is the argument Phase 10 held 0.7.0 on.
 
 **Phase 29c bumped to 0.28.0, once.** One metric id joined, `links.score-distribution`,
-and `links.high-outlinks` reads derived per-page counts with the same findings. The
-ruleset is 228 rules (72 page / 139 query / 17 metric; 33 critical / 97 warning /
-98 info).
+and `links.high-outlinks` reads derived per-page counts with the same findings. One
+query rule joined, `links.anchors-generic-only`, with one overridable threshold,
+`GENERIC_ANCHOR_MIN_INLINKS` (the twenty-fourth; migration 0060 rewrites every stored
+run stamp to hold it at 3). The ruleset is 229 rules (72 page / 140 query / 17 metric;
+33 critical / 97 warning / 99 info).
 
 **Phase 29b bumped to 0.27.0, once, and moved `RENDER_CAPTURE_VERSION` to 3.** Twenty-nine
 rule ids and one metric id joined: `render.js-exception`, `render.console-error`,

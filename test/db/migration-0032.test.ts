@@ -109,6 +109,11 @@ describe("0032 — crawls judged before 27a carry a stamp", () => {
           new URL("../../drizzle/0058_image_oversize_threshold.sql", import.meta.url),
           "utf8",
         )));
+        // And 0060, which names the generic anchor threshold.
+        await tx.execute(sql.raw(readFileSync(
+          new URL("../../drizzle/0060_generic_anchor_threshold.sql", import.meta.url),
+          "utf8",
+        )));
         const effective = await tx
           .select({ id: crawls.id, stamp: crawls.rulesJudgedWith })
           .from(crawls)

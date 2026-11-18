@@ -71,6 +71,8 @@ const ADDED_SINCE_0_22 = [
   ...A11Y_RULES.map((r) => `a11y.${r.axeId}`),
   // 0.28.0, Phase 29c T3: the link score distribution (CHECK-33).
   "links.score-distribution",
+  // 0.28.0, Phase 29c T4: pages named only by generic anchors (CHECK-86).
+  "links.anchors-generic-only",
 ];
 // Entries whose text was deliberately changed after 0.22.0: the fields that
 // differ from the fixture, spelled out so any other drift still fails.

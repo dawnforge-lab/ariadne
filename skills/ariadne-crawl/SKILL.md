@@ -834,10 +834,10 @@ upgrading the engine rather than re-crawling the site.
 
 `crawl_config_get` answers the crawl's judgement: `{crawlId, judgement, thresholds,
 judgedWith, judgementStale}`. `judgement` is the block, `{}` when nothing is set;
-`thresholds` lists all 23 overridable thresholds as `{value, default, min, max,
+`thresholds` lists all 24 overridable thresholds as `{value, default, min, max,
 overridden}`, where `value` is what the NEXT rules run will use; `judgedWith` is what
 the last completed run used — `{disabledRules, thresholds, findingCap?}`, its
-`thresholds` all 23 at the values that run actually judged with — (`null` if nobody
+`thresholds` all 24 at the values that run actually judged with — (`null` if nobody
 has judged the crawl); and
 `judgementStale` (`{stale, reasons}`) says whether the two differ.
 

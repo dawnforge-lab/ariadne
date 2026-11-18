@@ -53,7 +53,13 @@ describe("0058 — a stamp names the image oversize threshold", () => {
     );
     const judgedAt = new Date("2026-11-17T00:00:00.000Z");
     // The pre-0058 shape: every threshold but the new one.
-    const { IMAGE_OVERSIZE_PERCENT: _image, ...twentyTwo } = DEFAULT_THRESHOLDS;
+    const {
+      IMAGE_OVERSIZE_PERCENT: _image,
+      GENERIC_ANCHOR_MIN_INLINKS: _generic,
+      ...twentyTwo
+    } = DEFAULT_THRESHOLDS;
+    // The shape 0058 leaves: 23 thresholds. 0060 adds the 24th.
+    const { GENERIC_ANCHOR_MIN_INLINKS: _g2, ...defaultsAt0058 } = DEFAULT_THRESHOLDS;
     let asserted = false;
 
     const outcome = await db
@@ -96,15 +102,16 @@ describe("0058 — a stamp names the image oversize threshold", () => {
         // The SQL writes the default out literally; today's code agrees.
         expect(stamp.get(ids.old)).toEqual({
           disabledRules: [],
-          thresholds: { ...DEFAULT_THRESHOLDS },
+          thresholds: defaultsAt0058,
         });
         expect(stamp.get(ids.overridden)).toEqual({
           disabledRules: [],
-          thresholds: { ...DEFAULT_THRESHOLDS, SLOW_MS: 500 },
+          thresholds: { ...defaultsAt0058, SLOW_MS: 500 },
         });
         expect(stamp.get(ids.unjudged)).toBeNull();
+        // readStamp wants all 24 and the last is 0060's, so it still refuses here.
         for (const id of [ids.old, ids.overridden]) {
-          expect(() => readStamp(stamp.get(id), id)).not.toThrow();
+          expect(() => readStamp(stamp.get(id), id)).toThrow();
         }
 
         // Idempotent: a second application changes nothing.

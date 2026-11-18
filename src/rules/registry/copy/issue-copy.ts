@@ -1634,6 +1634,13 @@ export const COPY_TEMPLATES: Record<string, IssueCopy> = {
     howToFix:
       "Replace each generic anchor with words that describe the page it points at, such as the name of the product or the question the page answers.",
   },
+  "links.anchors-generic-only": {
+    title: "Links: Pages named only by generic or empty anchor text",
+    explanation:
+      "Indexable pages with {GENERIC_ANCHOR_MIN_INLINKS} or more internal inlinks where every link pointing at them has anchor text that is empty or a generic English phrase such as click here or read more; the anchors pointing at a page are what tell visitors and search engines what it is about, and here none of them does. Link text is what is judged, so an aria-label is not read here, and links.no-anchor-text and links.aria-label-only cover links that have no text. Each row gives the number of linking pages and up to 10 distinct anchors, with an empty one shown as blank, and anchors in other languages are not judged.",
+    howToFix:
+      "Replace at least one of the links to the page, ideally the most prominent, with anchor text that names it, such as the product, topic or question the page answers.",
+  },
   "links.uncrawlable": {
     title: "Links: Links crawlers cannot follow",
     explanation:

@@ -1082,6 +1082,12 @@ const KINDS = ["page", "query", "metric"] as const satisfies readonly AnyRule["k
 //        `links.score-distribution` (info; CHECK-33): the eight distribution
 //        numbers of `pages.link_score` (`deriveLinkScore`) for the site and each
 //        template. 228 rules: 72 page / 139 query / 17 metric.
+//        New query rule `links.anchors-generic-only` (info; CHECK-86): an
+//        indexable page with `GENERIC_ANCHOR_MIN_INLINKS` (new overridable
+//        threshold, default 3, 1-1000; the 24th) or more internal inlinks
+//        (`pages.inlinks_internal`) whose every inlink anchor is empty or on
+//        `NON_DESCRIPTIVE_ANCHORS`. Migration 0060 names the threshold in every
+//        stored stamp. 229 rules: 72 page / 140 query / 17 metric.
 export const RULESET_VERSION = "0.28.0";
 
 /**

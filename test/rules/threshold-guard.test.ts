@@ -123,7 +123,7 @@ function sources(): Array<{ file: string; text: string }> {
 
 describe("the threshold guard proves itself", () => {
   it("names the overridable thresholds it guards", () => {
-    expect(NAMES).toHaveLength(23);
+    expect(NAMES).toHaveLength(24);
     expect(NAMES).toContain("TITLE_PX_MAX");
   });
 

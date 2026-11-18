@@ -177,6 +177,7 @@ export const TRIAGE: Readonly<Record<string, Readonly<TriageRow>>> = {
   "indexability.meta-header-conflict": { type: "issue", priority: "high" },
   "indexability.nofollow": { type: "warning", priority: "high", sfIssue: "Directives: Nofollow" },
   "indexability.noindex": { type: "warning", priority: "high", sfIssue: "Directives: Noindex" },
+  "links.anchors-generic-only": { type: "opportunity", priority: "low" },
   "links.aria-label-only": { type: "warning", priority: "low" },
   "links.broken-internal": { type: "issue", priority: "high", sfIssue: "Response Codes: Internal Client Error (4xx)" },
   "links.empty-href": { type: "issue", priority: "low" },

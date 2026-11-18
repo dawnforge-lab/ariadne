@@ -649,15 +649,18 @@ describe("check annotations", () => {
  *
  * Phase 29c (0.28.0) Task 3 adds the metric `links.score-distribution` (info):
  * 98 info, 228 rules.
+ *
+ * Phase 29c (0.28.0) Task 4 adds the query rule `links.anchors-generic-only`
+ * (info): 99 info, 229 rules.
  */
 describe("severity shape of the ruleset", () => {
   const all = buildRegistry().all();
 
-  it("holds 33 critical, 97 warning and 98 info rules", () => {
+  it("holds 33 critical, 97 warning and 99 info rules", () => {
     const counts = { critical: 0, warning: 0, info: 0 };
     for (const r of all) counts[r.severity] += 1;
-    expect(counts).toEqual({ critical: 33, warning: 97, info: 98 });
-    expect(all).toHaveLength(228);
+    expect(counts).toEqual({ critical: 33, warning: 97, info: 99 });
+    expect(all).toHaveLength(229);
   });
 
   it("names exactly the rules that are critical", () => {
@@ -890,9 +893,9 @@ describe("a metric table's declared order", () => {
 
 // 29a rework final review: the severity split, pinned from the registry itself.
 describe("the registry's severity totals", () => {
-  it("228 rules are 33 critical, 97 warning and 98 info", () => {
+  it("229 rules are 33 critical, 97 warning and 99 info", () => {
     const counts: Record<string, number> = {};
     for (const rule of buildRegistry().all()) counts[rule.severity] = (counts[rule.severity] ?? 0) + 1;
-    expect(counts).toEqual({ critical: 33, warning: 97, info: 98 });
+    expect(counts).toEqual({ critical: 33, warning: 97, info: 99 });
   });
 });

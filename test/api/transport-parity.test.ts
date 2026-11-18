@@ -249,7 +249,7 @@ async function buildCases(): Promise<{ valid: Case[]; invalid: Case[] }> {
   }
 
   const thresholds = props["judgement"]?.properties?.["thresholds"]?.properties ?? {};
-  expect(Object.keys(thresholds).length).toBe(23);
+  expect(Object.keys(thresholds).length).toBe(24);
   for (const [name, spec] of Object.entries(thresholds)) {
     for (const bad of [wrongType(spec), ...bounds(spec)]) {
       invalid.push({
