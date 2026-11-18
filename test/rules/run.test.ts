@@ -508,6 +508,10 @@ describe("runRules against the database", () => {
       "deriveClickDepth.unreachable": 1,
       "deriveClickDepth.maxDepth": 0,
       "deriveClickDepth.capped": 0,
+      // Two pages, no links: the home page has no inlinks and is analysed.
+      "deriveLinkCounts.pages": 2,
+      "deriveLinkCounts.withInlinks": 0,
+      "deriveLinkCounts.analysed": 2,
       // No sitemap alternate was staged, so no `source = 'sitemap'` row.
       "deriveSitemapHreflang.rows": 0,
     });

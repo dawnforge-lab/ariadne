@@ -1417,12 +1417,12 @@ describe("crawl_rules", () => {
     // crawl skill's fenced block is compared field for field and missed here,
     // where nothing compared anything — and it named four of the six fields
     // that are actually returned. Asserted against `Object.keys` of the real
-    // summary rather than a restated list, so a seventh field cannot be added
+    // summary rather than a restated list, so an eighth field cannot be added
     // to `RunSummary` and left undocumented.
     const rules = (await client.listTools()).tools.find((t) => t.name === "crawl_rules");
     const rulesDescription = rules?.description ?? "";
     expect(Object.keys(summary).sort()).toEqual([
-      "byMetric", "byRule", "derived", "findings", "metrics", "pagesScanned",
+      "byMetric", "byRule", "derived", "derivedMs", "findings", "metrics", "pagesScanned",
     ]);
     for (const field of Object.keys(summary)) {
       expect(rulesDescription, `crawl_rules does not name ${field}`).toContain(field);

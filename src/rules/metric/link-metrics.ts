@@ -108,7 +108,7 @@ export const OTHER_SOURCES = "(other)";
  * the aggregate: `pages.id` is the table's primary key, so Postgres knows both
  * are functionally dependent on it.
  */
-function inlinkCohort(crawlId: string): SQL {
+export function inlinkCohort(crawlId: string): SQL {
   return sql`
     select p.url as url, ${COHORT_PAGE_TYPE} as page_type,
            count(distinct l.source_page_id)::int as v

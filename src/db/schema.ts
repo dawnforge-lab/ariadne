@@ -1,6 +1,6 @@
 import { sql } from "drizzle-orm";
 import {
-  pgTable, text, integer, smallint, bigint, bigserial, boolean, jsonb, timestamp, real,
+  pgTable, text, integer, smallint, bigint, bigserial, boolean, jsonb, timestamp, real, doublePrecision,
   primaryKey, index, uniqueIndex, customType, check, type AnyPgColumn,
 } from "drizzle-orm/pg-core";
 import type { ChainRender, ScheduleChain } from "../crawl/insert-crawl.js";
@@ -595,6 +595,31 @@ export const pages = pgTable("pages", {
   // reader before then sees every row null, which is "no click depth was
   // computed" and must not be read as "depth 0".
   clickDepth: integer("click_depth"),
+  // PHASE 29c LINK COUNTS AND LINK SCORE, all written by the rules run's derive
+  // step and all null until a run since 29c has judged the crawl. Null on a
+  // judged-before-29c crawl means NOT MEASURED; a reader that needs the fact
+  // refuses null and never reads it as 0.
+  //
+  // Distinct internal source pages linking to this URL (self-links excluded,
+  // nofollow included): the definition `inlinks.distribution` uses (R1). Set on
+  // EVERY page of a judged crawl, 0 when nothing links in, non-OK rows included.
+  inlinksInternal: integer("inlinks_internal"),
+  // Distinct internal link targets this page carries (R2: today's
+  // `links.high-outlinks` count, self-links and nofollow included). Set (0 when
+  // none) on fetched-OK pages of a judged crawl and null on every other row:
+  // only an analysed page has outlinks.
+  outlinksInternal: integer("outlinks_internal"),
+  // The same, for distinct external targets. Null exactly where
+  // `outlinks_internal` is.
+  outlinksExternal: integer("outlinks_external"),
+  // Raw random-surfer weight (written by the link-score derivation). Null on
+  // rows outside the link graph (non-OK pages), and on any crawl not judged
+  // since 29c (R5).
+  linkScoreRaw: doublePrecision("link_score_raw"),
+  // 0-100 log-scaled link score. Null on rows outside the graph. In a judged
+  // crawl a non-null `inlinks_internal` beside a null score means "not in the
+  // graph", a value and not a missing fact (R5).
+  linkScore: integer("link_score"),
   // Visible-text bytes over HTML bytes. It reads the SAME accumulator
   // `word_count` does, so Phase 7's template exclusion moved it too (template
   // text is no longer in the numerator) — but it does NOT read the renderable
