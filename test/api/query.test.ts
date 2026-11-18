@@ -4300,13 +4300,15 @@ describe("GET /rules — the order of the sections", () => {
       "structure.click-depth-distribution",
       "structure.depth-distribution",
       "url.param-volumes", "schema.property-coverage", "render.image-measurement",
+      // 29c: appended last, so no served position moved.
+      "links.score-distribution",
     ]);
 
     // The position is SERVED, so a client that lays the section out itself gets
     // the same order without re-deriving it.
     expect(
       rules.filter((rule) => rule.kind === "metric").map((rule) => rule.table?.order),
-    ).toEqual([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]);
+    ).toEqual([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]);
     // …and it is on the metric rules and on nothing else.
     for (const rule of rules) {
       if (rule.kind === "metric") continue;

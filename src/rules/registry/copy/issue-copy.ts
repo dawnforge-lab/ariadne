@@ -599,6 +599,13 @@ export const COPY_TEMPLATES: Record<string, IssueCopy> = {
     howToFix:
       "Read each row as a sentence about site structure: a commercial template reached from only one source template depends entirely on that template being crawled; one with no sources is reachable only from the sitemap.",
   },
+  "links.score-distribution": {
+    title: "Links: Link score distribution",
+    explanation:
+      "For the site and for each template: the link score of each indexable, self-canonical 200 page, as count, min, max, mean, quartiles and 95th percentile. The link score is the share of internal link weight a page holds (random-surfer model, damping 0.85), scaled 0 to 100 on a logarithmic scale so that 100 is the crawl's top page. Only followed internal links between pages that answered 200 are counted; self-links are not.",
+    howToFix:
+      "Read the bottom quartile first: those pages hold little of the site's internal link weight. A template whose median sits well below the site's receives less weight than the rest of the site. Add internal links to the pages that matter from pages that hold more weight.",
+  },
   "links.broken-internal": {
     title: "Response codes: Internal client error (4xx)",
     explanation:

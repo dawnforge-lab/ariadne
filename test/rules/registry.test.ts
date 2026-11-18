@@ -536,8 +536,8 @@ describe("check universe", () => {
     // unreachable robots.txt (docsFetched > 0), where it was silent; no copy or other rule moved.
     // 0.26.0: Phase 29a — structured data validated (microdata, RDFa, two thresholds), then the
     // 2026-11-16 rework: judged by web standards, not Google; registry.ts carries the grounds.
-    // 0.27.0: Phase 29b — render-pass checks (one bump for the phase); registry.ts carries the grounds.
-    expect(RULESET_VERSION).toBe("0.27.0");
+    // 0.28.0: Phase 29c — crawl analysis (one bump for the phase); registry.ts carries the grounds.
+    expect(RULESET_VERSION).toBe("0.28.0");
   });
   it("every listed check id is a well-formed CHECK-NN and unique", () => {
     expect(new Set(CRAWL_CHECK_IDS).size).toBe(CRAWL_CHECK_IDS.length);
@@ -646,15 +646,18 @@ describe("check annotations", () => {
  *
  * Task 8 drops `a11y.duplicate-id-aria` (a warning) from the subset, because
  * axe-core 4.14.0 never reports it as a violation: 97 warning, 227 rules.
+ *
+ * Phase 29c (0.28.0) Task 3 adds the metric `links.score-distribution` (info):
+ * 98 info, 228 rules.
  */
 describe("severity shape of the ruleset", () => {
   const all = buildRegistry().all();
 
-  it("holds 33 critical, 97 warning and 97 info rules", () => {
+  it("holds 33 critical, 97 warning and 98 info rules", () => {
     const counts = { critical: 0, warning: 0, info: 0 };
     for (const r of all) counts[r.severity] += 1;
-    expect(counts).toEqual({ critical: 33, warning: 97, info: 97 });
-    expect(all).toHaveLength(227);
+    expect(counts).toEqual({ critical: 33, warning: 97, info: 98 });
+    expect(all).toHaveLength(228);
   });
 
   it("names exactly the rules that are critical", () => {
@@ -887,9 +890,9 @@ describe("a metric table's declared order", () => {
 
 // 29a rework final review: the severity split, pinned from the registry itself.
 describe("the registry's severity totals", () => {
-  it("227 rules are 33 critical, 97 warning and 97 info", () => {
+  it("228 rules are 33 critical, 97 warning and 98 info", () => {
     const counts: Record<string, number> = {};
     for (const rule of buildRegistry().all()) counts[rule.severity] = (counts[rule.severity] ?? 0) + 1;
-    expect(counts).toEqual({ critical: 33, warning: 97, info: 97 });
+    expect(counts).toEqual({ critical: 33, warning: 97, info: 98 });
   });
 });

@@ -69,6 +69,8 @@ const ADDED_SINCE_0_22 = [
   // rules (25, then 24 once Task 8 dropped duplicate-id-aria), named from the table they are generated from (CHECK-89).
   "render.not-recorded",
   ...A11Y_RULES.map((r) => `a11y.${r.axeId}`),
+  // 0.28.0, Phase 29c T3: the link score distribution (CHECK-33).
+  "links.score-distribution",
 ];
 // Entries whose text was deliberately changed after 0.22.0: the fields that
 // differ from the fixture, spelled out so any other drift still fails.

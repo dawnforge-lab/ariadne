@@ -2688,7 +2688,7 @@ a reader acts on", `test/rules/helpers.test.ts:717` "names a block a block,
 whatever status the challenge was served with",
 `test/fixtures/harness.test.ts:1350` "declares a column for every evidence key it
 writes, and writes every column it declares",
-`test/rules/registry.test.ts:795` "finds one defining file per rule, and the key
+`test/rules/registry.test.ts:798` "finds one defining file per rule, and the key
 spelled inside it".
 
 **A rule the crawl's judgement disables is refused, 409** (Deviation 3), and so
@@ -2857,7 +2857,7 @@ header on the catalog, and only on metric rules",
 and one row per scope",
 `test/rules/metric-table.test.ts:377` "gives every metric rule a table whose
 columns are the catalog's",
-`test/fixtures/harness.test.ts:2554` "renders every metric's table, with no
+`test/fixtures/harness.test.ts:2555` "renders every metric's table, with no
 empty column and no unmapped key".
 
 **`judgementStale`** (Phase 27a) is the answer's last key, `crawl_status`'s flag
@@ -3831,10 +3831,10 @@ canonicalises under noindex", `test/rules/health-metrics.test.ts:414`
 are over", `test/rules/copy.test.ts:1540` "says the counts are the authority, not the
 ratio", `test/rules/copy.test.ts:1557` "grades nothing: no score, no label, no
 threshold";
-`test/rules/coverage.test.ts:648` "site.health is filed under the
+`test/rules/coverage.test.ts:649` "site.health is filed under the
 engine-coverage check, and CHECK-32 lost no claimant" (the re-file in both
 directions, and CHECK-83 outside the crawl-derived universe);
-`test/fixtures/harness.test.ts:3547` "the health rollup agrees with a
+`test/fixtures/harness.test.ts:3548` "the health rollup agrees with a
 page-by-page recount" — an independent recount in JavaScript over the end-to-end
 fixture crawl.
 

@@ -616,8 +616,9 @@ function namesOf(pageUrl: string, rows: { source: string | null; value: string }
  * more distinct external URLs than `HIGH_EXTERNAL_OUTLINKS`. The two counts are
  * never added: a page with 100 of each has crossed neither line.
  *
- * Distinct targets, not link rows: the analyzer keeps one row per target, and
- * the rule does not depend on that. `max` is the limit that was crossed (the
+ * Distinct targets, not link rows: `deriveLinkCounts` counts distinct
+ * `target_url` per page (self-links and nofollow included) into
+ * `pages.outlinks_internal` / `outlinks_external`, and this rule reads them. `max` is the limit that was crossed (the
  * internal one when both were) and `crossed` says which.
  */
 async function highOutlinkFindings(
@@ -627,6 +628,21 @@ async function highOutlinkFindings(
   maxInternal: number,
   maxExternal: number,
 ): Promise<Finding[]> {
+  // The counts are written by `deriveLinkCounts`, which `runRules` runs before
+  // any query rule. A fetched page with a null count means it has not run;
+  // reading null as 0 would report "no high outlinks" for a crawl never judged.
+  const underived = await db.execute<{ page_url: string }>(sql`
+    select p.url as page_url
+    from pages p
+    where p.crawl_id = ${crawlId} and ${FETCHED_OK("p")} and p.outlinks_internal is null
+    limit 1`);
+  const first = underived.rows[0];
+  if (first !== undefined) {
+    throw new Error(
+      `${HIGH_OUTLINKS.id}: outlinks_internal is null on ${first.page_url} (crawl ${crawlId}); deriveLinkCounts has not run for this crawl`,
+    );
+  }
+
   const result = await db.execute<{
     page_id: string;
     page_url: string;
@@ -635,15 +651,12 @@ async function highOutlinkFindings(
     total_matches: number;
   }>(sql`
     select p.id as page_id, p.url as page_url,
-           (count(distinct l.target_url) filter (where l.is_internal))::int as internal_outlinks,
-           (count(distinct l.target_url) filter (where not l.is_internal))::int as external_outlinks,
+           p.outlinks_internal as internal_outlinks,
+           p.outlinks_external as external_outlinks,
            count(*) over ()::int as total_matches
-    from links l
-    join pages p on p.id = l.source_page_id and p.crawl_id = ${crawlId}
-    where l.crawl_id = ${crawlId} and ${FETCHED_OK("p")}
-    group by p.id, p.url
-    having count(distinct l.target_url) filter (where l.is_internal) > ${maxInternal}
-        or count(distinct l.target_url) filter (where not l.is_internal) > ${maxExternal}
+    from pages p
+    where p.crawl_id = ${crawlId} and ${FETCHED_OK("p")}
+      and (p.outlinks_internal > ${maxInternal} or p.outlinks_external > ${maxExternal})
     order by p.url
     ${limitTo(caps.listing)}`);
 

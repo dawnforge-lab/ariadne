@@ -53,6 +53,7 @@ const NEEDS_SPIDER = [
   "inlinks.distribution",
   "inlinks.extremes",
   "inlinks.sources-by-type",
+  "links.score-distribution",
   "structure.depth-distribution",
   "structure.click-depth-distribution",
   // Beyond the brief: its finding is "an alternate URL the crawl did not fetch",

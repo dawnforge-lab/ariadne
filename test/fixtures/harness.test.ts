@@ -2507,6 +2507,7 @@ describe("the fixture site end to end", () => {
       "inlinks.distribution",
       "inlinks.extremes",
       "inlinks.sources-by-type",
+      "links.score-distribution",
       "page.weight",
       "redirect.volume",
       "render.coverage",

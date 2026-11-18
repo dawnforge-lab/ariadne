@@ -1075,7 +1075,14 @@ const KINDS = ["page", "query", "metric"] as const satisfies readonly AnyRule["k
 //        4.14.0 marks it `reviewOnFail`, so it reports "needs review" and never
 //        a violation, and WCAG 2.2 removed the criterion it tested (4.1.1).
 //        227 rules: 72 page / 139 query / 16 metric.
-export const RULESET_VERSION = "0.27.0";
+// 0.28.0: Phase 29c, crawl analysis. ONE BUMP FOR THE PHASE; later tasks append here.
+//        `links.high-outlinks` reads `pages.outlinks_internal` / `outlinks_external`
+//        (filled by the derive step, `deriveLinkCounts`) instead of grouping the
+//        `links` table; same counts, same findings; a null count throws. New metric
+//        `links.score-distribution` (info; CHECK-33): the eight distribution
+//        numbers of `pages.link_score` (`deriveLinkScore`) for the site and each
+//        template. 228 rules: 72 page / 139 query / 17 metric.
+export const RULESET_VERSION = "0.28.0";
 
 /**
  * The 48 crawl-derived checks (sf-audit checklist, Pre-Crawl + sections 1–11,

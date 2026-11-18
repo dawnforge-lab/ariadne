@@ -30,6 +30,7 @@ import {
   pages,
   resources,
 } from "../../src/db/schema.js";
+import { deriveLinkCounts } from "../../src/rules/derive/link-counts.js";
 import { DEFAULT_THRESHOLDS, type ThresholdName } from "../../src/rules/judgement.js";
 import { directiveRules } from "../../src/rules/page/directives.js";
 import { onPageRules } from "../../src/rules/page/on-page.js";
@@ -324,6 +325,8 @@ describe("query rules, the runner and site.health against the database", () => {
       position: i,
     }));
     await db.insert(links).values(rows);
+    // `links.high-outlinks` reads the derived counts, which `runRules` fills first.
+    await deriveLinkCounts(db, crawlId);
   }
 
   const QUERY_ROWS: QueryRow[] = [
