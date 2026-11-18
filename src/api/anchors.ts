@@ -14,10 +14,15 @@
  * pages that use that anchor on a link to the target, so a page linking twice
  * with the same text counts once, and `topAnchors[].count` never exceeds
  * `inlinks`. A page linking with two different texts counts once under each.
- * `genericShare` is the distinct source pages with AT LEAST ONE empty or
- * non-descriptive link, over `inlinks`. That equals (empty + nonDescriptive) over
- * inlinks unless a page mixes the two classes, and unlike that sum it can never
- * pass 1.
+ * `genericShare` is the distinct source pages EVERY ONE OF WHOSE LINKS to the
+ * target is empty or non-descriptive, over `inlinks` (the final-review M4 ruling).
+ * So `genericShare` is 1 exactly when every inlink anchor is generic, the anchor
+ * condition `links.anchors-generic-only` fires on: a source with "Read more" AND a
+ * descriptive link to the target does not count. When every source links once it
+ * equals (empty + nonDescriptive) over inlinks (R6); it can never pass 1.
+ * `emptyAnchors` and `nonDescriptiveAnchors` stay per anchor class: the sources
+ * that use an empty (or a non-descriptive) anchor on ANY of their links to the
+ * target.
  *
  * Anchors are grouped by `NORMALISED_ANCHOR`, the comparison `links.non-descriptive-
  * anchor` and `links.anchors-generic-only` use, so a finding and this listing
@@ -50,7 +55,7 @@ export interface AnchorsByTargetRow {
   emptyAnchors: number;
   /** Distinct source pages whose link text is on `NON_DESCRIPTIVE_ANCHORS`. */
   nonDescriptiveAnchors: number;
-  /** Source pages with an empty or non-descriptive link, over `inlinks`, 4 places. */
+  /** Source pages whose every link to the target is empty or non-descriptive, over `inlinks`, 4 places. */
   genericShare: number;
 }
 
@@ -108,8 +113,12 @@ export function anchorsByTargetSql(
               (select coalesce(sum(n), 0) from pa where anchor = '')::int as empty_anchors,
               (select coalesce(sum(n), 0) from pa
                 where anchor <> '' and anchor in (${anchorList()}))::int as non_descriptive,
-              (select count(distinct sid) from sa
-                where anchor = '' or anchor in (${anchorList()}))::int as generic_sources,
+              -- A source is generic only when ALL its links to the target are.
+              (select count(*) from (
+                 select sid from sa
+                  group by sid
+                 having bool_and(anchor = '' or anchor in (${anchorList()}))
+              ) g)::int as generic_sources,
               coalesce((select jsonb_agg(jsonb_build_object('text', t.anchor, 'count', t.n)
                                          order by t.n desc, t.anchor asc)
                           from (select anchor, n from pa where anchor <> ''

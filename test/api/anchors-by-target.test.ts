@@ -8,6 +8,8 @@
  *   /t2 (product)      s1 links TWICE, "Click Here" and "click  here" (one source,
  *                      one anchor once normalised); s2 links with "" AND "read more"
  *   /t3 (untyped)      /target links with a null anchor; /t3 links to itself
+ *   /t4 (content)      s1 links with "Read more" AND "Blue widgets" (a mixed source,
+ *                      not generic); s2 links with "Read more" only (generic)
  *   /lonely            nothing links to it
  *
  * Every count is in DISTINCT SOURCE PAGES (`src/api/anchors.ts`).
@@ -71,13 +73,16 @@ const EDGES: Edge[] = [
   ["/s2", "/t2", ""],
   ["/s2", "/t2", "read more"],
   ["/target", "/t3", null],
+  ["/s1", "/t4", "Read more"],
+  ["/s1", "/t4", "Blue widgets"],
+  ["/s2", "/t4", "Read more"],
   // /top: six distinct anchors, a tie at ranks 5 and 6 ("echo" and "foxtrot").
   ["/s1", "/top", "alpha"], ["/s2", "/top", "alpha"], ["/s3", "/top", "bravo"],
   ["/s4", "/top", "charlie"], ["/s5", "/top", "delta"], ["/s6", "/top", "foxtrot"],
   ["/s7", "/top", "echo"],
   ["/t3", "/t3", "self link"],
 ];
-const PATHS = [...SOURCES, "/target", "/t2", "/t3", "/top", "/lonely"];
+const PATHS = [...SOURCES, "/target", "/t2", "/t3", "/t4", "/top", "/lonely"];
 /** The s3 -> /target link carries rel=nofollow: it still counts as an inlink. */
 const NOFOLLOW_FROM = "/s3";
 
@@ -201,7 +206,7 @@ describe("anchors_by_target rows", () => {
 
   it("lists only pages with internal inlinks, ordered by url", async () => {
     const rows = items((await tool("anchors_by_target", { crawlId: judgedId })).body);
-    expect(rows.map((r) => String(r["url"]).slice(SITE.length))).toEqual(["/t2", "/t3", "/target", "/top"]);
+    expect(rows.map((r) => String(r["url"]).slice(SITE.length))).toEqual(["/t2", "/t3", "/t4", "/target", "/top"]);
   });
 
   it("inlinks equals pages.inlinks_internal, and a self-link is not an inlink", async () => {
@@ -231,6 +236,17 @@ describe("anchors_by_target rows", () => {
     // empty + nonDescriptive over inlinks would be 3 / 2.
     expect(rows.get("/t2")?.["genericShare"]).toBe(1);
     for (const row of rows.values()) expect(row["genericShare"] as number).toBeLessThanOrEqual(1);
+  });
+
+  it("does not count a source whose links to the target mix generic and descriptive text", async () => {
+    const rows = byPath(items((await tool("anchors_by_target", { crawlId: judgedId })).body));
+    // s1 links "Read more" and "Blue widgets": not generic. s2 links "Read more" only.
+    // Both use "read more", so the class count is 2; the share counts s2 alone.
+    expect(rows.get("/t4")).toEqual({
+      url: url("/t4"), pageType: "content", inlinks: 2, distinctAnchors: 2,
+      topAnchors: [{ text: "read more", count: 2 }, { text: "blue widgets", count: 1 }],
+      emptyAnchors: 0, nonDescriptiveAnchors: 2, genericShare: 0.5,
+    });
   });
 
   it("reads a null anchor as empty, and an untyped target has a null pageType", async () => {
@@ -288,8 +304,8 @@ describe("anchors_by_target paging and filters", () => {
       cursor = res.nextCursor ?? undefined;
       pagesRead++;
     } while (cursor !== undefined && pagesRead < 10);
-    expect(seen).toEqual(["/t2", "/t3", "/target", "/top"]);
-    expect(pagesRead).toBe(4);
+    expect(seen).toEqual(["/t2", "/t3", "/t4", "/target", "/top"]);
+    expect(pagesRead).toBe(5);
   });
 
   it("filters by pageType, (untyped) included, and refuses a cohort that names no page", async () => {
@@ -319,6 +335,7 @@ describe("anchors_by_target CSV view", () => {
     expect(lines).toEqual([
       `${url("/t2")},product,2,3,1,2,1,click here (1); read more (1)`,
       `${url("/t3")},,1,1,1,0,1,`,
+      `${url("/t4")},content,2,2,0,2,0.5,read more (2); blue widgets (1)`,
       `${url("/target")},content,7,4,1,1,0.2857,blue widgets (4); click here (1); red (1)`,
       `${url("/top")},content,7,6,0,0,0,alpha (2); bravo (1); charlie (1); delta (1); echo (1)`,
     ]);

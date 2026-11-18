@@ -277,8 +277,9 @@ export interface OverviewSection {
  *    overrides, the disabled rules' findings left out.
  *
  * `notMeasured` names what the crawl could not measure, with the reason; it is
- * never written as zeros. It usually names a whole section (`click-depth` and
- * `issues-grid` on an unjudged crawl, `render` on one that never rendered), but
+ * never written as zeros. It usually names a whole section (`click-depth`,
+ * `link-counts` and `issues-grid` on an unjudged crawl, `link-counts` on one
+ * judged before 29c, `render` on one that never rendered), but
  * MAY NAME ONE ENTRY of a measured section: `render-coverage` (the render
  * section's coverage entry, on a crawl that rendered and was never judged) and
  * `robots-blocked-dropped` (the `urls` dropped count, on a crawl that predates
@@ -304,6 +305,13 @@ export const NOT_MEASURED_REASONS = {
   "render-coverage": "render coverage is a rules-run metric; run crawl_rules",
   "issues-grid": "no rules run has judged this crawl; run crawl_rules",
 } as const;
+
+/**
+ * The `link-counts` reason on a crawl with no rules run stamped (never judged,
+ * or a rules run in flight). The id is the same as the judged-before-29c case;
+ * the reason says which case it is.
+ */
+export const LINK_COUNTS_UNJUDGED_REASON = "link counts are derived by the rules run; run crawl_rules";
 
 type NotMeasuredId = keyof typeof NOT_MEASURED_REASONS;
 
@@ -843,7 +851,7 @@ async function issuesGridSection(
  *
  * Unlike the Issues Overview, an unjudged crawl is answered: every crawl-level
  * section is there, and only what the rules run produces (`click-depth`,
- * `issues-grid`, the render coverage entry) is named as not measured.
+ * `link-counts`, `issues-grid`, the render coverage entry) is named as not measured.
  */
 export async function buildCrawlOverview(
   db: Db,
@@ -861,8 +869,8 @@ export async function buildCrawlOverview(
 
     const sections: OverviewSection[] = [];
     const notMeasured: NotMeasured = [];
-    const skip = (id: NotMeasuredId): void => {
-      notMeasured.push({ id, reason: NOT_MEASURED_REASONS[id] });
+    const skip = (id: NotMeasuredId, reason: string = NOT_MEASURED_REASONS[id]): void => {
+      notMeasured.push({ id, reason });
     };
 
     sections.push(urlsSection(detail));
@@ -877,6 +885,8 @@ export async function buildCrawlOverview(
       const linkCounts = await linkCountsSection(tx, crawlId);
       if (linkCounts === null) skip("link-counts");
       else sections.push(linkCounts);
+    } else {
+      skip("link-counts", LINK_COUNTS_UNJUDGED_REASON);
     }
     sections.push(await discoverySection(tx, crawlId));
     sections.push(await responseTimeSection(tx, crawlId, slowMs));

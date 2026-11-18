@@ -1446,7 +1446,7 @@ Two properties make the double-transport claim below cheap to trust:
   tools Phase 27a added are not among the thirteen pairs; each has its own
   route-equals-tool test instead (`test/api/judgement-config.test.ts:657`
   "crawl_config_get answers what GET /crawls/:id/config answers",
-  `test/api/crawl-overview.test.ts:474` "serves the same answer at GET
+  `test/api/crawl-overview.test.ts:477` "serves the same answer at GET
   /crawls/:id/overview/crawl"). `GET /crawls/:id/overview/issues` has no
   route test of its own: it is the same service call as the tool, and the
   Phase 27a gate compared the two live, with and without `includeZero`, and
@@ -2589,7 +2589,10 @@ Its eleven sections, in this order: `urls`, `fetch-class`, `status-class`,
   `inlinks p50|p90|max`, `outlinks (internal) p50|p90|max` and `outlinks (external)
   p50|p90|max`, each a `percentile_disc` integer with a null percent. When any
   fetched-OK page has a null `inlinks_internal` (judged before 29c) the section is
-  absent and `notMeasured` names `link-counts`. A judged crawl with no fetched-OK
+  absent and `notMeasured` names `link-counts`; on a crawl no rules run has judged
+  (never judged, or a rules run in flight) it is absent and named too, with the
+  reason `link counts are derived by the rules run; run crawl_rules`, as
+  `click-depth` is. A judged crawl with no fetched-OK
   page keeps the section with `entries: []`: a measured empty set, not a missing
   fact. Pinned: `test/api/link-facts.test.ts:226` "the link-counts section of
   crawl_overview".
@@ -2614,8 +2617,9 @@ Its eleven sections, in this order: `urls`, `fetch-class`, `status-class`,
   run.
 
 **`notMeasured`** is `[{id, reason}]`. It names a whole section the crawl could
-not measure (`click-depth` and `issues-grid` on a crawl no rules run has
-judged, `render` on a crawl that never rendered), and MAY name one entry of a
+not measure (`click-depth`, `link-counts` and `issues-grid` on a crawl no rules
+run has judged, `link-counts` on a crawl judged before 29c, `render` on a crawl
+that never rendered), and MAY name one entry of a
 measured section (`render-coverage` on a rendered crawl not yet judged,
 `robots-blocked-dropped` on a crawl that predates the counter). The dev
 database's unjudged crawl from before migration 0020, `crawl_a696e51a`, came
@@ -2628,7 +2632,7 @@ unrendered crawl" (9 tests, among them `test/api/crawl-overview.test.ts:267`
 "takes every urls entry from the crawl_status field it names"),
 `test/api/crawl-overview.test.ts:419` "crawl_overview on other crawls" (7 tests:
 the unjudged, rendered and pre-0020 crawls, and the route), and
-`test/api/crawl-overview.test.ts:508` "the overviews read the judgement inside
+`test/api/crawl-overview.test.ts:511` "the overviews read the judgement inside
 their snapshot".
 
 ### 4.4 `issue_urls` → `{columns, items, nextCursor}` — one rule as a table
@@ -3116,10 +3120,16 @@ emptyAnchors, nonDescriptiveAnchors, genericShare
   anchor). An `aria-label` does not give it any: this listing is about link text.
   **`nonDescriptiveAnchors`** is the source pages whose link text is wholly one of the
   generic phrases ("click here", "read more", and the rest of the list the rules use).
-- **`genericShare`** is the source pages with at least one empty or non-descriptive
-  link, over `inlinks`, to four places. It equals (`emptyAnchors` +
-  `nonDescriptiveAnchors`) ÷ `inlinks` unless one page mixes the two kinds on its links
-  to the target, and unlike that sum it can never pass 1.
+- **`emptyAnchors` and `nonDescriptiveAnchors` are per anchor class:** a source
+  page counts in each class that any of its links to the target uses, so a page
+  linking once with `""` and once with "read more" counts in both.
+- **`genericShare`** is the source pages EVERY ONE of whose links to the target is
+  empty or non-descriptive, over `inlinks`, to four places. A page that links with
+  "Read more" and also with descriptive text does not count. So `genericShare` is 1
+  exactly when every inlink anchor is generic, the anchor condition
+  `links.anchors-generic-only` fires on (once `inlinks` reaches
+  `GENERIC_ANCHOR_MIN_INLINKS`). When every source links once it equals
+  (`emptyAnchors` + `nonDescriptiveAnchors`) ÷ `inlinks`; it can never pass 1.
 - **Filter:** `pageType` selects the targets by template cohort (`(untyped)` for the
   pages the crawl could not type); an unknown cohort is a 404-class refusal naming it,
   as on the other listings.
@@ -3129,13 +3139,15 @@ emptyAnchors, nonDescriptiveAnchors, genericShare
   no page links to. An unknown crawl and another tenant's crawl are the same 404.
 - The same rows are the `anchors_by_target` CSV view (§12).
 
-Pinned: `test/api/anchors-by-target.test.ts:184` ("answers the brief's fixture"),
-`test/api/anchors-by-target.test.ts:216` ("counts distinct source pages"),
-`test/api/anchors-by-target.test.ts:229` ("keeps genericShare at or below 1"),
-`test/api/anchors-by-target.test.ts:281` ("a cursor walk returns every row exactly
-once"), `test/api/anchors-by-target.test.ts:315` ("writes the header and the same
-rows"), `test/api/anchors-by-target.test.ts:334` ("a crawl judged before 29c is a
-CONFLICT"), `test/api/anchors-by-target.test.ts:348` ("an unknown crawl is NOT_FOUND,
+Pinned: `test/api/anchors-by-target.test.ts:189` ("answers the brief's fixture"),
+`test/api/anchors-by-target.test.ts:221` ("counts distinct source pages"),
+`test/api/anchors-by-target.test.ts:234` ("keeps genericShare at or below 1"),
+`test/api/anchors-by-target.test.ts:241` ("does not count a source whose links to the
+target mix generic and descriptive text"),
+`test/api/anchors-by-target.test.ts:297` ("a cursor walk returns every row exactly
+once"), `test/api/anchors-by-target.test.ts:331` ("writes the header and the same
+rows"), `test/api/anchors-by-target.test.ts:351` ("a crawl judged before 29c is a
+CONFLICT"), `test/api/anchors-by-target.test.ts:365` ("an unknown crawl is NOT_FOUND,
 and so is another tenant's").
 
 ### 4.7 `robots_get` → the robots.txt this crawl obeyed
@@ -3775,11 +3787,14 @@ an empty % of Judged cell when pagesJudged is null".
 `{id, reason}` shape.) A section the crawl could not measure is
 ABSENT from `sections` and named in `notMeasured` as `{id, reason}`; an entry
 of a measured section can be named the same way. Never a section of zeros. The
-reasons, verbatim (`NOT_MEASURED_REASONS` in `src/api/overview.ts`):
+reasons, verbatim (`NOT_MEASURED_REASONS` in `src/api/overview.ts`, and
+`LINK_COUNTS_UNJUDGED_REASON` beside it: `link-counts` has one id and two reasons,
+one per case):
 
 | id | names | reason |
 |---|---|---|
 | `click-depth` | the section, on a crawl no rules run has judged | `click depth is derived by the rules run; run crawl_rules` |
+| `link-counts` | the section, on a crawl no rules run has judged (never judged, or a rules run in flight) | `link counts are derived by the rules run; run crawl_rules` (`LINK_COUNTS_UNJUDGED_REASON`) |
 | `link-counts` | the section, on a crawl judged before link counts existed | `judged before link counts existed; re-run the rules` |
 | `issues-grid` | the section, on a crawl no rules run has judged | `no rules run has judged this crawl; run crawl_rules` |
 | `render` | the section, on a crawl that never rendered | `no render pass ran` |
@@ -3793,12 +3808,12 @@ percent means "not a share of Encountered", not "not measured". In the CSV view
 each `notMeasured` item is a row after the entries, `<id>,Not measured:
 <reason>,,` with empty Value and Percent cells. Pinned:
 `test/api/crawl-overview.test.ts:248` "lists the measured sections in order and
-names render as not measured", `test/api/crawl-overview.test.ts:442` "names
+names render as not measured", `test/api/crawl-overview.test.ts:445` "names
 render coverage as not measured on a rendered crawl no rules run judged",
-`test/api/crawl-overview.test.ts:453` "names an uncounted robots overflow
-(pre-0020 crawl) instead of writing 0", `test/api/crawl-overview.test.ts:546`
-"crawl_overview names issues-grid and click-depth as not measured, never zeros",
-`test/api/crawl-overview.test.ts:567` "has the exact header and one row per JSON
+`test/api/crawl-overview.test.ts:456` "names an uncounted robots overflow
+(pre-0020 crawl) instead of writing 0", `test/api/crawl-overview.test.ts:549`
+"crawl_overview names issues-grid, click-depth and link-counts as not measured, never zeros",
+`test/api/crawl-overview.test.ts:571` "has the exact header and one row per JSON
 entry, then the not-measured rows".
 
 ---

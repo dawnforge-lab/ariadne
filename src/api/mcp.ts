@@ -1429,9 +1429,10 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "  issues-grid: finding rows by type/priority (issue/high … opportunity/low), " +
         "the crawl's overrides applied and the disabled rules' findings left out.\n\n" +
         "NOT MEASURED IS NAMED, NEVER ZERO. A section the crawl could not measure is " +
-        "absent from sections and listed in notMeasured as {id, reason}: click-depth " +
-        "and issues-grid on a crawl no rules run has judged, link-counts on a crawl " +
-        "judged before link counts existed (re-run the rules), render on a crawl that " +
+        "absent from sections and listed in notMeasured as {id, reason}: click-depth, " +
+        "link-counts and issues-grid on a crawl no rules run has judged (never judged, " +
+        "or a rules run in flight), link-counts on a crawl judged before link counts " +
+        "existed (re-run the rules), render on a crawl that " +
         "never rendered. notMeasured MAY ALSO NAME ONE ENTRY of a measured section: " +
         "render-coverage (a rendered crawl not yet judged) and robots-blocked-dropped " +
         "(a crawl that predates the counter). An unjudged crawl is answered, not " +
@@ -1921,9 +1922,13 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "count descending then text ascending. emptyAnchors is the source pages whose " +
         "link has no text at all (an aria-label does not give it any: this is about " +
         "link text). nonDescriptiveAnchors is the source pages whose link text is " +
-        "wholly a generic phrase ('click here', 'read more', ...). genericShare is " +
-        "the source pages with at least one empty or non-descriptive link, over " +
-        "inlinks, to four places, so it never passes 1.\n\n" +
+        "wholly a generic phrase ('click here', 'read more', ...); a page counts in " +
+        "each class any of its links to the target uses. genericShare is the source " +
+        "pages EVERY ONE of whose links to the target is empty or non-descriptive, " +
+        "over inlinks, to four places: a page with 'read more' and a descriptive link " +
+        "does not count, so genericShare is 1 exactly when every inlink anchor is " +
+        "generic, the condition links.anchors-generic-only fires on (once inlinks " +
+        "reach its threshold). It never passes 1.\n\n" +
         "REFUSED, never answered empty, on a crawl the rules have not judged and on " +
         "one judged before link counts existed (409): run crawl_rules and ask again.\n\n" +
         "pageType filters the TARGETS by template cohort; '(untyped)' for the pages " +

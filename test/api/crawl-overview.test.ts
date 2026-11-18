@@ -419,9 +419,12 @@ describe("crawl_overview on a judged, unrendered crawl", () => {
 describe("crawl_overview on other crawls", () => {
   it("still answers the crawl-level sections on an unjudged crawl", async () => {
     const o = await overview(unjudgedId);
-    expect(o.notMeasured.map((n) => n.id)).toEqual(["click-depth", "render", "issues-grid"]);
+    expect(o.notMeasured.map((n) => n.id)).toEqual(["click-depth", "link-counts", "render", "issues-grid"]);
     expect(o.notMeasured[0]!.reason).toBe(
       "click depth is derived by the rules run; run crawl_rules",
+    );
+    expect(o.notMeasured[1]!.reason).toBe(
+      "link counts are derived by the rules run; run crawl_rules",
     );
     expect(o.sections.map((s) => s.id)).toEqual([
       "urls", "fetch-class", "status-class", "content", "indexability", "discovery", "response-time",
@@ -543,14 +546,15 @@ describe("the overviews read the judgement inside their snapshot", () => {
     await raced.close();
   });
 
-  it("crawl_overview names issues-grid and click-depth as not measured, never zeros", async () => {
+  it("crawl_overview names issues-grid, click-depth and link-counts as not measured, never zeros", async () => {
     expect((await service.getCrawl(LOCAL_TENANT, racedId)).rulesRunAt).not.toBeNull();
     armed = true;
     const o = await raced.crawlOverview(LOCAL_TENANT, racedId);
     expect(armed).toBe(false); // the reset really landed mid-call
     expect(o.sections.map((s) => s.id)).not.toContain("issues-grid");
+    expect(o.sections.map((s) => s.id)).not.toContain("link-counts");
     expect(o.notMeasured.map((n) => n.id)).toEqual(
-      expect.arrayContaining(["click-depth", "issues-grid"]),
+      expect.arrayContaining(["click-depth", "link-counts", "issues-grid"]),
     );
   });
 
