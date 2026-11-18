@@ -289,20 +289,35 @@ async function main(): Promise<number> {
     throw error;
   } finally {
     clearInterval(timer);
+    // In its own try, as gate-rules does: a write that fails is said, loudly,
+    // and fails the run (`jsonOutFailed`, read where the exit code is set),
+    // without masking an error the run already threw — and the cleanup below
+    // runs regardless.
     if (args.jsonOut !== null) {
-      writeFileSync(
-        args.jsonOut,
-        `${JSON.stringify(
-          { node: process.version, database: dbName, pages, isGate, smoke: args.smoke, base: args.base, head: args.head, passed: recorded.length === 0, failures: recorded, measurements },
-          null,
-          2,
-        )}\n`,
-      );
-      console.log(line("json out", args.jsonOut));
+      try {
+        writeFileSync(
+          args.jsonOut,
+          `${JSON.stringify(
+            { node: process.version, database: dbName, pages, isGate, smoke: args.smoke, base: args.base, head: args.head, passed: recorded.length === 0, failures: recorded, measurements },
+            null,
+            2,
+          )}\n`,
+        );
+        console.log(line("json out", args.jsonOut));
+      } catch (error) {
+        jsonOutFailed = true;
+        console.error(
+          `FAIL: writing --json-out ${args.jsonOut} failed — ` +
+            `${error instanceof Error ? error.message : String(error)}; the run fails with it`,
+        );
+      }
     }
     await service.close();
     await closeDb(db);
   }
 }
 
-process.exitCode = await main();
+/** Set when the --json-out write failed: the run fails even if every check passed. */
+let jsonOutFailed = false;
+const code = await main();
+process.exitCode = jsonOutFailed ? 1 : code;
