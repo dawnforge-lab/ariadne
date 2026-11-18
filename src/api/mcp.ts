@@ -1409,13 +1409,17 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "JavaScript|Other (fetch class non_html), Resource: Image|CSS|JavaScript. " +
         "Each percent is against its own group's subtotal. too_large and " +
         "unsupported_encoding pages are in neither page group.\n" +
+        "  link-counts (judged crawls only): over the fetched-OK pages, inlinks, " +
+        "outlinks (internal) and outlinks (external), each as p50, p90 and max; " +
+        "integer counts, percent null.\n" +
         "  render: Pages rendered (live), then Render coverage (<ran|none|failed>) " +
         "from the stored render.coverage metric.\n" +
         "  issues-grid: finding rows by type/priority (issue/high … opportunity/low), " +
         "the crawl's overrides applied and the disabled rules' findings left out.\n\n" +
         "NOT MEASURED IS NAMED, NEVER ZERO. A section the crawl could not measure is " +
         "absent from sections and listed in notMeasured as {id, reason}: click-depth " +
-        "and issues-grid on a crawl no rules run has judged, render on a crawl that " +
+        "and issues-grid on a crawl no rules run has judged, link-counts on a crawl " +
+        "judged before link counts existed (re-run the rules), render on a crawl that " +
         "never rendered. notMeasured MAY ALSO NAME ONE ENTRY of a measured section: " +
         "render-coverage (a rendered crawl not yet judged) and robots-blocked-dropped " +
         "(a crawl that predates the counter). An unjudged crawl is answered, not " +

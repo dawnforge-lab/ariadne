@@ -1572,7 +1572,7 @@ argument nobody allowed, naming it").
 **Not paginated, on purpose:** `rules_catalog`, `crawl_compare` and (Phase 27a)
 `issues_overview`. All three are bounded by the **ruleset** (188 rows at 0.23.0,
 174 of them finding rules) rather than by the crawl; `crawl_overview` is bounded
-by its ten sections and the crawl's page types. The
+by its eleven sections and the crawl's page types. The
 catalog is ~196 KB (**200,260 bytes**, measured 2026-11-08 at the end of Phase
 27a over all 188 rows of ruleset 0.23.0 the same way, with no crawl id — 16
 markers at 2,487 bytes and the fourteen tables at 5,620; the 6,074 bytes over the
@@ -2585,8 +2585,10 @@ Its eleven sections, in this order: `urls`, `fetch-class`, `status-class`,
   `inlinks p50|p90|max`, `outlinks (internal) p50|p90|max` and `outlinks (external)
   p50|p90|max`, each a `percentile_disc` integer with a null percent. When any
   fetched-OK page has a null `inlinks_internal` (judged before 29c) the section is
-  absent and `notMeasured` names `link-counts`. Pinned in
-  `test/api/link-facts.test.ts`.
+  absent and `notMeasured` names `link-counts`. A judged crawl with no fetched-OK
+  page keeps the section with `entries: []`: a measured empty set, not a missing
+  fact. Pinned: `test/api/link-facts.test.ts:226` "the link-counts section of
+  crawl_overview".
 - **`response-time` buckets are fixed** (Deviation 5): `Under 250 ms`,
   `250–500 ms`, `500–1000 ms`, `1000–2000 ms`, `2000+ ms`, each `[lo, hi)`, and
   `No response time`. Then `Over SLOW_MS (<n> ms)` counts the pages strictly over

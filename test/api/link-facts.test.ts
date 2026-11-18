@@ -255,3 +255,12 @@ describe("the link-counts section of crawl_overview", () => {
     );
   });
 });
+
+describe("the crawl_overview tool description", () => {
+  it("names link-counts and its not-measured case", async () => {
+    const listed = await client.listTools();
+    const description = listed.tools.find((t) => t.name === "crawl_overview")?.description ?? "";
+    expect(description).toContain("link-counts");
+    expect(description).toContain("judged before link counts existed");
+  });
+});
