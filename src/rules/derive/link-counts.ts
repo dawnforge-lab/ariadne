@@ -41,10 +41,14 @@ export interface LinkCountsDerivation extends Record<string, number> {
 /**
  * Recompute the three columns for one crawl.
  *
- * IDEMPOTENT BY NULL-THEN-SET inside one transaction, as `deriveClickDepth` is:
- * the columns are cleared for the crawl first, so a count that no longer holds
- * (a link removed from a template) cannot survive a re-run, and a reader never
- * sees a half-written crawl.
+ * ONE STATEMENT WRITES THE FINAL VALUE OF EVERY ROW of the crawl, null included
+ * (the outlink counts of a page that is not FETCHED_OK), so a count that no
+ * longer holds (a link removed from a template) cannot survive a re-run. The
+ * write is guarded by `is distinct from`: a row whose three values are already
+ * right is not rewritten, so a re-run over an unchanged crawl writes almost
+ * nothing (`pages` carries many indexes, and every rewritten row touches each
+ * of them; final review M1). It runs in one transaction with the read-back, so
+ * a reader never sees a half-written crawl.
  */
 export async function deriveLinkCounts(db: Db, crawlId: string): Promise<LinkCountsDerivation> {
   const crawl = await db
@@ -56,14 +60,8 @@ export async function deriveLinkCounts(db: Db, crawlId: string): Promise<LinkCou
 
   return db.transaction(async (tx) => {
     await tx.execute(sql`
-      update pages
-      set inlinks_internal = null, outlinks_internal = null, outlinks_external = null
-      where crawl_id = ${crawlId}`);
-
-    // INLINKS, every row, 0 when nothing links in (the left join + count).
-    await tx.execute(sql`
-      update pages t set inlinks_internal = agg.n
-      from (
+      with inl as (
+        -- INLINKS, every row, 0 when nothing links in (the left join + count).
         select p.id as id, count(distinct l.source_page_id)::int as n
         from pages p
         left join links l
@@ -72,13 +70,8 @@ export async function deriveLinkCounts(db: Db, crawlId: string): Promise<LinkCou
          and l.source_page_id <> p.id
         where p.crawl_id = ${crawlId}
         group by p.id
-      ) agg
-      where t.crawl_id = ${crawlId} and t.id = agg.id`);
-
-    // OUTLINKS, FETCHED_OK sources only, 0 when the page carries no links.
-    await tx.execute(sql`
-      update pages t set outlinks_internal = agg.internal, outlinks_external = agg.external
-      from (
+      ), outl as (
+        -- OUTLINKS, FETCHED_OK sources only, 0 when the page carries no links.
         select p.id as id,
                (count(distinct l.target_url) filter (where l.is_internal))::int as internal,
                (count(distinct l.target_url) filter (where not l.is_internal))::int as external
@@ -87,8 +80,19 @@ export async function deriveLinkCounts(db: Db, crawlId: string): Promise<LinkCou
           on l.crawl_id = ${crawlId} and l.source_page_id = p.id
         where p.crawl_id = ${crawlId} and ${FETCHED_OK("p")}
         group by p.id
-      ) agg
-      where t.crawl_id = ${crawlId} and t.id = agg.id`);
+      ), agg as (
+        -- Every row of the crawl; outl's absence is a non-FETCHED_OK page: null.
+        select inl.id, inl.n, outl.internal, outl.external
+        from inl left join outl on outl.id = inl.id
+      )
+      update pages t
+      set inlinks_internal = agg.n,
+          outlinks_internal = agg.internal,
+          outlinks_external = agg.external
+      from agg
+      where t.crawl_id = ${crawlId} and t.id = agg.id
+        and (t.inlinks_internal, t.outlinks_internal, t.outlinks_external)
+            is distinct from (agg.n, agg.internal, agg.external)`);
 
     const row = (
       await tx.execute<{ pages: number; with_inlinks: number; analysed: number }>(sql`

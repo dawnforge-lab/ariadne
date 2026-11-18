@@ -28,6 +28,15 @@
  * ln(max/min))` over the graph's pages, so 100 is the crawl's top page. When
  * max = min (or the ratio is not above 1) every page scores 100. Rows outside
  * the graph keep null in both columns.
+ *
+ * THE WRITES (final review M1, M2). The rank vector alternates between two temp
+ * tables, each iteration truncating and refilling the one it writes, so no
+ * iteration leaves dead tuples behind in a table the next one scans (temp
+ * tables are never vacuumed). `pages` is written ONCE: one statement sets the
+ * final value of every row of the crawl, null included for the rows outside
+ * the graph, guarded by `is distinct from` so a row already right is not
+ * rewritten (`pages` carries many indexes, and every rewritten row touches each
+ * of them).
  */
 import { eq, sql } from "drizzle-orm";
 
@@ -56,9 +65,10 @@ export interface LinkScoreDerivation extends Record<string, number> {
 }
 
 /**
- * Recompute both columns for one crawl, IDEMPOTENT BY NULL-THEN-SET inside one
- * transaction (as `deriveLinkCounts` is). The temp tables are `on commit drop`,
- * so a failure leaves nothing behind.
+ * Recompute both columns for one crawl inside one transaction: every row of the
+ * crawl is given its final value (null outside the graph), so a stale score
+ * cannot survive a re-run and a reader never sees a half-written crawl. The
+ * temp tables are `on commit drop`, so a failure leaves nothing behind.
  */
 export async function deriveLinkScore(db: Db, crawlId: string): Promise<LinkScoreDerivation> {
   const crawl = await db
@@ -69,10 +79,6 @@ export async function deriveLinkScore(db: Db, crawlId: string): Promise<LinkScor
   if (crawl.length === 0) throw new Error(`deriveLinkScore: no such crawl '${crawlId}'`);
 
   return db.transaction(async (tx) => {
-    await tx.execute(sql`
-      update pages set link_score_raw = null, link_score = null
-      where crawl_id = ${crawlId}`);
-
     await tx.execute(sql`
       create temporary table ls_nodes (
         n int primary key, page_id text not null, outdeg int not null default 0
@@ -87,7 +93,14 @@ export async function deriveLinkScore(db: Db, crawlId: string): Promise<LinkScor
       await tx.execute<{ n: number }>(sql`select count(*)::int as n from ls_nodes`)
     ).rows[0]?.n;
     if (nodes === undefined) throw new Error(`deriveLinkScore: crawl '${crawlId}' counted no nodes`);
-    if (nodes === 0) return { nodes: 0, edges: 0, dangling: 0, iterations: 0, converged: 1 };
+    if (nodes === 0) {
+      // No graph: every row of the crawl is outside it, so both columns are null.
+      await tx.execute(sql`
+        update pages set link_score_raw = null, link_score = null
+        where crawl_id = ${crawlId}
+          and (link_score_raw is not null or link_score is not null)`);
+      return { nodes: 0, edges: 0, dangling: 0, iterations: 0, converged: 1 };
+    }
 
     await tx.execute(sql`
       create temporary table ls_edges (src int not null, dst int not null) on commit drop`);
@@ -116,30 +129,35 @@ export async function deriveLinkScore(db: Db, crawlId: string): Promise<LinkScor
     ).rows[0];
     if (counts === undefined) throw new Error(`deriveLinkScore: crawl '${crawlId}' counted no edges`);
 
+    // Two rank tables whose roles swap every iteration: `cur` holds the vector
+    // read, `nxt` is truncated and refilled with the next one. The names are the
+    // two literals below, never input.
     await tx.execute(sql`
-      create temporary table ls_rank (n int primary key, v double precision not null)
+      create temporary table ls_rank_a (n int primary key, v double precision not null)
       on commit drop`);
     await tx.execute(sql`
-      create temporary table ls_next (n int primary key, v double precision not null)
+      create temporary table ls_rank_b (n int primary key, v double precision not null)
       on commit drop`);
-    await tx.execute(sql`insert into ls_rank (n, v) select n, 1.0::float8 / ${nodes}::float8 from ls_nodes`);
+    let cur = sql.raw("ls_rank_a");
+    let nxt = sql.raw("ls_rank_b");
+    await tx.execute(sql`insert into ${cur} (n, v) select n, 1.0::float8 / ${nodes}::float8 from ls_nodes`);
 
     const d = LINK_SCORE_DAMPING;
     let iterations = 0;
     let converged = 0;
     while (iterations < LINK_SCORE_MAX_ITERATIONS) {
       iterations += 1;
-      await tx.execute(sql`truncate ls_next`);
+      await tx.execute(sql`truncate ${nxt}`);
       await tx.execute(sql`
-        insert into ls_next (n, v)
+        insert into ${nxt} (n, v)
         with dang as (
           select coalesce(sum(r.v), 0)::float8 as w
-          from ls_rank r join ls_nodes nd on nd.n = r.n
+          from ${cur} r join ls_nodes nd on nd.n = r.n
           where nd.outdeg = 0
         ), inc as (
           select e.dst as n, sum(r.v / nd.outdeg)::float8 as s
           from ls_edges e
-          join ls_rank r on r.n = e.src
+          join ${cur} r on r.n = e.src
           join ls_nodes nd on nd.n = e.src
           group by e.dst
         )
@@ -153,34 +171,43 @@ export async function deriveLinkScore(db: Db, crawlId: string): Promise<LinkScor
       const delta = (
         await tx.execute<{ delta: number }>(sql`
           select sum(abs(x.v - r.v))::float8 as delta
-          from ls_next x join ls_rank r on r.n = x.n`)
+          from ${nxt} x join ${cur} r on r.n = x.n`)
       ).rows[0]?.delta;
       if (delta === undefined || delta === null || !Number.isFinite(Number(delta))) {
         throw new Error(`deriveLinkScore: crawl '${crawlId}' produced a non-finite change at iteration ${iterations}`);
       }
-      await tx.execute(sql`
-        update ls_rank r set v = x.v from ls_next x where r.n = x.n`);
+      // The vector just written is the one the next iteration (or the score) reads.
+      [cur, nxt] = [nxt, cur];
       if (Number(delta) < LINK_SCORE_TOLERANCE) {
         converged = 1;
         break;
       }
     }
 
+    // Every row of the crawl: the graph's pages get their score, the rest null.
     await tx.execute(sql`
       with b as (
-        select min(v) as lo, max(v) as hi from ls_rank
+        select min(v) as lo, max(v) as hi from ${cur}
       ), s as (
-        select r.n, r.v, b.lo, b.hi, ln(b.hi / b.lo) as span from ls_rank r cross join b
+        select r.n, r.v, b.lo, b.hi, ln(b.hi / b.lo) as span from ${cur} r cross join b
+      ), fin as (
+        select p.id,
+               s.v as raw,
+               case
+                 when s.n is null then null
+                 when s.span > 0 then round(100 * ln(s.v / s.lo) / s.span)::int
+                 else 100
+               end as score
+        from pages p
+        left join ls_nodes nd on nd.page_id = p.id
+        left join s on s.n = nd.n
+        where p.crawl_id = ${crawlId}
       )
       update pages p
-      set link_score_raw = s.v,
-          link_score = case
-            when s.span > 0 then round(100 * ln(s.v / s.lo) / s.span)::int
-            else 100
-          end
-      from s
-      join ls_nodes nd on nd.n = s.n
-      where p.crawl_id = ${crawlId} and p.id = nd.page_id`);
+      set link_score_raw = fin.raw, link_score = fin.score
+      from fin
+      where p.crawl_id = ${crawlId} and p.id = fin.id
+        and (p.link_score_raw, p.link_score) is distinct from (fin.raw, fin.score)`);
 
     return {
       nodes,
