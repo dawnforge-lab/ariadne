@@ -1,5 +1,5 @@
 /**
- * The MCP transport: thirty-five tools over the same service layer the HTTP
+ * The MCP transport: thirty-six tools over the same service layer the HTTP
  * routes use. Twelve of them change something (`crawl_start`, `crawl_resume`,
  * `crawl_pause`, `crawl_cancel`, `crawl_delete`, `crawl_render`, `crawl_rules`,
  * `crawl_mark_failed`, `crawl_config_set`, `schedule_create`, `schedule_update`,
@@ -77,6 +77,7 @@ import { RENDER_PASS_EVIDENCE } from "../rules/metric/render-metrics.js";
 import { METRIC_SCOPES } from "../rules/registry/types.js";
 import type { McpServerConfig } from "./config.js";
 import { credentialInputSchemas } from "./config-schema.js";
+import { ANCHORS_TOP_N } from "./anchors.js";
 import { CSV_VIEWS, EXPORT_FORMATS } from "./csv.js";
 import { strictInput } from "./mcp-input.js";
 import { STRUCTURED_DATA_FORMATS, STRUCTURED_DATA_PROBLEMS } from "./structured-data.js";
@@ -140,6 +141,7 @@ export const TOOL_NAMES = [
   "metric_table",
   "pages_query",
   "structured_data",
+  "anchors_by_target",
   "export_crawl",
   "rules_catalog",
   "crawl_compare",
@@ -193,6 +195,7 @@ The order of operations is fixed by what the evidence means:
   4. crawl_rules   runs every rule over the finished crawl and writes the
                    findings. Refused while the crawl is still moving.
   5. issues_list / issue_urls / metrics_get / pages_query read the results.
+                   anchors_by_target reads which anchor texts link to each page.
                    robots_get reads the robots.txt the crawl obeyed.
                    rules_catalog reads the checklist itself — every rule and,
                    with a crawlId, whether it fired on that crawl (including the
@@ -1886,6 +1889,55 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
   );
 
   server.registerTool(
+    named("anchors_by_target"),
+    {
+      title: "Which anchor texts link to each page",
+      description:
+        "One row per page that at least one other page of the crawl links to, any " +
+        "fetch class: {url, pageType, inlinks, distinctAnchors, topAnchors, " +
+        "emptyAnchors, nonDescriptiveAnchors, genericShare}. A page nothing links to " +
+        "is not listed. Use it to see how the site describes its own pages in link " +
+        "text, and which targets are linked with text that says nothing, before " +
+        "reading links.non-descriptive-anchor, links.no-anchor-text and " +
+        "links.anchors-generic-only.\n\n" +
+        "WHAT IS COUNTED: DISTINCT SOURCE PAGES, throughout. inlinks is the page's " +
+        "internal inlink count as pages_query's inlinksInternal gives it (distinct " +
+        "pages linking to it, itself excluded, nofollow links counted). Every anchor " +
+        "count is the number of distinct source pages using that anchor on a link to " +
+        "the target, so a page that links twice with the same text counts once, and " +
+        "no count passes inlinks.\n\n" +
+        "Anchors are compared lower-cased, trimmed, with runs of whitespace collapsed. " +
+        "distinctAnchors counts the distinct anchors, the empty one included. " +
+        `topAnchors are the ${ANCHORS_TOP_N} most frequent NON-EMPTY anchors, {text, count}, ` +
+        "count descending then text ascending. emptyAnchors is the source pages whose " +
+        "link has no text at all (an aria-label does not give it any: this is about " +
+        "link text). nonDescriptiveAnchors is the source pages whose link text is " +
+        "wholly a generic phrase ('click here', 'read more', ...). genericShare is " +
+        "the source pages with at least one empty or non-descriptive link, over " +
+        "inlinks, to four places, so it never passes 1.\n\n" +
+        "REFUSED, never answered empty, on a crawl the rules have not judged and on " +
+        "one judged before link counts existed (409): run crawl_rules and ask again.\n\n" +
+        "pageType filters the TARGETS by template cohort; '(untyped)' for the pages " +
+        "the crawl could not type. Ordered by URL. " +
+        `Paginated: {items, nextCursor}; limit defaults to ${PAGE_SIZE_DEFAULT}, ` +
+        `maximum ${PAGE_SIZE_MAX}. Pass nextCursor back as cursor to continue. The ` +
+        "same rows are a spreadsheet through export_crawl (format=csv, " +
+        "view=anchors_by_target).",
+      inputSchema: strictInput({
+        crawlId: crawlIdField(),
+        pageType: z
+          .string()
+          .describe("Only target pages of this template cohort, e.g. 'product', or '(untyped)'.")
+          .optional(),
+        limit: limitField(),
+        cursor: cursorField(),
+      }),
+    },
+    async ({ crawlId, ...rest }) =>
+      run("anchors_by_target", () => service.listAnchorsByTarget(tenant, crawlId, defined(rest))),
+  );
+
+  server.registerTool(
     named("robots_get"),
     {
       title: "The site's robots.txt, as this crawl read it",
@@ -2181,7 +2233,7 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "metric_table is one metric's table and needs a metricId; issues_overview is " +
         "the issues_overview tool's one-row-per-rule table; crawl_overview is the " +
         "crawl_overview tool's sections as Section,Label,Value,Percent rows; the other " +
-        "eight, like the two overviews, refuse both. Answers {format, view, path, rows, " +
+        "nine, like the two overviews, refuse both. Answers {format, view, path, rows, " +
         "bytes}, plus disabledRules on the four views that read findings (issues, " +
         "issue_urls, issues_overview, crawl_overview): the rules the crawl's judgement " +
         "disables, whose findings the file leaves out, with notMeasured beside it. " +
@@ -2201,6 +2253,11 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "and problem, and one row with an empty Problem for a block with none. " +
         "Refused, as the listing is, on a crawl the rules have not judged or judged " +
         "before structured data validation existed.\n" +
+        "  anchors_by_target is the anchors_by_target listing as a file — url, " +
+        "pageType, inlinks, distinctAnchors, emptyAnchors, nonDescriptiveAnchors, " +
+        "genericShare, topAnchors (rendered 'text (n); text (n)'). Refused, as the " +
+        "listing is, on a crawl the rules have not judged or judged before link counts " +
+        "existed.\n" +
         "'dataset' is the first format's word and 'view' is the second's; asking " +
         "with both is refused rather than resolved.\n\n" +
         "WHAT THE CSV LOOKS LIKE, because a human opens it and you are the one who " +

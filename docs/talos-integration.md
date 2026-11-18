@@ -283,6 +283,8 @@ crawler inside Talos. The intended shape:
   (schedules and their credentials, crawl history; `docs/gates/phase-28c.md`).
   Phase 29a adds the `structured_data` tool and route, read-only and tenant-scoped like
   the other per-crawl reads, and touches obligation 6 only (see there).
+  Phase 29c adds the `anchors_by_target` tool, route and CSV view on the same terms:
+  read-only, tenant-scoped, a foreign crawl answering as a missing one (obligation 9).
 - Talos repo pointer to this project: `docs/talos/crawler-engine.md` in the
   talos repo (`github.com/dawnforge-lab/talos`, local `/home/eugen-dev/Documents/Workflows/talos`).
 - Talos deep history: serena memory `talos-rewrite-status` in the talos

@@ -289,6 +289,12 @@ import {
 } from "../schedule/store.js";
 import { tenantExportDir, type TenantId } from "../tenant.js";
 import {
+  anchorsByTargetRow,
+  anchorsByTargetSql,
+  type AnchorsByTargetRaw,
+  type AnchorsByTargetRow,
+} from "./anchors.js";
+import {
   buildCrawlOverview,
   buildIssuesOverview,
   type CrawlOverview,
@@ -2380,6 +2386,13 @@ export interface StructuredDataQuery {
   pageType?: string;
   /** One of `STRUCTURED_DATA_FORMATS`: pages holding at least one block of it. */
   format?: string;
+  limit?: number;
+  cursor?: string;
+}
+
+/** The filters `GET /crawls/:id/anchors-by-target` accepts. Every one is validated. */
+export interface AnchorsByTargetQuery {
+  pageType?: string;
   limit?: number;
   cursor?: string;
 }
@@ -7085,6 +7098,74 @@ export class ApiService {
   }
 
   /**
+   * Which anchor texts the crawl's internal links use, target page by target
+   * page (Phase 29c, ruling R6; `src/api/anchors.ts` says what is counted).
+   *
+   * One row per page with at least one internal inlink, any fetch class,
+   * ordered by URL with `listPages`' one-column cursor. Refused with CONFLICT,
+   * never an empty page, on a crawl the rules have not judged and on one judged
+   * before link counts existed (`assertAnchorsJudged`): the listing's rows are
+   * selected on `inlinks_internal`, and a null there would read as "no page is
+   * linked to". The refusal and the read share one repeatable-read snapshot.
+   */
+  async listAnchorsByTarget(
+    tenant: TenantId,
+    crawlId: string,
+    opts: AnchorsByTargetQuery = {},
+  ): Promise<Page<AnchorsByTargetRow>> {
+    await this.assertCrawl(tenant, crawlId);
+    const limit = parseLimit(opts.limit);
+    const cursor = opts.cursor === undefined ? null : decodeCursor(opts.cursor, 1)[0];
+    const cohort = opts.pageType === undefined ? null : await this.pageTypeCondition(crawlId, opts.pageType);
+    return await this.db.transaction(
+      async (tx) => {
+        await this.assertAnchorsJudged(tx, crawlId);
+        const result = await tx.execute<AnchorsByTargetRaw>(
+          anchorsByTargetSql(crawlId, cursor, limit + 1, cohort),
+        );
+        const rows = result.rows;
+        const last = rows.length > limit ? rows[limit - 1] : undefined;
+        return {
+          items: rows.slice(0, limit).map(anchorsByTargetRow),
+          nextCursor: last === undefined ? null : encodeCursor(last.url),
+        };
+      },
+      { isolationLevel: "repeatable read", accessMode: "read only" },
+    );
+  }
+
+  /**
+   * The refusals `anchors_by_target` and its CSV view share: an unjudged crawl
+   * (the counts are written by the rules run) and one judged before 29c (any
+   * page's `inlinks_internal` null).
+   */
+  private async assertAnchorsJudged(reader: SnapshotReader, crawlId: string): Promise<void> {
+    const result = await reader.execute<{ judged: boolean; unset: boolean }>(sql`
+      select c.rules_run_at is not null as judged,
+             exists (select 1 from pages p
+                      where p.crawl_id = c.id and p.inlinks_internal is null) as unset
+        from crawls c
+       where c.id = ${crawlId}`);
+    const row = result.rows[0];
+    if (row === undefined) {
+      throw new ServiceError("NOT_FOUND", `no such crawl '${clip(crawlId)}'`);
+    }
+    if (!row.judged) {
+      throw new ServiceError(
+        "CONFLICT",
+        `crawl ${crawlId} has not been judged: run crawl_rules first — the link counts are ` +
+          "written by the rules run, and an empty anchors listing would read as a site no page links to",
+      );
+    }
+    if (row.unset) {
+      throw new ServiceError(
+        "CONFLICT",
+        `crawl ${crawlId} was judged before link counts existed — re-run the rules (crawl_rules)`,
+      );
+    }
+  }
+
+  /**
    * The two refusals the structured-data surfaces share, from one statement.
    *
    *  - **Unjudged** (`rules_run_at` null): the blobs are written by the rules
@@ -7441,6 +7522,7 @@ export class ApiService {
     // not count (unresolved references below extraction 4) is named in the
     // export answer's `notMeasured`, as the listing names it.
     let notMeasured: NotMeasured | null = judged === null ? null : judged.notMeasured;
+    if (view === "anchors_by_target") await this.assertAnchorsJudged(this.db, crawlId);
     if (view === "structured_data_nodes") {
       await this.assertStructuredDataJudged(this.db, crawlId);
       notMeasured = await this.structuredDataNotMeasured(this.db, crawlId);

@@ -408,7 +408,7 @@ index that keeps `renderDocuments` from scanning a crawl's pages. Gate evidence:
   and leaves rendered_html_path null"), `test/events/crawl-events.test.ts:206` ("(a) reads
   queued, claimed, started, paused{request}, resumed{auto:false}"),
   `test/api/no-key-echo.test.ts:633` ("no event detail carries any of it"),
-  `test/api/tenant-isolation.test.ts:562` ("an invalid body against a foreign schedule is
+  `test/api/tenant-isolation.test.ts:564` ("an invalid body against a foreign schedule is
   still the missing answer"), `test/api/schedules.test.ts:401` ("a URL the URL policy
   refuses is a 403 FORBIDDEN at create"), `test/api/schedules.test.ts:436` ("an update's
   crawl is checked against the stored render.urls"), `test/worker/chain.test.ts:529` ("a
@@ -1382,7 +1382,8 @@ Phase 11 additions (§4.2's `resources` block, §12's `resources` view) on
 `renderPassEvidence`) on 2026-09-02, each read back through the transport suite
 that now pins it — an MCP client over the in-memory transport and the HTTP
 routes beside it, against real crawls of the fixture site rather than against a
-type declaration. The Phase 27a additions (§4.1's `judgement`, §4.3's and §5.1's
+type declaration. The Phase 29c `anchors_by_target` additions (§4.6b, §12's view) were read back through
+the transport suite that pins them, against the fixture site. The Phase 27a additions (§4.1's `judgement`, §4.3's and §5.1's
 `type` / `priority` / `disabledRules`, §4.3a `issues_overview`, §4.3b
 `crawl_overview`, §4.9 `crawl_config_get` / `crawl_config_set`, `judgementStale`
 wherever it rides, §5.7 and §12's two views) were regenerated on 2026-11-08 the
@@ -1665,7 +1666,7 @@ config_validate ──▶ crawl_start ──▶ crawl_status (poll until status 
                             │
                             └─▶ issues_list · issues_overview · issue_urls · metrics_get
                                 crawl_overview (also before the rules: what it cannot measure is named)
-                                pages_query · structured_data · robots_get · rules_catalog (with crawlId) · export_crawl
+                                pages_query · structured_data · anchors_by_target · robots_get · rules_catalog (with crawlId) · export_crawl
                                 crawl_compare · compare_urls (two judged crawls of one site)
 ```
 
@@ -1713,6 +1714,7 @@ webhooks**: polling `crawl_status` is the contract until Talos asks otherwise.
 | `issue_inlinks` | `GET /crawls/:id/issues/:ruleId/inlinks` | `ruleId` (required — **only** `links.broken-internal`, `links.to-server-error` or `robots.blocks-internal-urls`), `limit`, `cursor` |
 | `metrics_get` | `GET /crawls/:id/metrics` | `metricId`, `scope`, `scopeValue`, `limit`, `cursor` |
 | `metric_table` | `GET /crawls/:id/metrics/:metricId` | `metricId` (required) |
+| `anchors_by_target` | `GET /crawls/:id/anchors-by-target` | `pageType`, `limit`, `cursor` (§4.6b; also `view=anchors_by_target` on `export_crawl`) |
 | `pages_query` | `GET /crawls/:id/pages` | `pageType`, `statusCode`, `indexable`, `rendered`, `fetchClass`, `discoveredVia`, `limit`, `cursor` |
 | `rules_catalog` | `GET /rules` | `crawlId` (**optional** — the only tool where it is) |
 | `crawl_compare` | `GET /compare` | `baseCrawlId`, `headCrawlId` (both required) |
@@ -1720,7 +1722,7 @@ webhooks**: polling `crawl_status` is the contract until Talos asks otherwise.
 | `export_crawl` | `GET /crawls/:id/export` | `format` (`jsonl.gz` \| `csv`), `dataset` (jsonl.gz only), `view` + `ruleId` \| `metricId` (csv only) |
 
 Pinned: the tool list and every schema — `test/api/mcp.test.ts:673`
-("advertises exactly the thirty-five tools of the agent surface"),
+("advertises exactly the thirty-six tools of the agent surface"),
 `test/api/mcp.test.ts:700` ("closes every input schema and describes every
 field"), `test/api/mcp.test.ts:732` ("names every member of the closed
 vocabulary each field enumerates"). `crawl_start`'s field set is not a second
@@ -3083,6 +3085,56 @@ problemsCapped
   with `checkId: "CHECK-43"`); this listing is what they cannot show, which templates
   publish which markup. A page with a clean block is listed with zero counts; a page
   that carries no markup is the one absent from the listing.
+
+### 4.6b `anchors_by_target` → `{items: AnchorsByTargetRow[], nextCursor}`
+
+`GET /crawls/:id/anchors-by-target` (Phase 29c, CHECK-86). One row per page that at
+least one other page of the crawl links to, of any fetch class (a 404 with inlinks is
+a fact worth listing); a page nothing links to is not listed. Ordered by URL; `limit`
+and `cursor` as everywhere.
+
+```
+url, pageType, inlinks, distinctAnchors, topAnchors: {text, count}[],
+emptyAnchors, nonDescriptiveAnchors, genericShare
+```
+
+- **Everything is counted in distinct source pages.** `inlinks` is the page's
+  `inlinksInternal` (`pages_query`): distinct pages linking to it, itself excluded,
+  nofollow links counted. Every anchor count is the number of distinct source pages
+  that use that anchor on a link to the target, so a page that links twice with the
+  same text counts once, and no count passes `inlinks`. A page that links with two
+  different texts counts once under each.
+- **Anchors are compared normalised**: lower-cased, trimmed, runs of whitespace
+  collapsed (a no-break space counts as whitespace), the comparison the
+  `links.non-descriptive-anchor` and `links.anchors-generic-only` findings use.
+  `distinctAnchors` counts the distinct ones, the empty one included.
+- **`topAnchors`** are the 5 most frequent non-empty anchors, `{text, count}`, count
+  descending then text ascending.
+- **`emptyAnchors`** is the source pages whose link has no text (an empty or null
+  anchor). An `aria-label` does not give it any: this listing is about link text.
+  **`nonDescriptiveAnchors`** is the source pages whose link text is wholly one of the
+  generic phrases ("click here", "read more", and the rest of the list the rules use).
+- **`genericShare`** is the source pages with at least one empty or non-descriptive
+  link, over `inlinks`, to four places. It equals (`emptyAnchors` +
+  `nonDescriptiveAnchors`) ÷ `inlinks` unless one page mixes the two kinds on its links
+  to the target, and unlike that sum it can never pass 1.
+- **Filter:** `pageType` selects the targets by template cohort (`(untyped)` for the
+  pages the crawl could not type); an unknown cohort is a 404-class refusal naming it,
+  as on the other listings.
+- **Refused, never answered empty.** A crawl the rules have not judged, and a crawl
+  judged before link counts existed (any page's `inlinksInternal` null), are 409
+  (`CONFLICT`): run `crawl_rules` and ask again. An empty listing would read as a site
+  no page links to. An unknown crawl and another tenant's crawl are the same 404.
+- The same rows are the `anchors_by_target` CSV view (§12).
+
+Pinned: `test/api/anchors-by-target.test.ts:162` ("answers the brief's fixture"),
+`test/api/anchors-by-target.test.ts:194` ("counts distinct source pages"),
+`test/api/anchors-by-target.test.ts:207` ("keeps genericShare at or below 1"),
+`test/api/anchors-by-target.test.ts:228` ("a cursor walk returns every row exactly
+once"), `test/api/anchors-by-target.test.ts:262` ("writes the header and the same
+rows"), `test/api/anchors-by-target.test.ts:280` ("a crawl judged before 29c is a
+CONFLICT"), `test/api/anchors-by-target.test.ts:294` ("an unknown crawl is NOT_FOUND,
+and so is another tenant's").
 
 ### 4.7 `robots_get` → the robots.txt this crawl obeyed
 
@@ -4554,6 +4606,7 @@ rest, except that `structured_data_nodes` answers `notMeasured` alone (below).
 | `metric_table` (needs `metricId`) | **the metric's own** — its `summary` labels, then its `columns` labels | one row of one metric's table | 40 rows (`inlinks.extremes`) |
 | `issues_overview` (Phase 27a) | Issue Name, Issue Type, Issue Priority, Severity, URLs, % of Judged, Description, How To Fix, Rule Id, Check Ids | one rule, as `issues_overview` (§4.3a) answers it | 46 rows / 27,040 B on the gate crawl `crawl_4dd32709` |
 | `crawl_overview` (Phase 27a) | Section, Label, Value, Percent | one entry of one `crawl_overview` section (§4.3b), then one row per `notMeasured` item | 75 rows / 2,332 B on the gate crawl `crawl_4dd32709` |
+| `anchors_by_target` (Phase 29c) | url, pageType, inlinks, distinctAnchors, emptyAnchors, nonDescriptiveAnchors, genericShare, topAnchors | one page with internal inlinks, as `anchors_by_target` (§4.6b) answers it; `topAnchors` is `text (n); text (n)` | — (added P29c-T6) |
 | `structured_data_nodes` (Phase 29a) | URL, Format, Schema Type, Path, Node Type, Problem, Detail | one problem of one structured-data block; a block with none is one row with an empty Problem. Schema Type is every type the block's node states, `\|`-joined; each problem list stops at 50 per block | — (added P29a-T9) |
 
 Semantics a consumer must repeat to its own users:
@@ -4599,6 +4652,11 @@ Semantics a consumer must repeat to its own users:
   `notMeasured`, as `{id, reason}` (`[]` on any other crawl), here without
   `disabledRules`. It pages by `(block id, problem position)` and, like the
   overview views, carries no `disabledRules`.
+- **`anchors_by_target` is the `anchors_by_target` listing as a sheet** (Phase 29c): the
+  same statement and row shaping as the JSON, paged by `url`; `topAnchors` is the top
+  anchors written `text (n); text (n)`. Refused before the first byte, 409, on a crawl
+  the rules have not judged or judged before link counts existed (re-run the rules).
+  It carries no `disabledRules` or `notMeasured`.
 - **`crawl_overview` is the Crawl Overview as a sheet** (Phase 27a): one row per
   entry, section by section in the JSON's order, then one row per `notMeasured`
   item, written `<id>,Not measured: <reason>,,` with empty Value and Percent
@@ -4681,7 +4739,7 @@ Semantics a consumer must repeat to its own users:
 - **Formula injection is guarded uniformly:** a cell whose first non-whitespace
   character is `= + - @` is written with a leading apostrophe, before RFC 4180
   quoting. The trade is deliberate — a negative number would render `'-3`; no
-  numeric column in these twelve views emits one (a metric's cells are counts, bytes,
+  numeric column in these thirteen views emits one (a metric's cells are counts, bytes,
   distances and percentages, none of which go below zero). It is not a text-column guard: a
   `Cache-Control` header is the server's own string and lands in a cell exactly
   as a page title does, which is what `test/api/query.test.ts:3098` "never lets a

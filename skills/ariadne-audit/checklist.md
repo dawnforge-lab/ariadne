@@ -2214,8 +2214,9 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
     the inlink count, the minimum in force and up to 10 distinct normalised anchors
     (`""` for empty). Link text is judged; an `aria-label` is not read here, and
     `links.no-anchor-text` and `links.aria-label-only` cover naming. The per-target
-    listing behind it, every anchor that points at a page, is the anchors-by-target
-    view (shipping with Phase 29c).
+    listing behind it, every anchor that points at a page, is the `anchors_by_target`
+    listing (and CSV view): per page with internal inlinks, the inlink count, the top 5
+    normalised anchors and the share that is empty or non-descriptive.
   Four more rules answer the rest of the check:
   - `links.empty-href` (info) — a page with `<a href="">`, which points back at the
     page itself.

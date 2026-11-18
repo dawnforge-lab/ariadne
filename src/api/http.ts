@@ -118,6 +118,14 @@
  *                                      409 on a crawl no rules run has judged,
  *                                      or one judged before the validation
  *                                      derivation existed (re-run the rules)
+ *   GET  /crawls/:id/anchors-by-target one row per page with internal inlinks:
+ *                                      inlinks, distinctAnchors, the top 5
+ *                                      normalised anchor texts, emptyAnchors,
+ *                                      nonDescriptiveAnchors, genericShare
+ *                                      (all counted in distinct source pages).
+ *                                      `?pageType=`. 409 on a crawl no rules run
+ *                                      has judged, or one judged before link
+ *                                      counts existed (re-run the rules)
  *   GET  /crawls/:id/robots            the site's robots.txt as this crawl read it
  *   GET  /config/schema                the crawl-start body as JSON Schema draft
  *                                      2020-12 — each field's description,
@@ -781,6 +789,19 @@ function buildRoutes(): Route[] {
         body: await service.listStructuredData(ctx.tenant, param(ctx, "id"), {
           ...optionalString(ctx.query, "pageType"),
           ...optionalString(ctx.query, "format"),
+          ...optionalNumber(ctx.query, "limit"),
+          ...optionalString(ctx.query, "cursor"),
+        }),
+      }),
+    },
+    {
+      method: "GET",
+      pattern: ["crawls", id, "anchors-by-target"],
+      query: ["pageType", ...PAGINATION_PARAMS],
+      handler: async (service, ctx) => ({
+        status: 200,
+        body: await service.listAnchorsByTarget(ctx.tenant, param(ctx, "id"), {
+          ...optionalString(ctx.query, "pageType"),
           ...optionalNumber(ctx.query, "limit"),
           ...optionalString(ctx.query, "cursor"),
         }),

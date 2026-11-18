@@ -2943,12 +2943,12 @@ describe("GET /crawls/:id/export?format=csv", () => {
     // Empty in all three on a page nobody re-asked about — which is every page
     // whose first fetch was not a server error, and never "it came back clean".
     expect(rowWhere(internal, "url", `${SITE}/csv-end`)).toEqual([
-      `${SITE}/csv-end`, "200", "ok", "true", "2", "", "", "", "", "product", "title of csv-end", "", "", "",
+      `${SITE}/csv-end`, "200", "ok", "true", "2", "1", "", "", "", "product", "title of csv-end", "", "", "",
     ]);
     // An empty cell is "the engine has no value", never a zero: this page has
     // no click depth because nothing links to it.
     expect(rowWhere(internal, "url", `${SITE}/csv-gone`)).toEqual([
-      `${SITE}/csv-gone`, "404", "client_error", "", "", "", "", "", "", "", "title of csv-gone", "", "", "",
+      `${SITE}/csv-gone`, "404", "client_error", "", "", "1", "", "", "", "", "title of csv-gone", "", "", "",
     ]);
 
     // And the crawl that HAS a second observation writes it: the class, the
@@ -4390,4 +4390,19 @@ beforeAll(async () => {
     raw,
     validation: validateBlock(raw, `${SITE}/csv-home`),
   });
+});
+
+// Phase 29c T6. Appended at the end so no line the surface document cites
+// moves. The CSV fixture crawl is judged by hand, so its pages carry no link
+// counts: this sets `inlinks_internal` as the rules run's derivation defines it
+// (R1: distinct source pages, self excluded), so the `anchors_by_target` view
+// has rows for "reads every view through a cursor" to walk, and is not refused.
+beforeAll(async () => {
+  await db.execute(sql`
+    update pages p
+       set inlinks_internal = (select count(distinct l.source_page_id)
+                                 from links l
+                                where l.crawl_id = p.crawl_id and l.target_url = p.url
+                                  and l.source_page_id <> p.id)
+     where p.crawl_id = ${crawlF}`);
 });

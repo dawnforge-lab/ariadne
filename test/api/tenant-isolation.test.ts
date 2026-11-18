@@ -110,6 +110,7 @@ const SCOPED_ROUTES: Record<string, HttpBuilder> = {
   "GET /crawls/:id/metrics/:metricId": crawlRoute("GET", "/metrics/site.health"),
   "GET /crawls/:id/pages": crawlRoute("GET", "/pages"),
   "GET /crawls/:id/structured-data": crawlRoute("GET", "/structured-data"),
+  "GET /crawls/:id/anchors-by-target": crawlRoute("GET", "/anchors-by-target"),
   "GET /crawls/:id/robots": crawlRoute("GET", "/robots"),
   "GET /crawls/:id/export": crawlRoute("GET", "/export?dataset=pages"),
   // Exercised WITH crawlId (ruling R1): the catalog resolves the crawl's ruleset.
@@ -144,6 +145,7 @@ const SCOPED_TOOLS: Record<string, ToolBuilder> = {
   metric_table: (c) => ({ crawlId: c, metricId: "site.health" }),
   pages_query: only,
   structured_data: only,
+  anchors_by_target: only,
   export_crawl: (c) => ({ crawlId: c, dataset: "pages" }),
   rules_catalog: only,
   crawl_compare: (c, o) => ({ baseCrawlId: c, headCrawlId: o }),
@@ -728,5 +730,40 @@ describe("the structured_data_nodes CSV view (29a)", () => {
     });
     expect(own.status).toBe(200);
     expect((await own.text()).split("\r\n")[0]).toBe("URL,Format,Schema Type,Path,Node Type,Problem,Detail");
+  });
+});
+
+describe("the anchors_by_target CSV view (29c)", () => {
+  const viewPath = (c: string): string => `/crawls/${c}/export?format=csv&view=anchors_by_target`;
+
+  it("HTTP: a foreign crawl's view answers exactly like a missing one's, and writes nothing", async () => {
+    const missing = `crawl_${randomUUID()}`;
+    const before = await snapshot(acmeCrawl);
+    const foreign = await http(BETA, { method: "GET", path: viewPath(acmeCrawl) });
+    const absent = await http(BETA, { method: "GET", path: viewPath(missing) });
+    expect(foreign.status).toBe(404);
+    expect(foreign.body).toMatchObject({ code: "NOT_FOUND" });
+    expect(substituted(foreign, acmeCrawl, missing)).toEqual(absent);
+    expect(await snapshot(acmeCrawl)).toEqual(before);
+  });
+
+  it("MCP: export_crawl of the view, the same", async () => {
+    const missing = `crawl_${randomUUID()}`;
+    const args = (c: string): Record<string, unknown> => ({ crawlId: c, format: "csv", view: "anchors_by_target" });
+    const foreign = await tool(betaClient, "export_crawl", args(acmeCrawl));
+    const absent = await tool(betaClient, "export_crawl", args(missing));
+    expect(foreign.status).toBe(1);
+    expect(foreign.body).toMatchObject({ code: "NOT_FOUND" });
+    expect(substituted(foreign, acmeCrawl, missing)).toEqual(absent);
+  });
+
+  it("the owner is answered: acme streams its own judged crawl's view", async () => {
+    const own = await fetch(`${base}${viewPath(acmeCrawl)}`, {
+      headers: { authorization: `Bearer ${TOKEN}`, "x-ariadne-tenant": ACME },
+    });
+    expect(own.status).toBe(200);
+    expect((await own.text()).split("\r\n")[0]).toBe(
+      "url,pageType,inlinks,distinctAnchors,emptyAnchors,nonDescriptiveAnchors,genericShare,topAnchors",
+    );
   });
 });

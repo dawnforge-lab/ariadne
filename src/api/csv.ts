@@ -66,6 +66,7 @@ import { sql, type SQL } from "drizzle-orm";
 import { indexabilityOf } from "../rules/helpers.js";
 import { MAX_REDIRECT_HOPS } from "../rules/query/redirects.js";
 import type { IssueType, Priority } from "../rules/registry/types.js";
+import { anchorsByTargetRow, anchorsByTargetSql, renderTopAnchors, type AnchorsByTargetRaw } from "./anchors.js";
 import { notDisabled } from "./judgement-view.js";
 import {
   STRUCTURED_DATA_FORMATS,
@@ -89,6 +90,7 @@ export const CSV_VIEWS = [
   "issues_overview",
   "crawl_overview",
   "structured_data_nodes",
+  "anchors_by_target",
 ] as const;
 export type CsvViewName = (typeof CSV_VIEWS)[number];
 
@@ -96,7 +98,7 @@ export type CsvViewName = (typeof CSV_VIEWS)[number];
 type NonKeysetView = "metric_table" | "issues_overview" | "crawl_overview";
 
 /**
- * THE NINE VIEWS THAT ARE A KEYSET READ OF A TABLE — every view but three.
+ * THE TEN VIEWS THAT ARE A KEYSET READ OF A TABLE — every view but three.
  *
  * `metric_table`, `issues_overview` and `crawl_overview` are the exceptions and
  * they are a different KIND of view. `issues_overview` is one `GROUP BY rule_id`
@@ -111,7 +113,7 @@ type NonKeysetView = "metric_table" | "issues_overview" | "crawl_overview";
  * one stored row into three (a measure each), or a stored list into twenty rows,
  * or a stored map into its entries — a transformation no `ORDER BY … LIMIT` can
  * express. So it has no `CsvView` definition, and the properties that make the
- * other nine safe on a 50,000-page crawl (a LIMIT, an order, a cursor
+ * other ten safe on a 50,000-page crawl (a LIMIT, an order, a cursor
  * comparison) are asserted over THIS list rather than over the vocabulary.
  *
  * What bounds `metric_table` instead is the rows themselves: one metric writes
@@ -623,7 +625,7 @@ function linkNext(row: LinkRow): string[] {
 }
 
 /**
- * The nine views.
+ * The ten views.
  *
  * Every one of them answers a question the Ahrefs-style bulk-export block asks,
  * and every one of them is a read the JSON surface could already answer more
@@ -1020,6 +1022,37 @@ export const CSV_VIEW_DEFS: Record<CsvQueryViewName, CsvView> = {
       orEmpty(row.fetch_reason),
       String(row.referencing_pages),
     ],
+  }),
+
+  /**
+   * The `anchors_by_target` listing as a file (29c, R6): the same statement and
+   * the same row shaping, keyed by `url`. `topAnchors` is `text (n); text (n)`.
+   * Refused before the header on an unjudged crawl or one judged before 29c
+   * (`ApiService.assertAnchorsJudged`).
+   */
+  anchors_by_target: defineCsvView<AnchorsByTargetRaw>({
+    header: [
+      "url", "pageType", "inlinks", "distinctAnchors", "emptyAnchors",
+      "nonDescriptiveAnchors", "genericShare", "topAnchors",
+    ],
+    keyset: ["url"],
+    start: [""],
+    query: (crawlId, cursor, limit) =>
+      anchorsByTargetSql(crawlId, cursor[0] ?? "", limit),
+    next: (row) => [row.url],
+    cells: (raw) => {
+      const row = anchorsByTargetRow(raw);
+      return [
+        row.url,
+        orEmpty(row.pageType),
+        String(row.inlinks),
+        String(row.distinctAnchors),
+        String(row.emptyAnchors),
+        String(row.nonDescriptiveAnchors),
+        String(row.genericShare),
+        renderTopAnchors(row.topAnchors),
+      ];
+    },
   }),
 
   /**
