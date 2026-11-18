@@ -618,8 +618,9 @@ function namesOf(pageUrl: string, rows: { source: string | null; value: string }
  *
  * Distinct targets, not link rows: `deriveLinkCounts` counts distinct
  * `target_url` per page (self-links and nofollow included) into
- * `pages.outlinks_internal` / `outlinks_external`, and this rule reads them. `max` is the limit that was crossed (the
- * internal one when both were) and `crossed` says which.
+ * `pages.outlinks_internal` / `outlinks_external`, and this rule reads them.
+ * `max` is the limit that was crossed (the internal one when both were) and
+ * `crossed` says which.
  */
 async function highOutlinkFindings(
   db: Db,

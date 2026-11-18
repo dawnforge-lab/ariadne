@@ -1,11 +1,21 @@
 # The Ariadne surface Talos codes against
 
-**Status:** the contract as of Phase 29b (ruleset 0.27.0, migrations 0000–0058,
+**Status:** the contract as of Phase 29c, in progress (ruleset 0.28.0, migrations 0000–0059,
 35 MCP tools / 35 HTTP routes; every column label in this document is served
 under the ruleset version the engine reports — `rules_catalog`'s
 `rulesetVersion`, which the metric-table pass moves).
 `docs/talos-integration.md` says *why* the seam exists and what obligations bind
 it; this document says *what the seam is*.
+
+**What Phase 29c has changed here so far: the link graph is summarised per page.** No
+tool or route is added and no response shape changes. The ruleset moves to **0.28.0**
+(228 rules: 72 page / 139 query / 17 metric; 33 critical / 97 warning / 98 info, the
+metric rules counting as info). The new metric `links.score-distribution` (CHECK-33)
+gives the eight distribution numbers of the link score, the share of internal link
+weight a page holds (random-surfer model, damping 0.85), scaled 0 to 100, for the site
+and each template. `links.high-outlinks` now reads the per-page outlink counts the
+rules run derives before any rule runs; its findings are unchanged, and a fetched page
+whose counts were never derived makes the rule fail loudly instead of reading as zero.
 
 **What Phase 29b changed here: the render pass reads the page's own errors, its image
 boxes and its accessibility, and the resource pass measures images.** No tool or route
@@ -1742,7 +1752,7 @@ every MCP tool's arguments. `crawl_start` and `config_validate` answer ONE
 `unknown_field` error per object, not one per key, so a body of a hundred thousand
 unknown keys is one short refusal, read in linear time. Rule ids in `judgement` are
 positional too, with the ruleset version (`key 2 in the order sent names no rule in
-ruleset 0.27.0`). Two things are still named: a credential header or cookie name that
+ruleset 0.28.0`). Two things are still named: a credential header or cookie name that
 is a valid HTTP token (27c), and a rule id already **stored** in a crawl's judgement
 that the ruleset no longer has, because that is the repair path (`crawl_config_set`,
 §4.9). "In the order sent" is `Object.keys` order, so an integer-like key counts first.
@@ -2783,7 +2793,7 @@ which one is visible in the header rather than in the payload:
 
 - **`perScope`** — one row per stored row, site first and the rest in
   scope-value order, each column a path into that row's value
-  (`site.health`, `inlinks.distribution`, `redirect.volume`, `render.coverage`,
+  (`site.health`, `inlinks.distribution`, `links.score-distribution`, `redirect.volume`, `render.coverage`,
   `sitemap.structure`, `hreflang.coverage`, `content.template-similarity`, the
   two depth distributions).
 - **`perScopeMeasure`** — one row per stored row × MEASURE, with the measure's
@@ -4182,18 +4192,23 @@ Six postures a Talos integrator should know about rather than discover:
 
 ## 11. Versioning, and what a ruleset change does to a served crawl
 
-`RULESET_VERSION` (**0.27.0** as of Phase 29b) stamps **judgement**: bump it when
+`RULESET_VERSION` (**0.28.0** as of Phase 29c) stamps **judgement**: bump it when
 a rule's verdict or copy changes. Adding a rule or a metric family adds rows
 without changing a verdict — `metrics` rows carry no version column at all —
 which is the argument Phase 10 held 0.7.0 on.
+
+**Phase 29c bumped to 0.28.0, once.** One metric id joined, `links.score-distribution`,
+and `links.high-outlinks` reads derived per-page counts with the same findings. The
+ruleset is 228 rules (72 page / 139 query / 17 metric; 33 critical / 97 warning /
+98 info).
 
 **Phase 29b bumped to 0.27.0, once, and moved `RENDER_CAPTURE_VERSION` to 3.** Twenty-nine
 rule ids and one metric id joined: `render.js-exception`, `render.console-error`,
 `render.failed-request`, `images.larger-than-displayed`, the 24 `a11y.*` rules, the
 marker `render.not-recorded`, and the metric `render.image-measurement`. No verdict
 that existed moved, so a crawl re-judged at 0.27.0 keeps its findings and gains the new
-ids where the data exists. The ruleset is 227 rules (72 page / 139 query / 16 metric;
-33 critical / 97 warning / 97 info), and `IMAGE_OVERSIZE_PERCENT` is the twenty-third
+ids where the data exists. At that bump the ruleset was 227 rules (72 page / 139 query /
+16 metric; 33 critical / 97 warning / 97 info), and `IMAGE_OVERSIZE_PERCENT` is the twenty-third
 overridable threshold; migration 0058 rewrites every stored run stamp to hold it at its
 default, so `judgementStale` does not read stale on an old stamp for that reason. The
 new rules are silent on a crawl without the capture they read, and
