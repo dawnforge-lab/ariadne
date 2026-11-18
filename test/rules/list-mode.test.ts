@@ -42,6 +42,7 @@ const NEEDS_SPIDER = [
   "links.orphan-skipped",
   "structure.deep-page",
   "links.only-from-non-indexable",
+  "links.anchors-generic-only",
   "canonical.unlinked",
   "hreflang.unlinked-target",
   "pagination.next-not-linked",

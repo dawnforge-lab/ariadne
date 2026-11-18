@@ -1088,6 +1088,9 @@ const KINDS = ["page", "query", "metric"] as const satisfies readonly AnyRule["k
 //        (`pages.inlinks_internal`) whose every inlink anchor is empty or on
 //        `NON_DESCRIPTIVE_ANCHORS`. Migration 0060 names the threshold in every
 //        stored stamp. 229 rules: 72 page / 140 query / 17 metric.
+//        `links.anchors-generic-only` is `needsSpider`: a list crawl knows only
+//        the links among the listed pages, so it is not run in list mode and
+//        `crawl.list-mode` names it (as `links.only-from-non-indexable`).
 export const RULESET_VERSION = "0.28.0";
 
 /**

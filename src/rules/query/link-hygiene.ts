@@ -890,6 +890,9 @@ export const linkHygieneRules: QueryRule[] = [
   defineRule<QueryRule>({
     kind: "query",
     id: GENERIC_ONLY.id,
+    // "Every inlink is generic" is a claim about the site's whole link graph; a
+    // list crawl knows only the links among the listed pages (Phase 27c).
+    needsSpider: true,
     checkIds: ["CHECK-86"],
     category: CATEGORY,
     severity: GENERIC_ONLY.severity,
