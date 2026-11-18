@@ -1,5 +1,5 @@
 /**
- * The MCP transport: thirty-six tools over the same service layer the HTTP
+ * The MCP transport: thirty-seven tools over the same service layer the HTTP
  * routes use. Twelve of them change something (`crawl_start`, `crawl_resume`,
  * `crawl_pause`, `crawl_cancel`, `crawl_delete`, `crawl_render`, `crawl_rules`,
  * `crawl_mark_failed`, `crawl_config_set`, `schedule_create`, `schedule_update`,
@@ -78,6 +78,7 @@ import { METRIC_SCOPES } from "../rules/registry/types.js";
 import type { McpServerConfig } from "./config.js";
 import { credentialInputSchemas } from "./config-schema.js";
 import { ANCHORS_TOP_N } from "./anchors.js";
+import { DIFF_FIELD_NAMES, DIFF_THRESHOLD_SPECS } from "./crawl-diff.js";
 import { CSV_VIEWS, EXPORT_FORMATS } from "./csv.js";
 import { strictInput } from "./mcp-input.js";
 import { STRUCTURED_DATA_FORMATS, STRUCTURED_DATA_PROBLEMS } from "./structured-data.js";
@@ -146,6 +147,7 @@ export const TOOL_NAMES = [
   "rules_catalog",
   "crawl_compare",
   "compare_urls",
+  "crawl_diff",
 ] as const;
 
 export type ToolName = (typeof TOOL_NAMES)[number];
@@ -207,6 +209,10 @@ The order of operations is fixed by what the evidence means:
                    and its caveats before quoting a change: two crawls judged by
                    different rulesets, or under different finding caps, produce
                    different counts for reasons that are not the site.
+                   crawl_diff compares the same pair page by page: how many
+                   pages changed each stored field (status, title, word count,
+                   inlinks, link score, ...), and how many could not be
+                   compared, which is not the same as unchanged.
 
 An empty findings or metrics answer is only 'nothing found' on a crawl that was
 judged. crawl_status's rulesRunAt is the check: a timestamp means a rules pass
@@ -2210,6 +2216,60 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
   );
 
   server.registerTool(
+    named("crawl_diff"),
+    {
+      title: "What changed on each page between two crawls of one site",
+      description:
+        "Two crawls of the SAME site, field by field, over what each crawl stored " +
+        "(nothing is fetched). Answers {base, head, thresholds, urls, fields}. base and " +
+        "head are {crawlId, siteUrl, rulesRunAt, pages}. urls is {common, added, " +
+        "removed}: URLs both crawls hold, URLs only the head holds, URLs only the " +
+        "base held. Pages are paired on the stored url exactly, so '/Page' and " +
+        "'/page', or '/a' and '/a/', are different pages and never one removed and " +
+        "one added.\n\n" +
+        "fields is one {field, changed, notComparable} per field, in this order: " +
+        `${DIFF_FIELD_NAMES.join(", ")}. Counts are over the common URLs. ` +
+        "changed is the pages whose value differs. notComparable is the pages where " +
+        "the two sides cannot be compared for that field, which is NOT 'unchanged': " +
+        "the content fields (title, metaDescription, h1, canonical, metaRobots, " +
+        "wordCount, schemaTypes) are not comparable when either side did not fetch " +
+        "ok (status and fetchClass already report that); metaRobots is not " +
+        "comparable when either side was extracted before extraction 2, schemaTypes " +
+        "before extraction 4; inlinks and linkScore are not comparable when either " +
+        "crawl was judged before link counts existed (run crawl_rules on it). " +
+        "clickDepth null means unreachable, which is a value.\n\n" +
+        "WHAT 'CHANGED' MEANS. status, fetchClass, indexable, title, metaDescription, " +
+        "h1, metaRobots and clickDepth: the stored value differs. canonical: the " +
+        "HTML canonical or the header canonical differs. schemaTypes: the set of " +
+        "schema types the page declares differs. wordCount: |head - base| as a " +
+        "percentage of base exceeds wordCountChangePct. inlinks: the change is at " +
+        "least inlinksChangeMin AND exceeds inlinksChangePct percent of base. " +
+        "linkScore: scored on one side only, or the score moved by at least " +
+        "linkScoreChangePoints.\n\n" +
+        "The thresholds are request parameters, integers, echoed in every answer: " +
+        "wordCountChangePct (default 20, 1 to 1000), inlinksChangePct (default 50, " +
+        "1 to 1000), inlinksChangeMin (default 5, 1 to 100000), " +
+        "linkScoreChangePoints (default 10, 1 to 100). One outside its range, or " +
+        "not an integer, is refused naming it.\n\n" +
+        "REFUSED, as crawl_compare refuses, in the same order: a crawl of another " +
+        "tenant or one that does not exist (404), the same crawl twice, two crawls " +
+        "of different sites, and a crawl that has never been judged (rulesRunAt " +
+        "null). This is evidence, not a verdict: no rule judges a change here. The " +
+        "URLs behind each count are not here.",
+      inputSchema: strictInput({
+        baseCrawlId: compareIdField("base", "the earlier crawl — what the site was"),
+        headCrawlId: compareIdField("head", "the later crawl — what the site is now"),
+        wordCountChangePct: diffThresholdField("wordCountChangePct"),
+        inlinksChangePct: diffThresholdField("inlinksChangePct"),
+        inlinksChangeMin: diffThresholdField("inlinksChangeMin"),
+        linkScoreChangePoints: diffThresholdField("linkScoreChangePoints"),
+      }),
+    },
+    async ({ baseCrawlId, headCrawlId, ...thresholds }) =>
+      run("crawl_diff", () => service.crawlDiff(tenant, baseCrawlId, headCrawlId, defined(thresholds))),
+  );
+
+  server.registerTool(
     named("export_crawl"),
     {
       title: "Export a dataset or a spreadsheet view to a file",
@@ -2393,6 +2453,14 @@ function compareIdField(side: "base" | "head", role: string) {
       `The ${side} crawl's id: ${role}. Both crawls must be of the same site and ` +
         "both must have been judged (crawl_rules run over them).",
     );
+}
+
+function diffThresholdField(name: keyof typeof DIFF_THRESHOLD_SPECS) {
+  const spec = DIFF_THRESHOLD_SPECS[name];
+  return z
+    .number()
+    .describe(`An integer from ${spec.min} to ${spec.max}. Defaults to ${spec.def}.`)
+    .optional();
 }
 
 function limitField() {

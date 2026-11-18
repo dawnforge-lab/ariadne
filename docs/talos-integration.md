@@ -285,6 +285,10 @@ crawler inside Talos. The intended shape:
   the other per-crawl reads, and touches obligation 6 only (see there).
   Phase 29c adds the `anchors_by_target` tool, route and CSV view on the same terms:
   read-only, tenant-scoped, a foreign crawl answering as a missing one (obligation 9).
+  Phase 29c also adds `crawl_diff` / `GET /diff`: a field-level diff of two judged crawls of
+  one site, read-only and tenant-scoped, refusing exactly as `crawl_compare` does
+  (a foreign crawl is a missing one, obligation 9). It is evidence and claims no check id
+  (obligation 6).
 - Talos repo pointer to this project: `docs/talos/crawler-engine.md` in the
   talos repo (`github.com/dawnforge-lab/talos`, local `/home/eugen-dev/Documents/Workflows/talos`).
 - Talos deep history: serena memory `talos-rewrite-status` in the talos

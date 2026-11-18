@@ -180,6 +180,11 @@
  *   GET  /compare/urls                 the URLs behind one of those three counts,
  *                                      paginated — the counts are on the summary
  *                                      and the URLs are only here (obligation 1)
+ *   GET  /diff                         the same pair page by page: per stored field,
+ *                                      how many common URLs changed and how many
+ *                                      could not be compared (never "unchanged").
+ *                                      Integer thresholds are query parameters and
+ *                                      echoed. Refused as /compare is
  *
  * ## What a caller can never be told
  *
@@ -197,6 +202,7 @@ import { randomUUID } from "node:crypto";
 import type { Db } from "../db/client.js";
 import type { ApiServerConfig } from "./config.js";
 import { checkBearer } from "./auth.js";
+import { DIFF_THRESHOLD_SPECS } from "./crawl-diff.js";
 import { serveOps } from "../ops/serve.js";
 import { parseTenant, type TenantId } from "../tenant.js";
 import { unknownQueryParameterMessage } from "./errors.js";
@@ -838,6 +844,25 @@ function buildRoutes(): Route[] {
           ctx.tenant,
           requiredString(ctx.query, "baseCrawlId"),
           requiredString(ctx.query, "headCrawlId"),
+        ),
+      }),
+    },
+    {
+      method: "GET",
+      pattern: ["diff"],
+      query: ["baseCrawlId", "headCrawlId", ...Object.keys(DIFF_THRESHOLD_SPECS)],
+      handler: async (service, ctx) => ({
+        status: 200,
+        body: await service.crawlDiff(
+          ctx.tenant,
+          requiredString(ctx.query, "baseCrawlId"),
+          requiredString(ctx.query, "headCrawlId"),
+          {
+            ...optionalNumber(ctx.query, "wordCountChangePct"),
+            ...optionalNumber(ctx.query, "inlinksChangePct"),
+            ...optionalNumber(ctx.query, "inlinksChangeMin"),
+            ...optionalNumber(ctx.query, "linkScoreChangePoints"),
+          },
         ),
       }),
     },

@@ -256,6 +256,14 @@ import {
 } from "./csv.js";
 import { ServiceError, clip, unknownKeysMessage } from "./errors.js";
 import {
+  diffFieldsOf,
+  diffSummarySql,
+  parseDiffThresholds,
+  type CrawlDiffField,
+  type DiffSummaryRow,
+  type DiffThresholds,
+} from "./crawl-diff.js";
+import {
   blockInfos,
   blockProblemsCapped,
   blockWarnings,
@@ -6551,6 +6559,47 @@ export class ApiService {
   }
 
   /**
+   * `GET /diff` and `crawl_diff` (Phase 29c T7): a field-level summary of two
+   * judged crawls of one site, joined on `pages.url`. `comparePair` runs first,
+   * in the same repeatable-read snapshot, so the refusals (same crawl twice,
+   * different sites, ownership, "never been judged") are `compareCrawls`' own,
+   * in the same order. A rules run in flight has cleared `rules_run_at` in its
+   * first transaction, so a diff then is refused as never judged and cannot
+   * read half-written link columns. One SQL statement, O(1) memory in pages
+   * (`src/api/crawl-diff.ts`).
+   */
+  async crawlDiff(
+    tenant: TenantId,
+    baseCrawlId: string,
+    headCrawlId: string,
+    thresholds: Partial<Record<keyof DiffThresholds, unknown>> = {},
+  ): Promise<CrawlDiff> {
+    // Parsed before any read, so a bad parameter is the refusal whatever the ids.
+    const t = parseDiffThresholds(thresholds);
+    return await this.db.transaction(
+      async (tx) => {
+        const { base, head } = await comparePair(tx, tenant, baseCrawlId, headCrawlId);
+        const result = await tx.execute<DiffSummaryRow>(diffSummarySql(baseCrawlId, headCrawlId, t));
+        const row = result.rows[0];
+        if (row === undefined) throw new Error("crawl_diff: the summary statement answered no row");
+        const count = (name: string): number => {
+          const value = row[name];
+          if (typeof value !== "number") throw new Error(`crawl_diff: the summary has no '${name}'`);
+          return value;
+        };
+        return {
+          base: { crawlId: base.crawlId, siteUrl: base.siteUrl, rulesRunAt: base.rulesRunAt, pages: count("base_pages") },
+          head: { crawlId: head.crawlId, siteUrl: head.siteUrl, rulesRunAt: head.rulesRunAt, pages: count("head_pages") },
+          thresholds: t,
+          urls: { common: count("common"), added: count("added"), removed: count("removed") },
+          fields: diffFieldsOf(row),
+        };
+      },
+      { isolationLevel: "repeatable read", accessMode: "read only" },
+    );
+  }
+
+  /**
    * The `judgement-overrides` caveat for each side whose stored judgement
    * disables a rule, naming the crawl and how many. Inside the comparison's
    * transaction, so the blocks are read from the same snapshot as the counts.
@@ -8678,6 +8727,15 @@ function sameSet(a: readonly string[], b: readonly string[]): boolean {
   const left = new Set(a);
   const right = new Set(b);
   return left.size === right.size && [...left].every((value) => right.has(value));
+}
+
+/** The `crawl_diff` answer (Phase 29c T7). */
+export interface CrawlDiff {
+  base: { crawlId: string; siteUrl: string; rulesRunAt: string; pages: number };
+  head: { crawlId: string; siteUrl: string; rulesRunAt: string; pages: number };
+  thresholds: DiffThresholds;
+  urls: { common: number; added: number; removed: number };
+  fields: CrawlDiffField[];
 }
 
 /**
