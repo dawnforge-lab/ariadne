@@ -111,7 +111,9 @@ export function anchorsByTargetSql(
        select (select count(*) from pa)::int as distinct_anchors,
               (select count(distinct sid) from sa)::int as source_count,
               (select coalesce(sum(n), 0) from pa where anchor = '')::int as empty_anchors,
-              (select coalesce(sum(n), 0) from pa
+              -- Distinct sources, not a sum over pa: a source using two different
+              -- generic phrases is one source in the class (never above inlinks).
+              (select count(distinct sid) from sa
                 where anchor <> '' and anchor in (${anchorList()}))::int as non_descriptive,
               -- A source is generic only when ALL its links to the target are.
               (select count(*) from (

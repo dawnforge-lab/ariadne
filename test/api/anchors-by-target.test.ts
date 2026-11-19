@@ -9,7 +9,8 @@
  *                      one anchor once normalised); s2 links with "" AND "read more"
  *   /t3 (untyped)      /target links with a null anchor; /t3 links to itself
  *   /t4 (content)      s1 links with "Read more" AND "Blue widgets" (a mixed source,
- *                      not generic); s2 links with "Read more" only (generic)
+ *                      not generic); s2 links with "Read more" AND "Click here" (two
+ *                      different generic phrases: generic, and one non-descriptive source)
  *   /lonely            nothing links to it
  *
  * Every count is in DISTINCT SOURCE PAGES (`src/api/anchors.ts`).
@@ -76,6 +77,7 @@ const EDGES: Edge[] = [
   ["/s1", "/t4", "Read more"],
   ["/s1", "/t4", "Blue widgets"],
   ["/s2", "/t4", "Read more"],
+  ["/s2", "/t4", "Click here"],
   // /top: six distinct anchors, a tie at ranks 5 and 6 ("echo" and "foxtrot").
   ["/s1", "/top", "alpha"], ["/s2", "/top", "alpha"], ["/s3", "/top", "bravo"],
   ["/s4", "/top", "charlie"], ["/s5", "/top", "delta"], ["/s6", "/top", "foxtrot"],
@@ -240,11 +242,14 @@ describe("anchors_by_target rows", () => {
 
   it("does not count a source whose links to the target mix generic and descriptive text", async () => {
     const rows = byPath(items((await tool("anchors_by_target", { crawlId: judgedId })).body));
-    // s1 links "Read more" and "Blue widgets": not generic. s2 links "Read more" only.
-    // Both use "read more", so the class count is 2; the share counts s2 alone.
+    // s1 links "Read more" and "Blue widgets": not generic. s2 links "Read more" and
+    // "Click here", two different generic phrases, and still counts ONCE in the class:
+    // the class count is 2 sources (never above inlinks); the share counts s2 alone.
     expect(rows.get("/t4")).toEqual({
-      url: url("/t4"), pageType: "content", inlinks: 2, distinctAnchors: 2,
-      topAnchors: [{ text: "read more", count: 2 }, { text: "blue widgets", count: 1 }],
+      url: url("/t4"), pageType: "content", inlinks: 2, distinctAnchors: 3,
+      topAnchors: [
+        { text: "read more", count: 2 }, { text: "blue widgets", count: 1 }, { text: "click here", count: 1 },
+      ],
       emptyAnchors: 0, nonDescriptiveAnchors: 2, genericShare: 0.5,
     });
   });
@@ -335,7 +340,7 @@ describe("anchors_by_target CSV view", () => {
     expect(lines).toEqual([
       `${url("/t2")},product,2,3,1,2,1,click here (1); read more (1)`,
       `${url("/t3")},,1,1,1,0,1,`,
-      `${url("/t4")},content,2,2,0,2,0.5,read more (2); blue widgets (1)`,
+      `${url("/t4")},content,2,3,0,2,0.5,read more (2); blue widgets (1); click here (1)`,
       `${url("/target")},content,7,4,1,1,0.2857,blue widgets (4); click here (1); red (1)`,
       `${url("/top")},content,7,6,0,0,0,alpha (2); bravo (1); charlie (1); delta (1); echo (1)`,
     ]);
