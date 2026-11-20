@@ -27,7 +27,7 @@ import { sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import type { RuleCategory, Severity, AnyRule, IssueType, Priority } from "../rules/registry/types.js";
 import { RULESET_VERSION, type Registry } from "../rules/registry/registry.js";
-import { INDEXABILITY_STATUS_SQL, NEVER_REQUESTED } from "../rules/helpers.js";
+import { FETCHED_OK, INDEXABILITY_STATUS_SQL, NEVER_REQUESTED } from "../rules/helpers.js";
 import { RENDER_PASS_EVIDENCE } from "../rules/metric/render-metrics.js";
 import {
   copyRenderer,
@@ -277,8 +277,9 @@ export interface OverviewSection {
  *    overrides, the disabled rules' findings left out.
  *
  * `notMeasured` names what the crawl could not measure, with the reason; it is
- * never written as zeros. It usually names a whole section (`click-depth` and
- * `issues-grid` on an unjudged crawl, `render` on one that never rendered), but
+ * never written as zeros. It usually names a whole section (`click-depth`,
+ * `link-counts` and `issues-grid` on an unjudged crawl, `link-counts` on one
+ * judged before 29c, `render` on one that never rendered), but
  * MAY NAME ONE ENTRY of a measured section: `render-coverage` (the render
  * section's coverage entry, on a crawl that rendered and was never judged) and
  * `robots-blocked-dropped` (the `urls` dropped count, on a crawl that predates
@@ -299,10 +300,18 @@ export const NOT_MEASURED_REASONS = {
   "robots-blocked-dropped":
     "the robots-blocked overflow was not counted on this crawl (it predates migration 0020)",
   "click-depth": "click depth is derived by the rules run; run crawl_rules",
+  "link-counts": "judged before link counts existed; re-run the rules",
   render: "no render pass ran",
   "render-coverage": "render coverage is a rules-run metric; run crawl_rules",
   "issues-grid": "no rules run has judged this crawl; run crawl_rules",
 } as const;
+
+/**
+ * The `link-counts` reason on a crawl with no rules run stamped (never judged,
+ * or a rules run in flight). The id is the same as the judged-before-29c case;
+ * the reason says which case it is.
+ */
+export const LINK_COUNTS_UNJUDGED_REASON = "link counts are derived by the rules run; run crawl_rules";
 
 type NotMeasuredId = keyof typeof NOT_MEASURED_REASONS;
 
@@ -551,6 +560,68 @@ async function clickDepthSection(db: Exec, crawlId: string): Promise<OverviewSec
 }
 
 /**
+ * Link counts over the `FETCHED_OK` pages: p50, p90 and max of the inlinks,
+ * the internal outlinks and the external outlinks, as the rules run's derive
+ * step wrote them. `percentile_disc`, so every value is an integer count.
+ * Returns null when any such page holds a null `inlinks_internal` (judged
+ * before 29c): the caller names the section in `notMeasured`. A null in an
+ * outlink column of an OK page is a writer defect and throws.
+ */
+async function linkCountsSection(db: Exec, crawlId: string): Promise<OverviewSection | null> {
+  const result = await db.execute<{
+    n: number;
+    null_in: number;
+    null_out: number;
+    in50: number | null; in90: number | null; in_max: number | null;
+    oi50: number | null; oi90: number | null; oi_max: number | null;
+    oe50: number | null; oe90: number | null; oe_max: number | null;
+  }>(sql`
+    select count(*)::int as n,
+           count(*) filter (where p.inlinks_internal is null)::int as null_in,
+           count(*) filter (where p.outlinks_internal is null
+                               or p.outlinks_external is null)::int as null_out,
+           percentile_disc(0.5) within group (order by p.inlinks_internal)::int as in50,
+           percentile_disc(0.9) within group (order by p.inlinks_internal)::int as in90,
+           max(p.inlinks_internal)::int as in_max,
+           percentile_disc(0.5) within group (order by p.outlinks_internal)::int as oi50,
+           percentile_disc(0.9) within group (order by p.outlinks_internal)::int as oi90,
+           max(p.outlinks_internal)::int as oi_max,
+           percentile_disc(0.5) within group (order by p.outlinks_external)::int as oe50,
+           percentile_disc(0.9) within group (order by p.outlinks_external)::int as oe90,
+           max(p.outlinks_external)::int as oe_max
+      from pages p
+     where p.crawl_id = ${crawlId} and ${FETCHED_OK("p")}`);
+  const r = result.rows[0];
+  if (r === undefined) {
+    throw new Error(`crawl overview of crawl ${crawlId}: the link counts aggregate answered no row`);
+  }
+  if (r.null_in > 0) return null;
+  if (r.null_out > 0) {
+    throw new Error(
+      `crawl overview of crawl ${crawlId}: ${r.null_out} fetched-OK pages have inlinks but no ` +
+        "outlink counts; re-run the rules over this crawl",
+    );
+  }
+  const entry = (label: string, value: number | null): OverviewEntry => {
+    if (value === null) {
+      throw new Error(`crawl overview of crawl ${crawlId}: link counts '${label}' is null`);
+    }
+    return { label, value, percent: null };
+  };
+  if (r.n === 0) return { id: "link-counts", entries: [] };
+  return {
+    id: "link-counts",
+    entries: [
+      entry("inlinks p50", r.in50), entry("inlinks p90", r.in90), entry("inlinks max", r.in_max),
+      entry("outlinks (internal) p50", r.oi50), entry("outlinks (internal) p90", r.oi90),
+      entry("outlinks (internal) max", r.oi_max),
+      entry("outlinks (external) p50", r.oe50), entry("outlinks (external) p90", r.oe90),
+      entry("outlinks (external) max", r.oe_max),
+    ],
+  };
+}
+
+/**
  * One entry per `discovered_via`, most first, then `In a sitemap` /
  * `Not in a sitemap`: whether any of the crawl's `sitemap_urls.url_normalised`
  * is the page's `url` (the join `sitemap.ts` and `link-graph.ts` make). Both
@@ -780,7 +851,7 @@ async function issuesGridSection(
  *
  * Unlike the Issues Overview, an unjudged crawl is answered: every crawl-level
  * section is there, and only what the rules run produces (`click-depth`,
- * `issues-grid`, the render coverage entry) is named as not measured.
+ * `link-counts`, `issues-grid`, the render coverage entry) is named as not measured.
  */
 export async function buildCrawlOverview(
   db: Db,
@@ -798,8 +869,8 @@ export async function buildCrawlOverview(
 
     const sections: OverviewSection[] = [];
     const notMeasured: NotMeasured = [];
-    const skip = (id: NotMeasuredId): void => {
-      notMeasured.push({ id, reason: NOT_MEASURED_REASONS[id] });
+    const skip = (id: NotMeasuredId, reason: string = NOT_MEASURED_REASONS[id]): void => {
+      notMeasured.push({ id, reason });
     };
 
     sections.push(urlsSection(detail));
@@ -810,6 +881,13 @@ export async function buildCrawlOverview(
     sections.push(await indexabilitySection(tx, crawlId));
     if (judged) sections.push(await clickDepthSection(tx, crawlId));
     else skip("click-depth");
+    if (judged) {
+      const linkCounts = await linkCountsSection(tx, crawlId);
+      if (linkCounts === null) skip("link-counts");
+      else sections.push(linkCounts);
+    } else {
+      skip("link-counts", LINK_COUNTS_UNJUDGED_REASON);
+    }
     sections.push(await discoverySection(tx, crawlId));
     sections.push(await responseTimeSection(tx, crawlId, slowMs));
     if (detail.renderPassCount > 0) {

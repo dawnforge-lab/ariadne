@@ -11,7 +11,7 @@ produces judgement. Full design in `docs/crawl-audit-engine-spec.md`; phasing
 and provenance in `docs/crawl-audit-build-plan.md`.
 
 **Session start:** read `docs/crawl-audit-engine-spec.md` and
-`docs/crawl-audit-build-plan.md` before writing code. Phases 0–29b are shipped
+`docs/crawl-audit-build-plan.md` before writing code. Phases 0–29c are shipped
 (gate evidence in `docs/gates/`). The order from Phase 25 on is
 `docs/superpowers/specs/2026-11-04-roadmap-design.md`; the active phase is the
 newest plan in `docs/superpowers/plans/`. Each phase gets its own design and

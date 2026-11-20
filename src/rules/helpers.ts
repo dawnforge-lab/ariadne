@@ -968,6 +968,25 @@ const SAYS_NOINDEX = (column: string): string =>
   `coalesce(${column} ~* 'noindex' or ${column} ~* '(^|[\\s,])none([\\s,]|$)', false)`;
 
 /**
+ * `nofollow` over one aliased robots column, in SQL: the whole directive
+ * `nofollow`, or `none` ("noindex, nofollow"), bounded on both sides, so
+ * `nofollowing` is not `nofollow`. It reads the value as `robotsTokens` does
+ * (parity pinned in test/rules/robots-nofollow-sql.test.ts):
+ *  - the value directives (`max-snippet`, `max-image-preview`,
+ *    `max-video-preview`) keep their colon and their value, so
+ *    `max-image-preview:none` is NOT `none`: they are cut out first;
+ *  - any other `name:` prefix is a bot, read as a directive for the page, so a
+ *    colon also opens a token (`googlebot:nofollow`, `googlebot: none`).
+ * Case-insensitive; NULL coalesces to false ("no directive").
+ *
+ * `\s` here is Postgres's `[[:space:]]`; see `SAYS_NOINDEX` for the one place
+ * it differs from JavaScript's.
+ */
+export const SAYS_NOFOLLOW = (column: string): string =>
+  `coalesce(regexp_replace(${column}, 'max-(snippet|image-preview|video-preview)[[:space:]]*:[[:space:]]*[^[:space:],]*', '', 'gi')` +
+  ` ~* '(^|[\\s,:])(nofollow|none)([\\s,]|$)', false)`;
+
+/**
  * `indexabilityOf(row).status` as a SQL expression over an aliased `pages`, so a
  * count by indexability (the Crawl Overview) is one `group by` rather than a
  * page load (hard rule 3). Returns `''` for an indexable page.

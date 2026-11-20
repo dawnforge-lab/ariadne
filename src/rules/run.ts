@@ -2,6 +2,8 @@ import { and, asc, eq, gt, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import { crawls, issues, metrics, pages } from "../db/schema.js";
 import { deriveClickDepth } from "./derive/click-depth.js";
+import { deriveLinkCounts } from "./derive/link-counts.js";
+import { deriveLinkScore } from "./derive/link-score.js";
 import { deriveSchemaValidation } from "./derive/schema-validation.js";
 import { deriveSitemapHreflang } from "./derive/sitemap-hreflang.js";
 import { deriveUrlParams } from "./derive/url-params.js";
@@ -37,6 +39,13 @@ export interface RunSummary {
   byRule: Record<string, number>;
   /** Rows each derivation wrote, by derivation name. */
   derived: Record<string, number>;
+  /**
+   * Wall time of each derivation in milliseconds, by function name
+   * (`deriveClickDepth`, `deriveLinkCounts`, ...), measured with
+   * `performance.now()`. Every surface that answers the summary carries it, so
+   * the derive step's cost is visible without a profiler.
+   */
+  derivedMs: Record<string, number>;
   /** `metrics` rows written across every metric rule. */
   metrics: number;
   /**
@@ -93,8 +102,8 @@ type Derivation = (db: Db, crawlId: string) => Promise<Record<string, number>>;
  * rows in one statement — so a re-run over the same crawl leaves exactly what
  * the first run left.
  *
- * The four are independent: they read `pages`, `structured_data`, `pages` and
- * `links`, and `sitemap_hreflang` and `pages`, and none of them reads what
+ * The five are independent: they read `pages`, `structured_data`, `pages` and
+ * `links` (click depth and link counts), and `sitemap_hreflang` and `pages`, and none of them reads what
  * another writes. The order between them is therefore arbitrary today, and
  * stated rather than discovered so that it stops being arbitrary the moment one
  * of them starts mattering.
@@ -103,6 +112,8 @@ const derivations: Derivation[] = [
   deriveUrlParams,
   deriveSchemaValidation,
   deriveClickDepth,
+  deriveLinkCounts,
+  deriveLinkScore,
   deriveSitemapHreflang,
 ];
 
@@ -308,6 +319,7 @@ export async function runRules(
     findings: 0,
     byRule: {},
     derived: {},
+    derivedMs: {},
     metrics: 0,
     byMetric: {},
   };
@@ -386,10 +398,12 @@ export async function runRules(
   // gathered on disk rather than taking it down with it.
   await flush();
   for (const derive of derivations) {
+    const started = performance.now();
     try {
       for (const [key, count] of Object.entries(await derive(db, crawlId))) {
         summary.derived[`${derive.name}.${key}`] = count;
       }
+      summary.derivedMs[derive.name] = performance.now() - started;
     } catch (error) {
       // Loud, like a rule that throws. A derivation that failed silently would
       // leave the next run's rules joining a stale or empty inventory table and

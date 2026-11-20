@@ -1075,7 +1075,27 @@ const KINDS = ["page", "query", "metric"] as const satisfies readonly AnyRule["k
 //        4.14.0 marks it `reviewOnFail`, so it reports "needs review" and never
 //        a violation, and WCAG 2.2 removed the criterion it tested (4.1.1).
 //        227 rules: 72 page / 139 query / 16 metric.
-export const RULESET_VERSION = "0.27.0";
+// 0.28.0: Phase 29c, crawl analysis. ONE BUMP FOR THE PHASE; later tasks append here.
+//        `links.high-outlinks` reads `pages.outlinks_internal` / `outlinks_external`
+//        (filled by the derive step, `deriveLinkCounts`) instead of grouping the
+//        `links` table; same counts, same findings; a null count throws. New metric
+//        `links.score-distribution` (info; CHECK-33): the eight distribution
+//        numbers of `pages.link_score` (`deriveLinkScore`) for the site and each
+//        template. 228 rules: 72 page / 139 query / 17 metric.
+//        New query rule `links.anchors-generic-only` (info; CHECK-86): an
+//        indexable page with `GENERIC_ANCHOR_MIN_INLINKS` (new overridable
+//        threshold, default 3, 1-1000; the 24th) or more internal inlinks
+//        (`pages.inlinks_internal`) whose every inlink anchor is empty or on
+//        `NON_DESCRIPTIVE_ANCHORS`. Migration 0060 names the threshold in every
+//        stored stamp. 229 rules: 72 page / 140 query / 17 metric.
+//        `links.anchors-generic-only` is `needsSpider`: a list crawl knows only
+//        the links among the listed pages, so it is not run in list mode and
+//        `crawl.list-mode` names it (as `links.only-from-non-indexable`).
+//        Link score, owner rulings: a page whose robots meta / `X-Robots-Tag` says
+//        `nofollow` or `none` (whole token, `SAYS_NOFOLLOW`) contributes no edges to
+//        the graph (link counts unchanged); every page scores 100 when `max - min <=
+//        LINK_SCORE_EQUAL_TOLERANCE (1e-9) * max`, not only when max = min exactly.
+export const RULESET_VERSION = "0.28.0";
 
 /**
  * The 48 crawl-derived checks (sf-audit checklist, Pre-Crawl + sections 1–11,

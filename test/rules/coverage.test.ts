@@ -567,15 +567,17 @@ describe("checklist coverage", () => {
   //   The 25 claim CHECK-89, which joins `CRAWL_CHECK_IDS` claimed (below).
   //   Phase 29b T8 drops `a11y.duplicate-id-aria` (axe reports it as needing
   //   review, never as a violation): query 140 - 1 = 139, total 227.
-  it("pins the ruleset split: 227 rules = 72 page + 139 query + 16 metric", () => {
+  //   Phase 29c T3 adds one metric (`links.score-distribution`, CHECK-33): metric 17, total 228.
+  //   Phase 29c T4 adds one query rule (`links.anchors-generic-only`, CHECK-86): query 140, total 229.
+  it("pins the ruleset split: 229 rules = 72 page + 140 query + 17 metric", () => {
     const registry = buildRegistry();
-    expect(registry.all()).toHaveLength(227);
+    expect(registry.all()).toHaveLength(229);
     expect(registry.byKind("page")).toHaveLength(72);
-    expect(registry.byKind("query")).toHaveLength(139);
+    expect(registry.byKind("query")).toHaveLength(140);
     // The link-graph five, the two content metrics and hreflang coverage, plus
     // the URL-parameter, redirect-volume and sitemap-structure metrics, plus
     // the render pass's coverage, the health rollup, the page-weight table, coverage.
-    expect(registry.byKind("metric")).toHaveLength(16);
+    expect(registry.byKind("metric")).toHaveLength(17);
   });
 
   // The section-12 claims, pinned in both directions the way CHECK-31's move is:

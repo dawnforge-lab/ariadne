@@ -801,13 +801,14 @@ distinction reaches the audit as `render.coverage`'s `selectionMode`.
 and metrics written. It answers the run summary:
 
 ```
-{pagesScanned, findings, byRule, derived, metrics, byMetric}
+{pagesScanned, findings, byRule, derived, derivedMs, metrics, byMetric}
 ```
 
 `findings` is the issue rows this run wrote and `byRule` breaks them down; `metrics`
 is the metric rows and `byMetric` breaks those down, naming **every** metric rule that
 ran, so a zero there means "this rule removed the crawl's previous answer" and an
-absent key means it never ran. `derived` counts what the derivations wrote, keyed
+absent key means it never ran. `derivedMs` is the wall time in milliseconds of each
+derivation, keyed by derivation name. `derived` counts what the derivations wrote, keyed
 `<derivation>.<count>`. Two of them are structured-data counts: deriveSchemaValidation.blocks
 is the blocks validated, and deriveSchemaValidation.orphanBlocks is the structured-data rows
 whose page row lost an insert race, which are left unvalidated and counted (no surface reads
@@ -833,10 +834,10 @@ upgrading the engine rather than re-crawling the site.
 
 `crawl_config_get` answers the crawl's judgement: `{crawlId, judgement, thresholds,
 judgedWith, judgementStale}`. `judgement` is the block, `{}` when nothing is set;
-`thresholds` lists all 23 overridable thresholds as `{value, default, min, max,
+`thresholds` lists all 24 overridable thresholds as `{value, default, min, max,
 overridden}`, where `value` is what the NEXT rules run will use; `judgedWith` is what
 the last completed run used — `{disabledRules, thresholds, findingCap?}`, its
-`thresholds` all 23 at the values that run actually judged with — (`null` if nobody
+`thresholds` all 24 at the values that run actually judged with — (`null` if nobody
 has judged the crawl); and
 `judgementStale` (`{stale, reasons}`) says whether the two differ.
 

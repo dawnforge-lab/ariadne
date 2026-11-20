@@ -66,6 +66,7 @@ import { sql, type SQL } from "drizzle-orm";
 import { indexabilityOf } from "../rules/helpers.js";
 import { MAX_REDIRECT_HOPS } from "../rules/query/redirects.js";
 import type { IssueType, Priority } from "../rules/registry/types.js";
+import { anchorsByTargetRow, anchorsByTargetSql, renderTopAnchors, type AnchorsByTargetRaw } from "./anchors.js";
 import { notDisabled } from "./judgement-view.js";
 import {
   STRUCTURED_DATA_FORMATS,
@@ -89,6 +90,7 @@ export const CSV_VIEWS = [
   "issues_overview",
   "crawl_overview",
   "structured_data_nodes",
+  "anchors_by_target",
 ] as const;
 export type CsvViewName = (typeof CSV_VIEWS)[number];
 
@@ -96,7 +98,7 @@ export type CsvViewName = (typeof CSV_VIEWS)[number];
 type NonKeysetView = "metric_table" | "issues_overview" | "crawl_overview";
 
 /**
- * THE NINE VIEWS THAT ARE A KEYSET READ OF A TABLE — every view but three.
+ * THE TEN VIEWS THAT ARE A KEYSET READ OF A TABLE — every view but three.
  *
  * `metric_table`, `issues_overview` and `crawl_overview` are the exceptions and
  * they are a different KIND of view. `issues_overview` is one `GROUP BY rule_id`
@@ -111,7 +113,7 @@ type NonKeysetView = "metric_table" | "issues_overview" | "crawl_overview";
  * one stored row into three (a measure each), or a stored list into twenty rows,
  * or a stored map into its entries — a transformation no `ORDER BY … LIMIT` can
  * express. So it has no `CsvView` definition, and the properties that make the
- * other nine safe on a 50,000-page crawl (a LIMIT, an order, a cursor
+ * other ten safe on a 50,000-page crawl (a LIMIT, an order, a cursor
  * comparison) are asserted over THIS list rather than over the vocabulary.
  *
  * What bounds `metric_table` instead is the rows themselves: one metric writes
@@ -623,7 +625,7 @@ function linkNext(row: LinkRow): string[] {
 }
 
 /**
- * The nine views.
+ * The ten views.
  *
  * Every one of them answers a question the Ahrefs-style bulk-export block asks,
  * and every one of them is a read the JSON surface could already answer more
@@ -751,6 +753,10 @@ export const CSV_VIEW_DEFS: Record<CsvQueryViewName, CsvView> = {
     fetch_class: string;
     is_indexable: boolean | null;
     click_depth: number | null;
+    inlinks_internal: number | null;
+    outlinks_internal: number | null;
+    outlinks_external: number | null;
+    link_score: number | null;
     page_type: string | null;
     title: string | null;
     recheck_fetch_class: string | null;
@@ -764,7 +770,11 @@ export const CSV_VIEW_DEFS: Record<CsvQueryViewName, CsvView> = {
     recheck_at: string | null;
   }>({
     header: [
-      "url", "status", "fetchClass", "indexable", "clickDepth", "pageType", "title",
+      "url", "status", "fetchClass", "indexable", "clickDepth",
+      // Link facts (29c). Empty is not measured (judged before 29c, or a page
+      // outside the link graph for the score and outlinks), never zero.
+      "inlinks", "outlinksInternal", "outlinksExternal", "linkScore",
+      "pageType", "title",
       // THE SECOND OBSERVATION, three columns wide (Phase 17). A list of server
       // errors that cannot be sorted by "still broken" is the wrong list: the
       // 5xx re-verification pass is what separates a confirmed outage from a
@@ -777,7 +787,8 @@ export const CSV_VIEW_DEFS: Record<CsvQueryViewName, CsvView> = {
     start: [""],
     query: (crawlId, cursor, limit) => sql`
       select p.url, p.status_code, p.fetch_class, p.is_indexable,
-             p.click_depth, p.page_type, p.title,
+             p.click_depth, p.inlinks_internal, p.outlinks_internal,
+             p.outlinks_external, p.link_score, p.page_type, p.title,
              p.recheck_fetch_class, p.recheck_status_code, p.recheck_at
       from pages p
       where p.crawl_id = ${crawlId} and p.url > ${cursor[0] ?? ""}::text
@@ -790,6 +801,10 @@ export const CSV_VIEW_DEFS: Record<CsvQueryViewName, CsvView> = {
       row.fetch_class,
       orEmpty(row.is_indexable),
       orEmpty(row.click_depth),
+      orEmpty(row.inlinks_internal),
+      orEmpty(row.outlinks_internal),
+      orEmpty(row.outlinks_external),
+      orEmpty(row.link_score),
       orEmpty(row.page_type),
       orEmpty(row.title),
       orEmpty(row.recheck_fetch_class),
@@ -1007,6 +1022,40 @@ export const CSV_VIEW_DEFS: Record<CsvQueryViewName, CsvView> = {
       orEmpty(row.fetch_reason),
       String(row.referencing_pages),
     ],
+  }),
+
+  /**
+   * The `anchors_by_target` listing as a file (29c, R6): the same statement and
+   * the same row shaping, keyed by `url`. `topAnchors` is `text (n); text (n)`.
+   * Refused before the header on an unjudged crawl or one judged before 29c
+   * (`ApiService.assertAnchorsJudged`).
+   */
+  anchors_by_target: defineCsvView<AnchorsByTargetRaw>({
+    header: [
+      "url", "pageType", "inlinks", "distinctAnchors", "emptyAnchors",
+      "nonDescriptiveAnchors", "genericShare", "topAnchors",
+    ],
+    keyset: ["url"],
+    start: [""],
+    query: (crawlId, cursor, limit) => {
+      const after = cursor[0];
+      if (after === undefined) throw new Error("anchors_by_target: the keyset cursor has no url part");
+      return anchorsByTargetSql(crawlId, after, limit);
+    },
+    next: (row) => [row.url],
+    cells: (raw) => {
+      const row = anchorsByTargetRow(raw);
+      return [
+        row.url,
+        orEmpty(row.pageType),
+        String(row.inlinks),
+        String(row.distinctAnchors),
+        String(row.emptyAnchors),
+        String(row.nonDescriptiveAnchors),
+        String(row.genericShare),
+        renderTopAnchors(row.topAnchors),
+      ];
+    },
   }),
 
   /**

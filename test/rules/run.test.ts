@@ -172,8 +172,10 @@ describe("buildRegistry", () => {
     expect(ids).toContain("a11y.image-alt");
     expect(ids).toContain("a11y.color-contrast");
     expect(ids).toContain("render.not-recorded");
-    // 227 since Phase 29b Task 8 dropped `a11y.duplicate-id-aria` (228 before).
-    expect(ids.length).toBe(227);
+    // 227 since Phase 29b Task 8 dropped `a11y.duplicate-id-aria` (228 before);
+    // 228 since Phase 29c Task 3 added `links.score-distribution`;
+    // 229 since Task 4 added `links.anchors-generic-only`.
+    expect(ids.length).toBe(229);
   });
 
   it("registers every kind the runner drives", () => {
@@ -508,6 +510,16 @@ describe("runRules against the database", () => {
       "deriveClickDepth.unreachable": 1,
       "deriveClickDepth.maxDepth": 0,
       "deriveClickDepth.capped": 0,
+      // Two pages, no links: the home page has no inlinks and is analysed.
+      "deriveLinkCounts.pages": 2,
+      "deriveLinkCounts.withInlinks": 0,
+      "deriveLinkCounts.analysed": 2,
+      // Two analysed pages and no links: every page dangles, one iteration is exact.
+      "deriveLinkScore.nodes": 2,
+      "deriveLinkScore.edges": 0,
+      "deriveLinkScore.dangling": 2,
+      "deriveLinkScore.iterations": 1,
+      "deriveLinkScore.converged": 1,
       // No sitemap alternate was staged, so no `source = 'sitemap'` row.
       "deriveSitemapHreflang.rows": 0,
     });

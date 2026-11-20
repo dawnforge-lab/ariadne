@@ -108,7 +108,7 @@ export const OTHER_SOURCES = "(other)";
  * the aggregate: `pages.id` is the table's primary key, so Postgres knows both
  * are functionally dependent on it.
  */
-function inlinkCohort(crawlId: string): SQL {
+export function inlinkCohort(crawlId: string): SQL {
   return sql`
     select p.url as url, ${COHORT_PAGE_TYPE} as page_type,
            count(distinct l.source_page_id)::int as v
@@ -119,6 +119,37 @@ function inlinkCohort(crawlId: string): SQL {
      and l.source_page_id <> p.id
     where ${cohortFilter(crawlId)}
     group by p.id`;
+}
+
+/**
+ * One row per cohort page: its type and its link score (0-100, the share of
+ * internal link weight the page holds; `deriveLinkScore` writes it). Same cohort
+ * as `inlinkCohort`, so the two CHECK-33 distributions describe one set of pages.
+ */
+function scoreCohort(crawlId: string): SQL {
+  return sql`
+    select ${COHORT_PAGE_TYPE} as page_type, p.link_score as v
+    from pages p
+    where ${cohortFilter(crawlId)}`;
+}
+
+/**
+ * A cohort page with no link score means the derivation has not run for this
+ * crawl (a fetched-OK page always has one afterwards). Counting it as 0 would
+ * report an unmeasured page as the least-linked page on the site, so refuse.
+ */
+async function assertScored(db: Db, crawlId: string, self: MetricIdentity): Promise<void> {
+  const missing = await db.execute<{ url: string }>(sql`
+    select p.url as url
+    from pages p
+    where ${cohortFilter(crawlId)} and p.link_score is null
+    limit 1`);
+  const first = missing.rows[0];
+  if (first !== undefined) {
+    throw new Error(
+      `${self.id}: link_score is null on ${first.url} (crawl ${crawlId}); deriveLinkScore has not run for this crawl`,
+    );
+  }
 }
 
 /**
@@ -394,7 +425,7 @@ const LINKS = "links";
 const TECHNICAL = "technical";
 
 /**
- * The five link-graph metrics.
+ * The link-graph metrics.
  *
  * Each is assembled by `metricRule`, which writes the id once and hands it to
  * the body as `self`: the id the registry keys, the id `copyFor` looks up and
@@ -409,6 +440,22 @@ export const linkMetrics: MetricRule[] = [
     LINKS,
     perScope("Template", DISTRIBUTION_COLUMNS, 4),
     async (db, crawlId, self) => distribution(db, crawlId, self, inlinkCohort(crawlId)),
+    { needsSpider: true },
+  ),
+
+  // The link score (random-surfer model, damping 0.85; `deriveLinkScore`) as a
+  // distribution, in the shape of `inlinks.distribution`. It is evidence about
+  // where internal link weight sits, never a verdict on a low score.
+  metricRule(
+    "links.score-distribution",
+    ["CHECK-33"],
+    LINKS,
+    perScope("Template", DISTRIBUTION_COLUMNS, 16),
+    async (db, crawlId, self) => {
+      await assertCrawl(db, crawlId, self.id);
+      await assertScored(db, crawlId, self);
+      return distribution(db, crawlId, self, scoreCohort(crawlId));
+    },
     { needsSpider: true },
   ),
 

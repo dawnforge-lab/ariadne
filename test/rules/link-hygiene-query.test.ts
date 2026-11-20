@@ -12,6 +12,7 @@ import { BLOCKED_HOSTS, BLOCKED_HOST_SUFFIXES, blockedHostReason } from "../../s
 import { closeDb, createDb, type Db } from "../../src/db/client.js";
 import { runMigrations } from "../../src/db/migrate.js";
 import { crawls, links, pages } from "../../src/db/schema.js";
+import { deriveLinkCounts } from "../../src/rules/derive/link-counts.js";
 import { SAMPLE_SOURCES } from "../../src/rules/query/link-targets.js";
 import { LOCALHOST_HOST_BATCH, linkHygieneRules } from "../../src/rules/query/link-hygiene.js";
 import type { Finding, QueryRule } from "../../src/rules/registry/types.js";
@@ -38,7 +39,7 @@ function rule(id: string): QueryRule {
 }
 
 describe("linkHygieneRules metadata", () => {
-  it("defines the seven rules, with their checks, severities and category", () => {
+  it("defines the eight rules, with their checks, severities and category", () => {
     expect(
       Object.fromEntries(linkHygieneRules.map((r) => [r.id, [r.checkIds, r.severity, r.category]])),
     ).toEqual({
@@ -51,6 +52,7 @@ describe("linkHygieneRules metadata", () => {
       "links.no-anchor-text": [["CHECK-86"], "warning", "links"],
       "links.aria-label-only": [["CHECK-86"], "info", "links"],
       "links.high-outlinks": [["CHECK-33"], "info", "links"],
+      "links.anchors-generic-only": [["CHECK-86"], "info", "links"],
     });
   });
 
@@ -777,6 +779,12 @@ describe("the link-hygiene rules against the database", () => {
 
   describe("links.high-outlinks", () => {
     const ID = "links.high-outlinks";
+    // The rule reads the derived counts, which `runRules` fills first; a test
+    // that calls the rule directly stands in for that step.
+    const run = async (id: string, crawlId: string, caps?: { listing: number | null }): Promise<Finding[]> => {
+      await deriveLinkCounts(db, crawlId);
+      return rule(id).run(db, crawlId, caps);
+    };
     const internal = (n: number): string[] => Array.from({ length: n }, (_, i) => `/o?n=${i}`);
     const external = (n: number): string[] =>
       Array.from({ length: n }, (_, i) => `https://ext${i}.example/`);
@@ -832,6 +840,15 @@ describe("the link-hygiene rules against the database", () => {
         ...external(HIGH_EXTERNAL_OUTLINKS),
       ]);
       expect(await run(ID, crawlId)).toHaveLength(0);
+    });
+
+    it("throws, naming the derivation, when a fetched page's outlink counts were never derived", async () => {
+      const crawlId = await newCrawl();
+      await addPages(crawlId, [{ path: "/underived" }]);
+      // Bypass the helper's derivation: the columns stay null.
+      await expect(rule(ID).run(db, crawlId)).rejects.toThrow(
+        /outlinks_internal is null.*deriveLinkCounts has not run/s,
+      );
     });
   });
 });

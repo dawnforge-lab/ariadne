@@ -256,6 +256,18 @@ import {
 } from "./csv.js";
 import { ServiceError, clip, unknownKeysMessage } from "./errors.js";
 import {
+  diffFieldsOf,
+  diffSummarySql,
+  diffUrlsSql,
+  parseDiffThresholds,
+  parseDiffUrlsRequest,
+  type CrawlDiffField,
+  type DiffState,
+  type DiffSummaryRow,
+  type DiffThresholds,
+  type DiffUrl,
+} from "./crawl-diff.js";
+import {
   blockInfos,
   blockProblemsCapped,
   blockWarnings,
@@ -288,6 +300,12 @@ import {
   type ScheduleView,
 } from "../schedule/store.js";
 import { tenantExportDir, type TenantId } from "../tenant.js";
+import {
+  anchorsByTargetRow,
+  anchorsByTargetSql,
+  type AnchorsByTargetRaw,
+  type AnchorsByTargetRow,
+} from "./anchors.js";
 import {
   buildCrawlOverview,
   buildIssuesOverview,
@@ -2002,6 +2020,26 @@ export interface PageRow {
    * derivation that computes it runs there.
    */
   clickDepth: number | null;
+  /**
+   * Distinct internal pages that link to this URL (nofollow included, self-links
+   * excluded). Set on every row by a rules run, a 0 included; null only on a
+   * crawl judged before 29c, which means not measured and never zero.
+   */
+  inlinksInternal: number | null;
+  /**
+   * Distinct internal / external link targets on this page (self-links and
+   * nofollow included). Set on fetched-OK pages by a rules run; null on every
+   * other row and on a crawl judged before 29c.
+   */
+  outlinksInternal: number | null;
+  outlinksExternal: number | null;
+  /**
+   * The share of internal link weight the page holds (random-surfer model,
+   * damping 0.85), scaled 0-100 on a log scale so 100 is the crawl's top page.
+   * Null for a page outside the link graph (not fetched-OK) and on a crawl
+   * judged before 29c.
+   */
+  linkScore: number | null;
   /** How the crawler found this URL: seed, link, sitemap or redirect. */
   discoveredVia: string;
   wordCount: number | null;
@@ -2360,6 +2398,13 @@ export interface StructuredDataQuery {
   pageType?: string;
   /** One of `STRUCTURED_DATA_FORMATS`: pages holding at least one block of it. */
   format?: string;
+  limit?: number;
+  cursor?: string;
+}
+
+/** The filters `GET /crawls/:id/anchors-by-target` accepts. Every one is validated. */
+export interface AnchorsByTargetQuery {
+  pageType?: string;
   limit?: number;
   cursor?: string;
 }
@@ -6518,6 +6563,87 @@ export class ApiService {
   }
 
   /**
+   * `GET /diff` and `crawl_diff` (Phase 29c T7): a field-level summary of two
+   * judged crawls of one site, joined on `pages.url`. `comparePair` runs first,
+   * in the same repeatable-read snapshot, so the refusals (same crawl twice,
+   * different sites, ownership, "never been judged") are `compareCrawls`' own,
+   * in the same order. A rules run in flight has cleared `rules_run_at` in its
+   * first transaction, so a diff then is refused as never judged and cannot
+   * read half-written link columns. One SQL statement, O(1) memory in pages
+   * (`src/api/crawl-diff.ts`).
+   */
+  async crawlDiff(
+    tenant: TenantId,
+    baseCrawlId: string,
+    headCrawlId: string,
+    thresholds: Partial<Record<keyof DiffThresholds, unknown>> = {},
+  ): Promise<CrawlDiff> {
+    // Parsed before any read, so a bad parameter is the refusal whatever the ids.
+    const t = parseDiffThresholds(thresholds);
+    return await this.db.transaction(
+      async (tx) => {
+        const { base, head } = await comparePair(tx, tenant, baseCrawlId, headCrawlId);
+        const result = await tx.execute<DiffSummaryRow>(diffSummarySql(baseCrawlId, headCrawlId, t));
+        const row = result.rows[0];
+        if (row === undefined) throw new Error("crawl_diff: the summary statement answered no row");
+        const count = (name: string): number => {
+          const value = row[name];
+          if (typeof value !== "number") throw new Error(`crawl_diff: the summary has no '${name}'`);
+          return value;
+        };
+        return {
+          base: { crawlId: base.crawlId, siteUrl: base.siteUrl, rulesRunAt: base.rulesRunAt, pages: count("base_pages") },
+          head: { crawlId: head.crawlId, siteUrl: head.siteUrl, rulesRunAt: head.rulesRunAt, pages: count("head_pages") },
+          thresholds: t,
+          urls: { common: count("common"), added: count("added"), removed: count("removed") },
+          fields: diffFieldsOf(row),
+        };
+      },
+      { isolationLevel: "repeatable read", accessMode: "read only" },
+    );
+  }
+
+  /**
+   * `GET /diff/urls` and `crawl_diff_urls` (Phase 29c T8): the urls behind one
+   * of `crawlDiff`'s counts, keyset-paged on the stored url, with the value on
+   * each side. The listing and the summary share `fieldChangedWhere` and
+   * `fieldNotComparableWhere`, so a listing walked to its end has exactly as
+   * many urls as the count said. `comparePair` runs first, in the same
+   * repeatable-read snapshot, so the refusals are `crawlDiff`'s own.
+   * `field` / `state` / thresholds are parsed before any read.
+   */
+  async listDiffUrls(
+    tenant: TenantId,
+    baseCrawlId: string,
+    headCrawlId: string,
+    field: string,
+    opts: { state?: string; limit?: number; cursor?: string } & Partial<Record<keyof DiffThresholds, unknown>> = {},
+  ): Promise<Page<DiffUrl> & { field: string; state: DiffState | null; thresholds: DiffThresholds }> {
+    const { state, limit: rawLimit, cursor: rawCursor, ...rawThresholds } = opts;
+    const t = parseDiffThresholds(rawThresholds);
+    const req = parseDiffUrlsRequest(field, state);
+    const limit = parseLimit(rawLimit);
+    const cursor = rawCursor === undefined ? null : decodeCursor(rawCursor, 1)[0];
+    return await this.db.transaction(
+      async (tx) => {
+        await comparePair(tx, tenant, baseCrawlId, headCrawlId);
+        const result = await tx.execute<DiffUrl>(diffUrlsSql(baseCrawlId, headCrawlId, req, t, cursor, limit));
+        const rows = result.rows;
+        const items = rows.slice(0, limit);
+        const last = rows.length > limit ? rows[limit - 1] : undefined;
+        return {
+          items,
+          nextCursor: last === undefined ? null : encodeCursor(last.url),
+          field: req.field,
+          state: req.state,
+          thresholds: t,
+        };
+      },
+      { isolationLevel: "repeatable read", accessMode: "read only" },
+    );
+  }
+
+  /**
    * The `judgement-overrides` caveat for each side whose stored judgement
    * disables a rule, naming the crawl and how many. Inside the comparison's
    * transaction, so the blocks are read from the same snapshot as the counts.
@@ -7065,6 +7191,74 @@ export class ApiService {
   }
 
   /**
+   * Which anchor texts the crawl's internal links use, target page by target
+   * page (Phase 29c, ruling R6; `src/api/anchors.ts` says what is counted).
+   *
+   * One row per page with at least one internal inlink, any fetch class,
+   * ordered by URL with `listPages`' one-column cursor. Refused with CONFLICT,
+   * never an empty page, on a crawl the rules have not judged and on one judged
+   * before link counts existed (`assertAnchorsJudged`): the listing's rows are
+   * selected on `inlinks_internal`, and a null there would read as "no page is
+   * linked to". The refusal and the read share one repeatable-read snapshot.
+   */
+  async listAnchorsByTarget(
+    tenant: TenantId,
+    crawlId: string,
+    opts: AnchorsByTargetQuery = {},
+  ): Promise<Page<AnchorsByTargetRow>> {
+    await this.assertCrawl(tenant, crawlId);
+    const limit = parseLimit(opts.limit);
+    const cursor = opts.cursor === undefined ? null : decodeCursor(opts.cursor, 1)[0];
+    const cohort = opts.pageType === undefined ? null : await this.pageTypeCondition(crawlId, opts.pageType);
+    return await this.db.transaction(
+      async (tx) => {
+        await this.assertAnchorsJudged(tx, crawlId);
+        const result = await tx.execute<AnchorsByTargetRaw>(
+          anchorsByTargetSql(crawlId, cursor, limit + 1, cohort),
+        );
+        const rows = result.rows;
+        const last = rows.length > limit ? rows[limit - 1] : undefined;
+        return {
+          items: rows.slice(0, limit).map(anchorsByTargetRow),
+          nextCursor: last === undefined ? null : encodeCursor(last.url),
+        };
+      },
+      { isolationLevel: "repeatable read", accessMode: "read only" },
+    );
+  }
+
+  /**
+   * The refusals `anchors_by_target` and its CSV view share: an unjudged crawl
+   * (the counts are written by the rules run) and one judged before 29c (any
+   * page's `inlinks_internal` null).
+   */
+  private async assertAnchorsJudged(reader: SnapshotReader, crawlId: string): Promise<void> {
+    const result = await reader.execute<{ judged: boolean; unset: boolean }>(sql`
+      select c.rules_run_at is not null as judged,
+             exists (select 1 from pages p
+                      where p.crawl_id = c.id and p.inlinks_internal is null) as unset
+        from crawls c
+       where c.id = ${crawlId}`);
+    const row = result.rows[0];
+    if (row === undefined) {
+      throw new ServiceError("NOT_FOUND", `no such crawl '${clip(crawlId)}'`);
+    }
+    if (!row.judged) {
+      throw new ServiceError(
+        "CONFLICT",
+        `crawl ${crawlId} has not been judged: run crawl_rules first — the link counts are ` +
+          "written by the rules run, and an empty anchors listing would read as a site no page links to",
+      );
+    }
+    if (row.unset) {
+      throw new ServiceError(
+        "CONFLICT",
+        `crawl ${crawlId} was judged before link counts existed — re-run the rules (crawl_rules)`,
+      );
+    }
+  }
+
+  /**
    * The two refusals the structured-data surfaces share, from one statement.
    *
    *  - **Unjudged** (`rules_run_at` null): the blobs are written by the rules
@@ -7421,6 +7615,7 @@ export class ApiService {
     // not count (unresolved references below extraction 4) is named in the
     // export answer's `notMeasured`, as the listing names it.
     let notMeasured: NotMeasured | null = judged === null ? null : judged.notMeasured;
+    if (view === "anchors_by_target") await this.assertAnchorsJudged(this.db, crawlId);
     if (view === "structured_data_nodes") {
       await this.assertStructuredDataJudged(this.db, crawlId);
       notMeasured = await this.structuredDataNotMeasured(this.db, crawlId);
@@ -8578,6 +8773,15 @@ function sameSet(a: readonly string[], b: readonly string[]): boolean {
   return left.size === right.size && [...left].every((value) => right.has(value));
 }
 
+/** The `crawl_diff` answer (Phase 29c T7). */
+export interface CrawlDiff {
+  base: { crawlId: string; siteUrl: string; rulesRunAt: string; pages: number };
+  head: { crawlId: string; siteUrl: string; rulesRunAt: string; pages: number };
+  thresholds: DiffThresholds;
+  urls: { common: number; added: number; removed: number };
+  fields: CrawlDiffField[];
+}
+
 /**
  * Both crawls' comparison-relevant facts, and every refusal that depends on
  * them — the shared pre-flight of `compareCrawls` and `listCompareUrls`.
@@ -8998,6 +9202,11 @@ export const PAGE_FIELDS = {
    * distribution and could not name a single page in it.
    */
   clickDepth: pages.clickDepth,
+  /** Link facts (29c): see `PageRow`. The raw score is deliberately not published. */
+  inlinksInternal: pages.inlinksInternal,
+  outlinksInternal: pages.outlinksInternal,
+  outlinksExternal: pages.outlinksExternal,
+  linkScore: pages.linkScore,
   /**
    * How the crawler reached this URL — seed, link, sitemap or redirect.
    *

@@ -1,11 +1,53 @@
 # The Ariadne surface Talos codes against
 
-**Status:** the contract as of Phase 29b (ruleset 0.27.0, migrations 0000–0058,
-35 MCP tools / 35 HTTP routes; every column label in this document is served
+**Status:** the contract as of Phase 29c, in progress (ruleset 0.28.0, migrations 0000–0060,
+38 MCP tools / 38 HTTP routes; every column label in this document is served
 under the ruleset version the engine reports — `rules_catalog`'s
 `rulesetVersion`, which the metric-table pass moves).
 `docs/talos-integration.md` says *why* the seam exists and what obligations bind
 it; this document says *what the seam is*.
+
+**What Phase 29c has changed here so far: the link graph is summarised per page, and
+two crawls can be diffed field by field.** Three tools and three routes are added
+(35 → 38 / 38), and existing answers gain fields:
+
+- **New tools and routes:** `anchors_by_target` (`GET /crawls/:id/anchors-by-target`,
+  §4.6b: per linked page, its inlinks, distinct anchors, top anchors, empty and
+  non-descriptive anchor counts and `genericShare`), `crawl_diff` (`GET /diff`, §7.6:
+  per field, how many pages changed between two judged crawls of one site) and
+  `crawl_diff_urls` (`GET /diff/urls`, §7.6: the URLs behind each of those counts,
+  with the value on each side).
+- **`pages_query` rows and the pages export** gain four link facts, written by the rules
+  run: `inlinksInternal`, `outlinksInternal`, `outlinksExternal` and `linkScore`. They
+  are null on a crawl never judged and on one judged before 29c, never zero.
+- **The `internal_urls` CSV view** gains the same four columns (`inlinks`,
+  `outlinksInternal`, `outlinksExternal`, `linkScore`), inserted after `clickDepth`, not
+  appended.
+- **`crawl_overview`** gains a `link-counts` section (§4.3b), after `click-depth`; on a
+  crawl not judged, or judged before 29c, it is absent and named in `notMeasured`.
+- **A thirteenth CSV view,** `anchors_by_target` (§12).
+- **The `crawl_rules` summary** gains `derivedMs`, the milliseconds each derivation took.
+
+The ruleset moves to **0.28.0**
+(229 rules: 72 page / 140 query / 17 metric; 33 critical / 97 warning / 99 info, the
+metric rules counting as info; 24 overridable thresholds). Migration 0060 stamps the
+new threshold onto every stored run stamp. The new metric `links.score-distribution` (CHECK-33)
+gives the eight distribution numbers of the link score, the share of internal link
+weight a page holds (random-surfer model, damping 0.85), scaled 0 to 100 (every page 100
+when max and min agree within 1e-9 relative), for the site and each template. A page whose
+robots meta or X-Robots-Tag says nofollow (or none) passes no link score through its links (its weight is shared evenly, as for a page with no links). The edge rule reads the two stored columns `robots_meta` and `x_robots_tag` only, so a bot-specific `<meta name=somebot>` (stored elsewhere) does not drop edges. `links.high-outlinks` now reads the per-page outlink counts the
+rules run derives before any rule runs; its findings are unchanged, and a fetched page
+whose counts were never derived makes the rule fail loudly instead of reading as zero.
+The new rule `links.anchors-generic-only` (info, CHECK-86) names an indexable page with
+`GENERIC_ANCHOR_MIN_INLINKS` or more internal inlinks, every one of whose anchors is
+empty or a generic English phrase (the list `links.non-descriptive-anchor` uses). The
+anchor text is judged, not an aria-label. Evidence: `inlinks` (distinct linking pages,
+the page's own links excluded, nofollow counted), `minInlinks` (the threshold in force)
+and `anchors` (up to 10 distinct normalised anchors, `""` for empty). It fails loudly
+on a crawl whose counts were never derived. Like `links.only-from-non-indexable` it
+needs the whole site's link graph, so it does not run on a list crawl and
+`crawl.list-mode` names it. `GENERIC_ANCHOR_MIN_INLINKS` is the
+twenty-fourth overridable threshold (integer, 1–1000, default 3).
 
 **What Phase 29b changed here: the render pass reads the page's own errors, its image
 boxes and its accessibility, and the resource pass measures images.** No tool or route
@@ -389,7 +431,7 @@ index that keeps `renderDocuments` from scanning a crawl's pages. Gate evidence:
   and leaves rendered_html_path null"), `test/events/crawl-events.test.ts:206` ("(a) reads
   queued, claimed, started, paused{request}, resumed{auto:false}"),
   `test/api/no-key-echo.test.ts:633` ("no event detail carries any of it"),
-  `test/api/tenant-isolation.test.ts:562` ("an invalid body against a foreign schedule is
+  `test/api/tenant-isolation.test.ts:571` ("an invalid body against a foreign schedule is
   still the missing answer"), `test/api/schedules.test.ts:401` ("a URL the URL policy
   refuses is a 403 FORBIDDEN at create"), `test/api/schedules.test.ts:436` ("an update's
   crawl is checked against the stored render.urls"), `test/worker/chain.test.ts:529` ("a
@@ -982,7 +1024,8 @@ produces them without a re-crawl (§11). By family:
   `pagination.loop` (warning), `pagination.sequence-error` (info).
 - **Links** (CHECK-32, CHECK-33, CHECK-86): `links.internal-nofollow`,
   `links.only-from-non-indexable` and `links.localhost` (warning),
-  `links.non-descriptive-anchor` and `links.high-outlinks` (info). `links.localhost`
+  `links.non-descriptive-anchor`, `links.anchors-generic-only` and `links.high-outlinks`
+  (info). `links.localhost`
   judges external links only, so a site crawled on a private address does not report
   itself. The outlink limits are 1,000 distinct internal or 10 distinct external
   targets.
@@ -1362,7 +1405,8 @@ Phase 11 additions (§4.2's `resources` block, §12's `resources` view) on
 `renderPassEvidence`) on 2026-09-02, each read back through the transport suite
 that now pins it — an MCP client over the in-memory transport and the HTTP
 routes beside it, against real crawls of the fixture site rather than against a
-type declaration. The Phase 27a additions (§4.1's `judgement`, §4.3's and §5.1's
+type declaration. The Phase 29c `anchors_by_target` additions (§4.6b, §12's view) were read back through
+the transport suite that pins them, against the fixture site. The Phase 27a additions (§4.1's `judgement`, §4.3's and §5.1's
 `type` / `priority` / `disabledRules`, §4.3a `issues_overview`, §4.3b
 `crawl_overview`, §4.9 `crawl_config_get` / `crawl_config_set`, `judgementStale`
 wherever it rides, §5.7 and §12's two views) were regenerated on 2026-11-08 the
@@ -1401,13 +1445,13 @@ Two properties make the double-transport claim below cheap to trust:
 - **One service, two transports.** `src/api/service.ts` holds every query,
   refusal and vocabulary; `http.ts` and `mcp.ts` do routing and serialisation
   and nothing else.
-- **The equality is tested, not argued.** `test/api/mcp.test.ts:2757`
+- **The equality is tested, not argued.** `test/api/mcp.test.ts:2759`
   ("answers the same JSON for the same question, route by tool") calls thirteen
   (tool, route) pairs over the wire against one database and asserts the two
-  answers are `toEqual`. `test/api/mcp.test.ts:2778` ("refuses in the same
+  answers are `toEqual`. `test/api/mcp.test.ts:2780` ("refuses in the same
   words, whichever transport asked") does the same for five refusals — the same
-  sentence and the mapped status. `test/api/mcp.test.ts:2836` ("streams the
-  bytes the other transport writes to a file") and `test/api/mcp.test.ts:2862`
+  sentence and the mapped status. `test/api/mcp.test.ts:2838` ("streams the
+  bytes the other transport writes to a file") and `test/api/mcp.test.ts:2864`
   ("streams the resources view byte for byte") assert the CSV a route streams is
   byte-identical to the file the tool writes, for the `issues` and `resources`
   views.
@@ -1425,7 +1469,7 @@ Two properties make the double-transport claim below cheap to trust:
   tools Phase 27a added are not among the thirteen pairs; each has its own
   route-equals-tool test instead (`test/api/judgement-config.test.ts:657`
   "crawl_config_get answers what GET /crawls/:id/config answers",
-  `test/api/crawl-overview.test.ts:473` "serves the same answer at GET
+  `test/api/crawl-overview.test.ts:477` "serves the same answer at GET
   /crawls/:id/overview/crawl"). `GET /crawls/:id/overview/issues` has no
   route test of its own: it is the same service call as the tool, and the
   Phase 27a gate compared the two live, with and without `includeZero`, and
@@ -1453,7 +1497,7 @@ Two properties make the double-transport claim below cheap to trust:
   names *which* thing was wrong — missing header, wrong scheme, wrong token.
 - **MCP asks for no credential** and that is a posture, not an omission: an
   stdio client either started this process or was handed its pipes
-  (`test/api/mcp.test.ts:3016` "asks for no bearer token: an stdio client is the
+  (`test/api/mcp.test.ts:3018` "asks for no bearer token: an stdio client is the
   process that started this one"). If Ariadne's MCP server is ever mounted on a
   network transport, that argument dies with the change and a credential has to
   arrive with it.
@@ -1523,7 +1567,7 @@ schema refusal (the SDK's plain-text "Input validation error", §4.1). Pinned:
 CREDENTIALS_REQUIRED and writes nothing".
 
 `correlationId` is a UUID; the stack goes to the server log under that id and
-nowhere else (`test/api/mcp.test.ts:2889` "turns an unexpected throw into a tool
+nowhere else (`test/api/mcp.test.ts:2891` "turns an unexpected throw into a tool
 error with a correlation id", `test/api/http.test.ts:2115` "turns an unexpected
 throw into a 500 with a correlation id").
 
@@ -1544,7 +1588,7 @@ clamping it").
 **Closed vocabularies.** Every query parameter, body field and tool argument is
 on a closed list. `?serverity=critical` is a 400 naming both the typo and the
 accepted set, never an unfiltered listing with a 200 on it
-(`test/api/query.test.ts:4071` "refuses a typo'd filter instead of answering the
+(`test/api/query.test.ts:4073` "refuses a typo'd filter instead of answering the
 question nobody asked"). MCP argument typos are refused by the SDK's schema
 validator before the handler runs (`test/api/mcp.test.ts:831` "refuses an
 argument nobody allowed, naming it").
@@ -1552,7 +1596,7 @@ argument nobody allowed, naming it").
 **Not paginated, on purpose:** `rules_catalog`, `crawl_compare` and (Phase 27a)
 `issues_overview`. All three are bounded by the **ruleset** (188 rows at 0.23.0,
 174 of them finding rules) rather than by the crawl; `crawl_overview` is bounded
-by its ten sections and the crawl's page types. The
+by its eleven sections and the crawl's page types. The
 catalog is ~196 KB (**200,260 bytes**, measured 2026-11-08 at the end of Phase
 27a over all 188 rows of ruleset 0.23.0 the same way, with no crawl id — 16
 markers at 2,487 bytes and the fourteen tables at 5,620; the 6,074 bytes over the
@@ -1645,8 +1689,8 @@ config_validate ──▶ crawl_start ──▶ crawl_status (poll until status 
                             │
                             └─▶ issues_list · issues_overview · issue_urls · metrics_get
                                 crawl_overview (also before the rules: what it cannot measure is named)
-                                pages_query · structured_data · robots_get · rules_catalog (with crawlId) · export_crawl
-                                crawl_compare · compare_urls (two judged crawls of one site)
+                                pages_query · structured_data · anchors_by_target · robots_get · rules_catalog (with crawlId) · export_crawl
+                                crawl_compare · compare_urls · crawl_diff · crawl_diff_urls (two judged crawls of one site)
 ```
 
 Crawls run on worker processes (Phase 28b): a worker runs `ARIADNE_WORKER_CONCURRENCY`
@@ -1693,14 +1737,17 @@ webhooks**: polling `crawl_status` is the contract until Talos asks otherwise.
 | `issue_inlinks` | `GET /crawls/:id/issues/:ruleId/inlinks` | `ruleId` (required — **only** `links.broken-internal`, `links.to-server-error` or `robots.blocks-internal-urls`), `limit`, `cursor` |
 | `metrics_get` | `GET /crawls/:id/metrics` | `metricId`, `scope`, `scopeValue`, `limit`, `cursor` |
 | `metric_table` | `GET /crawls/:id/metrics/:metricId` | `metricId` (required) |
+| `anchors_by_target` | `GET /crawls/:id/anchors-by-target` | `pageType`, `limit`, `cursor` (§4.6b; also `view=anchors_by_target` on `export_crawl`) |
 | `pages_query` | `GET /crawls/:id/pages` | `pageType`, `statusCode`, `indexable`, `rendered`, `fetchClass`, `discoveredVia`, `limit`, `cursor` |
 | `rules_catalog` | `GET /rules` | `crawlId` (**optional** — the only tool where it is) |
 | `crawl_compare` | `GET /compare` | `baseCrawlId`, `headCrawlId` (both required) |
 | `compare_urls` | `GET /compare/urls` | `baseCrawlId`, `headCrawlId`, `ruleId`, `set` (all required), `limit`, `cursor` |
+| `crawl_diff` | `GET /diff` | `baseCrawlId`, `headCrawlId` (both required), `wordCountChangePct`, `inlinksChangePct`, `inlinksChangeMin`, `linkScoreChangePoints` (§7.6) |
+| `crawl_diff_urls` | `GET /diff/urls` | `baseCrawlId`, `headCrawlId`, `field` (all required), `state`, the four diff thresholds, `limit`, `cursor` (§7.6) |
 | `export_crawl` | `GET /crawls/:id/export` | `format` (`jsonl.gz` \| `csv`), `dataset` (jsonl.gz only), `view` + `ruleId` \| `metricId` (csv only) |
 
 Pinned: the tool list and every schema — `test/api/mcp.test.ts:673`
-("advertises exactly the thirty-five tools of the agent surface"),
+("advertises exactly the thirty-eight tools of the agent surface"),
 `test/api/mcp.test.ts:700` ("closes every input schema and describes every
 field"), `test/api/mcp.test.ts:732` ("names every member of the closed
 vocabulary each field enumerates"). `crawl_start`'s field set is not a second
@@ -1742,7 +1789,7 @@ every MCP tool's arguments. `crawl_start` and `config_validate` answer ONE
 `unknown_field` error per object, not one per key, so a body of a hundred thousand
 unknown keys is one short refusal, read in linear time. Rule ids in `judgement` are
 positional too, with the ruleset version (`key 2 in the order sent names no rule in
-ruleset 0.27.0`). Two things are still named: a credential header or cookie name that
+ruleset 0.28.0`). Two things are still named: a credential header or cookie name that
 is a valid HTTP token (27c), and a rule id already **stored** in a crawl's judgement
 that the ruleset no longer has, because that is the repair path (`crawl_config_set`,
 §4.9). "In the order sent" is `Object.keys` order, so an integer-like key counts first.
@@ -2312,28 +2359,28 @@ server error and that is an answer; what is unknown is whether it persists. The
 page keeps its `critical` finding, and its evidence carries
 `recheck: "not run"` so a report writer can say which it is (§5.5).
 
-Pinned: `test/api/query.test.ts:2088` "the fields an audit checks itself against"
+Pinned: `test/api/query.test.ts:2089` "the fields an audit checks itself against"
 (15 tests over the whole block — the marker, the live findings count,
 `pagesScanned`, the one-statement read, the four the recheck block added, and
 the no-response partition Phase 23 added),
-`test/api/query.test.ts:2201` "counts
+`test/api/query.test.ts:2202` "counts
 the resource census off the database, partitioned exactly",
-`test/api/query.test.ts:2243` "answers the block on a crawl that holds no
-resource rows at all", `test/api/query.test.ts:2435` "reports the cap-exceeded
+`test/api/query.test.ts:2244` "answers the block on a crawl that holds no
+resource rows at all", `test/api/query.test.ts:2436` "reports the cap-exceeded
 page count a crawl stamped, and null when none did",
-`test/api/query.test.ts:2462` "echoes whether the crawl
-asked about its files", `test/api/query.test.ts:2480` "409s a stored
+`test/api/query.test.ts:2463` "echoes whether the crawl
+asked about its files", `test/api/query.test.ts:2481` "409s a stored
 fetchResources that is not a boolean"; over the agent transport,
 `test/api/mcp.test.ts:1032` "answers the resource census and whether the crawl
 asked for it" and `test/api/mcp.test.ts:1121` "tells an agent what the resource
 numbers mean, and what they do not". The recheck block:
-`test/api/query.test.ts:2254` "partitions the crawl's server errors by what the
+`test/api/query.test.ts:2255` "partitions the crawl's server errors by what the
 second look found" (the arithmetic, over a fixture holding one row of every
-outcome), `test/api/query.test.ts:2299` "counts as cleared exactly the classes
+outcome), `test/api/query.test.ts:2300` "counts as cleared exactly the classes
 http.server-error-transient fires on" (the surface and the rule read ONE set,
-imported, never two lists), `test/api/query.test.ts:2379` "tells a crawl with no
+imported, never two lists), `test/api/query.test.ts:2380` "tells a crawl with no
 server errors apart from a crawl nobody rechecked",
-`test/api/query.test.ts:2415` "keeps the recheck block off the crawl listing";
+`test/api/query.test.ts:2416` "keeps the recheck block off the crawl listing";
 over the agent transport, `test/api/mcp.test.ts:1062` "answers the recheck
 coverage, and keeps its two zeroes apart" (which also reads the block off a
 crawl the suite really ran). The robots split itself is
@@ -2518,8 +2565,8 @@ never zero. The gate crawl's `urls` section, as it came back (2026-11-08):
  {"label":"Blocked by robots.txt (dropped)","value":0,"percent":null}]}
 ```
 
-Its ten sections, in this order: `urls`, `fetch-class`, `status-class`,
-`content`, `indexability`, `click-depth`, `discovery`, `response-time`,
+Its eleven sections, in this order: `urls`, `fetch-class`, `status-class`,
+`content`, `indexability`, `click-depth`, `link-counts`, `discovery`, `response-time`,
 `render`, `issues-grid`.
 
 - **`urls` is `crawl_status`'s own fields** (ruling 10), read through the same
@@ -2561,6 +2608,17 @@ Its ten sections, in this order: `urls`, `fetch-class`, `status-class`,
   how deep the judged pages sit.
   `discovery` is one entry per `discovered_via`, then `In a sitemap` /
   `Not in a sitemap`.
+- **`link-counts` (29c), judged crawls only,** is over the fetched-OK pages:
+  `inlinks p50|p90|max`, `outlinks (internal) p50|p90|max` and `outlinks (external)
+  p50|p90|max`, each a `percentile_disc` integer with a null percent. When any
+  fetched-OK page has a null `inlinks_internal` (judged before 29c) the section is
+  absent and `notMeasured` names `link-counts`; on a crawl no rules run has judged
+  (never judged, or a rules run in flight) it is absent and named too, with the
+  reason `link counts are derived by the rules run; run crawl_rules`, as
+  `click-depth` is. A judged crawl with no fetched-OK
+  page keeps the section with `entries: []`: a measured empty set, not a missing
+  fact. Pinned: `test/api/link-facts.test.ts:226` "the link-counts section of
+  crawl_overview".
 - **`response-time` buckets are fixed** (Deviation 5): `Under 250 ms`,
   `250–500 ms`, `500–1000 ms`, `1000–2000 ms`, `2000+ ms`, each `[lo, hi)`, and
   `No response time`. Then `Over SLOW_MS (<n> ms)` counts the pages strictly over
@@ -2582,8 +2640,9 @@ Its ten sections, in this order: `urls`, `fetch-class`, `status-class`,
   run.
 
 **`notMeasured`** is `[{id, reason}]`. It names a whole section the crawl could
-not measure (`click-depth` and `issues-grid` on a crawl no rules run has
-judged, `render` on a crawl that never rendered), and MAY name one entry of a
+not measure (`click-depth`, `link-counts` and `issues-grid` on a crawl no rules
+run has judged, `link-counts` on a crawl judged before 29c, `render` on a crawl
+that never rendered), and MAY name one entry of a
 measured section (`render-coverage` on a rendered crawl not yet judged,
 `robots-blocked-dropped` on a crawl that predates the counter). The dev
 database's unjudged crawl from before migration 0020, `crawl_a696e51a`, came
@@ -2592,11 +2651,11 @@ named, and those sections and that entry absent rather than written as zeros
 (§5.7).
 
 Pinned: `test/api/crawl-overview.test.ts:247` "crawl_overview on a judged,
-unrendered crawl" (9 tests, among them `test/api/crawl-overview.test.ts:266`
+unrendered crawl" (9 tests, among them `test/api/crawl-overview.test.ts:267`
 "takes every urls entry from the crawl_status field it names"),
-`test/api/crawl-overview.test.ts:418` "crawl_overview on other crawls" (7 tests:
+`test/api/crawl-overview.test.ts:419` "crawl_overview on other crawls" (7 tests:
 the unjudged, rendered and pre-0020 crawls, and the route), and
-`test/api/crawl-overview.test.ts:507` "the overviews read the judgement inside
+`test/api/crawl-overview.test.ts:511` "the overviews read the judgement inside
 their snapshot".
 
 ### 4.4 `issue_urls` → `{columns, items, nextCursor}` — one rule as a table
@@ -2686,9 +2745,9 @@ not name", `test/api/query.test.ts:1481` "carries a finding with no page as a
 null url", `test/rules/helpers.test.ts:697` "maps each fetch class to the status
 a reader acts on", `test/rules/helpers.test.ts:717` "names a block a block,
 whatever status the challenge was served with",
-`test/fixtures/harness.test.ts:1350` "declares a column for every evidence key it
+`test/fixtures/harness.test.ts:1351` "declares a column for every evidence key it
 writes, and writes every column it declares",
-`test/rules/registry.test.ts:795` "finds one defining file per rule, and the key
+`test/rules/registry.test.ts:801` "finds one defining file per rule, and the key
 spelled inside it".
 
 **A rule the crawl's judgement disables is refused, 409** (Deviation 3), and so
@@ -2783,7 +2842,7 @@ which one is visible in the header rather than in the payload:
 
 - **`perScope`** — one row per stored row, site first and the rest in
   scope-value order, each column a path into that row's value
-  (`site.health`, `inlinks.distribution`, `redirect.volume`, `render.coverage`,
+  (`site.health`, `inlinks.distribution`, `links.score-distribution`, `redirect.volume`, `render.coverage`,
   `sitemap.structure`, `hreflang.coverage`, `content.template-similarity`, the
   two depth distributions).
 - **`perScopeMeasure`** — one row per stored row × MEASURE, with the measure's
@@ -2857,7 +2916,7 @@ header on the catalog, and only on metric rules",
 and one row per scope",
 `test/rules/metric-table.test.ts:377` "gives every metric rule a table whose
 columns are the catalog's",
-`test/fixtures/harness.test.ts:2554` "renders every metric's table, with no
+`test/fixtures/harness.test.ts:2557` "renders every metric's table, with no
 empty column and no unmapped key".
 
 **`judgementStale`** (Phase 27a) is the answer's last key, `crawl_status`'s flag
@@ -2921,14 +2980,24 @@ rendered, and still reports what a pass would choose".
 
 ```
 url, statusCode, fetchClass, fetchReason, pageType, indexable, depth,
-clickDepth, discoveredVia, wordCount, renderableWordCount, rendered,
+clickDepth, inlinksInternal, outlinksInternal, outlinksExternal, linkScore,
+discoveredVia, wordCount, renderableWordCount, rendered,
 renderedWordCount, renderedRenderableWordCount, renderError,
 fetchedAt, recheckFetchClass, recheckStatusCode, recheckReason, recheckAt
 ```
 
 Deliberately slim: `pages` has sixty columns and an endpoint that returned them
 would be an export in listing clothes (obligation 1). `clickDepth: null` means
-*unreachable*, never zero. `renderError` is why an **attempted** render produced
+*unreachable*, never zero. **Link facts (29c), written by `crawl_rules`:**
+`inlinksInternal` is the distinct internal pages linking to the URL (nofollow
+counted, self-links not), set on every row, a `0` included; `outlinksInternal` and
+`outlinksExternal` are the distinct targets on a fetched-OK page (null elsewhere);
+`linkScore` is 0 to 100, the share of internal link weight a page holds
+(random-surfer model, damping 0.85), log-scaled so 100 is the crawl's top page (all 100
+when max and min agree within 1e-9 relative), null outside the link graph; a page whose
+robots meta or X-Robots-Tag says nofollow or none passes none (its edges are dropped;
+counts above are unchanged). All four are null on a crawl judged before 29c: not
+measured, never zero. The raw score is not published. `renderError` is why an **attempted** render produced
 nothing; null there is not "it worked".
 
 **The last five are the two observations, and they were added to a projection
@@ -2968,9 +3037,9 @@ unweighed-file floor). Per template it is `metrics_get` with
 view (§12), which carries `referencingPages`.
 Pinned: `test/api/query.test.ts:1794` "returns a slim projection and nothing
 else" (the widened projection, pinned as a whole set),
-`test/api/query.test.ts:1832` "carries both observations, and never lets the
-second rewrite the first", `test/api/mcp.test.ts:2319` "names every field of the
-row it answers with, in its own description", `test/api/query.test.ts:1935` "carries both word counts, so the number a
+`test/api/query.test.ts:1833` "carries both observations, and never lets the
+second rewrite the first", `test/api/mcp.test.ts:2320` "names every field of the
+row it answers with, in its own description", `test/api/query.test.ts:1936` "carries both word counts, so the number a
 reader quotes is the one they can see", `test/api/mcp.test.ts:2253` "answers the
 crawled pages, slim and ordered by URL".
 
@@ -3048,6 +3117,64 @@ problemsCapped
   publish which markup. A page with a clean block is listed with zero counts; a page
   that carries no markup is the one absent from the listing.
 
+### 4.6b `anchors_by_target` → `{items: AnchorsByTargetRow[], nextCursor}`
+
+`GET /crawls/:id/anchors-by-target` (Phase 29c, CHECK-86). One row per page that at
+least one other page of the crawl links to, of any fetch class (a 404 with inlinks is
+a fact worth listing); a page nothing links to is not listed. Ordered by URL; `limit`
+and `cursor` as everywhere.
+
+```
+url, pageType, inlinks, distinctAnchors, topAnchors: {text, count}[],
+emptyAnchors, nonDescriptiveAnchors, genericShare
+```
+
+- **Everything is counted in distinct source pages.** `inlinks` is the page's
+  `inlinksInternal` (`pages_query`): distinct pages linking to it, itself excluded,
+  nofollow links counted. Every anchor count is the number of distinct source pages
+  that use that anchor on a link to the target, so a page that links twice with the
+  same text counts once, and no count passes `inlinks`. A page that links with two
+  different texts counts once under each.
+- **Anchors are compared normalised**: lower-cased, trimmed, runs of whitespace
+  collapsed (a no-break space counts as whitespace), the comparison the
+  `links.non-descriptive-anchor` and `links.anchors-generic-only` findings use.
+  `distinctAnchors` counts the distinct ones, the empty one included.
+- **`topAnchors`** are the 5 most frequent non-empty anchors, `{text, count}`, count
+  descending then text ascending.
+- **`emptyAnchors`** is the source pages whose link has no text (an empty or null
+  anchor). An `aria-label` does not give it any: this listing is about link text.
+  **`nonDescriptiveAnchors`** is the source pages whose link text is wholly one of the
+  generic phrases ("click here", "read more", and the rest of the list the rules use).
+- **`emptyAnchors` and `nonDescriptiveAnchors` are per anchor class:** a source
+  page counts in each class that any of its links to the target uses, so a page
+  linking once with `""` and once with "read more" counts in both.
+- **`genericShare`** is the source pages EVERY ONE of whose links to the target is
+  empty or non-descriptive, over `inlinks`, to four places. A page that links with
+  "Read more" and also with descriptive text does not count. So `genericShare` is 1
+  exactly when every inlink anchor is generic, the anchor condition
+  `links.anchors-generic-only` fires on (once `inlinks` reaches
+  `GENERIC_ANCHOR_MIN_INLINKS`). When every source links once it equals
+  (`emptyAnchors` + `nonDescriptiveAnchors`) ÷ `inlinks`; it can never pass 1.
+- **Filter:** `pageType` selects the targets by template cohort (`(untyped)` for the
+  pages the crawl could not type); an unknown cohort is a 404-class refusal naming it,
+  as on the other listings.
+- **Refused, never answered empty.** A crawl the rules have not judged, and a crawl
+  judged before link counts existed (any page's `inlinksInternal` null), are 409
+  (`CONFLICT`): run `crawl_rules` and ask again. An empty listing would read as a site
+  no page links to. An unknown crawl and another tenant's crawl are the same 404.
+- The same rows are the `anchors_by_target` CSV view (§12).
+
+Pinned: `test/api/anchors-by-target.test.ts:191` ("answers the brief's fixture"),
+`test/api/anchors-by-target.test.ts:223` ("counts distinct source pages"),
+`test/api/anchors-by-target.test.ts:236` ("keeps genericShare at or below 1"),
+`test/api/anchors-by-target.test.ts:243` ("does not count a source whose links to the
+target mix generic and descriptive text"),
+`test/api/anchors-by-target.test.ts:302` ("a cursor walk returns every row exactly
+once"), `test/api/anchors-by-target.test.ts:336` ("writes the header and the same
+rows"), `test/api/anchors-by-target.test.ts:356` ("a crawl judged before 29c is a
+CONFLICT"), `test/api/anchors-by-target.test.ts:370` ("an unknown crawl is NOT_FOUND,
+and so is another tenant's").
+
 ### 4.7 `robots_get` → the robots.txt this crawl obeyed
 
 `{crawlId, robotsUrl, outcome, raw, truncated, crawlDelaySec, note,
@@ -3055,8 +3182,8 @@ sitemapSources[], suppliedSitemaps[], userAgent}`. It is **stored evidence, neve
 a re-fetch**: the file as the crawl read it, which is the only honest answer to
 "what did this crawl obey". `outcome ∈ read | absent | unreachable`, and
 `unreachable` is not "there are no rules" (RFC 9309 §2.3.1.4).
-Pinned: `test/api/query.test.ts:1983` "answers with the robots.txt the crawl
-read, and the metadata that makes it readable", `test/api/mcp.test.ts:2356`
+Pinned: `test/api/query.test.ts:1984` "answers with the robots.txt the crawl
+read, and the metadata that makes it readable", `test/api/mcp.test.ts:2357`
 "answers with the robots.txt the crawl read, verbatim".
 
 ### 4.8 `crawl_list` → `{items: CrawlListItem[], nextCursor}`
@@ -3070,9 +3197,9 @@ seeded as `http://example.com/`. It is the engine's one definition of "the same
 site" (`hostnameSpellings`), the same one the cross-site compare refusal uses.
 A `siteUrl` that is not an http(s) URL is **refused by name and never read as
 "no filter"** — a dropped filter would answer with every crawl the engine holds.
-Pinned: `test/api/query.test.ts:3434` "narrows the listing to one site, and
-leaves the other site's crawls out", `test/api/query.test.ts:3440` "matches the
-apex and www spellings, both schemes", `test/api/query.test.ts:3454` "refuses a
+Pinned: `test/api/query.test.ts:3436` "narrows the listing to one site, and
+leaves the other site's crawls out", `test/api/query.test.ts:3442` "matches the
+apex and www spellings, both schemes", `test/api/query.test.ts:3456` "refuses a
 siteUrl that is not an http(s) URL rather than dropping the filter";
 `test/api/mcp.test.ts:2062` "narrows crawl_list to one site".
 
@@ -3110,7 +3237,7 @@ made it 22, and Phase 29b 23):
   200 applies. It is stored where it always was, `config_jsonb.findingCap`
   (Deviation 1), so `crawl_status.findingCap`, `crawl_start`'s top-level key and
   this block read and write one value.
-- **`thresholds`** lists ALL 23 overridable thresholds as `{value, default, min,
+- **`thresholds`** lists ALL 24 overridable thresholds as `{value, default, min,
   max, overridden}`: `value` is what the NEXT rules run will use, `overridden` is
   true where the block sets it, and `min` / `max` are the inclusive bounds. The
   names: `TITLE_MIN`, `TITLE_MAX`, `META_MIN`, `META_MAX`, `H1_MAX`, `H2_MAX`,
@@ -3120,13 +3247,14 @@ made it 22, and Phase 29b 23):
   `HIGH_EXTERNAL_OUTLINKS`, `UNAVAILABLE_AFTER_WARN_DAYS` (20, not the 19 the
   plan's prose counted: ruling 5), and, from Phase 29a, `SCHEMA_TEMPLATE_SHARE`
   (percent, 50–100, default 70) and `SCHEMA_TEMPLATE_MIN_PAGES` (2–100000, default
-  10), and, from Phase 29b, `IMAGE_OVERSIZE_PERCENT` (percent, 101–1000, default 200),
-  23 in all. Extraction-time limits, similarity distances,
+  10), from Phase 29b, `IMAGE_OVERSIZE_PERCENT` (percent, 101–1000, default 200),
+  and, from Phase 29c, `GENERIC_ANCHOR_MIN_INLINKS` (inlinks, 1–1000, default 3),
+  24 in all. Extraction-time limits, similarity distances,
   render heuristics, walk bounds and protocol limits are engine internals and
   are not overridable.
 - **`judgedWith`** is the stamp the last completed rules run wrote of what it
   used, `{disabledRules, thresholds, findingCap?}`, or `null` on a crawl nobody
-  has judged. Its `thresholds` holds ALL 23 names at the EFFECTIVE values that
+  has judged. Its `thresholds` holds ALL 24 names at the EFFECTIVE values that
   run used (its override, else the default then in force), not only the
   overrides, so it stays true when a later ruleset moves a default: the copy is
   rendered from these values, and a moved default reads stale `thresholds`. **`judgementStale`** compares it with the
@@ -3340,7 +3468,7 @@ so a UI that draws both puts the same rule in the same place twice. The METRIC
 rules follow them as one contiguous block, by their declared `table.order` then
 by id (Phase 21); no other listing has an opinion about where a metric goes,
 because a metric writes no finding row and never appears in `issues_list`.
-Pinned: `test/api/query.test.ts:4275` "leads the metric section with the site
+Pinned: `test/api/query.test.ts:4277` "leads the metric section with the site
 census, then the declared sequence".
 
 A NOT MEASURED marker's row carries one field more — `marker`, the reason
@@ -3403,15 +3531,15 @@ cap the two differ by construction, which is what `atLeast` is for. Quoting a
 catalog count to a client as "the number of orphans on this site" is the Phase 6
 D-1 incident recurring in a new place.
 
-Pinned: `test/api/query.test.ts:2517` "answers the whole ruleset with its
-client-facing copy and no fired state", `test/api/query.test.ts:2597` "joins a
+Pinned: `test/api/query.test.ts:2518` "answers the whole ruleset with its
+client-facing copy and no fired state", `test/api/query.test.ts:2598` "joins a
 judged crawl's fired state, and counts a clean rule as zero",
-`test/api/query.test.ts:2621` "marks a metric rule's structural zero apart from a
-real clean", `test/api/query.test.ts:2647` "says fired null on a crawl nobody has
-judged, however many rows it holds", `test/api/query.test.ts:2664` "marks a
+`test/api/query.test.ts:2622` "marks a metric rule's structural zero apart from a
+real clean", `test/api/query.test.ts:2648` "says fired null on a crawl nobody has
+judged, however many rows it holds", `test/api/query.test.ts:2665` "marks a
 capped rule's count as a floor, agreeing with issues_list",
-`test/api/query.test.ts:2703` "reads the marker and the counts from one
-statement", `test/api/query.test.ts:2559` "carries the registry's marker on every
+`test/api/query.test.ts:2704` "reads the marker and the counts from one
+statement", `test/api/query.test.ts:2560` "carries the registry's marker on every
 NOT MEASURED marker, and on no other rule"; `test/api/mcp.test.ts:1883` "joins a
 judged crawl's fired state, zero included, summing to findingsCount" and
 `test/api/mcp.test.ts:1946` "names every field it actually answers with".
@@ -3522,7 +3650,7 @@ rows cannot say it and only the config can.
    nobody weighed, and reports the referenced-and-weighed pair beside it.
 
 Pinned: `src/db/schema.ts`'s `resources.fetch_class` comment (the column says
-this); `test/api/query.test.ts:3055` "writes one row per referenced file, with
+this); `test/api/query.test.ts:3057` "writes one row per referenced file, with
 the class that makes an empty status readable" (all four spellings in the CSV);
 `test/crawl/fetch-resources.test.ts:1362` "asks nobody anything when the operator
 turned resource fetching off".
@@ -3579,7 +3707,7 @@ Pinned: `src/db/schema.ts`'s `crawls.resource_refs_capped_pages` comment;
 `test/db/migration-0014.test.ts:234` "leaves the column null on a row no crawl
 loop ever closed"; `test/db/migration-0014.test.ts:212` "stamps 0 on a crawl that
 lost nothing — a measurement, not a silence";
-`test/api/query.test.ts:2435` "reports the cap-exceeded page count a crawl
+`test/api/query.test.ts:2436` "reports the cap-exceeded page count a crawl
 stamped, and null when none did".
 
 ### 5.5 `recheckFetchClass` null — nobody asked about this page
@@ -3613,10 +3741,10 @@ evidence blob carries `recheck: "not run"` (one of `"not run"`, `"capped"`,
 than implying a re-verification that never happened.
 
 Pinned: `src/db/schema.ts`'s `pages.recheck_fetch_class` comment (the null
-contract, stated at the column); `test/api/query.test.ts:1832` "carries both
+contract, stated at the column); `test/api/query.test.ts:1833` "carries both
 observations, and never lets the second rewrite the first" (the three nulls,
 told apart row by row, and the `recheckAt` invariant over every row of a
-listing); `test/api/query.test.ts:2379` "tells a crawl with no server errors
+listing); `test/api/query.test.ts:2380` "tells a crawl with no server errors
 apart from a crawl nobody rechecked" (the two zeroes, at the crawl level).
 
 ### 5.6 `failureReason` null — either nothing failed, or nobody could say
@@ -3651,9 +3779,9 @@ robots.txt answers 502); `test/db/migration-0017.test.ts:259` "clears the
 sentence when the failed crawl is resumed" (the implication over a RESUME, which
 is the one move that changes the status without closing the crawl — the fixture
 holds the robots request so the row is read mid-run);
-`test/api/mcp.test.ts:3167` "clears the failure sentence of the crawl a resume
+`test/api/mcp.test.ts:3169` "clears the failure sentence of the crawl a resume
 accepts" (the same, over the queue's own writer and on the wire);
-`test/api/query.test.ts:4218` "tells a pre-0017 failed
+`test/api/query.test.ts:4220` "tells a pre-0017 failed
 crawl apart from a crawl that did not fail" (the two nulls, on the wire).
 
 ### 5.7 The overviews: `pagesJudged`, `percentOfJudged` and `notMeasured`
@@ -3684,11 +3812,15 @@ an empty % of Judged cell when pagesJudged is null".
 `{id, reason}` shape.) A section the crawl could not measure is
 ABSENT from `sections` and named in `notMeasured` as `{id, reason}`; an entry
 of a measured section can be named the same way. Never a section of zeros. The
-reasons, verbatim (`NOT_MEASURED_REASONS` in `src/api/overview.ts`):
+reasons, verbatim (`NOT_MEASURED_REASONS` in `src/api/overview.ts`, and
+`LINK_COUNTS_UNJUDGED_REASON` beside it: `link-counts` has one id and two reasons,
+one per case):
 
 | id | names | reason |
 |---|---|---|
 | `click-depth` | the section, on a crawl no rules run has judged | `click depth is derived by the rules run; run crawl_rules` |
+| `link-counts` | the section, on a crawl no rules run has judged (never judged, or a rules run in flight) | `link counts are derived by the rules run; run crawl_rules` (`LINK_COUNTS_UNJUDGED_REASON`) |
+| `link-counts` | the section, on a crawl judged before link counts existed | `judged before link counts existed; re-run the rules` |
 | `issues-grid` | the section, on a crawl no rules run has judged | `no rules run has judged this crawl; run crawl_rules` |
 | `render` | the section, on a crawl that never rendered | `no render pass ran` |
 | `render-coverage` | the `Render coverage` entry, on a rendered crawl not yet judged | `render coverage is a rules-run metric; run crawl_rules` |
@@ -3701,12 +3833,12 @@ percent means "not a share of Encountered", not "not measured". In the CSV view
 each `notMeasured` item is a row after the entries, `<id>,Not measured:
 <reason>,,` with empty Value and Percent cells. Pinned:
 `test/api/crawl-overview.test.ts:248` "lists the measured sections in order and
-names render as not measured", `test/api/crawl-overview.test.ts:441` "names
+names render as not measured", `test/api/crawl-overview.test.ts:445` "names
 render coverage as not measured on a rendered crawl no rules run judged",
-`test/api/crawl-overview.test.ts:452` "names an uncounted robots overflow
-(pre-0020 crawl) instead of writing 0", `test/api/crawl-overview.test.ts:545`
-"crawl_overview names issues-grid and click-depth as not measured, never zeros",
-`test/api/crawl-overview.test.ts:566` "has the exact header and one row per JSON
+`test/api/crawl-overview.test.ts:456` "names an uncounted robots overflow
+(pre-0020 crawl) instead of writing 0", `test/api/crawl-overview.test.ts:549`
+"crawl_overview names issues-grid, click-depth and link-counts as not measured, never zeros",
+`test/api/crawl-overview.test.ts:571` "has the exact header and one row per JSON
 entry, then the not-measured rows".
 
 ---
@@ -3831,10 +3963,10 @@ canonicalises under noindex", `test/rules/health-metrics.test.ts:414`
 are over", `test/rules/copy.test.ts:1540` "says the counts are the authority, not the
 ratio", `test/rules/copy.test.ts:1557` "grades nothing: no score, no label, no
 threshold";
-`test/rules/coverage.test.ts:648` "site.health is filed under the
+`test/rules/coverage.test.ts:650` "site.health is filed under the
 engine-coverage check, and CHECK-32 lost no claimant" (the re-file in both
 directions, and CHECK-83 outside the crawl-derived universe);
-`test/fixtures/harness.test.ts:3547` "the health rollup agrees with a
+`test/fixtures/harness.test.ts:3568` "the health rollup agrees with a
 page-by-page recount" — an independent recount in JavaScript over the end-to-end
 fixture crawl.
 
@@ -4001,9 +4133,9 @@ showing a user.
 
 Pinned: the whole `GET /compare` and `GET /compare/urls` blocks of
 `test/api/query.test.ts` — the arithmetic, the per-URL collapse, every caveat and
-every refusal — of which `test/api/query.test.ts:3503` "answers both sides,
+every refusal — of which `test/api/query.test.ts:3505` "answers both sides,
 comparable, and the rules in issues_list's order" is the answer itself and
-`test/api/query.test.ts:3917` "makes the same refusals as the summary" is the
+`test/api/query.test.ts:3919` "makes the same refusals as the summary" is the
 drill-down inheriting the summary's refusals; over the agent transport,
 `test/api/mcp.test.ts:2009` "answers the counts and the caveat when the two
 rulesets differ" and `test/api/mcp.test.ts:2074` "names every field it answers
@@ -4013,6 +4145,76 @@ with, and both caveat codes it produced".
 22 rules, `comparable: false` with both caveats, both invariants true on all 22
 rows, nineteen rules reproducing to the URL, `structure.deep-page` 0 → 1 as
 `new`, and the two cap-artefact rows flagged `baseTruncated: true`.
+
+### 7.6 Field diff: `crawl_diff`
+
+`{baseCrawlId, headCrawlId, wordCountChangePct?, inlinksChangePct?,
+inlinksChangeMin?, linkScoreChangePoints?}` →
+`{base, head, thresholds, urls, fields}`. Where `crawl_compare` counts findings,
+this counts stored facts: for each field, how many pages common to both crawls
+changed. Not paginated; the summary is one SQL statement, so memory does not
+grow with the crawl. The URLs behind a count are on `crawl_diff_urls`, below.
+
+```json
+{"base":{"crawlId":"crawl_a","siteUrl":"https://example.com/","rulesRunAt":"…","pages":20},
+ "head":{"crawlId":"crawl_b","siteUrl":"https://example.com/","rulesRunAt":"…","pages":20},
+ "thresholds":{"wordCountChangePct":20,"inlinksChangePct":50,"inlinksChangeMin":5,"linkScoreChangePoints":10},
+ "urls":{"common":19,"added":1,"removed":1},
+ "fields":[{"field":"status","changed":2,"notComparable":0}, …]}
+```
+
+- **Pairing is on the stored `pages.url`**, so `/Page` and `/page`, or `/a` and `/a/`,
+  are different pages. `added` is a URL only the head has, `removed` only the base.
+- **`fields`** is in the order `status, fetchClass, indexable, title,
+  metaDescription, h1, canonical, metaRobots, wordCount, schemaTypes, inlinks,
+  clickDepth, linkScore`.
+- **`notComparable` is not "unchanged".** Content fields (title through
+  schemaTypes) are not comparable when either side did not fetch `ok`;
+  `metaRobots` when either side is before extraction 2, `schemaTypes` before 4;
+  `inlinks` and `linkScore` when either crawl was judged before link counts
+  existed (re-run the rules to fill them). A null `clickDepth` on a judged crawl
+  is "unreachable", a value.
+- **Changed** is a differing stored value for the exact fields; `canonical` is
+  the HTML or the header canonical; `schemaTypes` is the set of declared types;
+  `wordCount` is `|head - base| * 100 > wordCountChangePct * base`; `inlinks` is
+  a change of at least `inlinksChangeMin` that also exceeds `inlinksChangePct`
+  percent; `linkScore` is scored on one side only or moved by at least
+  `linkScoreChangePoints`.
+- **Thresholds** are integers (defaults 20, 50, 5, 10; ranges 1-1000, 1-1000,
+  1-100000, 1-100), echoed on every answer; one outside its range or not an
+  integer is a 400 naming it.
+- **Refusals** are `crawl_compare`'s, in its order (§7.5), because the
+  pre-flight is the same function: both crawls must be judged, so a diff during
+  a rules run is refused as never judged.
+- It is evidence: no rule judges a change and it claims no check id.
+
+**`crawl_diff_urls`** (`GET /diff/urls`): `{baseCrawlId, headCrawlId, field, state?,
+wordCountChangePct?, inlinksChangePct?, inlinksChangeMin?, linkScoreChangePoints?,
+limit?, cursor?}` → `{items, nextCursor, field, state, thresholds}`, each item
+`{url, before, after}`, ordered by the stored URL and keyset-paged.
+
+- **`field`** is one of the thirteen diff fields, or `added` / `removed`.
+  Anything else is a 400 listing the accepted names.
+- **`state`** is `changed` (the default) or `notComparable`, and is a 400 for
+  `added` and `removed`, which have none (the answer's `state` is then null).
+- **`before` / `after`** are the stored values, so text is capped as stored.
+  `title`, `metaDescription`, `h1`, `fetchClass` and `metaRobots` are strings,
+  `canonical` is `{html, header}`, `schemaTypes` a sorted array, `linkScore` and
+  the other numbers are numbers, and a null side is null. For `added` and
+  `removed` both are null.
+- **One definition.** The listing and the summary use the same two predicates
+  (`fieldChangedWhere`, `fieldNotComparableWhere` in `src/api/crawl-diff.ts`), so
+  a field walked to its end has exactly as many URLs as `crawl_diff` counted.
+  Pass the same thresholds to both. The listing's own checks come first, in the
+  order thresholds, `field`, `state`, `limit`, `cursor`, all before any read; then
+  `crawl_diff`'s refusals, in its order.
+
+Pinned: `test/api/crawl-diff.test.ts:259` ("counts changed and notComparable per
+field as the fixture header derives"), whose header derives every count from its
+fixture; the listing, by `test/api/crawl-diff.test.ts:423` ("crawl_diff_urls agrees
+with crawl_diff"), `test/api/crawl-diff.test.ts:511` ("limit 1 returns every url
+exactly once") and `test/api/crawl-diff.test.ts:572` ("GET /diff/urls answers what
+crawl_diff_urls answers").
 
 ---
 
@@ -4068,8 +4270,8 @@ Obligation 6, as a checked property rather than a promise:
 - No stack frame, no filesystem path, no repository document, no connection
   string, no private host, in any answer or any refusal. Pinned as a standing
   guard over live answers and over the CSV bytes:
-  `test/api/query.test.ts:3981` "carries no path, no document and no stack in any
-  answer this phase added" and `test/api/query.test.ts:4024` "holds for the CSV
+  `test/api/query.test.ts:3983` "carries no path, no document and no stack in any
+  answer this phase added" and `test/api/query.test.ts:4026` "holds for the CSV
   bytes, which are a response like any other".
 - Refusals name **the caller's own words** — the ids they supplied, the field
   they misspelled, the accepted vocabulary — plus, for a cross-site compare, the
@@ -4182,18 +4384,25 @@ Six postures a Talos integrator should know about rather than discover:
 
 ## 11. Versioning, and what a ruleset change does to a served crawl
 
-`RULESET_VERSION` (**0.27.0** as of Phase 29b) stamps **judgement**: bump it when
+`RULESET_VERSION` (**0.28.0** as of Phase 29c) stamps **judgement**: bump it when
 a rule's verdict or copy changes. Adding a rule or a metric family adds rows
 without changing a verdict — `metrics` rows carry no version column at all —
 which is the argument Phase 10 held 0.7.0 on.
+
+**Phase 29c bumped to 0.28.0, once.** One metric id joined, `links.score-distribution`,
+and `links.high-outlinks` reads derived per-page counts with the same findings. One
+query rule joined, `links.anchors-generic-only`, with one overridable threshold,
+`GENERIC_ANCHOR_MIN_INLINKS` (the twenty-fourth; migration 0060 rewrites every stored
+run stamp to hold it at 3). The ruleset is 229 rules (72 page / 140 query / 17 metric;
+33 critical / 97 warning / 99 info).
 
 **Phase 29b bumped to 0.27.0, once, and moved `RENDER_CAPTURE_VERSION` to 3.** Twenty-nine
 rule ids and one metric id joined: `render.js-exception`, `render.console-error`,
 `render.failed-request`, `images.larger-than-displayed`, the 24 `a11y.*` rules, the
 marker `render.not-recorded`, and the metric `render.image-measurement`. No verdict
 that existed moved, so a crawl re-judged at 0.27.0 keeps its findings and gains the new
-ids where the data exists. The ruleset is 227 rules (72 page / 139 query / 16 metric;
-33 critical / 97 warning / 97 info), and `IMAGE_OVERSIZE_PERCENT` is the twenty-third
+ids where the data exists. At that bump the ruleset was 227 rules (72 page / 139 query /
+16 metric; 33 critical / 97 warning / 97 info), and `IMAGE_OVERSIZE_PERCENT` is the twenty-third
 overridable threshold; migration 0058 rewrites every stored run stamp to hold it at its
 default, so `judgementStale` does not read stale on an old stamp for that reason. The
 new rules are silent on a crawl without the capture they read, and
@@ -4500,7 +4709,7 @@ rest, except that `structured_data_nodes` answers `notMeasured` alone (below).
 |---|---|---|---|
 | `issues` | ruleId, severity, type, priority, category, checkIds, url, title, evidence | one finding | 17,659 rows / 5,315,760 B |
 | `issue_urls` (needs `ruleId`) | **the rule's own** — `rules_catalog`'s `columns` labels, then `Truncated` | one finding of one rule | 243 rows (`links.orphan`) |
-| `internal_urls` | url, status, fetchClass, indexable, clickDepth, pageType, title, recheckFetchClass, recheckStatus, recheckAt | one crawled page | 551 rows |
+| `internal_urls` | url, status, fetchClass, indexable, clickDepth, inlinks, outlinksInternal, outlinksExternal, linkScore, pageType, title, recheckFetchClass, recheckStatus, recheckAt | one crawled page | 551 rows |
 | `links_to_4xx` | Source, Destination, Anchor, Status Code | one internal link to a 4xx page | 99 rows |
 | `links_to_5xx` | Source, Destination, Anchor, Status Code | one internal link to a 5xx page | — (added P20-T1) |
 | `anchor_texts` | source, target, text | one link, internal or external | 35,145 rows / 4,664,393 B |
@@ -4509,6 +4718,7 @@ rest, except that `structured_data_nodes` answers `notMeasured` alone (below).
 | `metric_table` (needs `metricId`) | **the metric's own** — its `summary` labels, then its `columns` labels | one row of one metric's table | 40 rows (`inlinks.extremes`) |
 | `issues_overview` (Phase 27a) | Issue Name, Issue Type, Issue Priority, Severity, URLs, % of Judged, Description, How To Fix, Rule Id, Check Ids | one rule, as `issues_overview` (§4.3a) answers it | 46 rows / 27,040 B on the gate crawl `crawl_4dd32709` |
 | `crawl_overview` (Phase 27a) | Section, Label, Value, Percent | one entry of one `crawl_overview` section (§4.3b), then one row per `notMeasured` item | 75 rows / 2,332 B on the gate crawl `crawl_4dd32709` |
+| `anchors_by_target` (Phase 29c) | url, pageType, inlinks, distinctAnchors, emptyAnchors, nonDescriptiveAnchors, genericShare, topAnchors | one page with internal inlinks, as `anchors_by_target` (§4.6b) answers it; `topAnchors` is `text (n); text (n)` | — (added P29c-T6) |
 | `structured_data_nodes` (Phase 29a) | URL, Format, Schema Type, Path, Node Type, Problem, Detail | one problem of one structured-data block; a block with none is one row with an empty Problem. Schema Type is every type the block's node states, `\|`-joined; each problem list stops at 50 per block | — (added P29a-T9) |
 
 Semantics a consumer must repeat to its own users:
@@ -4554,6 +4764,11 @@ Semantics a consumer must repeat to its own users:
   `notMeasured`, as `{id, reason}` (`[]` on any other crawl), here without
   `disabledRules`. It pages by `(block id, problem position)` and, like the
   overview views, carries no `disabledRules`.
+- **`anchors_by_target` is the `anchors_by_target` listing as a sheet** (Phase 29c): the
+  same statement and row shaping as the JSON, paged by `url`; `topAnchors` is the top
+  anchors written `text (n); text (n)`. Refused before the first byte, 409, on a crawl
+  the rules have not judged or judged before link counts existed (re-run the rules).
+  It carries no `disabledRules` or `notMeasured`.
 - **`crawl_overview` is the Crawl Overview as a sheet** (Phase 27a): one row per
   entry, section by section in the JSON's order, then one row per `notMeasured`
   item, written `<id>,Not measured: <reason>,,` with empty Value and Percent
@@ -4636,10 +4851,10 @@ Semantics a consumer must repeat to its own users:
 - **Formula injection is guarded uniformly:** a cell whose first non-whitespace
   character is `= + - @` is written with a leading apostrophe, before RFC 4180
   quoting. The trade is deliberate — a negative number would render `'-3`; no
-  numeric column in these twelve views emits one (a metric's cells are counts, bytes,
+  numeric column in these thirteen views emits one (a metric's cells are counts, bytes,
   distances and percentages, none of which go below zero). It is not a text-column guard: a
   `Cache-Control` header is the server's own string and lands in a cell exactly
-  as a page title does, which is what `test/api/query.test.ts:3096` "never lets a
+  as a page title does, which is what `test/api/query.test.ts:3098` "never lets a
   crawled string become a formula" asserts.
 - **No BOM**, `\r\n` line endings, RFC 4180 quoting. Excel on a non-UTF-8
   Windows locale may mangle accents on a double-click; every parser and pipeline
@@ -4659,23 +4874,23 @@ Pinned: `test/api/csv.test.ts` (the writer, the guard, the
 flattening, the SQL keyset pins, and the view vocabulary — including
 `test/api/csv.test.ts:252` "heads the issue_urls view with the rule's own
 columns, in the rule's own order");
-`test/api/query.test.ts:2910` "writes each view's header, always, and the row a
+`test/api/query.test.ts:2911` "writes each view's header, always, and the row a
 caller came for" (including the three recheck columns, empty on a page nobody
-re-asked about and filled on one that was), `test/api/query.test.ts:3055` "writes one row per referenced
+re-asked about and filled on one that was), `test/api/query.test.ts:3057` "writes one row per referenced
 file, with the class that makes an empty status readable" (the four unfetched
-spellings), `test/api/query.test.ts:3096` "never lets a crawled string become a
-formula" (including a hostile `Cache-Control`), `test/api/query.test.ts:3117`
+spellings), `test/api/query.test.ts:3098` "never lets a crawled string become a
+formula" (including a hostile `Cache-Control`), `test/api/query.test.ts:3119`
 "quotes a cell holding a comma, a quote or a newline",
-`test/api/query.test.ts:3218` "exports exactly as many rows as the source holds"
+`test/api/query.test.ts:3220` "exports exactly as many rows as the source holds"
 (for `resources`, against BOTH of its tables: one row per file, and the
-referencing counts summing to the edge table), `test/api/query.test.ts:3273`
+referencing counts summing to the edge table), `test/api/query.test.ts:3275`
 "reads every view through a cursor that can be walked one row at a time",
-`test/api/query.test.ts:3308` "refuses a view, a format or a rule it cannot
-answer", `test/api/query.test.ts:3383` "refuses a crawl holding a retired rule's
+`test/api/query.test.ts:3310` "refuses a view, a format or a rule it cannot
+answer", `test/api/query.test.ts:3385` "refuses a crawl holding a retired rule's
 findings BEFORE the header", `test/api/http.test.ts:1991` "tears the response
 when a CSV export fails mid-stream, rather than truncating the file";
 `test/api/mcp.test.ts:802` "describes the shape of the CSV it writes, not just
-that it writes one" and `test/api/mcp.test.ts:2862` "streams the resources view
+that it writes one" and `test/api/mcp.test.ts:2864` "streams the resources view
 byte for byte, as it writes it".
 
 ---

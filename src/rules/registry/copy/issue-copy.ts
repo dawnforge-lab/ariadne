@@ -599,6 +599,13 @@ export const COPY_TEMPLATES: Record<string, IssueCopy> = {
     howToFix:
       "Read each row as a sentence about site structure: a commercial template reached from only one source template depends entirely on that template being crawled; one with no sources is reachable only from the sitemap.",
   },
+  "links.score-distribution": {
+    title: "Links: Link score distribution",
+    explanation:
+      "For the site and for each template: the link score of each indexable, self-canonical 200 page, as count, min, max, mean, quartiles and 95th percentile. The link score is the share of internal link weight a page holds (random-surfer model, damping 0.85), scaled 0 to 100 on a logarithmic scale so that 100 is the crawl's top page (every page scores 100 when the highest and lowest agree within one part in a billion). Only followed internal links between pages that answered 200 are counted; self-links are not, and a page whose robots meta or X-Robots-Tag says nofollow (or none) passes no link score through its links (its weight is shared evenly, as for a page with no links).",
+    howToFix:
+      "Read the bottom quartile first: those pages hold little of the site's internal link weight. A template whose median sits well below the site's receives less weight than the rest of the site. Add internal links to the pages that matter from pages that hold more weight.",
+  },
   "links.broken-internal": {
     title: "Response codes: Internal client error (4xx)",
     explanation:
@@ -1626,6 +1633,13 @@ export const COPY_TEMPLATES: Record<string, IssueCopy> = {
       "Pages with internal links whose whole anchor text is a generic English phrase such as click here, read more or learn more. The anchor is what tells visitors and search engines what the target is about, and these phrases tell them nothing. Each row gives the number of such links and up to 10 of the phrases; anchors in other languages are not judged.",
     howToFix:
       "Replace each generic anchor with words that describe the page it points at, such as the name of the product or the question the page answers.",
+  },
+  "links.anchors-generic-only": {
+    title: "Links: Pages named only by generic or empty anchor text",
+    explanation:
+      "Indexable pages with {GENERIC_ANCHOR_MIN_INLINKS} or more internal inlinks where every link pointing at them has anchor text that is empty or a generic English phrase such as click here or read more; the anchors pointing at a page are what tell visitors and search engines what it is about, and here none of them does. Link text is what is judged, so an aria-label is not read here, and links.no-anchor-text and links.aria-label-only cover links that have no text. Each row gives the number of linking pages and up to 10 distinct anchors, with an empty one shown as blank, and anchors in other languages are not judged.",
+    howToFix:
+      "Replace at least one of the links to the page, ideally the most prominent, with anchor text that names it, such as the product, topic or question the page answers.",
   },
   "links.uncrawlable": {
     title: "Links: Links crawlers cannot follow",

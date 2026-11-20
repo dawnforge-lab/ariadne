@@ -2051,12 +2051,23 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
 
 ### CHECK-33: Unique inlinks distribution
 - **Priority**: Medium | **Requires**: Engine (metrics and rules)
-- **Engine**: two metrics, which measure, and two rules, which find. The inlink count
+- **Engine**: three metrics, which measure, and two rules, which find. The inlink count
   is a measurement rather than a fault, so the metrics carry the distribution:
   - `inlinks.distribution` — `{count, min, p25, median, p75, p95, max, mean}` unique
     inlinks per indexable page, for the site and per page type (`scope: "page_type"`)
   - `inlinks.extremes` — the two ends as URLs: the under-linked bottom and the
     top-linked pages, ready to quote
+  - `links.score-distribution` — the same eight numbers over the link score, for the
+    site and per page type. The link score is the share of internal link weight a page
+    holds (random-surfer model, damping 0.85), computed in SQL from the followed
+    internal links between pages that answered 200 and scaled 0 to 100 on a
+    logarithmic scale, so 100 is the crawl's top page. It is evidence about where
+    internal link weight sits, never a verdict: no rule judges a low score.
+
+  Each rules run also writes the per-page link counts the rules and the metrics read:
+  the internal inlink count (distinct pages linking to this one, its own links
+  excluded, nofollow counted) and the internal and external outlink counts (distinct
+  targets, on analysed pages). A count that was never derived is an error, not a zero.
 
   The two rules are per-page findings about the links a page carries, read with
   `issues_list` and `checkId: "CHECK-33"`:
@@ -2185,7 +2196,7 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
   here", "read more") and so tells neither a visitor nor a search engine what the
   target is. The evidence is the `links` table, answered in SQL for the whole crawl,
   with `issue_urls` naming the source page and the target. Only external links are
-  judged for private hosts: an internal link is the site itself. Two rules answer it:
+  judged for private hosts: an internal link is the site itself. Three rules answer it:
   - `links.localhost` (warning) — a page with an external link whose host is
     `localhost`, a private or reserved IP address, or an internal-only name (`.local`,
     `.internal` and the like), decided by the same policy the crawler refuses to fetch
@@ -2195,6 +2206,17 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
     anchor is a generic English phrase ("click here", "read more", "learn more" and the
     rest of the list in the rule's thresholds). The judgement covers internal anchors
     only; anchors in other languages, and external anchors, are not judged.
+  - `links.anchors-generic-only` (info) — an indexable page with at least
+    `GENERIC_ANCHOR_MIN_INLINKS` internal inlinks (default 3, overridable) where EVERY
+    inlink's anchor text is empty or on the same generic list. It is the page-level
+    view of the rule above: one descriptive anchor from any linking page silences it.
+    A page that links twice, once descriptively, counts as descriptive. The row gives
+    the inlink count, the minimum in force and up to 10 distinct normalised anchors
+    (`""` for empty). Link text is judged; an `aria-label` is not read here, and
+    `links.no-anchor-text` and `links.aria-label-only` cover naming. The per-target
+    listing behind it, every anchor that points at a page, is the `anchors_by_target`
+    listing (and CSV view): per page with internal inlinks, the inlink count, the top 5
+    normalised anchors and the share that is empty or non-descriptive.
   Four more rules answer the rest of the check:
   - `links.empty-href` (info) — a page with `<a href="">`, which points back at the
     page itself.
@@ -2225,6 +2247,8 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
   - PASS if no link points at a private host and generic anchors are rare
   - WARN if any link points at `localhost` or a private address, any internal link has
     nothing that names it (`links.no-anchor-text`), or generic anchors are common
+  - INFO if `links.anchors-generic-only` (info) > 0: those pages are named by no
+    descriptive anchor anywhere on the site
   - Record: source page, target URL and anchor text for each finding
 
 ### CHECK-87: Social sharing tags (Open Graph and X)

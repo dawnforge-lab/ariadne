@@ -55,6 +55,7 @@ const ANCHOR: RuleIdentity = { id: "links.non-descriptive-anchor", severity: "in
 const NO_ANCHOR: RuleIdentity = { id: "links.no-anchor-text", severity: "warning" };
 const ARIA_ONLY: RuleIdentity = { id: "links.aria-label-only", severity: "info" };
 const HIGH_OUTLINKS: RuleIdentity = { id: "links.high-outlinks", severity: "info" };
+const GENERIC_ONLY: RuleIdentity = { id: "links.anchors-generic-only", severity: "info" };
 
 /**
  * An anchor as the comparison sees it: trimmed, lower-cased, runs of whitespace
@@ -63,7 +64,7 @@ const HIGH_OUTLINKS: RuleIdentity = { id: "links.high-outlinks", severity: "info
  * anchor, and the rule does not rely on that: `links.anchor` is a column other
  * writers could fill, and "Read  More" must match whichever wrote it.
  */
-const NORMALISED_ANCHOR = sql`lower(btrim(regexp_replace(l.anchor, '[\\s\\u00a0]+', ' ', 'g')))`;
+export const NORMALISED_ANCHOR = sql`lower(btrim(regexp_replace(l.anchor, '[\\s\\u00a0]+', ' ', 'g')))`;
 
 /**
  * A link's `aria-label` read as ABSENT: null (no attribute, or a row written
@@ -83,7 +84,7 @@ const NAME_HINT_ABSENT = sql`(btrim(regexp_replace(coalesce(l.name_hint, ''), '[
 /** Nothing but the anchor is missing: an aria-label or a wider name names the link. */
 const NAMED_BY_ATTRIBUTES = sql`not (${ARIA_LABEL_ABSENT} and ${NAME_HINT_ABSENT})`;
 
-const anchorList = (): SQL =>
+export const anchorList = (): SQL =>
   sql.join(
     NON_DESCRIPTIVE_ANCHORS.map((a) => sql`${a}`),
     sql`, `,
@@ -616,9 +617,11 @@ function namesOf(pageUrl: string, rows: { source: string | null; value: string }
  * more distinct external URLs than `HIGH_EXTERNAL_OUTLINKS`. The two counts are
  * never added: a page with 100 of each has crossed neither line.
  *
- * Distinct targets, not link rows: the analyzer keeps one row per target, and
- * the rule does not depend on that. `max` is the limit that was crossed (the
- * internal one when both were) and `crossed` says which.
+ * Distinct targets, not link rows: `deriveLinkCounts` counts distinct
+ * `target_url` per page (self-links and nofollow included) into
+ * `pages.outlinks_internal` / `outlinks_external`, and this rule reads them.
+ * `max` is the limit that was crossed (the internal one when both were) and
+ * `crossed` says which.
  */
 async function highOutlinkFindings(
   db: Db,
@@ -627,6 +630,21 @@ async function highOutlinkFindings(
   maxInternal: number,
   maxExternal: number,
 ): Promise<Finding[]> {
+  // The counts are written by `deriveLinkCounts`, which `runRules` runs before
+  // any query rule. A fetched page with a null count means it has not run;
+  // reading null as 0 would report "no high outlinks" for a crawl never judged.
+  const underived = await db.execute<{ page_url: string }>(sql`
+    select p.url as page_url
+    from pages p
+    where p.crawl_id = ${crawlId} and ${FETCHED_OK("p")} and p.outlinks_internal is null
+    limit 1`);
+  const first = underived.rows[0];
+  if (first !== undefined) {
+    throw new Error(
+      `${HIGH_OUTLINKS.id}: outlinks_internal is null on ${first.page_url} (crawl ${crawlId}); deriveLinkCounts has not run for this crawl`,
+    );
+  }
+
   const result = await db.execute<{
     page_id: string;
     page_url: string;
@@ -635,15 +653,12 @@ async function highOutlinkFindings(
     total_matches: number;
   }>(sql`
     select p.id as page_id, p.url as page_url,
-           (count(distinct l.target_url) filter (where l.is_internal))::int as internal_outlinks,
-           (count(distinct l.target_url) filter (where not l.is_internal))::int as external_outlinks,
+           p.outlinks_internal as internal_outlinks,
+           p.outlinks_external as external_outlinks,
            count(*) over ()::int as total_matches
-    from links l
-    join pages p on p.id = l.source_page_id and p.crawl_id = ${crawlId}
-    where l.crawl_id = ${crawlId} and ${FETCHED_OK("p")}
-    group by p.id, p.url
-    having count(distinct l.target_url) filter (where l.is_internal) > ${maxInternal}
-        or count(distinct l.target_url) filter (where not l.is_internal) > ${maxExternal}
+    from pages p
+    where p.crawl_id = ${crawlId} and ${FETCHED_OK("p")}
+      and (p.outlinks_internal > ${maxInternal} or p.outlinks_external > ${maxExternal})
     order by p.url
     ${limitTo(caps.listing)}`);
 
@@ -662,6 +677,94 @@ async function highOutlinkFindings(
       dedupeKey: row.page_url,
     });
   });
+  return noteTruncation(findings, result.rows[0]?.total_matches ?? 0);
+}
+
+/**
+ * An anchor that names nothing: empty or null, or on `NON_DESCRIPTIVE_ANCHORS`,
+ * each read through `NORMALISED_ANCHOR` so this rule and `links.non-descriptive-
+ * anchor` / `links.no-anchor-text` agree on what generic and empty mean. Null is
+ * coalesced first, so `not (...)` is never null.
+ */
+const GENERIC_OR_EMPTY_ANCHOR = sql`(coalesce(${NORMALISED_ANCHOR}, '') = '' or ${NORMALISED_ANCHOR} in (${anchorList()}))`;
+
+/**
+ * Indexable pages (`JUDGED`: 200, indexable, not canonicalised elsewhere) with
+ * at least `minInlinks` internal inlinks, every one of which is generic or
+ * empty. The inlinks are `pages.inlinks_internal`'s (distinct source pages, the
+ * page's own links out, nofollow in); "every inlink's anchor" is every link row
+ * from every such source, so a source linking twice needs both anchors generic,
+ * and one descriptive anchor from any source silences the page.
+ *
+ * The anchor text is judged and the aria-label is not read here: a link named
+ * only by an attribute is `links.aria-label-only`'s, an empty one is
+ * `links.no-anchor-text`'s.
+ */
+async function genericOnlyFindings(
+  db: Db,
+  crawlId: string,
+  caps: RuleCaps,
+  minInlinks: number,
+): Promise<Finding[]> {
+  // The count is written by `deriveLinkCounts`, which `runRules` runs before any
+  // query rule. Null means it has not run; reading it as 0 would report "no
+  // page is named only generically" for a crawl that was never counted.
+  const underived = await db.execute<{ page_url: string }>(sql`
+    select p.url as page_url
+    from pages p
+    where p.crawl_id = ${crawlId} and p.inlinks_internal is null
+    limit 1`);
+  const first = underived.rows[0];
+  if (first !== undefined) {
+    throw new Error(
+      `${GENERIC_ONLY.id}: inlinks_internal is null on ${first.page_url} (crawl ${crawlId}); deriveLinkCounts has not run for this crawl`,
+    );
+  }
+
+  const result = await db.execute<{
+    page_id: string;
+    page_url: string;
+    inlinks: number;
+    total_matches: number;
+    anchors: string[];
+  }>(sql`
+    with hits as (
+      select p.id as page_id, p.url as page_url, p.inlinks_internal as inlinks,
+             count(*) over ()::int as total_matches
+      from pages p
+      where p.crawl_id = ${crawlId} and ${JUDGED("p")}
+        and p.inlinks_internal >= ${minInlinks}
+        and not exists (
+          select 1
+          from links l
+          where l.crawl_id = ${crawlId} and l.target_url = p.url and l.source_page_id <> p.id
+            and not ${GENERIC_OR_EMPTY_ANCHOR}
+        )
+      order by p.url
+      ${limitTo(caps.listing)}
+    )
+    select h.page_id, h.page_url, h.inlinks, h.total_matches, x.anchors
+    from hits h
+    cross join lateral (
+      select coalesce(array_agg(a.anchor order by a.anchor), array[]::text[]) as anchors
+      from (
+        select distinct coalesce(${NORMALISED_ANCHOR}, '') as anchor
+        from links l
+        where l.crawl_id = ${crawlId} and l.target_url = h.page_url and l.source_page_id <> h.page_id
+        order by 1
+        limit ${SAMPLE_SOURCES}
+      ) a
+    ) x
+    order by h.page_url`);
+
+  const findings = result.rows.map((row) =>
+    queryFinding(GENERIC_ONLY, {
+      pageId: row.page_id,
+      pageUrl: row.page_url,
+      evidence: { inlinks: row.inlinks, minInlinks, anchors: row.anchors },
+      dedupeKey: row.page_url,
+    }),
+  );
   return noteTruncation(findings, result.rows[0]?.total_matches ?? 0);
 }
 
@@ -782,6 +885,27 @@ export const linkHygieneRules: QueryRule[] = [
         thresholds.HIGH_INTERNAL_OUTLINKS,
         thresholds.HIGH_EXTERNAL_OUTLINKS,
       );
+    },
+  }),
+  defineRule<QueryRule>({
+    kind: "query",
+    id: GENERIC_ONLY.id,
+    // "Every inlink is generic" is a claim about the site's whole link graph; a
+    // list crawl knows only the links among the listed pages (Phase 27c).
+    needsSpider: true,
+    checkIds: ["CHECK-86"],
+    category: CATEGORY,
+    severity: GENERIC_ONLY.severity,
+    columns: [
+      { key: "inlinks", label: "Internal Inlinks" },
+      { key: "minInlinks", label: "Inlink Minimum" },
+      { key: "anchors", label: "Anchor Text" },
+    ],
+    ...copyFor(GENERIC_ONLY.id),
+    rulesetVersion: RULESET_VERSION,
+    run: (db, crawlId, caps, ctx) => {
+      const { thresholds } = judgementOr(ctx);
+      return genericOnlyFindings(db, crawlId, capsOr(caps), thresholds.GENERIC_ANCHOR_MIN_INLINKS);
     },
   }),
 ];

@@ -96,7 +96,7 @@ import {
 import type { JudgementContext, RuleCaps } from "../src/rules/registry/types.js";
 import { runRules } from "../src/rules/run.js";
 import { scopeRefusesSql, scopeVerdict, type CrawlScope } from "../src/crawl/url-scope.js";
-import { siteFixture, startSiteServer } from "../test/gate/site-server.js";
+import { plantSwitch, siteFixture, startSiteServer } from "../test/gate/site-server.js";
 import { LOCAL_TENANT } from "../src/tenant.js";
 
 /** The gate's three numbers. All are the build plan's, not this script's. */
@@ -110,6 +110,13 @@ const GATE_PEAK_RSS_BYTES = 512 * 1024 * 1024;
  * the constant the code under test reads.
  */
 const GATE_RENDER_PCT = 5;
+
+/**
+ * Phase 29c: both link derivations (`deriveLinkCounts` + `deriveLinkScore`) must
+ * finish within this many ms at 50k. Restated here, not imported, for the same
+ * reason as `GATE_RENDER_PCT`.
+ */
+const GATE_LINK_DERIVE_MS = 60_000;
 
 /** How often RSS is sampled — the Phase 1 interval, so the two are comparable. */
 const SAMPLE_MS = 2_000;
@@ -793,7 +800,9 @@ async function main(): Promise<number> {
   const reuse = reusedCrawlId();
   const noAccessibility = accessibilityOff();
   // A run without axe is a diagnostic: the gate's render phase includes it.
-  const isGate = pages === GATE_PAGES && reuse === null && !noAccessibility;
+  // A planted run (GATE_PLANT=1, Phase 29c) serves a different site: never the gate.
+  const planted = plantSwitch();
+  const isGate = pages === GATE_PAGES && reuse === null && !noAccessibility && !planted;
   const exclude = excludePatterns();
   const jsonOut = jsonOutPath();
   /** Every failure the run recorded, for the exit code and for `--json-out`. */
@@ -815,9 +824,14 @@ async function main(): Promise<number> {
     inferPageTemplatesRescanMs: number | null;
     render: number | null;
     rules: number | null;
-  } = { crawl: null, inferPageTemplatesRescanMs: null, render: null, rules: null };
+    /** `deriveLinkCounts` + `deriveLinkScore`, from the rules run's `derivedMs`. */
+    linkDerive: number | null;
+  } = { crawl: null, inferPageTemplatesRescanMs: null, render: null, rules: null, linkDerive: null };
   if (exclude.length > 0 && reuse !== null) {
     throw new RangeError("gate: --exclude needs a crawl in this process; GATE_CRAWL_ID runs none");
+  }
+  if (planted && exclude.length > 0) {
+    throw new RangeError("gate: --exclude and GATE_PLANT=1 cannot combine; the exclude census assumes the plain site");
   }
   if (noAccessibility && reuse !== null) {
     throw new RangeError("gate: --no-accessibility needs a render pass in this process; GATE_CRAWL_ID runs none");
@@ -840,6 +854,9 @@ async function main(): Promise<number> {
             `under ${GATE_RENDER_PCT}% of them`
         : `SMOKE RUN — ${pages.toLocaleString()} pages. NOT the gate (set GATE_PAGES=${GATE_PAGES} for that).`,
     );
+  }
+  if (planted) {
+    console.log("PLANTED SITE (GATE_PLANT=1) — titles, 410 statuses and removed pages differ from the baseline. NOT the gate.");
   }
   console.log(`node ${process.version}, flags ${process.execArgv.join(" ") || "(none)"}`);
   console.log(line("accessibility", noAccessibility ? "OFF (--no-accessibility)" : "on (axe runs)"));
@@ -864,6 +881,8 @@ async function main(): Promise<number> {
   const sampler = startRssSampler();
   const site = reuse === null ? await startSiteServer(pages) : null;
   let siteOpen = site !== null;
+  /** The rules run's per-derivation wall times (ms), null until the rules phase ran. */
+  let derivedMs: Record<string, number> | null = null;
   /**
    * What the render phase measured, or null on a rules-only run — where there
    * is no fixture to render and the numbers would be another run's.
@@ -1083,7 +1102,9 @@ async function main(): Promise<number> {
 
       // With `--exclude`, the refused URLs are never fetched: the crawl must
       // reach exactly the rest.
-      const expectedFetched = pages - (census?.matched ?? 0);
+      // A planted site's removed pages are linked from nowhere, so never fetched.
+      const plantedRemoved = planted ? siteFixture.plantedSets(pages).removed.length : 0;
+      const expectedFetched = pages - (census?.matched ?? 0) - plantedRemoved;
       if (summary.pagesCrawled !== expectedFetched) {
         return fail(
           `crawled ${summary.pagesCrawled} pages, expected exactly ${expectedFetched}` +
@@ -1373,6 +1394,23 @@ async function main(): Promise<number> {
       );
     }
     console.log(line("  unaccounted", seconds(rulesMs - accounted)));
+    // Per derivation, as the runner timed each one (RunSummary.derivedMs).
+    for (const [name, ms] of Object.entries(run.derivedMs)) {
+      console.log(`  ${name.padEnd(24)}${seconds(ms)}`);
+    }
+    derivedMs = run.derivedMs;
+    const countsMs = run.derivedMs["deriveLinkCounts"];
+    const scoreMs = run.derivedMs["deriveLinkScore"];
+    if (countsMs === undefined || scoreMs === undefined) {
+      return fail(
+        `the rules run reported no derivedMs for ${countsMs === undefined ? "deriveLinkCounts" : "deriveLinkScore"} ` +
+          `(got ${Object.keys(run.derivedMs).join(", ") || "none"})`,
+      );
+    }
+    durationsMs.linkDerive = Math.round(countsMs + scoreMs);
+    console.log(
+      line("link derive", `${seconds(durationsMs.linkDerive)} (deriveLinkCounts ${seconds(countsMs)} + deriveLinkScore ${seconds(scoreMs)}), limit ${seconds(GATE_LINK_DERIVE_MS)}`),
+    );
     console.log(
       line("peak RSS", `${megabytes(rulesRss.peakBytes)} (at +${(rulesRss.peakAtMs / 1000).toFixed(0)}s)`),
     );
@@ -1488,6 +1526,12 @@ async function main(): Promise<number> {
     const missing = metricRuleIds.filter((id) => !(id in run.byMetric));
     if (missing.length > 0) failures.push(`metric rules that never ran: ${missing.join(", ")}`);
 
+    if (isGate && durationsMs.linkDerive > GATE_LINK_DERIVE_MS) {
+      failures.push(
+        `link derivations took ${seconds(durationsMs.linkDerive)}, over the ${seconds(GATE_LINK_DERIVE_MS)} limit`,
+      );
+    }
+
     if (failures.length > 0) {
       for (const failure of failures) fail(failure);
       return 1;
@@ -1516,6 +1560,8 @@ async function main(): Promise<number> {
               node: process.version,
               pages,
               isGate,
+              planted,
+              derivedMs,
               // False only on a `--no-accessibility` diagnostic run.
               accessibility: !noAccessibility,
               passed: recorded.length === 0,

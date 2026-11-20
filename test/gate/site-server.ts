@@ -58,6 +58,22 @@
  * A shard this size is STREAMED, in 64 KB writes that wait for the socket to
  * drain, never built whole: the fixture runs in the gate's own process, and a
  * 19 MB string per request would be the fixture's memory in the crawler's peak.
+ *
+ * PLANT (Phase 29c gate, `GATE_PLANT=1`, R12). Off by default, and off means
+ * the bytes are unchanged. On, three index sets differ from the baseline so a
+ * crawl diff of a plain run against a planted run has known answers:
+ *
+ *  - TITLES   `i % 500 === 250`: the page's `<title>` becomes
+ *    `Retitled <original>`. Nothing else on the page changes (anchors, H1,
+ *    `og:title` and alt text keep the original).
+ *  - STATUSES `i % 1000 === 500`: the page answers 410.
+ *  - REMOVED  `i % 2000 === 1000`: no page links to it, no sitemap lists it,
+ *    and it answers 404.
+ *
+ * The sets are disjoint and never include index 0. At 50,000 pages they hold
+ * 100, 50 and 25 pages. `plantedSets` is the one place the sets are decided, so
+ * the gate script and this server cannot disagree. A planted run is never the
+ * gate.
  */
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
@@ -66,6 +82,39 @@ import type { AddressInfo } from "node:net";
 export interface SiteOptions {
   /** Every sitemap `<url>` carries `xhtml:link` alternates. See the header. */
   sitemapHreflang: boolean;
+  /** Apply R12's planted sets. See the header. Absent means off. */
+  plant?: boolean;
+  /**
+   * Port to listen on; absent or 0 is an ephemeral one. A crawl diff joins two
+   * crawls of ONE site, and the site's origin includes the port, so the plain
+   * run and the planted run it is diffed against must serve the same one.
+   */
+  port?: number;
+}
+
+/**
+ * The `GATE_PORT` switch: unset or empty is an ephemeral port; otherwise an
+ * integer 1..65535. Anything else is refused.
+ */
+export function portSwitch(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = env["GATE_PORT"];
+  if (raw === undefined || raw === "") return 0;
+  const value = Number(raw);
+  if (!Number.isInteger(value) || value < 1 || value > 65_535) {
+    throw new RangeError(`GATE_PORT must be an integer from 1 to 65535 or unset, got ${JSON.stringify(raw)}`);
+  }
+  return value;
+}
+
+/**
+ * The `GATE_PLANT` switch: unset, empty or `0` is off, `1` is on. Anything else
+ * is refused, so a typo never runs the gate in the other shape.
+ */
+export function plantSwitch(env: NodeJS.ProcessEnv = process.env): boolean {
+  const raw = env["GATE_PLANT"];
+  if (raw === undefined || raw === "" || raw === "0") return false;
+  if (raw === "1") return true;
+  throw new RangeError(`GATE_PLANT must be 1, 0 or unset, got ${JSON.stringify(raw)}`);
 }
 
 /**
@@ -86,6 +135,8 @@ export interface GateSite {
   pages: number;
   /** Whether the sitemap shards carry `xhtml:link` alternates. */
   sitemapHreflang: boolean;
+  /** Whether R12's planted sets are applied. */
+  plant: boolean;
   /** A snapshot of what this server has answered so far. See `ServedCounts`. */
   served(): ServedCounts;
   close(): Promise<void>;
@@ -205,6 +256,33 @@ export interface Layout {
   products: number;
   /** `/blog/0` .. `/blog/{blog-1}`. */
   blog: number;
+  /** R12's planted sets apply. Part of the layout because links and sitemaps read it. */
+  planted: boolean;
+}
+
+/** R12's index sets: modulus and remainder each. */
+const PLANT_TITLES = { every: 500, at: 250 };
+const PLANT_STATUSES = { every: 1000, at: 500 };
+const PLANT_REMOVED = { every: 2000, at: 1000 };
+
+function inSet(index: number, set: { every: number; at: number }): boolean {
+  return index % set.every === set.at;
+}
+
+/** True when `index` is a removed page of a planted layout. */
+function isRemoved(index: number, site: Layout): boolean {
+  return site.planted && inSet(index, PLANT_REMOVED);
+}
+
+/** The planted URL paths, by set, for a site of `pages`. */
+function plantedSets(pages: number): { titles: string[]; statuses: string[]; removed: string[] } {
+  const site = layout(pages, true);
+  const pick = (set: { every: number; at: number }): string[] => {
+    const out: string[] = [];
+    for (let index = set.at; index < pages; index += set.every) out.push(pathOfIndex(index, site));
+    return out;
+  };
+  return { titles: pick(PLANT_TITLES), statuses: pick(PLANT_STATUSES), removed: pick(PLANT_REMOVED) };
 }
 
 /**
@@ -213,12 +291,12 @@ export interface Layout {
  * audits. The three counts always sum to `pages` exactly — the gate asserts on
  * a page count, so an off-by-one here would read as a crawler defect.
  */
-function layout(pages: number): Layout {
+function layout(pages: number, planted = false): Layout {
   if (!Number.isInteger(pages) || pages < 3) {
     throw new RangeError(`startSiteServer: pages must be an integer ≥ 3, got ${pages}`);
   }
   const blog = Math.floor((pages - 1) / 5);
-  return { pages, products: pages - 1 - blog, blog };
+  return { pages, products: pages - 1 - blog, blog, planted };
 }
 
 /** Index -> path. The inverse of `indexOfPath`. */
@@ -234,6 +312,11 @@ function pathOfIndex(index: number, site: Layout): string {
  * that invented URLs.
  */
 function indexOfPath(path: string, site: Layout): number | null {
+  const index = indexOfPathUnplanted(path, site);
+  return index !== null && isRemoved(index, site) ? null : index;
+}
+
+function indexOfPathUnplanted(path: string, site: Layout): number | null {
   if (path === "/") return 0;
 
   const product = /^\/products\/p(\d+)$/.exec(path);
@@ -251,11 +334,12 @@ function indexOfPath(path: string, site: Layout): number | null {
   return null;
 }
 
-/** The 20 indices this page links to. */
+/** The indices this page links to: 20, less any removed page of a planted layout. */
 function linkTargets(index: number, site: Layout): number[] {
   const targets: number[] = [];
   for (let k = 1; k <= LINKS_PER_PAGE; k++) {
-    targets.push((index * LINK_STRIDE + k) % site.pages);
+    const target = (index * LINK_STRIDE + k) % site.pages;
+    if (!isRemoved(target, site)) targets.push(target);
   }
   return targets;
 }
@@ -284,6 +368,7 @@ function renderPage(index: number, site: Layout, base: string): string {
   const path = pathOfIndex(index, site);
   const isProduct = index >= 1 && index <= site.products;
   const title = pageTitle(index, site);
+  const headTitle = site.planted && inSet(index, PLANT_TITLES) ? `Retitled ${title}` : title;
   const description =
     `Deterministic gate fixture page ${index} of ${site.pages}. ` +
     `Synthetic ${isProduct ? "product" : "editorial"} copy for the Ariadne 50k crawl gate.`;
@@ -329,7 +414,7 @@ function renderPage(index: number, site: Layout, base: string): string {
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>${escapeHtml(title)}</title>
+<title>${escapeHtml(headTitle)}</title>
 <meta name="description" content="${escapeHtml(description)}">
 <meta name="robots" content="index,follow">
 <link rel="canonical" href="${base}${path}">
@@ -445,10 +530,13 @@ function* sitemapShardPieces(
   yield `<?xml version="1.0" encoding="UTF-8"?>
 <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"${xhtml}>
 `;
+  let first = true;
   for (let index = start; index < end; index++) {
+    if (isRemoved(index, site)) continue;
     const alternates = opts.sitemapHreflang ? sitemapAlternates(index, site, base) : "";
-    yield `${index === start ? "" : "\n"}<url><loc>${base}${pathOfIndex(index, site)}</loc>` +
+    yield `${first ? "" : "\n"}<url><loc>${base}${pathOfIndex(index, site)}</loc>` +
       `<lastmod>2026-08-25</lastmod>${alternates}</url>`;
+    first = false;
   }
   yield `
 </urlset>
@@ -534,6 +622,10 @@ function respond(
     send(res, 404, "text/html; charset=utf-8", "<!doctype html><title>404</title><h1>Not found</h1>");
     return "notFound";
   }
+  if (site.planted && inSet(index, PLANT_STATUSES)) {
+    send(res, 410, "text/html; charset=utf-8", "<!doctype html><title>410</title><h1>Gone</h1>");
+    return "notFound";
+  }
   send(res, 200, "text/html; charset=utf-8", renderPage(index, site, base));
   return "html";
 }
@@ -562,6 +654,8 @@ export const siteFixture = {
   sitemapShard,
   sitemapShardPieces,
   hreflangLocales: HREFLANG_LOCALES,
+  /** R12's planted URL paths by set. See the header. */
+  plantedSets,
 };
 
 /**
@@ -576,9 +670,10 @@ export const siteFixture = {
  */
 export async function startSiteServer(
   pages: number,
-  opts: SiteOptions = { sitemapHreflang: sitemapHreflangSwitch() },
+  opts: SiteOptions = { sitemapHreflang: sitemapHreflangSwitch(), plant: plantSwitch(), port: portSwitch() },
 ): Promise<GateSite> {
-  const site = layout(pages);
+  const plant = opts.plant ?? false;
+  const site = layout(pages, plant);
   let base = "";
 
   const served: ServedCounts = { html: 0, meta: 0, notFound: 0, total: 0 };
@@ -598,7 +693,7 @@ export async function startSiteServer(
 
   await new Promise<void>((resolve, reject) => {
     server.once("error", reject);
-    server.listen(0, "127.0.0.1", () => {
+    server.listen(opts.port ?? 0, "127.0.0.1", () => {
       server.removeListener("error", reject);
       resolve();
     });
@@ -611,6 +706,7 @@ export async function startSiteServer(
     base,
     pages,
     sitemapHreflang: opts.sitemapHreflang,
+    plant,
     // A copy, not the live object: a caller that took two readings and got the
     // same mutable reference twice would compare a number with itself.
     served: () => ({ ...served }),

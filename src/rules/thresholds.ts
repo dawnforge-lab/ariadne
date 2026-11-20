@@ -449,3 +449,13 @@ export const SCHEMA_TEMPLATE_MIN_PAGES = 10;
  * Overridable per crawl.
  */
 export const IMAGE_OVERSIZE_PERCENT = 200;
+
+/**
+ * How many internal inlinks a page needs before `links.anchors-generic-only`
+ * judges the anchors that point at it (Phase 29c, CHECK-86). With one or two
+ * inlinks, a generic anchor says little about how the site names the page; from
+ * three, every source having chosen "click here" or nothing is a pattern.
+ * Counted as `pages.inlinks_internal` counts them: distinct source pages, the
+ * page's own links excluded, nofollow included. Overridable per crawl.
+ */
+export const GENERIC_ANCHOR_MIN_INLINKS = 3;

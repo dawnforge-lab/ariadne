@@ -670,14 +670,14 @@ afterAll(async () => {
 });
 
 describe("the tool surface", () => {
-  it("advertises exactly the thirty-five tools of the agent surface, each described", async () => {
+  it("advertises exactly the thirty-eight tools of the agent surface, each described", async () => {
     const listed = await client.listTools();
     expect(listed.tools.map((t) => t.name).sort()).toEqual(
       [
         "compare_urls", "config_schema", "config_validate", "crawl_compare", "crawl_config_get", "crawl_config_set", "crawl_list",
         "crawl_mark_failed", "crawl_overview", "crawl_render", "crawl_resume", "crawl_rules", "crawl_start", "crawl_pause", "crawl_cancel", "crawl_delete",
         "crawl_history", "schedule_create", "schedule_list", "schedule_get", "schedule_update", "schedule_delete", "schedule_history", "crawl_status", "export_crawl", "issue_inlinks", "issue_urls", "issues_list",
-        "issues_overview", "metric_table", "metrics_get", "pages_query", "robots_get", "rules_catalog", "structured_data",
+        "issues_overview", "metric_table", "metrics_get", "pages_query", "robots_get", "rules_catalog", "structured_data", "anchors_by_target", "crawl_diff", "crawl_diff_urls",
       ].sort(),
     );
     for (const tool of listed.tools) {
@@ -686,8 +686,8 @@ describe("the tool surface", () => {
       // agent reads one tool's description, not the server's instructions.
       if (
         tool.name.endsWith("_list") ||
-        tool.name === "pages_query" || tool.name === "structured_data" ||
-        tool.name === "issue_urls" ||
+        tool.name === "pages_query" || tool.name === "structured_data" || tool.name === "anchors_by_target" ||
+        tool.name === "issue_urls" || tool.name === "crawl_diff_urls" ||
         tool.name === "issue_inlinks" ||
         tool.name === "compare_urls" || tool.name === "crawl_history" || tool.name === "schedule_history"
       ) {
@@ -1417,12 +1417,12 @@ describe("crawl_rules", () => {
     // crawl skill's fenced block is compared field for field and missed here,
     // where nothing compared anything — and it named four of the six fields
     // that are actually returned. Asserted against `Object.keys` of the real
-    // summary rather than a restated list, so a seventh field cannot be added
+    // summary rather than a restated list, so an eighth field cannot be added
     // to `RunSummary` and left undocumented.
     const rules = (await client.listTools()).tools.find((t) => t.name === "crawl_rules");
     const rulesDescription = rules?.description ?? "";
     expect(Object.keys(summary).sort()).toEqual([
-      "byMetric", "byRule", "derived", "findings", "metrics", "pagesScanned",
+      "byMetric", "byRule", "derived", "derivedMs", "findings", "metrics", "pagesScanned",
     ]);
     for (const field of Object.keys(summary)) {
       expect(rulesDescription, `crawl_rules does not name ${field}`).toContain(field);
@@ -2260,6 +2260,7 @@ describe("pages_query", () => {
     // and CHECK-31 asks for buckets and for the URLs in them.
     expect(Object.keys(rows[0] ?? {}).sort()).toEqual([
       "clickDepth", "depth", "discoveredVia", "fetchClass", "fetchReason", "indexable",
+      "inlinksInternal", "linkScore", "outlinksExternal", "outlinksInternal",
       "pageType", "renderError", "renderableWordCount", "rendered", "renderedWordCount",
       // See the same assertion in test/api/query.test.ts: the analyzer's count
       // over the post-JavaScript DOM, which is the column the CSR rule reads.
@@ -2542,7 +2543,8 @@ describe("export_crawl — the CSV views", () => {
       crawlId: liveCrawlId, format: "csv", view: "internal_urls",
     });
     expect(read(pagesCsv).split("\r\n")[0]).toBe(
-      "url,status,fetchClass,indexable,clickDepth,pageType,title," +
+      "url,status,fetchClass,indexable,clickDepth,inlinks,outlinksInternal," +
+        "outlinksExternal,linkScore,pageType,title," +
         "recheckFetchClass,recheckStatus,recheckAt",
     );
   });

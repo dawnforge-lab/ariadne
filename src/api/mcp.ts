@@ -1,5 +1,5 @@
 /**
- * The MCP transport: thirty-five tools over the same service layer the HTTP
+ * The MCP transport: thirty-eight tools over the same service layer the HTTP
  * routes use. Twelve of them change something (`crawl_start`, `crawl_resume`,
  * `crawl_pause`, `crawl_cancel`, `crawl_delete`, `crawl_render`, `crawl_rules`,
  * `crawl_mark_failed`, `crawl_config_set`, `schedule_create`, `schedule_update`,
@@ -77,6 +77,8 @@ import { RENDER_PASS_EVIDENCE } from "../rules/metric/render-metrics.js";
 import { METRIC_SCOPES } from "../rules/registry/types.js";
 import type { McpServerConfig } from "./config.js";
 import { credentialInputSchemas } from "./config-schema.js";
+import { ANCHORS_TOP_N } from "./anchors.js";
+import { DIFF_FIELD_NAMES, DIFF_STATES, DIFF_THRESHOLD_SPECS, DIFF_URL_SETS } from "./crawl-diff.js";
 import { CSV_VIEWS, EXPORT_FORMATS } from "./csv.js";
 import { strictInput } from "./mcp-input.js";
 import { STRUCTURED_DATA_FORMATS, STRUCTURED_DATA_PROBLEMS } from "./structured-data.js";
@@ -140,10 +142,13 @@ export const TOOL_NAMES = [
   "metric_table",
   "pages_query",
   "structured_data",
+  "anchors_by_target",
   "export_crawl",
   "rules_catalog",
   "crawl_compare",
   "compare_urls",
+  "crawl_diff",
+  "crawl_diff_urls",
 ] as const;
 
 export type ToolName = (typeof TOOL_NAMES)[number];
@@ -193,6 +198,7 @@ The order of operations is fixed by what the evidence means:
   4. crawl_rules   runs every rule over the finished crawl and writes the
                    findings. Refused while the crawl is still moving.
   5. issues_list / issue_urls / metrics_get / pages_query read the results.
+                   anchors_by_target reads which anchor texts link to each page.
                    robots_get reads the robots.txt the crawl obeyed.
                    rules_catalog reads the checklist itself — every rule and,
                    with a crawlId, whether it fired on that crawl (including the
@@ -204,6 +210,12 @@ The order of operations is fixed by what the evidence means:
                    and its caveats before quoting a change: two crawls judged by
                    different rulesets, or under different finding caps, produce
                    different counts for reasons that are not the site.
+                   crawl_diff compares the same pair page by page: how many
+                   pages changed each stored field (status, title, word count,
+                   inlinks, link score, ...), and how many could not be
+                   compared, which is not the same as unchanged.
+                   crawl_diff_urls lists the URLs behind any of those counts,
+                   with the value on each side.
 
 An empty findings or metrics answer is only 'nothing found' on a crawl that was
 judged. crawl_status's rulesRunAt is the check: a timestamp means a rules pass
@@ -860,10 +872,11 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
       description:
         "Judge a finished crawl: run every rule in the registry over it and write " +
         "the findings and metrics. Answers the run summary — {pagesScanned, " +
-        "findings, byRule, derived, metrics, byMetric} — not the findings " +
-        "themselves; read those with issues_list and metrics_get. Those six are " +
-        "the whole summary; it carries no timing field, so time the call " +
-        "yourself if you want the duration.\n\n" +
+        "findings, byRule, derived, derivedMs, metrics, byMetric} — not the findings " +
+        "themselves; read those with issues_list and metrics_get. Those seven are " +
+        "the whole summary. derivedMs is the wall time in milliseconds of each " +
+        "derivation, by name; there is no whole-run duration, so time the call " +
+        "yourself if you want one.\n\n" +
         "pagesScanned here is the crawl's page count, and crawl_status answers " +
         "the same number without judging anything — so a crawl somebody else " +
         "judged does not need a second pass to be described.\n\n" +
@@ -1408,13 +1421,18 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "JavaScript|Other (fetch class non_html), Resource: Image|CSS|JavaScript. " +
         "Each percent is against its own group's subtotal. too_large and " +
         "unsupported_encoding pages are in neither page group.\n" +
+        "  link-counts (judged crawls only): over the fetched-OK pages, inlinks, " +
+        "outlinks (internal) and outlinks (external), each as p50, p90 and max; " +
+        "integer counts, percent null.\n" +
         "  render: Pages rendered (live), then Render coverage (<ran|none|failed>) " +
         "from the stored render.coverage metric.\n" +
         "  issues-grid: finding rows by type/priority (issue/high … opportunity/low), " +
         "the crawl's overrides applied and the disabled rules' findings left out.\n\n" +
         "NOT MEASURED IS NAMED, NEVER ZERO. A section the crawl could not measure is " +
-        "absent from sections and listed in notMeasured as {id, reason}: click-depth " +
-        "and issues-grid on a crawl no rules run has judged, render on a crawl that " +
+        "absent from sections and listed in notMeasured as {id, reason}: click-depth, " +
+        "link-counts and issues-grid on a crawl no rules run has judged (never judged, " +
+        "or a rules run in flight), link-counts on a crawl judged before link counts " +
+        "existed (re-run the rules), render on a crawl that " +
         "never rendered. notMeasured MAY ALSO NAME ONE ENTRY of a measured section: " +
         "render-coverage (a rendered crawl not yet judged) and robots-blocked-dropped " +
         "(a crawl that predates the counter). An unjudged crawl is answered, not " +
@@ -1661,7 +1679,8 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
       title: "The crawled pages",
       description:
         "The crawl's pages, slim and filtered: {url, statusCode, fetchClass, " +
-        "fetchReason, pageType, indexable, depth, clickDepth, discoveredVia, " +
+        "fetchReason, pageType, indexable, depth, clickDepth, inlinksInternal, " +
+        "outlinksInternal, outlinksExternal, linkScore, discoveredVia, " +
         "wordCount, renderableWordCount, rendered, renderedWordCount, " +
         "renderedRenderableWordCount, renderError}. " +
         "Use it to answer questions about the site itself — how deep the blog is, " +
@@ -1678,6 +1697,17 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "also null on every page of a crawl the rules have not run over, since the " +
         "search that computes it runs with them; crawl_status's rulesRunAt is what " +
         "tells the two nulls apart.\n\n" +
+        "LINK FACTS, written by crawl_rules. inlinksInternal is the number of distinct " +
+        "internal pages linking to the URL (nofollow counted, self-links not), a 0 " +
+        "included. outlinksInternal and outlinksExternal are the distinct targets on " +
+        "a fetched-OK page. linkScore is 0-100: the share of internal link weight " +
+        "the page holds (random-surfer model, damping 0.85), log-scaled so 100 is " +
+        "the crawl's top page; null for a page outside the link graph. Every one is " +
+        "null on a crawl the rules have never judged and on one judged before these " +
+        "existed, which is not measured and never zero: run crawl_rules " +
+        "(crawl_status's rulesRunAt tells an unjudged crawl apart). On a judged " +
+        "crawl a non-null inlinksInternal beside a null linkScore means the page is " +
+        "outside the link graph (not fetched OK), a value, not a gap.\n\n" +
         "TWO WORD COUNTS, AND THEY MEAN DIFFERENT THINGS. wordCount is every word " +
         "of visible text in the HTML. renderableWordCount is that count minus the " +
         "words the page's own markup says are not displayed (hidden attributes, " +
@@ -1869,6 +1899,59 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
     },
     async ({ crawlId, ...rest }) =>
       run("structured_data", () => service.listStructuredData(tenant, crawlId, defined(rest))),
+  );
+
+  server.registerTool(
+    named("anchors_by_target"),
+    {
+      title: "Which anchor texts link to each page",
+      description:
+        "One row per page that at least one other page of the crawl links to, any " +
+        "fetch class: {url, pageType, inlinks, distinctAnchors, topAnchors, " +
+        "emptyAnchors, nonDescriptiveAnchors, genericShare}. A page nothing links to " +
+        "is not listed. Use it to see how the site describes its own pages in link " +
+        "text, and which targets are linked with text that says nothing, before " +
+        "reading links.non-descriptive-anchor, links.no-anchor-text and " +
+        "links.anchors-generic-only.\n\n" +
+        "WHAT IS COUNTED: DISTINCT SOURCE PAGES, throughout. inlinks is the page's " +
+        "internal inlink count as pages_query's inlinksInternal gives it (distinct " +
+        "pages linking to it, itself excluded, nofollow links counted). Every anchor " +
+        "count is the number of distinct source pages using that anchor on a link to " +
+        "the target, so a page that links twice with the same text counts once, and " +
+        "no count passes inlinks.\n\n" +
+        "Anchors are compared lower-cased, trimmed, with runs of whitespace collapsed. " +
+        "distinctAnchors counts the distinct anchors, the empty one included. " +
+        `topAnchors are the ${ANCHORS_TOP_N} most frequent NON-EMPTY anchors, {text, count}, ` +
+        "count descending then text ascending. emptyAnchors is the source pages whose " +
+        "link has no text at all (an aria-label does not give it any: this is about " +
+        "link text). nonDescriptiveAnchors is the source pages whose link text is " +
+        "wholly a generic phrase ('click here', 'read more', ...); a page counts in " +
+        "each class any of its links to the target uses. genericShare is the source " +
+        "pages EVERY ONE of whose links to the target is empty or non-descriptive, " +
+        "over inlinks, to four places: a page with 'read more' and a descriptive link " +
+        "does not count, so genericShare is 1 exactly when every inlink anchor is " +
+        "generic, the condition links.anchors-generic-only fires on (once inlinks " +
+        "reach its threshold). It never passes 1.\n\n" +
+        "REFUSED, never answered empty, on a crawl the rules have not judged and on " +
+        "one judged before link counts existed (409): run crawl_rules and ask again.\n\n" +
+        "pageType filters the TARGETS by template cohort; '(untyped)' for the pages " +
+        "the crawl could not type. Ordered by URL. " +
+        `Paginated: {items, nextCursor}; limit defaults to ${PAGE_SIZE_DEFAULT}, ` +
+        `maximum ${PAGE_SIZE_MAX}. Pass nextCursor back as cursor to continue. The ` +
+        "same rows are a spreadsheet through export_crawl (format=csv, " +
+        "view=anchors_by_target).",
+      inputSchema: strictInput({
+        crawlId: crawlIdField(),
+        pageType: z
+          .string()
+          .describe("Only target pages of this template cohort, e.g. 'product', or '(untyped)'.")
+          .optional(),
+        limit: limitField(),
+        cursor: cursorField(),
+      }),
+    },
+    async ({ crawlId, ...rest }) =>
+      run("anchors_by_target", () => service.listAnchorsByTarget(tenant, crawlId, defined(rest))),
   );
 
   server.registerTool(
@@ -2144,6 +2227,120 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
   );
 
   server.registerTool(
+    named("crawl_diff"),
+    {
+      title: "What changed on each page between two crawls of one site",
+      description:
+        "Two crawls of the SAME site, field by field, over what each crawl stored " +
+        "(nothing is fetched). Answers {base, head, thresholds, urls, fields}. base and " +
+        "head are {crawlId, siteUrl, rulesRunAt, pages}. urls is {common, added, " +
+        "removed}: URLs both crawls hold, URLs only the head holds, URLs only the " +
+        "base held. Pages are paired on the stored url exactly, so '/Page' and " +
+        "'/page', or '/a' and '/a/', are different pages and never one removed and " +
+        "one added.\n\n" +
+        "fields is one {field, changed, notComparable} per field, in this order: " +
+        `${DIFF_FIELD_NAMES.join(", ")}. Counts are over the common URLs. ` +
+        "changed is the pages whose value differs. notComparable is the pages where " +
+        "the two sides cannot be compared for that field, which is NOT 'unchanged': " +
+        "the content fields (title, metaDescription, h1, canonical, metaRobots, " +
+        "wordCount, schemaTypes) are not comparable when either side did not fetch " +
+        "ok (status and fetchClass already report that); metaRobots is not " +
+        "comparable when either side was extracted before extraction 2, schemaTypes " +
+        "before extraction 4; inlinks and linkScore are not comparable when either " +
+        "crawl was judged before link counts existed (run crawl_rules on it). " +
+        "clickDepth null means unreachable, which is a value.\n\n" +
+        "WHAT 'CHANGED' MEANS. status, fetchClass, indexable, title, metaDescription, " +
+        "h1, metaRobots and clickDepth: the stored value differs. canonical: the " +
+        "HTML canonical or the header canonical differs. schemaTypes: the set of " +
+        "schema types the page declares differs. wordCount: |head - base| as a " +
+        "percentage of base exceeds wordCountChangePct. inlinks: the change is at " +
+        "least inlinksChangeMin AND exceeds inlinksChangePct percent of base. " +
+        "linkScore: scored on one side only, or the score moved by at least " +
+        "linkScoreChangePoints.\n\n" +
+        "The thresholds are request parameters, integers, echoed in every answer: " +
+        "wordCountChangePct (default 20, 1 to 1000), inlinksChangePct (default 50, " +
+        "1 to 1000), inlinksChangeMin (default 5, 1 to 100000), " +
+        "linkScoreChangePoints (default 10, 1 to 100). One outside its range, or " +
+        "not an integer, is refused naming it.\n\n" +
+        "REFUSED, as crawl_compare refuses, in the same order: a crawl of another " +
+        "tenant or one that does not exist (404), the same crawl twice, two crawls " +
+        "of different sites, and a crawl that has never been judged (rulesRunAt " +
+        "null). This is evidence, not a verdict: no rule judges a change here. The " +
+        "URLs behind each count are not here: crawl_diff_urls lists them.",
+      inputSchema: strictInput({
+        baseCrawlId: compareIdField("base", "the earlier crawl — what the site was"),
+        headCrawlId: compareIdField("head", "the later crawl — what the site is now"),
+        wordCountChangePct: diffThresholdField("wordCountChangePct"),
+        inlinksChangePct: diffThresholdField("inlinksChangePct"),
+        inlinksChangeMin: diffThresholdField("inlinksChangeMin"),
+        linkScoreChangePoints: diffThresholdField("linkScoreChangePoints"),
+      }),
+    },
+    async ({ baseCrawlId, headCrawlId, ...thresholds }) =>
+      run("crawl_diff", () => service.crawlDiff(tenant, baseCrawlId, headCrawlId, defined(thresholds))),
+  );
+
+  server.registerTool(
+    named("crawl_diff_urls"),
+    {
+      title: "The URLs behind a crawl_diff count",
+      description:
+        "The pages behind one of crawl_diff's counts, with what each looked like in " +
+        "the two crawls. Answers {items, nextCursor, field, state, thresholds}; each " +
+        "item is {url, before, after}, ordered by URL. before is the BASE crawl's " +
+        "stored value and after the HEAD crawl's, as stored (text is capped as it " +
+        "was stored): a string for title, metaDescription, h1, fetchClass (the " +
+        "fetch class, e.g. ok, client_error) and metaRobots (the robots meta content " +
+        "as stored); a number for " +
+        "status, wordCount, inlinks, clickDepth and linkScore; true or false for " +
+        "indexable; {html, header} for canonical; a sorted array of schema types " +
+        "for schemaTypes; null where the page had no value.\n\n" +
+        `field is one of ${DIFF_FIELD_NAMES.join(", ")}, or ${DIFF_URL_SETS.join(" or ")}. ` +
+        "added is URLs only the head crawl holds and removed is URLs only the base " +
+        "held; both have a null before and after and no state. For any other field, " +
+        `state is ${DIFF_STATES.join(" or ")}, default changed. changed lists the ` +
+        "pages crawl_diff counted as changed for that field and notComparable the " +
+        "pages it could not compare, which is NOT 'unchanged' (crawl_diff says why " +
+        "for each field). The listing is defined by the same predicates as the " +
+        "counts, so a field walked to its end has exactly as many URLs as " +
+        "crawl_diff counted. Pass the same threshold parameters you gave " +
+        "crawl_diff, or the two will count different pages; they are echoed here.\n\n" +
+        "REFUSED: a field or state not listed above, a state given with added or " +
+        "removed, a threshold outside its range, and every refusal crawl_diff makes " +
+        "(another tenant's or a missing crawl, the same crawl twice, two sites, a " +
+        "crawl never judged).\n\n" +
+        `Paginated: {items, nextCursor}; limit defaults to ${PAGE_SIZE_DEFAULT}, ` +
+        `maximum ${PAGE_SIZE_MAX}. Pass nextCursor back as cursor, with the SAME ` +
+        "baseCrawlId, headCrawlId, field, state and thresholds, until nextCursor is null.",
+      inputSchema: strictInput({
+        baseCrawlId: compareIdField("base", "the earlier crawl — what the site was"),
+        headCrawlId: compareIdField("head", "the later crawl — what the site is now"),
+        field: z
+          .string()
+          .describe(
+            `Which count to list: ${DIFF_FIELD_NAMES.join(", ")}, ${DIFF_URL_SETS.join(", ")}.`,
+          ),
+        state: z
+          .string()
+          .describe(
+            `${DIFF_STATES.join(" or ")}. Defaults to changed. Not allowed with added or removed.`,
+          )
+          .optional(),
+        wordCountChangePct: diffThresholdField("wordCountChangePct"),
+        inlinksChangePct: diffThresholdField("inlinksChangePct"),
+        inlinksChangeMin: diffThresholdField("inlinksChangeMin"),
+        linkScoreChangePoints: diffThresholdField("linkScoreChangePoints"),
+        limit: limitField(),
+        cursor: cursorField(),
+      }),
+    },
+    async ({ baseCrawlId, headCrawlId, field, ...rest }) =>
+      run("crawl_diff_urls", () =>
+        service.listDiffUrls(tenant, baseCrawlId, headCrawlId, field, defined(rest)),
+      ),
+  );
+
+  server.registerTool(
     named("export_crawl"),
     {
       title: "Export a dataset or a spreadsheet view to a file",
@@ -2167,7 +2364,7 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "metric_table is one metric's table and needs a metricId; issues_overview is " +
         "the issues_overview tool's one-row-per-rule table; crawl_overview is the " +
         "crawl_overview tool's sections as Section,Label,Value,Percent rows; the other " +
-        "eight, like the two overviews, refuse both. Answers {format, view, path, rows, " +
+        "nine, like the two overviews, refuse both. Answers {format, view, path, rows, " +
         "bytes}, plus disabledRules on the four views that read findings (issues, " +
         "issue_urls, issues_overview, crawl_overview): the rules the crawl's judgement " +
         "disables, whose findings the file leaves out, with notMeasured beside it. " +
@@ -2187,6 +2384,11 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "and problem, and one row with an empty Problem for a block with none. " +
         "Refused, as the listing is, on a crawl the rules have not judged or judged " +
         "before structured data validation existed.\n" +
+        "  anchors_by_target is the anchors_by_target listing as a file — url, " +
+        "pageType, inlinks, distinctAnchors, emptyAnchors, nonDescriptiveAnchors, " +
+        "genericShare, topAnchors (rendered 'text (n); text (n)'). Refused, as the " +
+        "listing is, on a crawl the rules have not judged or judged before link counts " +
+        "existed.\n" +
         "'dataset' is the first format's word and 'view' is the second's; asking " +
         "with both is refused rather than resolved.\n\n" +
         "WHAT THE CSV LOOKS LIKE, because a human opens it and you are the one who " +
@@ -2322,6 +2524,14 @@ function compareIdField(side: "base" | "head", role: string) {
       `The ${side} crawl's id: ${role}. Both crawls must be of the same site and ` +
         "both must have been judged (crawl_rules run over them).",
     );
+}
+
+function diffThresholdField(name: keyof typeof DIFF_THRESHOLD_SPECS) {
+  const spec = DIFF_THRESHOLD_SPECS[name];
+  return z
+    .number()
+    .describe(`An integer from ${spec.min} to ${spec.max}. Defaults to ${spec.def}.`)
+    .optional();
 }
 
 function limitField() {

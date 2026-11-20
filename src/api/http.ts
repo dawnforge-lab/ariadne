@@ -118,6 +118,14 @@
  *                                      409 on a crawl no rules run has judged,
  *                                      or one judged before the validation
  *                                      derivation existed (re-run the rules)
+ *   GET  /crawls/:id/anchors-by-target one row per page with internal inlinks:
+ *                                      inlinks, distinctAnchors, the top 5
+ *                                      normalised anchor texts, emptyAnchors,
+ *                                      nonDescriptiveAnchors, genericShare
+ *                                      (all counted in distinct source pages).
+ *                                      `?pageType=`. 409 on a crawl no rules run
+ *                                      has judged, or one judged before link
+ *                                      counts existed (re-run the rules)
  *   GET  /crawls/:id/robots            the site's robots.txt as this crawl read it
  *   GET  /config/schema                the crawl-start body as JSON Schema draft
  *                                      2020-12 — each field's description,
@@ -172,6 +180,15 @@
  *   GET  /compare/urls                 the URLs behind one of those three counts,
  *                                      paginated — the counts are on the summary
  *                                      and the URLs are only here (obligation 1)
+ *   GET  /diff                         the same pair page by page: per stored field,
+ *                                      how many common URLs changed and how many
+ *                                      could not be compared (never "unchanged").
+ *                                      Integer thresholds are query parameters and
+ *                                      echoed. Refused as /compare is
+ *   GET  /diff/urls                    the URLs behind one of those counts, paginated,
+ *                                      with the value on each side: field (a diff
+ *                                      field, added or removed), state (changed |
+ *                                      notComparable), the same thresholds
  *
  * ## What a caller can never be told
  *
@@ -189,6 +206,7 @@ import { randomUUID } from "node:crypto";
 import type { Db } from "../db/client.js";
 import type { ApiServerConfig } from "./config.js";
 import { checkBearer } from "./auth.js";
+import { DIFF_THRESHOLD_SPECS } from "./crawl-diff.js";
 import { serveOps } from "../ops/serve.js";
 import { parseTenant, type TenantId } from "../tenant.js";
 import { unknownQueryParameterMessage } from "./errors.js";
@@ -786,6 +804,19 @@ function buildRoutes(): Route[] {
         }),
       }),
     },
+    {
+      method: "GET",
+      pattern: ["crawls", id, "anchors-by-target"],
+      query: ["pageType", ...PAGINATION_PARAMS],
+      handler: async (service, ctx) => ({
+        status: 200,
+        body: await service.listAnchorsByTarget(ctx.tenant, param(ctx, "id"), {
+          ...optionalString(ctx.query, "pageType"),
+          ...optionalNumber(ctx.query, "limit"),
+          ...optionalString(ctx.query, "cursor"),
+        }),
+      }),
+    },
     // THE ONE ROUTE THAT IS NOT UNDER A CRAWL. The catalog is a property of the
     // ruleset, and a crawl is an optional projection onto it — which is why
     // `crawlId` is a query parameter here rather than a path segment: without
@@ -817,6 +848,51 @@ function buildRoutes(): Route[] {
           ctx.tenant,
           requiredString(ctx.query, "baseCrawlId"),
           requiredString(ctx.query, "headCrawlId"),
+        ),
+      }),
+    },
+    {
+      method: "GET",
+      pattern: ["diff"],
+      query: ["baseCrawlId", "headCrawlId", ...Object.keys(DIFF_THRESHOLD_SPECS)],
+      handler: async (service, ctx) => ({
+        status: 200,
+        body: await service.crawlDiff(
+          ctx.tenant,
+          requiredString(ctx.query, "baseCrawlId"),
+          requiredString(ctx.query, "headCrawlId"),
+          {
+            ...optionalNumber(ctx.query, "wordCountChangePct"),
+            ...optionalNumber(ctx.query, "inlinksChangePct"),
+            ...optionalNumber(ctx.query, "inlinksChangeMin"),
+            ...optionalNumber(ctx.query, "linkScoreChangePoints"),
+          },
+        ),
+      }),
+    },
+    {
+      method: "GET",
+      pattern: ["diff", "urls"],
+      query: [
+        "baseCrawlId", "headCrawlId", "field", "state",
+        ...Object.keys(DIFF_THRESHOLD_SPECS), ...PAGINATION_PARAMS,
+      ],
+      handler: async (service, ctx) => ({
+        status: 200,
+        body: await service.listDiffUrls(
+          ctx.tenant,
+          requiredString(ctx.query, "baseCrawlId"),
+          requiredString(ctx.query, "headCrawlId"),
+          requiredString(ctx.query, "field"),
+          {
+            ...optionalString(ctx.query, "state"),
+            ...optionalNumber(ctx.query, "wordCountChangePct"),
+            ...optionalNumber(ctx.query, "inlinksChangePct"),
+            ...optionalNumber(ctx.query, "inlinksChangeMin"),
+            ...optionalNumber(ctx.query, "linkScoreChangePoints"),
+            ...optionalNumber(ctx.query, "limit"),
+            ...optionalString(ctx.query, "cursor"),
+          },
         ),
       }),
     },

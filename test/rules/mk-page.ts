@@ -68,6 +68,13 @@ export function mkPage(overrides: Partial<PageRecord> = {}): PageRecord {
     // different page from a clean one — `content.csr-dependent` refuses a
     // crawl of them. The clean page is a page a current crawl wrote.
     clickDepth: 2,
+    // Phase 29c link columns: written by the rules run's derive step, so a row
+    // built straight into `pages` has not been judged and carries null.
+    inlinksInternal: null,
+    outlinksInternal: null,
+    outlinksExternal: null,
+    linkScoreRaw: null,
+    linkScore: null,
     textRatio: 0.4,
     contentHash: "0".repeat(64),
     simhash: 1234567890123456789n,

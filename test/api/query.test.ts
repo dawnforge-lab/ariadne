@@ -1804,6 +1804,7 @@ describe("GET /crawls/:id/pages", () => {
       // get there (null when nothing reaches it). CHECK-31 asks for the second
       // per page, so the projection carries it.
       "clickDepth", "depth", "discoveredVia", "fetchClass", "fetchReason", "indexable",
+      "inlinksInternal", "linkScore", "outlinksExternal", "outlinksInternal",
       "pageType", "rendered", "renderError", "renderableWordCount", "renderedWordCount",
       // The rendered side of `content.csr-dependent` since P8-T1, published so
       // an agent can check the rule COULD have fired before reading its silence
@@ -2933,7 +2934,8 @@ describe("GET /crawls/:id/export?format=csv", () => {
 
     const internal = await callCsv(`/crawls/${crawlF}/export?format=csv&view=internal_urls`);
     expect(internal.records[0]).toEqual([
-      "url", "status", "fetchClass", "indexable", "clickDepth", "pageType", "title",
+      "url", "status", "fetchClass", "indexable", "clickDepth",
+      "inlinks", "outlinksInternal", "outlinksExternal", "linkScore", "pageType", "title",
       // The SECOND observation, three columns wide (P17-T4): a list of server
       // errors that cannot be sorted by "still broken" is the wrong list.
       "recheckFetchClass", "recheckStatus", "recheckAt",
@@ -2941,33 +2943,33 @@ describe("GET /crawls/:id/export?format=csv", () => {
     // Empty in all three on a page nobody re-asked about — which is every page
     // whose first fetch was not a server error, and never "it came back clean".
     expect(rowWhere(internal, "url", `${SITE}/csv-end`)).toEqual([
-      `${SITE}/csv-end`, "200", "ok", "true", "2", "product", "title of csv-end", "", "", "",
+      `${SITE}/csv-end`, "200", "ok", "true", "2", "1", "", "", "", "product", "title of csv-end", "", "", "",
     ]);
-    // An empty cell is "the engine has no value", never a zero: this page has
-    // no click depth because nothing links to it.
+    // An empty cell is "the engine has no value", never a zero: a 404 is not a
+    // node of the click-depth walk, so it has no depth although a page links to it.
     expect(rowWhere(internal, "url", `${SITE}/csv-gone`)).toEqual([
-      `${SITE}/csv-gone`, "404", "client_error", "", "", "", "title of csv-gone", "", "", "",
+      `${SITE}/csv-gone`, "404", "client_error", "", "", "1", "", "", "", "", "title of csv-gone", "", "", "",
     ]);
 
     // And the crawl that HAS a second observation writes it: the class, the
     // status it came back with, and an ISO instant a spreadsheet can sort.
     const rechecked = await callCsv(`/crawls/${crawlG}/export?format=csv&view=internal_urls`);
     expect(rowWhere(rechecked, "url", `${SITE}/still-broken`)).toEqual([
-      `${SITE}/still-broken`, "503", "server_error", "", "", "", "title of still-broken",
+      `${SITE}/still-broken`, "503", "server_error", "", "", "", "", "", "", "", "title of still-broken",
       "server_error", "503", "2026-09-08T10:00:00.000Z",
     ]);
     // The first observation is NEVER rewritten by the second: this row's own
     // `status` and `fetchClass` are still the 500 the crawl saw, beside an `ok`
     // recheck. Two facts, two columns.
     expect(rowWhere(rechecked, "url", `${SITE}/blip`)).toEqual([
-      `${SITE}/blip`, "500", "server_error", "", "", "", "title of blip",
+      `${SITE}/blip`, "500", "server_error", "", "", "", "", "", "", "", "title of blip",
       "ok", "200", "2026-09-08T10:00:00.000Z",
     ]);
     // A row the cap stopped short of: no class, no status, no time — the reason
     // it carries lives on the row, and this view does not claim it decided
     // anything.
     expect(rowWhere(rechecked, "url", `${SITE}/over-budget`)).toEqual([
-      `${SITE}/over-budget`, "500", "server_error", "", "", "", "title of over-budget",
+      `${SITE}/over-budget`, "500", "server_error", "", "", "", "", "", "", "", "title of over-budget",
       "", "", "",
     ]);
 
@@ -3097,7 +3099,7 @@ describe("GET /crawls/:id/export?format=csv", () => {
     const internal = await callCsv(`/crawls/${crawlF}/export?format=csv&view=internal_urls`);
     // The PARSED cell still reads as the site wrote it, plus the apostrophe
     // that stops the spreadsheet evaluating it.
-    expect(rowWhere(internal, "url", `${SITE}/csv-formula`)[6]).toBe(`'${HOSTILE_TITLE}`);
+    expect(rowWhere(internal, "url", `${SITE}/csv-formula`)[10]).toBe(`'${HOSTILE_TITLE}`);
     // And the raw bytes carry no unguarded formula opener at the start of a cell.
     expect(internal.text).toContain(`,'${HOSTILE_TITLE}`);
     expect(internal.text).not.toContain(`,${HOSTILE_TITLE}`);
@@ -3118,10 +3120,10 @@ describe("GET /crawls/:id/export?format=csv", () => {
     const internal = await callCsv(`/crawls/${crawlF}/export?format=csv&view=internal_urls`);
     // One RECORD, spanning two lines, holding the title verbatim: the parser
     // round-trips it, which is the property a spreadsheet needs.
-    expect(rowWhere(internal, "url", `${SITE}/csv-quoted`)[6]).toBe(QUOTED_TITLE);
+    expect(rowWhere(internal, "url", `${SITE}/csv-quoted`)[10]).toBe(QUOTED_TITLE);
     expect(internal.text).toContain(`"He said ""hi"", then\nleft"`);
     // Every record has the same width, which a mis-quoted newline would break.
-    for (const row of internal.records) expect(row).toHaveLength(10);
+    for (const row of internal.records) expect(row).toHaveLength(14);
   });
 
   /**
@@ -4300,13 +4302,15 @@ describe("GET /rules — the order of the sections", () => {
       "structure.click-depth-distribution",
       "structure.depth-distribution",
       "url.param-volumes", "schema.property-coverage", "render.image-measurement",
+      // 29c: appended last, so no served position moved.
+      "links.score-distribution",
     ]);
 
     // The position is SERVED, so a client that lays the section out itself gets
     // the same order without re-deriving it.
     expect(
       rules.filter((rule) => rule.kind === "metric").map((rule) => rule.table?.order),
-    ).toEqual([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]);
+    ).toEqual([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]);
     // …and it is on the metric rules and on nothing else.
     for (const rule of rules) {
       if (rule.kind === "metric") continue;
@@ -4386,4 +4390,19 @@ beforeAll(async () => {
     raw,
     validation: validateBlock(raw, `${SITE}/csv-home`),
   });
+});
+
+// Phase 29c T6. Appended at the end so no line the surface document cites
+// moves. The CSV fixture crawl is judged by hand, so its pages carry no link
+// counts: this sets `inlinks_internal` as the rules run's derivation defines it
+// (R1: distinct source pages, self excluded), so the `anchors_by_target` view
+// has rows for "reads every view through a cursor" to walk, and is not refused.
+beforeAll(async () => {
+  await db.execute(sql`
+    update pages p
+       set inlinks_internal = (select count(distinct l.source_page_id)
+                                 from links l
+                                where l.crawl_id = p.crawl_id and l.target_url = p.url
+                                  and l.source_page_id <> p.id)
+     where p.crawl_id = ${crawlF}`);
 });

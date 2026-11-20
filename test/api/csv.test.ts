@@ -193,7 +193,7 @@ describe("the view definitions", () => {
       CSV_VIEW_DEFS[view].query("crawl_x", CSV_VIEW_DEFS[view].start, 500, "title.missing", []),
     ).sql;
 
-  it("defines exactly the nine keyset views the surface advertises", () => {
+  it("defines exactly the ten keyset views the surface advertises", () => {
     expect(Object.keys(CSV_VIEW_DEFS).sort()).toEqual([...CSV_QUERY_VIEWS].sort());
     // Eight since P20-T1 added `links_to_5xx` beside `links_to_4xx`. The count
     // moves with the vocabulary deliberately: a view defined and never
@@ -217,8 +217,8 @@ describe("the view definitions", () => {
     //
     // TWELVE SINCE 29a-T9, nine of them keyset: `structured_data_nodes` is one
     // row per (block, problem), walked by `(id, ord)`.
-    expect(CSV_VIEWS).toHaveLength(12);
-    expect(CSV_QUERY_VIEWS).toHaveLength(9);
+    expect(CSV_VIEWS).toHaveLength(13);
+    expect(CSV_QUERY_VIEWS).toHaveLength(10);
     expect(CSV_QUERY_VIEWS).toContain("structured_data_nodes");
     expect(CSV_VIEWS).toContain("metric_table");
     expect(CSV_VIEWS).toContain("issues_overview");

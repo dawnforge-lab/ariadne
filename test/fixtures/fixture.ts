@@ -21,6 +21,7 @@ import { authoredP26bFixtures } from "./pages/authored-p26b.js";
 import { authoredP26cFixtures } from "./pages/authored-p26c.js";
 import { authoredP29aFixtures } from "./pages/authored-p29a.js";
 import { authoredP29bFixtures } from "./pages/authored-p29b.js";
+import { authoredP29cFixtures } from "./pages/authored-p29c.js";
 import { controlFixture } from "./pages/control.js";
 import { renderFixtures } from "./pages/render-p5.js";
 
@@ -189,6 +190,9 @@ export function allFixtures(): Fixture[] {
     // loads), and one page per rule of the accessibility subset, generated from
     // `A11Y_RULES`.
     ...authoredP29bFixtures,
+    // P29c: a page whose three inlinks all say click here, read more or here, and
+    // the three pages that link to it that way.
+    ...authoredP29cFixtures,
     controlFixture,
   ];
 }

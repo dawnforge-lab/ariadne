@@ -20,11 +20,12 @@ import { crawls } from "../../src/db/schema.js";
 import { LOCAL_TENANT } from "../../src/tenant.js";
 import { DEFAULT_THRESHOLDS, readStamp } from "../../src/rules/judgement.js";
 
-// 0033 wrote 20 thresholds; the two Phase 29a added after it are 0054's, and 0058 added the third.
+// 0033 wrote 20 thresholds; the two Phase 29a added after it are 0054's, 0058 added the third and 0060 the fourth.
 const {
   SCHEMA_TEMPLATE_SHARE: _share,
   SCHEMA_TEMPLATE_MIN_PAGES: _min,
   IMAGE_OVERSIZE_PERCENT: _image,
+  GENERIC_ANCHOR_MIN_INLINKS: _generic,
   ...DEFAULTS_AT_0033
 } = DEFAULT_THRESHOLDS;
 
@@ -113,7 +114,7 @@ describe("0033 — a stamp holds the effective thresholds", () => {
           .where(inArray(crawls.id, Object.values(ids)));
         expect(new Map(again.map((r) => [r.id, r.stamp]))).toEqual(stamp);
 
-        // readStamp wants all 23, which are 0054's and 0058's to complete.
+        // readStamp wants all 24, which are 0054's, 0058's and 0060's to complete.
         await tx.execute(
           sql.raw(
             readFileSync(
@@ -126,6 +127,14 @@ describe("0033 — a stamp holds the effective thresholds", () => {
           sql.raw(
             readFileSync(
               new URL("../../drizzle/0058_image_oversize_threshold.sql", import.meta.url),
+              "utf8",
+            ),
+          ),
+        );
+        await tx.execute(
+          sql.raw(
+            readFileSync(
+              new URL("../../drizzle/0060_generic_anchor_threshold.sql", import.meta.url),
               "utf8",
             ),
           ),

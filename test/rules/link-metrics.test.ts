@@ -42,11 +42,12 @@ const url = (path: string): string => `${SITE}${path}`;
 const rule = metricLookup(linkMetrics, "linkMetrics");
 
 describe("linkMetrics metadata", () => {
-  it("defines the phase-4 four plus the click-depth metric", () => {
+  it("defines the phase-4 four, the click-depth metric and the link score distribution", () => {
     expect(linkMetrics.map((r) => r.id).sort()).toEqual([
       "inlinks.distribution",
       "inlinks.extremes",
       "inlinks.sources-by-type",
+      "links.score-distribution",
       "structure.click-depth-distribution",
       "structure.depth-distribution",
     ]);
@@ -60,6 +61,7 @@ describe("linkMetrics metadata", () => {
       "inlinks.distribution": [["CHECK-33"], "info", "links"],
       "inlinks.extremes": [["CHECK-33"], "info", "links"],
       "inlinks.sources-by-type": [["CHECK-33b"], "info", "links"],
+      "links.score-distribution": [["CHECK-33"], "info", "links"],
       // CHECK-31 asks how many clicks from the home page a page is, so it is
       // claimed by the metric that measures clicks. The one below keeps its
       // data — discovery depth is real evidence about how the crawl found the
@@ -110,6 +112,8 @@ describe("the link-graph metrics against the database", () => {
      * reader puts side by side are still describing one site.
      */
     clickDepth?: number | null;
+    /** `pages.link_score`, set directly: `deriveLinkScore` has its own test file. */
+    linkScore?: number | null;
   }
 
   const newCrawl = async (): Promise<string> =>
@@ -129,6 +133,7 @@ describe("the link-graph metrics against the database", () => {
       robotsMeta: s.robotsMeta ?? null,
       depth: s.depth,
       clickDepth: s.clickDepth ?? null,
+      linkScore: s.linkScore ?? null,
       discoveredVia: s.depth === 0 ? "seed" : "link",
     }));
     await db.insert(pages).values(rows);
@@ -839,5 +844,42 @@ describe("the link-graph metrics against the database", () => {
     // produce too — `count: 0`, two empty lists, no cohort rows — so each rule
     // gates on the crawl existing first (hard rule 7, `runRules`' precedent).
     await expectRefusesUnknownCrawl(db, linkMetrics);
+  });
+  // Phase 29c Task 3. `link_score` is written directly (the derivation has its
+  // own tests); what is under test is the distribution over it.
+  describe("links.score-distribution", () => {
+    const ID = "links.score-distribution";
+
+    it("reports the eight numbers of link_score for the site and each template", async () => {
+      const id = await newCrawl();
+      await addPages(id, [
+        { path: "/a1", pageType: "product", depth: 1, linkScore: 100 },
+        { path: "/a2", pageType: "product", depth: 1, linkScore: 50 },
+        { path: "/a3", pageType: "product", depth: 1, linkScore: 0 },
+        { path: "/b1", pageType: "blog", depth: 1, linkScore: 40 },
+        { path: "/b2", pageType: "blog", depth: 1, linkScore: 20 },
+        // Outside the cohort (noindex, 404): its score is not measured here.
+        { path: "/n1", pageType: "blog", depth: 1, robotsMeta: "noindex", linkScore: 99 },
+        { path: "/gone", pageType: "blog", depth: 1, statusCode: 404, fetchClass: "http_error", linkScore: null },
+      ]);
+      const rows = await run(ID, id);
+      // Site: 0,20,40,50,100 — n=5, pos = q*4. mean 210/5 = 42.
+      //   p25 pos 1 -> 20; median pos 2 -> 40; p75 pos 3 -> 50;
+      //   p95 pos 3.8 -> 50 + 0.8*(100-50) = 90.
+      expect(rows["site|"]).toEqual({ count: 5, min: 0, p25: 20, median: 40, p75: 50, p95: 90, max: 100, mean: 42 });
+      // product: 0,50,100 — pos = q*2. p25 25, median 50, p75 75, p95 pos 1.9 -> 50+0.9*50 = 95. mean 50.
+      expect(rows["page_type|product"]).toEqual({ count: 3, min: 0, p25: 25, median: 50, p75: 75, p95: 95, max: 100, mean: 50 });
+      // blog: 20,40 — pos = q. p25 25, median 30, p75 35, p95 39. mean 30.
+      expect(rows["page_type|blog"]).toEqual({ count: 2, min: 20, p25: 25, median: 30, p75: 35, p95: 39, max: 40, mean: 30 });
+    });
+
+    it("throws, naming the derivation, when a cohort page has no link score", async () => {
+      const id = await newCrawl();
+      await addPages(id, [
+        { path: "/a1", pageType: "product", depth: 1, linkScore: 80 },
+        { path: "/a2", pageType: "product", depth: 1, linkScore: null },
+      ]);
+      await expect(run(ID, id)).rejects.toThrow(/link_score is null.*deriveLinkScore has not run/s);
+    });
   });
 });

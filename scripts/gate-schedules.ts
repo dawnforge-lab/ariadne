@@ -45,7 +45,8 @@
  * A scheduler's first lock attempt is one `scheduleEvery` after its start, so
  * the schedules are created only once a leader is seen.
  *
- * SAFETY. It refuses any database but `ariadne_gate28c` — its workers fire
+ * SAFETY. It refuses any database but `GATE_DB_NAME` (default `ariadne_gate28c`,
+ * and the name must start with `ariadne_gate`) — its workers fire
  * every tenant's due schedules — and one with a queued or running job, an
  * enabled schedule, or a scheduler lock already held. It disables its three
  * schedules before it ends, on every path. Rows stay as evidence. Every child
@@ -69,7 +70,25 @@ import type { CredentialKeys } from "../src/crawl/credential-vault.js";
 import { closeFetchAgents } from "../src/crawl/http.js";
 import { SCHEDULER_LOCK } from "../src/schedule/scheduler.js";
 
-const GATE_DB = "ariadne_gate28c";
+/** The database prefix every gate database starts with. */
+const GATE_DB_PREFIX = "ariadne_gate";
+const DEFAULT_GATE_DB = "ariadne_gate28c";
+
+/**
+ * `GATE_DB_NAME` names the one database this gate may run on; it defaults to
+ * `ariadne_gate28c` and must start with `ariadne_gate`. Unset and empty are the
+ * default, anything else is checked against the prefix and refused if it fails.
+ */
+function gateDbName(env: NodeJS.ProcessEnv = process.env): string {
+  const raw = env["GATE_DB_NAME"];
+  if (raw === undefined || raw === "") return DEFAULT_GATE_DB;
+  if (!raw.startsWith(GATE_DB_PREFIX)) {
+    throw new Error(`GATE_DB_NAME must start with '${GATE_DB_PREFIX}', got ${JSON.stringify(raw)}`);
+  }
+  return raw;
+}
+
+const GATE_DB = gateDbName();
 const SCHEDULE_EVERY_MS = 30_000;
 const SLOTS = 10;
 const MINUTE = 60_000;
@@ -733,7 +752,17 @@ async function main(): Promise<number> {
       }
       const cmp = await ok("GET", `/compare?baseCrawlId=${base}&headCrawlId=${head}`, s1.tenant, 200);
       check(failures, cmp["comparable"] === true, `comparable ${String(cmp["comparable"])}, caveats ${JSON.stringify(cmp["caveats"])}`);
-      return { base, head, comparable: cmp["comparable"], caveats: cmp["caveats"] ?? null };
+      // Phase 29c: the same pair through the field-level diff. The fires crawl one
+      // unchanging fixture, so no field changed, none is not comparable, and no
+      // URL was added or removed between the first and the tenth.
+      const diff = await ok("GET", `/diff?baseCrawlId=${base}&headCrawlId=${head}`, s1.tenant, 200);
+      const urls = diff["urls"] as { added: number; removed: number } | undefined;
+      check(failures, urls !== undefined && urls.added === 0 && urls.removed === 0, `diff urls ${JSON.stringify(urls)} (want added 0, removed 0)`);
+      const fields = diff["fields"] as { field: string; changed: number; notComparable: number }[] | undefined;
+      check(failures, Array.isArray(fields) && fields.length > 0, "the diff answered no fields");
+      const dirty = (fields ?? []).filter((f) => f.changed !== 0 || f.notComparable !== 0);
+      check(failures, dirty.length === 0, `diff fields with changed or notComparable above 0: ${JSON.stringify(dirty)}`);
+      return { base, head, comparable: cmp["comparable"], caveats: cmp["caveats"] ?? null, diffUrls: urls ?? null, diffDirtyFields: dirty };
     });
 
     // ---- clause 1d: an overlap skip and a not-allowed skip

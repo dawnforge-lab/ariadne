@@ -56,6 +56,7 @@ describe("thresholds", () => {
       SCHEMA_TEMPLATE_SHARE: 70,
       SCHEMA_TEMPLATE_MIN_PAGES: 10,
       IMAGE_OVERSIZE_PERCENT: 200,
+      GENERIC_ANCHOR_MIN_INLINKS: 3,
       SITEMAP_LOC_MAX: 2048,
       W3C_DATETIME:
         /^\d{4}(?:-(?:0[1-9]|1[0-2])(?:-(?:0[1-9]|[12]\d|3[01])(?:T(?:[01]\d|2[0-3]):[0-5]\d(?::[0-5]\d(?:\.\d+)?)?(?:Z|[+-](?:[01]\d|2[0-3]):[0-5]\d))?)?)?$/,
