@@ -8,19 +8,22 @@
  * diff joined on the normalised one would pair them with each other and report
  * the real pair as removed and added.
  *
- * TWO ADDRESSES OF ONE SITE ARE MATCHED ON PATH (owner ruling, 2026-11-21). The
- * pairing refusal admits two crawls of one host family (apex and www) under any
- * scheme, so a site moved from http to https or from the apex to www is one
- * site. Joined on the exact url, every page of such a pair would read removed
- * and added. When the two crawls' site origins differ (`diffRebaseOf`), each
- * BASE url on the base's own origin is read in the head's origin before the
- * join (`http://a.example/x` -> `https://www.a.example/x`): path and query
- * still have to match exactly, as above. A base url on any other origin (a
- * subdomain, or a page the base already stored at the head's address) is
- * matched as it is. Two base urls that would land on one head url are refused,
- * never paired by a guess (`diffRebaseCollisionSql`). The answer says which
- * matching it used (`matchedBy`), and every listed url carries the base's own
- * url beside it (`baseUrl`).
+ * A SITE THAT MOVED BETWEEN THE CRAWLS IS MATCHED ON PATH (owner rulings,
+ * 2026-11-21: "the diff should be where crawl landed"). The crawler follows
+ * redirects and stays on the address the site sends it to, so two crawls of a
+ * site that redirects store the same urls whichever spelling each was started
+ * from, and pair exactly. Only a site that moved between them (http -> https,
+ * apex -> www) stores its pages under two origins, and joined on the exact url
+ * every page would read removed and added. So each crawl's LANDING origin is
+ * read (`landingSql`: where its start url's redirect chain ended), and when the
+ * two differ (`diffRebaseOf`) each BASE url on the base's landing origin is read
+ * in the head's before the join (`http://a.example/x` ->
+ * `https://www.a.example/x`): path and query still have to match exactly. A
+ * base url on any other origin is matched as it is. Two base urls that would
+ * pair with one head url are refused, never paired by a guess
+ * (`diffRebaseCollisionSql`). The answer names each side's landing
+ * (`landedOn`) and the matching used (`matchedBy`), and every listed url
+ * carries the base's own url beside it (`baseUrl`).
  *
  * ONE STATEMENT (`diffSummarySql`): a `count(*) filter (where ...)` per field
  * over `diffJoinSql`, so memory is O(1) in pages and the answer is one
@@ -202,27 +205,56 @@ export const DIFF_FIELDS: readonly DiffField[] = [
 
 
 /**
- * How a diff pairs urls: `null` when both crawls' site urls share an origin
- * (the exact url), or the base origin to read in the head's when they do not.
- * The origin is scheme, host and port: `https://a.example/` and
- * `https://a.example/shop/` share one, `http://` and `https://` do not.
+ * How a diff pairs urls: `null` for the exact url, or the base origin to read
+ * in the head's. The origin is scheme, host and port: `http://` and `https://`
+ * differ, `https://a.example/` and `https://a.example/shop/` do not.
  */
 export interface DiffRebase {
-  /** The base crawl's site origin, e.g. `http://a.example`. */
+  /** The origin the base crawl landed on, e.g. `http://a.example`. */
   from: string;
-  /** The head crawl's site origin, e.g. `https://www.a.example`. */
+  /** The origin the head crawl landed on, e.g. `https://www.a.example`. */
   to: string;
 }
 
-export function diffRebaseOf(baseSiteUrl: string, headSiteUrl: string): DiffRebase | null {
-  const from = new URL(baseSiteUrl).origin;
-  const to = new URL(headSiteUrl).origin;
-  return from === to ? null : { from, to };
+/**
+ * The rebase for two crawls' landing origins (`landingSql`): none when either
+ * has no landing (a list crawl, which has no start page and pairs exactly) or
+ * when they landed on the same origin. Two crawls typed as `http://a.example`
+ * and `https://www.a.example` of a site that redirects one to the other landed
+ * on the same origin and stored the same urls, so they pair exactly; only a
+ * site that MOVED between the crawls lands them apart.
+ */
+export function diffRebaseOf(baseLanding: string | null, headLanding: string | null): DiffRebase | null {
+  if (baseLanding === null || headLanding === null || baseLanding === headLanding) return null;
+  return { from: baseLanding, to: headLanding };
+}
+
+/**
+ * Where a spider crawl landed: the last stored page of its start url's redirect
+ * chain, followed through `redirect_url_normalised` (the spelling `pages.url`
+ * is keyed by), at most `LANDING_MAX_HOPS` hops so a redirect loop ends. One
+ * row `{url, hops}`, or none when the crawl stored no page for its start url.
+ * `seedUrl` is the start url through `normalizeUrl`, the frontier's own key.
+ */
+export const LANDING_MAX_HOPS = 50;
+
+export function landingSql(crawlId: string, seedUrl: string): SQL {
+  return sql`
+    with recursive chain (url, fetch_class, next_url, hops) as (
+      select url, fetch_class, redirect_url_normalised, 0
+        from pages where crawl_id = ${crawlId} and url = ${seedUrl}
+      union all
+      select p.url, p.fetch_class, p.redirect_url_normalised, c.hops + 1
+        from chain c
+        join pages p on p.crawl_id = ${crawlId} and p.url = c.next_url
+       where c.fetch_class = 'redirect' and c.hops < ${LANDING_MAX_HOPS}::int
+    )
+    select url, hops from chain order by hops desc limit 1`;
 }
 
 /**
  * A url-valued base column as the diff reads it: the stored value, or, under a
- * rebase, the value read in the head's origin when it is on the base's own
+ * rebase, the value read in the head's origin when it is on the base's landing
  * origin. Applied to the page url (the join key) and to the two canonicals, so
  * a self-canonical that moved with the site is unchanged and a head canonical
  * still naming the old address is a change. The origin is followed by `/` in

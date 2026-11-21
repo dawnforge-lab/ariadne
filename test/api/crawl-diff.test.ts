@@ -95,6 +95,16 @@ const strayBaseId = `crawl_diff_stray_${runId}`;
 const collideBaseId = `crawl_diff_collide_${runId}`;
 /** The https head again, every canonical still naming the http address. */
 const staleCanonHeadId = `crawl_diff_stalecanon_${runId}`;
+/**
+ * The ordinary case: typed as http://diff.example/same, the site redirected it
+ * to https, and the crawl went on there: its pages are the base's, under
+ * https, plus the http start url as a redirect row.
+ */
+const redirectedBaseId = `crawl_diff_redirected_${runId}`;
+/** A spider crawl that stored no page for its start url. */
+const noStartId = `crawl_diff_nostart_${runId}`;
+/** A list crawl: no start page, so no landing. */
+const listHeadId = `crawl_diff_list_${runId}`;
 const OTHER = parseTenant(`other-${runId.slice(0, 8)}`);
 
 function databaseUrl(): string {
@@ -149,11 +159,25 @@ const SPECS: Spec[] = [
 
 const url = (path: string): string => `${SITE}${path}`;
 
-async function seed(id: string, side: Side, opts: { site?: string; judged?: boolean; legacy?: boolean } = {}): Promise<void> {
+/**
+ * A crawl started at `/same`, a page both sides store, so every spider crawl
+ * here has a stored start page to land on (`landingOf`) without adding a page
+ * to the counts above. `typed` overrides the start url as typed; `list` makes a
+ * list crawl, which has no start page.
+ */
+async function seed(
+  id: string,
+  side: Side,
+  opts: { site?: string; typed?: string; list?: boolean; judged?: boolean; legacy?: boolean } = {},
+): Promise<void> {
   const site = opts.site ?? SITE;
+  const typed = opts.typed ?? `${site}/same`;
   await db.insert(crawls).values({
-    tenantId: LOCAL_TENANT, id, siteUrl: `${site}/`, hostKey: hostKeyOf(`${site}/`),
-    config: { siteUrl: `${site}/`, maxPages: 100, userAgent: "AriadneBot-test" },
+    tenantId: LOCAL_TENANT, id, siteUrl: typed, hostKey: hostKeyOf(typed),
+    config: {
+      siteUrl: typed, maxPages: 100, userAgent: "AriadneBot-test",
+      ...(opts.list === true ? { mode: "list" } : {}),
+    },
     discovery: mkDiscovery(), rulesetVersion: "test", status: "finished",
     pagesCrawled: SPECS.length, robotsBlockedDropped: 0,
     ...(opts.judged === false ? {} : { rulesRunAt: new Date() }),
@@ -236,6 +260,9 @@ beforeAll(async () => {
   await seed(strayBaseId, "base", { site: HTTP_SITE });
   await seed(collideBaseId, "base", { site: HTTP_SITE });
   await seed(staleCanonHeadId, "head");
+  await seed(redirectedBaseId, "base", { typed: `${HTTP_SITE}/same` });
+  await seed(noStartId, "base", { typed: `${SITE}/not-stored` });
+  await seed(listHeadId, "head", { typed: `${SITE}/not-stored`, list: true });
   await db.update(pages)
     .set({ canonicalHtml: sql`replace(${pages.canonicalHtml}, ${SITE}, ${HTTP_SITE})` })
     .where(eq(pages.crawlId, staleCanonHeadId));
@@ -248,6 +275,13 @@ beforeAll(async () => {
       id: `page_${randomUUID()}`, crawlId: collideBaseId, url: url("/same"), urlNormalised: url("/same"),
       extractionVersion: EXTRACTION_VERSION, inlinksInternal: 5, linkScore: 30,
     }),
+    mkPage({
+      id: `page_${randomUUID()}`, crawlId: redirectedBaseId,
+      url: `${HTTP_SITE}/same`, urlNormalised: `${HTTP_SITE}/same`,
+      statusCode: 301, fetchClass: "redirect", isIndexable: false, linkScore: null,
+      redirectUrl: url("/same"), redirectUrlNormalised: url("/same"),
+      extractionVersion: EXTRACTION_VERSION, inlinksInternal: 0,
+    }),
   ]);
 }, 60_000);
 
@@ -256,7 +290,7 @@ afterAll(async () => {
   await mcp.close();
   await api.close();
   await service.close();
-  for (const id of [baseId, headId, legacyId, unjudgedId, elsewhereId, httpBaseId, wwwBaseId, strayBaseId, collideBaseId, staleCanonHeadId]) {
+  for (const id of [baseId, headId, legacyId, unjudgedId, elsewhereId, httpBaseId, wwwBaseId, strayBaseId, collideBaseId, staleCanonHeadId, redirectedBaseId, noStartId, listHeadId]) {
     await db.delete(crawls).where(eq(crawls.id, id));
   }
   await closeDb(db);
@@ -267,8 +301,8 @@ describe("crawl_diff counts", () => {
   it("answers the url sets, both sides and the echoed defaults", async () => {
     const { body } = await tool("crawl_diff", { baseCrawlId: baseId, headCrawlId: headId });
     expect(body["urls"]).toEqual({ common: 19, added: 1, removed: 1 });
-    expect(body["base"]).toMatchObject({ crawlId: baseId, siteUrl: `${SITE}/`, pages: 20 });
-    expect(body["head"]).toMatchObject({ crawlId: headId, siteUrl: `${SITE}/`, pages: 20 });
+    expect(body["base"]).toMatchObject({ crawlId: baseId, siteUrl: `${SITE}/same`, landedOn: SITE, pages: 20 });
+    expect(body["head"]).toMatchObject({ crawlId: headId, siteUrl: `${SITE}/same`, landedOn: SITE, pages: 20 });
     expect(body["matchedBy"]).toBe("url");
     expect(typeof (body["base"] as Body)["rulesRunAt"]).toBe("string");
     expect(body["thresholds"]).toEqual({
@@ -628,7 +662,7 @@ describe("crawl_diff_urls transports", () => {
   });
 });
 
-describe("crawls of one site from different addresses are matched on path", () => {
+describe("crawls that landed on different addresses are matched on path; one site address is matched exactly", () => {
   it.each([["http", HTTP_SITE], ["www", WWW_SITE]])(
     "a %s base diffs against the https head page by page, as the same-address base does",
     async (_name, site) => {
@@ -637,7 +671,7 @@ describe("crawls of one site from different addresses are matched on path", () =
       const { error, body } = await tool("crawl_diff", { baseCrawlId: moved, headCrawlId: headId });
       expect(error).toBe(false);
       expect(body["matchedBy"]).toBe("path");
-      expect(body["base"]).toMatchObject({ crawlId: moved, siteUrl: `${site}/`, pages: 20 });
+      expect(body["base"]).toMatchObject({ crawlId: moved, siteUrl: `${site}/same`, landedOn: site, pages: 20 });
       expect(body["urls"]).toEqual({ common: 19, added: 1, removed: 1 });
       expect(body["fields"]).toEqual(same["fields"]);
     },
@@ -692,6 +726,35 @@ describe("crawls of one site from different addresses are matched on path", () =
       expect(e.message).toContain(`${HTTP_SITE}/same`);
       expect(e.message).toContain(url("/same"));
     }
+  });
+
+  it("pairs exactly when the crawls were typed differently but the site redirected them to one address", async () => {
+    // Typed http://, redirected to https://, crawled there: the same urls as the
+    // https head, so nothing is rewritten and no page collides.
+    const same = (await tool("crawl_diff", { baseCrawlId: baseId, headCrawlId: headId })).body;
+    const { error, body } = await tool("crawl_diff", { baseCrawlId: redirectedBaseId, headCrawlId: headId });
+    expect(error).toBe(false);
+    expect(body["matchedBy"]).toBe("url");
+    expect(body["base"]).toMatchObject({ siteUrl: `${HTTP_SITE}/same`, landedOn: SITE, pages: 21 });
+    // The http start url is a redirect row only the base stored.
+    expect(body["urls"]).toEqual({ common: 19, added: 1, removed: 2 });
+    expect(body["fields"]).toEqual(same["fields"]);
+    expect((await walk("removed", {}, [redirectedBaseId, headId])).map((r) => r.baseUrl))
+      .toEqual([`${HTTP_SITE}/same`, url("/old")]);
+  });
+
+  it("refuses a spider crawl that stored no page for its start url, naming it", async () => {
+    const e = await refusal(service.crawlDiff(LOCAL_TENANT, noStartId, headId));
+    expect(e.code).toBe("CONFLICT");
+    expect(e.message).toContain(`${SITE}/not-stored`);
+  });
+
+  it("pairs a list crawl exactly: it has no start page, so no landing", async () => {
+    const { error, body } = await tool("crawl_diff", { baseCrawlId: baseId, headCrawlId: listHeadId });
+    expect(error).toBe(false);
+    expect(body["matchedBy"]).toBe("url");
+    expect(body["head"]).toMatchObject({ landedOn: null });
+    expect(body["urls"]).toEqual({ common: 19, added: 1, removed: 1 });
   });
 
   it("still refuses a crawl of another site", async () => {

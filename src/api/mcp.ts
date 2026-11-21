@@ -2233,22 +2233,26 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
       description:
         "Two crawls of the SAME site, field by field, over what each crawl stored " +
         "(nothing is fetched). Answers {base, head, matchedBy, thresholds, urls, fields}. " +
-        "base and head are {crawlId, siteUrl, rulesRunAt, pages}. urls is {common, added, " +
+        "base and head are {crawlId, siteUrl, landedOn, rulesRunAt, pages}. urls is {common, added, " +
         "removed}: URLs both crawls hold, URLs only the head holds, URLs only the " +
         "base held. Pages are paired on the stored url exactly, so '/Page' and " +
         "'/page', or '/a' and '/a/', are different pages and never one removed and " +
         "one added.\n\n" +
-        "TWO ADDRESSES OF ONE SITE. Crawls of the apex and the www host, over http or " +
-        "https, are one site. When the two siteUrls differ in scheme, host or port, " +
-        "matchedBy is path: each base url on the base's own address is read in the " +
-        "head's address first (http://example.com/a pairs with " +
-        "https://www.example.com/a), so a moved site diffs page by page; path and " +
-        "query still match exactly, and a base url on any other host is matched as " +
-        "it is. The base's canonicals are read the same way, so a self-canonical that " +
-        "moved with the site is unchanged and a head canonical still naming the old " +
-        "address is a change. Otherwise matchedBy is url. If two base pages would " +
-        "pair with one head url (the base stored both http://example.com/a and " +
-        "https://www.example.com/a), the diff is refused with 409 naming both.\n\n" +
+        "WHERE EACH CRAWL LANDED. The crawler follows redirects and stays on the " +
+        "address the site sends it to, so base.landedOn and head.landedOn are the " +
+        "origins each crawl's start url's redirect chain ended on (null for a list " +
+        "crawl, which has no start page). Two crawls typed as http://example.com and " +
+        "https://www.example.com of a site that redirects one to the other landed on " +
+        "one origin and are paired on the exact url (matchedBy url). When they landed " +
+        "on different origins (the site moved between them, e.g. http to https), " +
+        "matchedBy is path: each base url on the base's landing origin is read in the " +
+        "head's first (http://example.com/a pairs with https://www.example.com/a), so " +
+        "a moved site diffs page by page; path and query still match exactly, and a " +
+        "base url on any other host is matched as it is. The base's canonicals are " +
+        "read the same way, so a self-canonical that moved with the site is unchanged " +
+        "and a head canonical still naming the old address is a change. If two base " +
+        "pages would pair with one head url, the diff is refused with 409 naming both; " +
+        "a spider crawl with no stored page for its start url is refused with 409 too.\n\n" +
         "fields is one {field, changed, notComparable} per field, in this order: " +
         `${DIFF_FIELD_NAMES.join(", ")}. Counts are over the common URLs. ` +
         "changed is the pages whose value differs. notComparable is the pages where " +

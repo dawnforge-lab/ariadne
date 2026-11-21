@@ -260,6 +260,7 @@ import {
   diffRebaseCollisionSql,
   diffRebaseOf,
   diffSummarySql,
+  landingSql,
   diffUrlsSql,
   parseDiffThresholds,
   parseDiffUrlsRequest,
@@ -6586,7 +6587,7 @@ export class ApiService {
     return await this.db.transaction(
       async (tx) => {
         const { base, head } = await comparePair(tx, tenant, baseCrawlId, headCrawlId);
-        const rebase = await diffRebaseFor(tx, base, head);
+        const { rebase, baseLanding, headLanding } = await diffPairingFor(tx, base, head);
         const result = await tx.execute<DiffSummaryRow>(diffSummarySql(baseCrawlId, headCrawlId, t, rebase));
         const row = result.rows[0];
         if (row === undefined) throw new Error("crawl_diff: the summary statement answered no row");
@@ -6596,8 +6597,14 @@ export class ApiService {
           return value;
         };
         return {
-          base: { crawlId: base.crawlId, siteUrl: base.siteUrl, rulesRunAt: base.rulesRunAt, pages: count("base_pages") },
-          head: { crawlId: head.crawlId, siteUrl: head.siteUrl, rulesRunAt: head.rulesRunAt, pages: count("head_pages") },
+          base: {
+            crawlId: base.crawlId, siteUrl: base.siteUrl, landedOn: baseLanding,
+            rulesRunAt: base.rulesRunAt, pages: count("base_pages"),
+          },
+          head: {
+            crawlId: head.crawlId, siteUrl: head.siteUrl, landedOn: headLanding,
+            rulesRunAt: head.rulesRunAt, pages: count("head_pages"),
+          },
           matchedBy: rebase === null ? "url" : "path",
           thresholds: t,
           urls: { common: count("common"), added: count("added"), removed: count("removed") },
@@ -6632,7 +6639,7 @@ export class ApiService {
     return await this.db.transaction(
       async (tx) => {
         const { base, head } = await comparePair(tx, tenant, baseCrawlId, headCrawlId);
-        const rebase = await diffRebaseFor(tx, base, head);
+        const { rebase } = await diffPairingFor(tx, base, head);
         const result = await tx.execute<DiffUrl>(diffUrlsSql(baseCrawlId, headCrawlId, req, t, cursor, limit, rebase));
         const rows = result.rows;
         const items = rows.slice(0, limit);
@@ -8781,12 +8788,16 @@ function sameSet(a: readonly string[], b: readonly string[]): boolean {
 
 /** The `crawl_diff` answer (Phase 29c T7). */
 export interface CrawlDiff {
-  base: { crawlId: string; siteUrl: string; rulesRunAt: string; pages: number };
-  head: { crawlId: string; siteUrl: string; rulesRunAt: string; pages: number };
   /**
-   * `url` when both site urls share an origin (pages paired on the exact url);
-   * `path` when they do not (the base's urls on its own origin read in the
-   * head's first, `src/api/crawl-diff.ts`).
+   * `landedOn` is the origin the crawl's start url's redirect chain ended on
+   * (`landingOf`), null for a list crawl, which has no start page.
+   */
+  base: { crawlId: string; siteUrl: string; landedOn: string | null; rulesRunAt: string; pages: number };
+  head: { crawlId: string; siteUrl: string; landedOn: string | null; rulesRunAt: string; pages: number };
+  /**
+   * `url` when the two crawls landed on one origin, or either is a list crawl
+   * (pages paired on the exact url); `path` when they landed on two (the base's
+   * urls on its landing origin read in the head's first, `src/api/crawl-diff.ts`).
    */
   matchedBy: "url" | "path";
   thresholds: DiffThresholds;
@@ -8795,20 +8806,54 @@ export interface CrawlDiff {
 }
 
 /**
- * How `crawl_diff` and `crawl_diff_urls` pair this pair's urls, and the
- * refusal when path matching would be ambiguous: two base pages that land on
- * one head url (the base stored `http://a.example/x` AND
- * `https://a.example/x`, say) cannot both be "the" page the head's continues,
- * and choosing one would hide the other's change. A loud CONFLICT naming both,
- * never a guess. Inside the caller's snapshot, after `comparePair`.
+ * Where one crawl landed: the origin of the last stored page of its start
+ * url's redirect chain (`landingSql`), or null for a list crawl, which fetched
+ * the urls it was given and has no start page. A spider crawl that stored no
+ * page for its start url is a row this engine did not write (the seed is always
+ * written, even when robots.txt or the policy refuses it): a loud CONFLICT,
+ * never a guess from the typed address.
  */
-async function diffRebaseFor(
+async function landingOf(reader: Reader, crawlId: string, siteUrl: string): Promise<string | null> {
+  const mode = await reader.execute<{ mode: string | null }>(
+    sql`select config_jsonb->>'mode' as mode from crawls where id = ${crawlId}`,
+  );
+  const row = mode.rows[0];
+  if (row === undefined) throw new Error(`landingOf: crawl ${crawlId} vanished inside the diff's snapshot`);
+  if (row.mode === "list") return null;
+  const seed = normalizeUrl(siteUrl);
+  if (seed === null) {
+    throw new Error(`landingOf: crawl ${crawlId}'s site URL passed comparePair but does not normalise`);
+  }
+  const chain = await reader.execute<{ url: string; hops: number }>(landingSql(crawlId, seed));
+  const last = chain.rows[0];
+  if (last === undefined) {
+    throw new ServiceError(
+      "CONFLICT",
+      `crawl '${clip(crawlId)}' holds no page for its start URL '${clip(seed)}', so where it ` +
+        `landed cannot be told and its pages cannot be matched to another crawl's`,
+    );
+  }
+  return new URL(last.url).origin;
+}
+
+/**
+ * How `crawl_diff` and `crawl_diff_urls` pair this pair's urls (by where each
+ * crawl landed, `landingOf`), and the refusal when path matching would be
+ * ambiguous: two base pages that land on one head url (the base stored
+ * `http://a.example/x` AND `https://a.example/x`, say) cannot both be "the"
+ * page the head's continues, and choosing one would hide the other's change. A
+ * loud CONFLICT naming both, never a guess. Inside the caller's snapshot,
+ * after `comparePair`.
+ */
+async function diffPairingFor(
   reader: Reader,
   base: { crawlId: string; siteUrl: string },
   head: { crawlId: string; siteUrl: string },
-): Promise<DiffRebase | null> {
-  const rebase = diffRebaseOf(base.siteUrl, head.siteUrl);
-  if (rebase === null) return null;
+): Promise<{ rebase: DiffRebase | null; baseLanding: string | null; headLanding: string | null }> {
+  const baseLanding = await landingOf(reader, base.crawlId, base.siteUrl);
+  const headLanding = await landingOf(reader, head.crawlId, head.siteUrl);
+  const rebase = diffRebaseOf(baseLanding, headLanding);
+  if (rebase === null) return { rebase, baseLanding, headLanding };
   const result = await reader.execute<{ match_url: string; urls: string[] }>(
     diffRebaseCollisionSql(base.crawlId, rebase),
   );
@@ -8816,14 +8861,14 @@ async function diffRebaseFor(
   if (clash !== undefined) {
     throw new ServiceError(
       "CONFLICT",
-      `crawls '${clip(base.crawlId)}' (${rebase.from}) and '${clip(head.crawlId)}' (${rebase.to}) ` +
-        `started from different addresses, so pages are matched on path, and crawl ` +
+      `crawls '${clip(base.crawlId)}' and '${clip(head.crawlId)}' landed on different addresses ` +
+        `(${rebase.from} and ${rebase.to}), so pages are matched on path, and crawl ` +
         `'${clip(base.crawlId)}' holds ${clash.urls.map((u) => `'${clip(u)}'`).join(" and ")}, ` +
         `which both match '${clip(clash.match_url)}': the diff cannot say which one that page ` +
-        `continues. Diff against a crawl started from the same address instead`,
+        `continues`,
     );
   }
-  return rebase;
+  return { rebase, baseLanding, headLanding };
 }
 
 /**
