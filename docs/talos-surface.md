@@ -1,6 +1,6 @@
 # The Ariadne surface Talos codes against
 
-**Status:** the contract as of Phase 29c, in progress (ruleset 0.28.0, migrations 0000–0060,
+**Status:** the contract as of Phase 29c (ruleset 0.28.1, migrations 0000–0060,
 38 MCP tools / 38 HTTP routes; every column label in this document is served
 under the ruleset version the engine reports — `rules_catalog`'s
 `rulesetVersion`, which the metric-table pass moves).
@@ -4384,10 +4384,21 @@ Six postures a Talos integrator should know about rather than discover:
 
 ## 11. Versioning, and what a ruleset change does to a served crawl
 
-`RULESET_VERSION` (**0.28.0** as of Phase 29c) stamps **judgement**: bump it when
+`RULESET_VERSION` (**0.28.1** after Phase 29c) stamps **judgement**: bump it when
 a rule's verdict or copy changes. Adding a rule or a metric family adds rows
 without changing a verdict — `metrics` rows carry no version column at all —
 which is the argument Phase 10 held 0.7.0 on.
+
+**0.28.1 is a fix, not a phase.** A robots value's `none` is the directive (noindex,
+nofollow) only as a whole token: `max-image-preview: none` asks for no image preview and
+no longer reads as noindex (the unspaced `max-image-preview:none` already did not), and a
+bot-prefixed `googlebot:none` now reads as noindex, as nofollow already read it. The
+change is in both readings that must agree: the crawl's `isIndexable` stamp on each page
+and the rules' indexability. On a page carrying either form, `indexability.noindex` and
+the `indexability` / `indexabilityStatus` labels on its findings change. A crawl stored
+before the fix that holds such a page keeps the old `isIndexable` stamp, which now
+contradicts the reading: a finding or CSV row labelled with that page's indexability is a
+loud error naming the URL, never a guessed label. Re-crawl it.
 
 **Phase 29c bumped to 0.28.0, once.** One metric id joined, `links.score-distribution`,
 and `links.high-outlinks` reads derived per-page counts with the same findings. One

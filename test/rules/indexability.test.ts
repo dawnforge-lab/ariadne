@@ -118,6 +118,25 @@ describe("indexability.noindex", () => {
     }
   });
 
+  // A value directive keeps its value: `max-image-preview: none` asks for no
+  // image preview, not for `none`, with or without the space after the colon
+  // (`robotsTokens` reads it as the one token `max-image-preview:none`). A
+  // bot-prefixed `none` is the directive, read for the page as `robotsTokens` does.
+  it("reads a value directive's `none` as its value, and a bot-prefixed `none` as the directive", () => {
+    for (const robotsMeta of [
+      "max-image-preview: none", "max-image-preview:none", "index, follow, max-image-preview: none",
+      "MAX-IMAGE-PREVIEW : NONE", "max-video-preview: none", "max-snippet: none",
+    ]) {
+      expect(rule("indexability.noindex").run(mkPage({ robotsMeta })), robotsMeta).toHaveLength(0);
+    }
+    for (const robotsMeta of [
+      "googlebot:none", "googlebot: none", "max-image-preview: none none", "max-image-preview: none, none",
+    ]) {
+      expect(rule("indexability.noindex").run(mkPage({ robotsMeta })), robotsMeta).toHaveLength(1);
+    }
+    expect(rule("indexability.noindex").run(mkPage({ xRobotsTag: "max-image-preview: none" }))).toHaveLength(0);
+  });
+
   it("is silent on directives that do not say noindex", () => {
     for (const robotsMeta of ["index, follow", "nofollow", "noarchive", "", null]) {
       expect(rule("indexability.noindex").run(mkPage({ robotsMeta })), String(robotsMeta))

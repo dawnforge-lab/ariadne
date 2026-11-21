@@ -1095,7 +1095,16 @@ const KINDS = ["page", "query", "metric"] as const satisfies readonly AnyRule["k
 //        `nofollow` or `none` (whole token, `SAYS_NOFOLLOW`) contributes no edges to
 //        the graph (link counts unchanged); every page scores 100 when `max - min <=
 //        LINK_SCORE_EQUAL_TOLERANCE (1e-9) * max`, not only when max = min exactly.
-export const RULESET_VERSION = "0.28.0";
+// 0.28.1: a fix, not a phase. `none` in a robots value is the directive only as a
+//        whole token: a value directive keeps its value, so `max-image-preview: none`
+//        (with the space; the unspaced form was already right) no longer reads as
+//        `none` = noindex, and a bot-prefixed `googlebot:none` now does, as
+//        `robotsTokens` and `SAYS_NOFOLLOW` already read both. One definition,
+//        src/crawl/robots-directives.ts, read by `saysNoindex`, by the crawl
+//        writer's `is_indexable` stamp, and spelled in SQL as `SAYS_NOINDEX`.
+//        Verdicts change on such pages: `indexability.noindex` and every
+//        finding's indexability label. Rule count unchanged.
+export const RULESET_VERSION = "0.28.1";
 
 /**
  * The 48 crawl-derived checks (sf-audit checklist, Pre-Crawl + sections 1–11,

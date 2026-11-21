@@ -111,6 +111,7 @@ import { fitsIndex, isSameOrigin, normalizeUrl } from "./parse/url-utils.js";
 import { completeUrls } from "./frontier.js";
 import { derivePageType, type PageTypePattern } from "./page-type.js";
 import { EXTRACTION_VERSION } from "./versions.js";
+import { saysNoindex } from "./robots-directives.js";
 import { storableDeep } from "./storable-text.js";
 
 const DEFAULT_BATCH_SIZE = 100;
@@ -1047,28 +1048,16 @@ function normaliseRedirect(redirectUrl: string): string {
 }
 
 /**
- * `none` as a whole directive — Google's shorthand for "noindex, nofollow".
- * Bounded on both sides because the directive list is comma- and
- * space-delimited: a substring test would read "nonevent" as a directive and
- * drop the page out of the index.
- */
-const NONE_DIRECTIVE = /(?:^|[\s,])none(?:[\s,]|$)/i;
-
-/** Whether one robots directive string asks for the page to stay out of the index. */
-function saysNoindex(value: string | null): boolean {
-  return /noindex/i.test(value ?? "") || NONE_DIRECTIVE.test(value ?? "");
-}
-
-/**
  * Indexability as the checklist defines it: a 200 that fetched cleanly and is
  * not told to stay out of the index by either robots channel. Anything else —
  * a redirect, a 404, a blocked page, a page with no HTML — is not indexable,
  * which is why the fetch class is part of the test and not just the status.
  *
- * MIRRORED BY `saysNoindex` (src/rules/helpers.ts), which asks the
- * same question of the stored columns when the rules run. The two must agree —
- * a page the rule layer calls noindex and this column calls indexable is a
- * contradiction the report cannot resolve. Change one, change the other.
+ * The robots test is `saysNoindex` (src/crawl/robots-directives.ts), the ONE
+ * definition the rule layer's `saysNoindex` (src/rules/helpers.ts) reads too
+ * when it asks the same question of the stored columns. The two must agree — a
+ * page the rule layer calls noindex and this column calls indexable is a
+ * contradiction `indexabilityOf` throws on — so neither keeps its own copy.
  */
 function isIndexable(fetch: FetchResult, analysis: PageAnalysis | null): boolean {
   return (
