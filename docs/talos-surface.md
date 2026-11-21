@@ -4150,7 +4150,7 @@ rows, nineteen rules reproducing to the URL, `structure.deep-page` 0 → 1 as
 
 `{baseCrawlId, headCrawlId, wordCountChangePct?, inlinksChangePct?,
 inlinksChangeMin?, linkScoreChangePoints?}` →
-`{base, head, thresholds, urls, fields}`. Where `crawl_compare` counts findings,
+`{base, head, matchedBy, thresholds, urls, fields}`. Where `crawl_compare` counts findings,
 this counts stored facts: for each field, how many pages common to both crawls
 changed. Not paginated; the summary is one SQL statement, so memory does not
 grow with the crawl. The URLs behind a count are on `crawl_diff_urls`, below.
@@ -4158,6 +4158,7 @@ grow with the crawl. The URLs behind a count are on `crawl_diff_urls`, below.
 ```json
 {"base":{"crawlId":"crawl_a","siteUrl":"https://example.com/","rulesRunAt":"…","pages":20},
  "head":{"crawlId":"crawl_b","siteUrl":"https://example.com/","rulesRunAt":"…","pages":20},
+ "matchedBy":"url",
  "thresholds":{"wordCountChangePct":20,"inlinksChangePct":50,"inlinksChangeMin":5,"linkScoreChangePoints":10},
  "urls":{"common":19,"added":1,"removed":1},
  "fields":[{"field":"status","changed":2,"notComparable":0}, …]}
@@ -4165,6 +4166,17 @@ grow with the crawl. The URLs behind a count are on `crawl_diff_urls`, below.
 
 - **Pairing is on the stored `pages.url`**, so `/Page` and `/page`, or `/a` and `/a/`,
   are different pages. `added` is a URL only the head has, `removed` only the base.
+- **Two addresses of one site are matched on path** (`matchedBy: "path"`; owner ruling
+  2026-11-21). The pairing refusal treats the apex and www hosts, over either scheme, as
+  one site. When the two `siteUrl`s differ in scheme, host or port, each base URL on the
+  base's own address is read in the head's address before pairing
+  (`http://example.com/a` pairs with `https://www.example.com/a`); path and query still
+  match exactly, and a base URL on any other host is matched as stored. The base's
+  canonicals are read the same way, so a self-canonical that moved with the site is
+  unchanged and a head canonical still naming the old address is a change. Two base pages
+  that would pair with one head URL (the base stored both `http://example.com/a` and
+  `https://www.example.com/a`) are a 409 naming both, never a guess. Same origin:
+  `matchedBy: "url"`, the exact pairing above.
 - **`fields`** is in the order `status, fetchClass, indexable, title,
   metaDescription, h1, canonical, metaRobots, wordCount, schemaTypes, inlinks,
   clickDepth, linkScore`.
@@ -4191,7 +4203,10 @@ grow with the crawl. The URLs behind a count are on `crawl_diff_urls`, below.
 **`crawl_diff_urls`** (`GET /diff/urls`): `{baseCrawlId, headCrawlId, field, state?,
 wordCountChangePct?, inlinksChangePct?, inlinksChangeMin?, linkScoreChangePoints?,
 limit?, cursor?}` → `{items, nextCursor, field, state, thresholds}`, each item
-`{url, before, after}`, ordered by the stored URL and keyset-paged.
+`{url, baseUrl, before, after}`, ordered by `url` and keyset-paged. `url` is the page's
+URL in the head's address (for a removed page, the base's URL as matched); `baseUrl` is
+the base crawl's own stored URL, null for an added page. They differ only under
+`matchedBy: "path"`.
 
 - **`field`** is one of the thirteen diff fields, or `added` / `removed`.
   Anything else is a 400 listing the accepted names.
@@ -4209,12 +4224,16 @@ limit?, cursor?}` → `{items, nextCursor, field, state, thresholds}`, each item
   order thresholds, `field`, `state`, `limit`, `cursor`, all before any read; then
   `crawl_diff`'s refusals, in its order.
 
-Pinned: `test/api/crawl-diff.test.ts:259` ("counts changed and notComparable per
+Pinned: `test/api/crawl-diff.test.ts:289` ("counts changed and notComparable per
 field as the fixture header derives"), whose header derives every count from its
-fixture; the listing, by `test/api/crawl-diff.test.ts:423` ("crawl_diff_urls agrees
-with crawl_diff"), `test/api/crawl-diff.test.ts:511` ("limit 1 returns every url
-exactly once") and `test/api/crawl-diff.test.ts:572` ("GET /diff/urls answers what
-crawl_diff_urls answers").
+fixture; the listing, by `test/api/crawl-diff.test.ts:453` ("crawl_diff_urls agrees
+with crawl_diff"), `test/api/crawl-diff.test.ts:542` ("limit 1 returns every url
+exactly once") and `test/api/crawl-diff.test.ts:603` ("GET /diff/urls answers what
+crawl_diff_urls answers"); path matching, by `test/api/crawl-diff.test.ts:631` ("crawls
+of one site from different addresses are matched on path"),
+`test/api/crawl-diff.test.ts:661` ("reads the base's canonicals in the head's address")
+and `test/api/crawl-diff.test.ts:685` ("refuses when two base pages would pair with one
+head url").
 
 ---
 

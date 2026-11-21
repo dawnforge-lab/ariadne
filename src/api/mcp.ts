@@ -2232,12 +2232,23 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
       title: "What changed on each page between two crawls of one site",
       description:
         "Two crawls of the SAME site, field by field, over what each crawl stored " +
-        "(nothing is fetched). Answers {base, head, thresholds, urls, fields}. base and " +
-        "head are {crawlId, siteUrl, rulesRunAt, pages}. urls is {common, added, " +
+        "(nothing is fetched). Answers {base, head, matchedBy, thresholds, urls, fields}. " +
+        "base and head are {crawlId, siteUrl, rulesRunAt, pages}. urls is {common, added, " +
         "removed}: URLs both crawls hold, URLs only the head holds, URLs only the " +
         "base held. Pages are paired on the stored url exactly, so '/Page' and " +
         "'/page', or '/a' and '/a/', are different pages and never one removed and " +
         "one added.\n\n" +
+        "TWO ADDRESSES OF ONE SITE. Crawls of the apex and the www host, over http or " +
+        "https, are one site. When the two siteUrls differ in scheme, host or port, " +
+        "matchedBy is path: each base url on the base's own address is read in the " +
+        "head's address first (http://example.com/a pairs with " +
+        "https://www.example.com/a), so a moved site diffs page by page; path and " +
+        "query still match exactly, and a base url on any other host is matched as " +
+        "it is. The base's canonicals are read the same way, so a self-canonical that " +
+        "moved with the site is unchanged and a head canonical still naming the old " +
+        "address is a change. Otherwise matchedBy is url. If two base pages would " +
+        "pair with one head url (the base stored both http://example.com/a and " +
+        "https://www.example.com/a), the diff is refused with 409 naming both.\n\n" +
         "fields is one {field, changed, notComparable} per field, in this order: " +
         `${DIFF_FIELD_NAMES.join(", ")}. Counts are over the common URLs. ` +
         "changed is the pages whose value differs. notComparable is the pages where " +
@@ -2287,7 +2298,10 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
       description:
         "The pages behind one of crawl_diff's counts, with what each looked like in " +
         "the two crawls. Answers {items, nextCursor, field, state, thresholds}; each " +
-        "item is {url, before, after}, ordered by URL. before is the BASE crawl's " +
+        "item is {url, baseUrl, before, after}, ordered by url. url is the page's " +
+        "address in the HEAD crawl's site (for a removed page, the base's url as it " +
+        "was matched); baseUrl is the BASE crawl's own stored url, null for an added " +
+        "page. The two differ only when crawl_diff's matchedBy is path. before is the BASE crawl's " +
         "stored value and after the HEAD crawl's, as stored (text is capped as it " +
         "was stored): a string for title, metaDescription, h1, fetchClass (the " +
         "fetch class, e.g. ok, client_error) and metaRobots (the robots meta content " +
