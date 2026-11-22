@@ -262,11 +262,19 @@ export function landingSql(crawlId: string, seedUrl: string): SQL {
  * of the test, so `http://a.example.evil/` is not on `http://a.example`.
  */
 function rebasedSql(column: "url" | "canonical_html" | "canonical_header", rebase: DiffRebase | null): SQL {
-  const c = sql.raw(column);
-  if (rebase === null) return c;
-  return sql`case when starts_with(${c}, ${`${rebase.from}/`}::text)
-                  then ${rebase.to}::text || substr(${c}, ${rebase.from.length + 1}::int)
-                  else ${c} end`;
+  return rebasedUrlSql(sql.raw(column), rebase);
+}
+
+/**
+ * `rebasedSql` over any url-valued expression: `crawl_compare` rebases the
+ * base's finding keys (`details_jsonb->>'pageUrl'`) with it. A value not on the
+ * base's landing origin, the empty site-level key included, passes unchanged.
+ */
+export function rebasedUrlSql(value: SQL, rebase: DiffRebase | null): SQL {
+  if (rebase === null) return value;
+  return sql`case when starts_with(${value}, ${`${rebase.from}/`}::text)
+                  then ${rebase.to}::text || substr(${value}, ${rebase.from.length + 1}::int)
+                  else ${value} end`;
 }
 
 /**

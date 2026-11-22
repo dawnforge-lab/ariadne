@@ -2096,8 +2096,8 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
       title: "What changed between two crawls of one site",
       description:
         "Two crawls of the SAME site, rule by rule: what appeared, what went away, " +
-        "and what is still there. Answers {base, head, comparable, caveats, rules}.\n\n" +
-        "base and head each carry {crawlId, siteUrl, rulesRunAt, rulesetVersions, " +
+        "and what is still there. Answers {base, head, matchedBy, comparable, caveats, rules}.\n\n" +
+        "base and head each carry {crawlId, siteUrl, landedOn, rulesRunAt, rulesetVersions, " +
         "findingCap, findingsCount}. rulesetVersions is read off the FINDINGS' own " +
         "stamp, not off the crawl row — a crawl made under one ruleset and judged " +
         "later under another is stamped with the one that judged it — and it is a " +
@@ -2132,6 +2132,19 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "persisting, and baseUrls = resolved + persisting. A site-wide finding has " +
         "no page URL and compares by rule presence alone; it appears in the " +
         "drill-down as url null.\n\n" +
+        "WHERE EACH CRAWL LANDED. base.landedOn and head.landedOn are the origins " +
+        "each crawl's start url's redirect chain ended on (null for a list crawl, " +
+        "which has no start page) — the crawler follows the site's redirects and " +
+        "stays where it is sent. Two crawls that landed on one origin pair findings " +
+        "on the exact page URL (matchedBy url), whatever address each was typed as. " +
+        "When they landed on different origins (the site moved between them, e.g. " +
+        "http to https), matchedBy is path: each base page URL on the base's landing " +
+        "origin is read in the head's first, so a moved site is not every finding " +
+        "resolved and new; path and query still match exactly, and a base URL on any " +
+        "other host is matched as it is. If two of one rule's base URLs would pair " +
+        "with one head URL, the comparison is refused with 409 naming the rule and " +
+        "both; a spider crawl with no stored page for its start url is refused with " +
+        "409 too.\n\n" +
         "READ comparable BEFORE READING A CHANGE. It is false when the engine can " +
         "see that the two sides' numbers were produced under different conditions, " +
         "and every reason is in caveats as {code, message}:\n" +
@@ -2178,7 +2191,7 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
     {
       title: "The URLs behind one comparison count",
       description:
-        "One rule's URLs in one of crawl_compare's three sets: {url}. This is the " +
+        "One rule's URLs in one of crawl_compare's three sets: {url, baseUrl}. This is the " +
         "drill-down — crawl_compare gives you 'links.orphan: 43 new' in one small " +
         "object, and this gives you the 43 URLs when you want them.\n\n" +
         `set is one of: ${COMPARE_SETS.join(", ")}. new is URLs the head crawl has ` +
@@ -2188,6 +2201,11 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "URLs as the count said.\n\n" +
         "url is null for a site-wide finding — a fact about the crawl rather than " +
         "about a page, which compares by whether the rule fired at all.\n\n" +
+        "url is the URL the sets are keyed on: the head's own, or, when the two " +
+        "crawls landed on different origins (crawl_compare's matchedBy path), a base " +
+        "URL read in the head's origin. baseUrl is the base crawl's own stored URL " +
+        "for that finding (resolved and persisting), null for new and for a " +
+        "site-wide finding; it equals url unless the crawls landed apart.\n\n" +
         "A rule that fires more than once on a page appears ONCE per URL here, for " +
         "the reason crawl_compare's description sets out: the page URL is the only " +
         "identity a finding keeps across two crawls.\n\n" +

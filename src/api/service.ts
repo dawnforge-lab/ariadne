@@ -262,6 +262,7 @@ import {
   diffSummarySql,
   landingSql,
   diffUrlsSql,
+  rebasedUrlSql,
   parseDiffThresholds,
   parseDiffUrlsRequest,
   type CrawlDiffField,
@@ -1817,6 +1818,12 @@ export type CompareSet = (typeof COMPARE_SETS)[number];
 export interface CompareSide {
   crawlId: string;
   siteUrl: string;
+  /**
+   * The origin this crawl's start url's redirect chain ended on (`landingOf`),
+   * null for a list crawl, which has no start page. Findings are paired on
+   * their page url read in the head's landing origin (`matchedBy`).
+   */
+  landedOn: string | null;
   /** Never null on a side that got this far — an unjudged crawl is refused. */
   rulesRunAt: string;
   /**
@@ -1916,6 +1923,13 @@ export interface CrawlComparison {
   base: CompareSide;
   head: CompareSide;
   /**
+   * `url` when the two crawls landed on one origin, or either is a list crawl
+   * (findings paired on their exact page url); `path` when they landed on two
+   * (the base's page urls on its landing origin read in the head's first, so a
+   * site that moved from http to https is not every finding resolved and new).
+   */
+  matchedBy: "url" | "path";
+  /**
    * Whether anything the engine can check says the two sides' counts were
    * produced under different conditions. False when the ruleset versions differ
    * (or cannot be read) or the finding caps differ; every reason is in
@@ -1942,8 +1956,18 @@ export interface CrawlComparison {
 
 /** One URL in one of a comparison's three sets. */
 export interface CompareUrl {
-  /** Null for a site-wide finding, which compares by rule presence alone. */
+  /**
+   * The page url the sets are keyed on: as the head stored it, or, for a base
+   * finding under path matching, the base's url read in the head's landing
+   * origin. Null for a site-wide finding, which compares by rule presence alone.
+   */
   url: string | null;
+  /**
+   * The base's own stored page url for this finding (`resolved` and
+   * `persisting`), null for `new` and for a site-wide finding. Equal to `url`
+   * unless the two crawls landed on different origins.
+   */
+  baseUrl: string | null;
 }
 
 /**
@@ -6465,6 +6489,12 @@ export class ApiService {
    *     and diffing it would report every finding on the other side as new or
    *     resolved. The reference crawl `crawl_2af4daf1` is exactly this: 1,314
    *     findings in the table and `rules_run_at` null.
+   *  5. **Where a crawl landed cannot be told, or path matching is ambiguous** —
+   *     409 (`pairingFor`). The page URL is read where each crawl landed, so a
+   *     site that moved from http to https between the crawls pairs page by
+   *     page (`matchedBy: "path"`); a spider crawl with no stored start page, or
+   *     two of one rule's base URLs that read as one head URL, is refused by
+   *     name rather than paired by a guess.
    *
    * A RULESET MISMATCH IS NOT A REFUSAL. It is `comparable: false` with a caveat
    * naming both versions, and the counts are returned — the engine states what
@@ -6491,7 +6521,8 @@ export class ApiService {
     return await this.db.transaction(
       async (tx) => {
         const { base, head } = await comparePair(tx, tenant, baseCrawlId, headCrawlId);
-        const rows = await compareRuleRows(tx, baseCrawlId, headCrawlId);
+        const { rebase, baseLanding, headLanding } = await pairingFor(tx, base, head, "compare");
+        const rows = await compareRuleRows(tx, baseCrawlId, headCrawlId, rebase);
 
         const caveats: CompareCaveat[] = [];
         const rules: CompareRule[] = [];
@@ -6539,8 +6570,12 @@ export class ApiService {
           (a, b) => severityRank(a.severity) - severityRank(b.severity) || a.ruleId.localeCompare(b.ruleId),
         );
 
-        const baseSide: CompareSide = { ...base, rulesetVersions: versionsOf(rows, "base"), findingsCount: baseFindings };
-        const headSide: CompareSide = { ...head, rulesetVersions: versionsOf(rows, "head"), findingsCount: headFindings };
+        const baseSide: CompareSide = {
+          ...base, landedOn: baseLanding, rulesetVersions: versionsOf(rows, "base"), findingsCount: baseFindings,
+        };
+        const headSide: CompareSide = {
+          ...head, landedOn: headLanding, rulesetVersions: versionsOf(rows, "head"), findingsCount: headFindings,
+        };
         // BOTH CHECKS RUN, ALWAYS. `&&` would short-circuit, and the pair that
         // most needs both sentences is exactly the one where the first fails:
         // the reference pair is judged by two rulesets AND under two finding
@@ -6560,7 +6595,9 @@ export class ApiService {
         // found in, so a reader meets the reason `comparable` is false before the
         // per-rule notes.
         caveats.sort((a, b) => CAVEAT_ORDER.indexOf(a.code) - CAVEAT_ORDER.indexOf(b.code));
-        return { base: baseSide, head: headSide, comparable, caveats, rules };
+        return {
+          base: baseSide, head: headSide, matchedBy: rebase === null ? "url" : "path", comparable, caveats, rules,
+        };
       },
       { isolationLevel: "repeatable read", accessMode: "read only" },
     );
@@ -6587,7 +6624,7 @@ export class ApiService {
     return await this.db.transaction(
       async (tx) => {
         const { base, head } = await comparePair(tx, tenant, baseCrawlId, headCrawlId);
-        const { rebase, baseLanding, headLanding } = await diffPairingFor(tx, base, head);
+        const { rebase, baseLanding, headLanding } = await pairingFor(tx, base, head, "diff");
         const result = await tx.execute<DiffSummaryRow>(diffSummarySql(baseCrawlId, headCrawlId, t, rebase));
         const row = result.rows[0];
         if (row === undefined) throw new Error("crawl_diff: the summary statement answered no row");
@@ -6639,7 +6676,7 @@ export class ApiService {
     return await this.db.transaction(
       async (tx) => {
         const { base, head } = await comparePair(tx, tenant, baseCrawlId, headCrawlId);
-        const { rebase } = await diffPairingFor(tx, base, head);
+        const { rebase } = await pairingFor(tx, base, head, "diff");
         const result = await tx.execute<DiffUrl>(diffUrlsSql(baseCrawlId, headCrawlId, req, t, cursor, limit, rebase));
         const rows = result.rows;
         const items = rows.slice(0, limit);
@@ -6705,12 +6742,15 @@ export class ApiService {
    * obligation 1's shape: a chat agent gets `new: 243` in one small object and
    * asks for the list when it wants the list.
    *
-   * **The set arithmetic is SQL's** (rule 3). `except` and `intersect` over two
-   * `select distinct`s that each ride the `issues_crawl_rule` index; the keyset
-   * predicate goes INSIDE the left-hand select, where it is a filter on the
-   * ordering column rather than a filter on the result of a set operation, so
-   * the plan stays a bounded scan of one rule's rows and this process never
-   * holds more than a page.
+   * **The set arithmetic is SQL's** (rule 3). An anti-join (`new`, `resolved`)
+   * or a join (`persisting`) over two `select distinct`s that each ride the
+   * `issues_crawl_rule` index; the keyset predicate goes INSIDE the leading
+   * side's select, where it is a filter on the ordering column rather than on
+   * the result of the set operation, so the plan stays a bounded scan of one
+   * rule's rows and this process never holds more than a page. The base's keys
+   * are its page urls read in the head's landing origin when the two crawls
+   * landed on different ones (`pairingFor`), and each row carries the base's
+   * own url beside the key (`baseUrl`).
    *
    * Ordered by the URL key, which is a total order (the two sets are sets of
    * distinct keys), so the cursor is exact rather than approximately right. The
@@ -6732,30 +6772,45 @@ export class ApiService {
 
     return await this.db.transaction(
       async (tx) => {
-        await comparePair(tx, tenant, baseCrawlId, headCrawlId);
-        // Which side leads the set operation IS the definition of the set:
-        // `new` and `persisting` are questions about the head's URLs, `resolved`
-        // is a question about the base's. The keyset predicate rides the leading
-        // select for that reason — it is the side whose rows are being ordered.
-        const lead = which === "resolved" ? baseCrawlId : headCrawlId;
-        const other = which === "resolved" ? headCrawlId : baseCrawlId;
-        const operator = which === "persisting" ? sql`intersect` : sql`except`;
-        const result = await tx.execute<{ k: string }>(sql`
-          select k from (
-            (select distinct coalesce(i.details_jsonb->>'pageUrl', '') as k
-               from issues i
-              where i.crawl_id = ${lead} and i.rule_id = ${ruleId}
-                ${cursor === null ? sql`` : sql`and coalesce(i.details_jsonb->>'pageUrl', '') > ${cursor}`})
-            ${operator}
-            (select distinct coalesce(i.details_jsonb->>'pageUrl', '') as k
-               from issues i
-              where i.crawl_id = ${other} and i.rule_id = ${ruleId})
-          ) s
+        const { base, head } = await comparePair(tx, tenant, baseCrawlId, headCrawlId);
+        const { rebase } = await pairingFor(tx, base, head, "compare");
+        // Which side leads IS the definition of the set: `new` and `persisting`
+        // are questions about the head's URLs, `resolved` is a question about the
+        // base's. The keyset predicate rides the leading side for that reason —
+        // it is the side whose rows are being ordered.
+        const ownKey = sql`coalesce(i.details_jsonb->>'pageUrl', '')`;
+        const baseKey = rebasedUrlSql(ownKey, rebase);
+        const after = (key: SQL): SQL => (cursor === null ? sql`` : sql`and ${key} > ${cursor}`);
+        const set =
+          which === "new"
+            ? sql`select hk.k, null::text as base_k from hk
+                   where not exists (select 1 from bk where bk.k = hk.k)`
+            : which === "resolved"
+              ? sql`select bk.k, bk.base_k from bk
+                     where not exists (select 1 from hk where hk.k = bk.k)`
+              : sql`select hk.k, bk.base_k from hk join bk on bk.k = hk.k`;
+        // `pairingFor` refused a rule whose base keys collide under the rebase,
+        // so `bk` holds one `base_k` per `k` and the join cannot fan out.
+        const result = await tx.execute<{ k: string; base_k: string | null }>(sql`
+          with bk as (
+                 select distinct ${baseKey} as k, ${ownKey} as base_k
+                   from issues i
+                  where i.crawl_id = ${baseCrawlId} and i.rule_id = ${ruleId}
+                    ${which === "resolved" ? after(baseKey) : sql``}),
+               hk as (
+                 select distinct ${ownKey} as k
+                   from issues i
+                  where i.crawl_id = ${headCrawlId} and i.rule_id = ${ruleId}
+                    ${which === "resolved" ? sql`` : after(ownKey)})
+          select k, base_k from (${set}) s
           order by k asc
           limit ${limit + 1}`);
 
         const rows = result.rows;
-        const items = rows.slice(0, limit).map((row) => ({ url: row.k === "" ? null : row.k }));
+        const items = rows.slice(0, limit).map((row) => ({
+          url: row.k === "" ? null : row.k,
+          baseUrl: row.base_k === null || row.base_k === "" ? null : row.base_k,
+        }));
         const last = rows.length > limit ? rows[limit - 1] : undefined;
         return { items, nextCursor: last === undefined ? null : encodeCursor(last.k) };
       },
@@ -8837,39 +8892,86 @@ async function landingOf(reader: Reader, crawlId: string, siteUrl: string): Prom
 }
 
 /**
- * How `crawl_diff` and `crawl_diff_urls` pair this pair's urls (by where each
- * crawl landed, `landingOf`), and the refusal when path matching would be
- * ambiguous: two base pages that land on one head url (the base stored
- * `http://a.example/x` AND `https://a.example/x`, say) cannot both be "the"
- * page the head's continues, and choosing one would hide the other's change. A
- * loud CONFLICT naming both, never a guess. Inside the caller's snapshot,
- * after `comparePair`.
+ * How two crawls' pages are paired, by where each landed (`landingOf`): the
+ * rebase `crawl_diff` / `crawl_diff_urls` apply to the base's page urls and
+ * `crawl_compare` / `compare_urls` to the base's finding keys, and the refusal
+ * when path matching would be ambiguous. Two base urls that read as one head
+ * url (the base stored `http://a.example/x` AND `https://a.example/x`, say)
+ * cannot both be "the" page the head's continues, and choosing one would hide
+ * the other's change: a loud CONFLICT naming both, never a guess. The diff
+ * checks the base's pages; the comparison checks its finding keys rule by
+ * rule, since that is what it pairs. Inside the caller's snapshot, after
+ * `comparePair`.
  */
-async function diffPairingFor(
+async function pairingFor(
   reader: Reader,
   base: { crawlId: string; siteUrl: string },
   head: { crawlId: string; siteUrl: string },
+  answer: "diff" | "compare",
 ): Promise<{ rebase: DiffRebase | null; baseLanding: string | null; headLanding: string | null }> {
   const baseLanding = await landingOf(reader, base.crawlId, base.siteUrl);
   const headLanding = await landingOf(reader, head.crawlId, head.siteUrl);
   const rebase = diffRebaseOf(baseLanding, headLanding);
   if (rebase === null) return { rebase, baseLanding, headLanding };
-  const result = await reader.execute<{ match_url: string; urls: string[] }>(
-    diffRebaseCollisionSql(base.crawlId, rebase),
-  );
-  const clash = result.rows[0];
-  if (clash !== undefined) {
-    throw new ServiceError(
-      "CONFLICT",
-      `crawls '${clip(base.crawlId)}' and '${clip(head.crawlId)}' landed on different addresses ` +
-        `(${rebase.from} and ${rebase.to}), so pages are matched on path, and crawl ` +
-        `'${clip(base.crawlId)}' holds ${clash.urls.map((u) => `'${clip(u)}'`).join(" and ")}, ` +
-        `which both match '${clip(clash.match_url)}': the diff cannot say which one that page ` +
-        `continues`,
+  if (answer === "diff") {
+    const result = await reader.execute<{ match_url: string; urls: string[] }>(
+      diffRebaseCollisionSql(base.crawlId, rebase),
     );
+    const clash = result.rows[0];
+    if (clash !== undefined) {
+      throw pairingClash(base.crawlId, head.crawlId, rebase, `crawl '${clip(base.crawlId)}' holds`, clash, "diff");
+    }
+  } else {
+    const result = await reader.execute<{ rule_id: string; match_url: string; urls: string[] }>(
+      compareRebaseCollisionSql(base.crawlId, rebase),
+    );
+    const clash = result.rows[0];
+    if (clash !== undefined) {
+      const where = `rule '${clash.rule_id}' in crawl '${clip(base.crawlId)}' found`;
+      throw pairingClash(base.crawlId, head.crawlId, rebase, where, clash, "comparison");
+    }
   }
   return { rebase, baseLanding, headLanding };
 }
+
+/** `pairingFor`'s refusal: two base urls that read as one head url, named. */
+function pairingClash(
+  baseCrawlId: string,
+  headCrawlId: string,
+  rebase: DiffRebase,
+  where: string,
+  clash: { match_url: string; urls: string[] },
+  answer: "diff" | "comparison",
+): ServiceError {
+  return new ServiceError(
+    "CONFLICT",
+    `crawls '${clip(baseCrawlId)}' and '${clip(headCrawlId)}' landed on different addresses ` +
+      `(${rebase.from} and ${rebase.to}), so pages are matched on path, and ${where} ` +
+      `${clash.urls.map((u) => `'${clip(u)}'`).join(" and ")}, which both match ` +
+      `'${clip(clash.match_url)}': the ${answer} cannot say which one that page continues`,
+  );
+}
+
+/**
+ * Under a rebase, the first (rule, head-address key) that two of the base's
+ * finding keys both read as, with those keys (sorted), or no row. Per rule:
+ * the comparison pairs `(rule_id, key)`, so two keys collide only inside one
+ * rule.
+ */
+function compareRebaseCollisionSql(baseCrawlId: string, rebase: DiffRebase): SQL {
+  const key = sql`coalesce(i.details_jsonb->>'pageUrl', '')`;
+  return sql`
+    select rule_id, match_url, array_agg(k order by k) as urls
+      from (select distinct i.rule_id, ${key} as k, ${rebasedUrlSql(key, rebase)} as match_url
+              from issues i where i.crawl_id = ${baseCrawlId}) b
+     group by rule_id, match_url
+    having count(*) > 1
+     order by rule_id, match_url
+     limit 1`;
+}
+
+/** One side as `comparePair` reads it: the facts every pairing needs first. */
+type PairSide = Omit<CompareSide, "landedOn" | "rulesetVersions" | "findingsCount">;
 
 /**
  * Both crawls' comparison-relevant facts, and every refusal that depends on
@@ -8887,7 +8989,7 @@ async function comparePair(
   tenant: TenantId,
   baseCrawlId: string,
   headCrawlId: string,
-): Promise<{ base: Omit<CompareSide, "rulesetVersions" | "findingsCount">; head: Omit<CompareSide, "rulesetVersions" | "findingsCount"> }> {
+): Promise<{ base: PairSide; head: PairSide }> {
   if (baseCrawlId === headCrawlId) {
     throw new ServiceError(
       "VALIDATION",
@@ -8977,7 +9079,7 @@ async function comparePair(
   const side = (
     row: { id: string; site_url: string; rules_run_at: string | null },
     config: unknown,
-  ): Omit<CompareSide, "rulesetVersions" | "findingsCount"> => {
+  ): PairSide => {
     if (row.rules_run_at === null) throw new Error("comparePair: an unjudged side survived");
     return {
       crawlId: row.id,
@@ -9052,9 +9154,14 @@ async function compareRuleRows(
   reader: Reader,
   baseCrawlId: string,
   headCrawlId: string,
+  rebase: DiffRebase | null,
 ): Promise<CompareRuleRow[]> {
-  /** One side: its rows, its key set, its distinct stamps, and the aggregate. */
-  const side = (prefix: string, crawlId: string): SQL => {
+  /**
+   * One side: its rows, its key set, its distinct stamps, and the aggregate.
+   * The base's keys are read in the head's landing origin under a rebase
+   * (`pairingFor`); the head's are its own.
+   */
+  const side = (prefix: string, crawlId: string, keyRebase: DiffRebase | null): SQL => {
     const raw = sql.raw(`${prefix}raw`);
     const keys = sql.raw(`${prefix}k`);
     const stamp = sql.raw(`${prefix}stamp`);
@@ -9063,7 +9170,7 @@ async function compareRuleRows(
         select i.rule_id,
                i.severity,
                i.ruleset_version,
-               coalesce(i.details_jsonb->>'pageUrl', '') as k,
+               ${rebasedUrlSql(sql`coalesce(i.details_jsonb->>'pageUrl', '')`, keyRebase)} as k,
                (i.details_jsonb->'truncated' is not null) as trunc
           from issues i
          where i.crawl_id = ${crawlId}),
@@ -9082,8 +9189,8 @@ async function compareRuleRows(
   };
 
   const result = await reader.execute<CompareRuleRow>(sql`
-    with ${side("b", baseCrawlId)},
-         ${side("h", headCrawlId)},
+    with ${side("b", baseCrawlId, rebase)},
+         ${side("h", headCrawlId, null)},
          d as (
            select coalesce(bk.rule_id, hk.rule_id) as rule_id,
                   count(*) filter (where bk.k is null)::int as added,
