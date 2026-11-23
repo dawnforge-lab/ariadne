@@ -314,6 +314,27 @@ describe("PageWriter", () => {
         makeAnalysis({ robotsMeta: "nonevent" }),
         true,
       ],
+      // A value directive's `none` is its value, not the directive: the page
+      // asks for no image preview and stays indexable, space or no space...
+      [
+        `${SITE}/meta-image-preview-none`,
+        makeFetch(`${SITE}/meta-image-preview-none`),
+        makeAnalysis({ robotsMeta: "index, follow, max-image-preview: none" }),
+        true,
+      ],
+      [
+        `${SITE}/header-image-preview-none`,
+        makeFetch(`${SITE}/header-image-preview-none`, { xRobotsTag: "max-image-preview:none" }),
+        makeAnalysis(),
+        true,
+      ],
+      // ...while a bot-prefixed `none` is the directive, read for the page.
+      [
+        `${SITE}/header-bot-none`,
+        makeFetch(`${SITE}/header-bot-none`, { xRobotsTag: "googlebot:none" }),
+        makeAnalysis(),
+        false,
+      ],
       [
         `${SITE}/404`,
         makeFetch(`${SITE}/404`, {

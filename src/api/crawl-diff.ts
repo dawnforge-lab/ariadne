@@ -8,6 +8,23 @@
  * diff joined on the normalised one would pair them with each other and report
  * the real pair as removed and added.
  *
+ * A SITE THAT MOVED BETWEEN THE CRAWLS IS MATCHED ON PATH (owner rulings,
+ * 2026-11-21: "the diff should be where crawl landed"). The crawler follows
+ * redirects and stays on the address the site sends it to, so two crawls of a
+ * site that redirects store the same urls whichever spelling each was started
+ * from, and pair exactly. Only a site that moved between them (http -> https,
+ * apex -> www) stores its pages under two origins, and joined on the exact url
+ * every page would read removed and added. So each crawl's LANDING origin is
+ * read (`landingSql`: where its start url's redirect chain ended), and when the
+ * two differ (`diffRebaseOf`) each BASE url on the base's landing origin is read
+ * in the head's before the join (`http://a.example/x` ->
+ * `https://www.a.example/x`): path and query still have to match exactly. A
+ * base url on any other origin is matched as it is. Two base urls that would
+ * pair with one head url are refused, never paired by a guess
+ * (`diffRebaseCollisionSql`). The answer names each side's landing
+ * (`landedOn`) and the matching used (`matchedBy`), and every listed url
+ * carries the base's own url beside it (`baseUrl`).
+ *
  * ONE STATEMENT (`diffSummarySql`): a `count(*) filter (where ...)` per field
  * over `diffJoinSql`, so memory is O(1) in pages and the answer is one
  * snapshot. The url listing (`crawl_diff_urls`) reuses `diffJoinSql` and `DIFF_FIELDS`.
@@ -136,8 +153,11 @@ export const DIFF_FIELDS: readonly DiffField[] = [
   {
     name: "canonical",
     comparable: content,
+    // The base's canonicals as read in the head's address (`rebasedSql`, the
+    // stored value when the origins agree); the listing's `before` shows them
+    // as stored.
     changed: (b, h) =>
-      sql`(${col(b, "canonical_html")} is distinct from ${col(h, "canonical_html")} or ${col(b, "canonical_header")} is distinct from ${col(h, "canonical_header")})`,
+      sql`(${col(b, "match_canonical_html")} is distinct from ${col(h, "canonical_html")} or ${col(b, "match_canonical_header")} is distinct from ${col(h, "canonical_header")})`,
     before: (b) => sql`jsonb_build_object('html', ${col(b, "canonical_html")}, 'header', ${col(b, "canonical_header")})`,
     after: (h) => sql`jsonb_build_object('html', ${col(h, "canonical_html")}, 'header', ${col(h, "canonical_header")})`,
   },
@@ -185,15 +205,94 @@ export const DIFF_FIELDS: readonly DiffField[] = [
 
 
 /**
- * The two crawls' pages, full-joined on `url`, each side's schema-type set as a
- * lateral aggregate: aliases `b`, `h`, `bs`, `hs` (see `BASE_SIDE`/`HEAD_SIDE`).
- * A url on one side only has null columns on the other (`b.id is null` is
- * "added", `h.id is null` is "removed").
+ * How a diff pairs urls: `null` for the exact url, or the base origin to read
+ * in the head's. The origin is scheme, host and port: `http://` and `https://`
+ * differ, `https://a.example/` and `https://a.example/shop/` do not.
  */
-export function diffJoinSql(baseId: string, headId: string): SQL {
+export interface DiffRebase {
+  /** The origin the base crawl landed on, e.g. `http://a.example`. */
+  from: string;
+  /** The origin the head crawl landed on, e.g. `https://www.a.example`. */
+  to: string;
+}
+
+/**
+ * The rebase for two crawls' landing origins (`landingSql`): none when either
+ * has no landing (a list crawl, which has no start page and pairs exactly) or
+ * when they landed on the same origin. Two crawls typed as `http://a.example`
+ * and `https://www.a.example` of a site that redirects one to the other landed
+ * on the same origin and stored the same urls, so they pair exactly; only a
+ * site that MOVED between the crawls lands them apart.
+ */
+export function diffRebaseOf(baseLanding: string | null, headLanding: string | null): DiffRebase | null {
+  if (baseLanding === null || headLanding === null || baseLanding === headLanding) return null;
+  return { from: baseLanding, to: headLanding };
+}
+
+/**
+ * Where a spider crawl landed: the last stored page of its start url's redirect
+ * chain, followed through `redirect_url_normalised` (the spelling `pages.url`
+ * is keyed by), at most `LANDING_MAX_HOPS` hops so a redirect loop ends. One
+ * row `{url, hops}`, or none when the crawl stored no page for its start url.
+ * `seedUrl` is the start url through `normalizeUrl`, the frontier's own key.
+ */
+export const LANDING_MAX_HOPS = 50;
+
+export function landingSql(crawlId: string, seedUrl: string): SQL {
   return sql`
-    (select * from pages where crawl_id = ${baseId}) b
-    full join (select * from pages where crawl_id = ${headId}) h on h.url = b.url
+    with recursive chain (url, fetch_class, next_url, hops) as (
+      select url, fetch_class, redirect_url_normalised, 0
+        from pages where crawl_id = ${crawlId} and url = ${seedUrl}
+      union all
+      select p.url, p.fetch_class, p.redirect_url_normalised, c.hops + 1
+        from chain c
+        join pages p on p.crawl_id = ${crawlId} and p.url = c.next_url
+       where c.fetch_class = 'redirect' and c.hops < ${LANDING_MAX_HOPS}::int
+    )
+    select url, hops from chain order by hops desc limit 1`;
+}
+
+/**
+ * A url-valued base column as the diff reads it: the stored value, or, under a
+ * rebase, the value read in the head's origin when it is on the base's landing
+ * origin. Applied to the page url (the join key) and to the two canonicals, so
+ * a self-canonical that moved with the site is unchanged and a head canonical
+ * still naming the old address is a change. The origin is followed by `/` in
+ * every stored url (`normalizeUrl` gives every url a path), and the `/` is part
+ * of the test, so `http://a.example.evil/` is not on `http://a.example`.
+ */
+function rebasedSql(column: "url" | "canonical_html" | "canonical_header", rebase: DiffRebase | null): SQL {
+  return rebasedUrlSql(sql.raw(column), rebase);
+}
+
+/**
+ * `rebasedSql` over any url-valued expression: `crawl_compare` rebases the
+ * base's finding keys (`details_jsonb->>'pageUrl'`) with it. A value not on the
+ * base's landing origin, the empty site-level key included, passes unchanged.
+ */
+export function rebasedUrlSql(value: SQL, rebase: DiffRebase | null): SQL {
+  if (rebase === null) return value;
+  return sql`case when starts_with(${value}, ${`${rebase.from}/`}::text)
+                  then ${rebase.to}::text || substr(${value}, ${rebase.from.length + 1}::int)
+                  else ${value} end`;
+}
+
+/**
+ * The two crawls' pages, full-joined on the base's match url (`baseMatchUrlSql`:
+ * the stored url unless the origins differ) against the head's stored url, each
+ * side's schema-type set as a lateral aggregate: aliases `b`, `h`, `bs`, `hs`
+ * (see `BASE_SIDE`/`HEAD_SIDE`); `b.match_url` is the base's url as joined, and
+ * `b.match_canonical_html` / `b.match_canonical_header` its canonicals read the
+ * same way. A url on one side only has null columns on the other (`b.id is null`
+ * is "added", `h.id is null` is "removed").
+ */
+export function diffJoinSql(baseId: string, headId: string, rebase: DiffRebase | null): SQL {
+  return sql`
+    (select *, ${rebasedSql("url", rebase)} as match_url,
+            ${rebasedSql("canonical_html", rebase)} as match_canonical_html,
+            ${rebasedSql("canonical_header", rebase)} as match_canonical_header
+       from pages where crawl_id = ${baseId}) b
+    full join (select * from pages where crawl_id = ${headId}) h on h.url = b.match_url
     cross join lateral (
       select coalesce(array_agg(distinct schema_type order by schema_type), '{}'::text[]) as types
         from structured_data where crawl_id = ${baseId} and page_id = b.id
@@ -202,6 +301,22 @@ export function diffJoinSql(baseId: string, headId: string): SQL {
       select coalesce(array_agg(distinct schema_type order by schema_type), '{}'::text[]) as types
         from structured_data where crawl_id = ${headId} and page_id = h.id
     ) hs`;
+}
+
+/**
+ * Under a rebase, the first head url that two base pages would both pair with,
+ * and those base urls (sorted), or no row. Never run without a rebase: a
+ * crawl's stored urls are unique (`pages_crawl_url`), so the exact join cannot
+ * pair two base pages with one head page.
+ */
+export function diffRebaseCollisionSql(baseId: string, rebase: DiffRebase): SQL {
+  return sql`
+    select match_url, array_agg(url order by url) as urls
+      from (select url, ${rebasedSql("url", rebase)} as match_url from pages where crawl_id = ${baseId}) b
+     group by match_url
+    having count(*) > 1
+     order by match_url
+     limit 1`;
 }
 
 /** `b` and `h` both present: the pairs a field can be compared over. */
@@ -224,7 +339,7 @@ export const fieldNotComparableWhere = (f: DiffField): SQL =>
   sql`(${COMMON_SQL} and not ${f.comparable(BASE_SIDE, HEAD_SIDE)})`;
 
 /** The one statement: url sets, per-side page counts, and a changed / notComparable pair per field. */
-export function diffSummarySql(baseId: string, headId: string, t: DiffThresholds): SQL {
+export function diffSummarySql(baseId: string, headId: string, t: DiffThresholds, rebase: DiffRebase | null): SQL {
   const parts: SQL[] = [
     sql`count(b.id)::int as base_pages`,
     sql`count(h.id)::int as head_pages`,
@@ -238,7 +353,7 @@ export function diffSummarySql(baseId: string, headId: string, t: DiffThresholds
       sql`count(*) filter (where ${fieldNotComparableWhere(f)})::int as ${sql.raw(`nc_${i}`)}`,
     );
   });
-  return sql`select ${sql.join(parts, sql`, `)} from ${diffJoinSql(baseId, headId)}`;
+  return sql`select ${sql.join(parts, sql`, `)} from ${diffJoinSql(baseId, headId, rebase)}`;
 }
 
 export type DiffSummaryRow = Record<string, number>;
@@ -262,9 +377,16 @@ export type DiffState = (typeof DIFF_STATES)[number];
 /** What `field` of `crawl_diff_urls` accepts: every diff field, then the two url sets. */
 export const DIFF_URL_FIELDS: readonly string[] = [...DIFF_FIELD_NAMES, ...DIFF_URL_SETS];
 
-/** One url behind a count. `before` and `after` are null for `added` and `removed`. */
+/**
+ * One url behind a count. `url` is the page's url in the head crawl's address
+ * (the head's stored url, or for a removed page the base's url as matched);
+ * `baseUrl` is the base crawl's own stored url, null for an added page. The two
+ * differ only when the crawls' origins do (`matchedBy: "path"`). `before` and
+ * `after` are null for `added` and `removed`.
+ */
 export type DiffUrl = {
   url: string;
+  baseUrl: string | null;
   before: unknown;
   after: unknown;
 };
@@ -302,9 +424,11 @@ export function parseDiffUrlsRequest(field: string, state: string | undefined): 
 }
 
 /**
- * One page of the urls behind a count: keyset on the stored url, `limit + 1`
- * rows so the caller can tell whether a next page exists. The predicates are
- * `fieldChangedWhere` / `fieldNotComparableWhere`, the summary's own.
+ * One page of the urls behind a count: keyset on the matched url (`url` of
+ * `DiffUrl`, unique: the head's urls are, and so are the base's match urls once
+ * `diffRebaseCollisionSql` found no collision), `limit + 1` rows so the caller
+ * can tell whether a next page exists. The predicates are `fieldChangedWhere` /
+ * `fieldNotComparableWhere`, the summary's own.
  */
 export function diffUrlsSql(
   baseId: string,
@@ -313,6 +437,7 @@ export function diffUrlsSql(
   t: DiffThresholds,
   cursor: string | null,
   limit: number,
+  rebase: DiffRebase | null,
 ): SQL {
   let where: SQL;
   let before: SQL = sql`null::jsonb`;
@@ -329,10 +454,10 @@ export function diffUrlsSql(
     before = sql`to_jsonb(${f.before(BASE_SIDE)})`;
     after = sql`to_jsonb(${f.after(HEAD_SIDE)})`;
   }
-  const key = sql`coalesce(b.url, h.url)`;
+  const key = sql`coalesce(h.url, b.match_url)`;
   return sql`
-    select ${key} as url, ${before} as before, ${after} as after
-      from ${diffJoinSql(baseId, headId)}
+    select ${key} as url, b.url as "baseUrl", ${before} as before, ${after} as after
+      from ${diffJoinSql(baseId, headId, rebase)}
      where ${where} ${cursor === null ? sql`` : sql`and ${key} > ${cursor}`}
      order by ${key} asc
      limit ${limit + 1}`;

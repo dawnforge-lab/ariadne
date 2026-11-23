@@ -60,6 +60,7 @@ import { RULESET_VERSION } from "../../src/rules/registry/registry.js";
 import { LOCAL_TENANT } from "../../src/tenant.js";
 import { TEST_CREDENTIAL_KEY_ENV, TEST_CREDENTIAL_KEYS } from "../helpers/credential-keys.js";
 import { hostKeyOf } from "../../src/crawl/host-key.js";
+import { normalizeUrl } from "../../src/crawl/parse/url-utils.js";
 
 /** `crawl_status.recheck.noResponse` on a crawl with no no-response pages. */
 const NO_RESPONSE_ZERO = { pages: 0, confirmed: 0, answered: 0, inconclusive: 0, pending: 0 };
@@ -235,6 +236,11 @@ async function seedCrawl(row: {
   judged?: boolean;
   /** Defaults to `SEEDED_SITE`; only the compare fixtures move it. */
   siteUrl?: string;
+  /**
+   * Store the start url as an ok page: `crawl_compare` pairs two crawls by
+   * where each landed, read off that page, and refuses a spider crawl without.
+   */
+  startPage?: boolean;
 }): Promise<string> {
   await db.insert(crawls).values({
     tenantId: LOCAL_TENANT,
@@ -262,6 +268,15 @@ async function seedCrawl(row: {
       : {}),
   });
   createdCrawls.push(row.id);
+  if (row.startPage === true) {
+    const start = normalizeUrl(row.siteUrl ?? `${SEEDED_SITE}/`);
+    if (start === null) throw new Error(`seedCrawl: ${row.id}'s site url does not normalise`);
+    await db.insert(pages).values({
+      id: `${row.id}_start`, crawlId: row.id, url: start, urlNormalised: start,
+      statusCode: 200, fetchClass: "ok", depth: 0, discoveredVia: "seed",
+      isIndexable: true, rendered: false,
+    });
+  }
   return row.id;
 }
 
@@ -597,8 +612,12 @@ beforeAll(async () => {
   // 0.9.0-test. Head: one title resolved, one new, one still there, the orphans
   // gone, and a rule that fired twice on ONE page — judged at 0.8.0-test, so the
   // answer must carry the counts AND the mismatch caveat.
-  cmpBaseId = await seedCrawl({ id: `crawl_mcp_cmp_base_${Date.now()}`, status: "finished", judged: true });
-  cmpHeadId = await seedCrawl({ id: `crawl_mcp_cmp_head_${Date.now()}`, status: "finished", judged: true });
+  cmpBaseId = await seedCrawl({
+    id: `crawl_mcp_cmp_base_${Date.now()}`, status: "finished", judged: true, startPage: true,
+  });
+  cmpHeadId = await seedCrawl({
+    id: `crawl_mcp_cmp_head_${Date.now()}`, status: "finished", judged: true, startPage: true,
+  });
   cmpOtherId = await seedCrawl({
     id: `crawl_mcp_cmp_other_${Date.now()}`,
     status: "finished",

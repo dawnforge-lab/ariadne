@@ -63,6 +63,7 @@ import { RULESET_VERSION } from "../../src/rules/registry/registry.js";
 import { LOCAL_TENANT } from "../../src/tenant.js";
 import { TEST_CREDENTIAL_KEYS } from "../helpers/credential-keys.js";
 import { hostKeyOf } from "../../src/crawl/host-key.js";
+import { normalizeUrl } from "../../src/crawl/parse/url-utils.js";
 
 const TOKEN = "test-token-0123456789abcdef";
 const SITE = "http://query.example";
@@ -332,6 +333,12 @@ async function seedCrawl(
     judged?: boolean;
     /** Defaults to `SITE` — the compare fixtures are the only rows that move it. */
     siteUrl?: string;
+    /**
+     * Store the start url as an ok page. `crawl_compare` pairs two crawls by
+     * where each landed, read off that page, and refuses a spider crawl that
+     * has none, so every judged compare fixture carries one.
+     */
+    startPage?: boolean;
   } = {},
 ): Promise<void> {
   await db.insert(crawls).values({
@@ -358,6 +365,15 @@ async function seedCrawl(
         }
       : {}),
   });
+  if (opts.startPage === true) {
+    const start = normalizeUrl(opts.siteUrl ?? `${SITE}/`);
+    if (start === null) throw new Error(`seedCrawl: ${id}'s site url does not normalise`);
+    await db.insert(pages).values({
+      id: `${id}_start`, crawlId: id, url: start, urlNormalised: start,
+      statusCode: 200, fetchClass: "ok", depth: 0, discoveredVia: "seed",
+      isIndexable: true, rendered: false,
+    });
+  }
 }
 
 /** The stamp of a run with no overrides, under `config.findingCap` when it has one. */
@@ -648,18 +664,20 @@ beforeAll(async () => {
   // comparison could raise is one this fixture did not put there.
   const uncapped = { siteUrl: `${SITE}/`, findingCap: null };
   for (const id of [cmpBase, cmpHead, cmpOld]) {
-    await seedCrawl(id, { judged: true, config: uncapped });
+    await seedCrawl(id, { judged: true, config: uncapped, startPage: true });
   }
   // No `findingCap` key at all: the engine's 200 default, which is what makes
   // this crawl differ from the pair in exactly one way.
-  await seedCrawl(cmpCapped, { judged: true });
-  await seedCrawl(cmpOther, { judged: true, siteUrl: `${OTHER_SITE}/`, config: uncapped });
-  await seedCrawl(cmpWww, { judged: true, siteUrl: `http://www.compare-other.example/`, config: uncapped });
+  await seedCrawl(cmpCapped, { judged: true, startPage: true });
+  await seedCrawl(cmpOther, { judged: true, siteUrl: `${OTHER_SITE}/`, config: uncapped, startPage: true });
+  await seedCrawl(cmpWww, {
+    judged: true, siteUrl: `http://www.compare-other.example/`, config: uncapped, startPage: true,
+  });
   // Rows in the table and no marker: the shape a rules pass that died part-way
   // leaves behind, and the shape the reference crawl `crawl_2af4daf1` is in.
   await seedCrawl(cmpUnjudged, { config: uncapped });
   for (const id of [cmpMixed, cmpUnstampedA, cmpUnstampedB]) {
-    await seedCrawl(id, { judged: true, config: uncapped });
+    await seedCrawl(id, { judged: true, config: uncapped, startPage: true });
   }
 
   const cmpIssue = (
@@ -3511,6 +3529,7 @@ describe("GET /compare", () => {
     expect(res.body["base"]).toEqual({
       crawlId: cmpBase,
       siteUrl: `${SITE}/`,
+      landedOn: SITE,
       rulesRunAt: "2026-08-30T09:00:00.000Z",
       rulesetVersions: [CMP_RULESET],
       findingCap: null,
@@ -3519,11 +3538,14 @@ describe("GET /compare", () => {
     expect(res.body["head"]).toEqual({
       crawlId: cmpHead,
       siteUrl: `${SITE}/`,
+      landedOn: SITE,
       rulesRunAt: "2026-08-30T09:00:00.000Z",
       rulesetVersions: [CMP_RULESET],
       findingCap: null,
       findingsCount: 12,
     });
+    // Both landed on one origin: findings pair on their exact page url.
+    expect(res.body["matchedBy"]).toBe("url");
 
     // Every rule with findings in EITHER crawl, warnings before the info rule,
     // alphabetical inside a severity.
@@ -3867,10 +3889,16 @@ describe("GET /compare/urls", () => {
     expect(await urls("title.missing", "persisting")).toEqual([`${SITE}/b`, `${SITE}/c`]);
     // Three rows, one page: one URL.
     expect(await urls("content.exact-duplicate", "new")).toEqual([`${SITE}/dup`]);
+    // One origin: the base's own url is the key, and a new url has none.
+    expect(items(await call(path("title.missing", "persisting")))).toEqual([
+      { url: `${SITE}/b`, baseUrl: `${SITE}/b` },
+      { url: `${SITE}/c`, baseUrl: `${SITE}/c` },
+    ]);
+    expect(items(await call(path("title.missing", "new")))).toEqual([{ url: `${SITE}/d`, baseUrl: null }]);
   });
 
   it("answers a site-wide finding with url null", async () => {
-    expect(items(await call(path("sitemap.missing", "resolved")))).toEqual([{ url: null }]);
+    expect(items(await call(path("sitemap.missing", "resolved")))).toEqual([{ url: null, baseUrl: null }]);
   });
 
   // THE PAGINATION CONTRACT, walked to the end: the cursor must terminate, and
@@ -3933,6 +3961,143 @@ describe("GET /compare/urls", () => {
       `/compare/urls?baseCrawlId=${cmpBase}&headCrawlId=crawl_nope&ruleId=title.missing&set=new`,
     );
     expect(missing.status).toBe(404);
+  });
+});
+
+/**
+ * `crawl_compare` across two addresses of one site: findings pair by where each
+ * crawl LANDED (the end of its start url's redirect chain), not by the address
+ * typed. `cmpBase` landed on http://query.example; these crawls are the same
+ * site after a move to https.
+ *
+ *   moved      typed and landed https. title.missing on b, c, d; sitemap.missing.
+ *   redirected typed http, its start url a 301 to https, landed https. title.missing on b.
+ *   collide    landed http, title.missing on http /a AND https /a.
+ *   noStart    judged, no page for its start url.
+ */
+describe("GET /compare across the addresses a site moved between", () => {
+  const HTTPS_SITE = "https://query.example";
+  const tag = `${Date.now()}`;
+  const moved = `crawl_cmp_moved_${tag}`;
+  const redirected = `crawl_cmp_redirected_${tag}`;
+  const collide = `crawl_cmp_collide_${tag}`;
+  const noStart = `crawl_cmp_nostart_${tag}`;
+  const uncapped = { siteUrl: `${SITE}/`, findingCap: null };
+
+  const finding = (crawlId: string, ruleId: string, pageUrl: string | null): Promise<void> =>
+    seedIssue(crawlId, {
+      ruleId, severity: "warning", pageUrl, dedupeKey: pageUrl ?? "site", rulesetVersion: CMP_RULESET,
+    });
+
+  beforeAll(async () => {
+    await seedCrawl(moved, { judged: true, siteUrl: `${HTTPS_SITE}/`, config: uncapped, startPage: true });
+    for (const slug of ["b", "c", "d"]) await finding(moved, "title.missing", `${HTTPS_SITE}/${slug}`);
+    await finding(moved, "sitemap.missing", null);
+
+    await seedCrawl(redirected, { judged: true, config: uncapped, startPage: false });
+    await db.insert(pages).values([
+      {
+        id: `${redirected}_start`, crawlId: redirected, url: `${SITE}/`, urlNormalised: `${SITE}/`,
+        statusCode: 301, fetchClass: "redirect", depth: 0, discoveredVia: "seed",
+        isIndexable: false, rendered: false,
+        redirectUrl: `${HTTPS_SITE}/`, redirectUrlNormalised: `${HTTPS_SITE}/`,
+      },
+      {
+        id: `${redirected}_home`, crawlId: redirected, url: `${HTTPS_SITE}/`, urlNormalised: `${HTTPS_SITE}/`,
+        statusCode: 200, fetchClass: "ok", depth: 0, discoveredVia: "redirect",
+        isIndexable: true, rendered: false,
+      },
+    ]);
+    await finding(redirected, "title.missing", `${HTTPS_SITE}/b`);
+
+    await seedCrawl(collide, { judged: true, config: uncapped, startPage: true });
+    await finding(collide, "title.missing", `${SITE}/a`);
+    await finding(collide, "title.missing", `${HTTPS_SITE}/a`);
+
+    await seedCrawl(noStart, { judged: true, config: uncapped });
+  });
+
+  async function compare(baseCrawlId: string, headCrawlId: string): Promise<Res> {
+    return await call(
+      `/compare?baseCrawlId=${encodeURIComponent(baseCrawlId)}&headCrawlId=${encodeURIComponent(headCrawlId)}`,
+    );
+  }
+
+  function ruleRow(res: Res, ruleId: string): Record<string, unknown> {
+    const rules = res.body["rules"];
+    if (!Array.isArray(rules)) throw new Error(`no rules in ${JSON.stringify(res.body)}`);
+    const row = (rules as Record<string, unknown>[]).find((r) => r["ruleId"] === ruleId);
+    if (row === undefined) throw new Error(`no row for ${ruleId}`);
+    return row;
+  }
+
+  function urlsPath(base: string, head: string, ruleId: string, set: string): string {
+    return (
+      `/compare/urls?baseCrawlId=${encodeURIComponent(base)}&headCrawlId=${encodeURIComponent(head)}` +
+      `&ruleId=${encodeURIComponent(ruleId)}&set=${encodeURIComponent(set)}`
+    );
+  }
+
+  // Exact-url pairing would call title.missing three resolved and three new:
+  // every page "changed" because the site moved to https.
+  it("pairs findings on path when the two crawls landed on different origins", async () => {
+    const res = await compare(cmpBase, moved);
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(res.body["matchedBy"]).toBe("path");
+    expect((res.body["base"] as Record<string, unknown>)["landedOn"]).toBe(SITE);
+    expect((res.body["head"] as Record<string, unknown>)["landedOn"]).toBe(HTTPS_SITE);
+    expect(ruleRow(res, "title.missing")).toMatchObject({
+      baseUrls: 3, headUrls: 3, new: 1, resolved: 1, persisting: 2,
+    });
+    // The site-level key is no url, so it pairs by rule presence as before.
+    expect(ruleRow(res, "sitemap.missing")).toMatchObject({ new: 0, resolved: 0, persisting: 1 });
+    expect(ruleRow(res, "links.orphan")).toMatchObject({ new: 0, resolved: 5, persisting: 0 });
+  });
+
+  it("lists each finding under the head's address with the base's own url beside it", async () => {
+    expect(items(await call(urlsPath(cmpBase, moved, "title.missing", "persisting")))).toEqual([
+      { url: `${HTTPS_SITE}/b`, baseUrl: `${SITE}/b` },
+      { url: `${HTTPS_SITE}/c`, baseUrl: `${SITE}/c` },
+    ]);
+    expect(items(await call(urlsPath(cmpBase, moved, "title.missing", "resolved")))).toEqual([
+      { url: `${HTTPS_SITE}/a`, baseUrl: `${SITE}/a` },
+    ]);
+    expect(items(await call(urlsPath(cmpBase, moved, "title.missing", "new")))).toEqual([
+      { url: `${HTTPS_SITE}/d`, baseUrl: null },
+    ]);
+  });
+
+  // The ordinary case: typed http, the site redirected, the crawl went on at
+  // https. It landed where `moved` did, so the pair is exact.
+  it("pairs exactly when a crawl typed at the old address was redirected to where the other landed", async () => {
+    const res = await compare(redirected, moved);
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(res.body["matchedBy"]).toBe("url");
+    expect((res.body["base"] as Record<string, unknown>)["landedOn"]).toBe(HTTPS_SITE);
+    expect(ruleRow(res, "title.missing")).toMatchObject({ new: 2, resolved: 0, persisting: 1 });
+  });
+
+  it("refuses a rule whose base urls would both match one head url, naming the rule and both", async () => {
+    for (const res of [
+      await compare(collide, moved),
+      await call(urlsPath(collide, moved, "title.missing", "new")),
+    ]) {
+      expect(res.status).toBe(409);
+      const error = String(res.body["error"]);
+      expect(error).toContain("rule 'title.missing'");
+      expect(error).toContain(`'${SITE}/a' and '${HTTPS_SITE}/a'`);
+      expect(error).toContain("comparison cannot say");
+    }
+  });
+
+  it("refuses a spider crawl that holds no page for its start url", async () => {
+    for (const res of [
+      await compare(noStart, moved),
+      await call(urlsPath(noStart, moved, "title.missing", "new")),
+    ]) {
+      expect(res.status).toBe(409);
+      expect(String(res.body["error"])).toContain("holds no page for its start URL");
+    }
   });
 });
 

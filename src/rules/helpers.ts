@@ -3,6 +3,7 @@ import { sql, type SQL } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import { normalizeUrl } from "../crawl/parse/url-utils.js";
 import { ROBOTS_BLOCKED_REASON_PREFIX } from "../crawl/discovery.js";
+import { saysNoindex as directiveSaysNoindex } from "../crawl/robots-directives.js";
 import { copyFor } from "./registry/copy/index.js";
 import type { MetricTable } from "./registry/metric-table.js";
 import { defineRule, RULESET_VERSION } from "./registry/registry.js";
@@ -446,20 +447,13 @@ export const JUDGED = (alias: string): SQL =>
   )} and not ${CANONICALISED_ELSEWHERE(alias)})`;
 
 /**
- * `none` as a whole directive: the list is comma- and space-delimited, so the
- * token has to be bounded on both sides. A substring test would read "nonevent"
- * as a directive and hide the page from every rule below.
- */
-const NONE_DIRECTIVE = /(?:^|[\s,])none(?:[\s,]|$)/i;
-
-/**
- * Whether a robots directive string asks for noindex. Substring match for
- * `noindex` itself, because the directive arrives as a comma list
- * ("max-snippet:-1, noindex, nofollow") and the value is stored verbatim.
- *
- * `none` counts too: it is Google's shorthand for "noindex, nofollow", and a
- * page carrying it is out of the index just as surely as one that spelled the
- * directive out.
+ * Whether a robots directive string asks for noindex: the substring `noindex`,
+ * or `none` (Google's shorthand for "noindex, nofollow") as a whole directive,
+ * a value directive's value (`max-image-preview: none`) excepted. The test
+ * itself lives in src/crawl/robots-directives.ts, the ONE definition this and
+ * the crawl writer's `pages.is_indexable` stamp (src/crawl/persist.ts) both
+ * read, so the two cannot drift (`indexabilityOf` throws on a row where they
+ * disagree).
  *
  * MOVED HERE FROM src/rules/page/indexability.ts (Phase 20), which re-exports
  * it at its old address, for the reason `resolveEffectiveCanonical` moved: the
@@ -468,15 +462,9 @@ const NONE_DIRECTIVE = /(?:^|[\s,])none(?:[\s,]|$)/i;
  * from a rule file that imports helpers.ts. One definition of "noindex", read
  * by the rule that reports it and by the column that labels every other rule's
  * rows.
- *
- * MIRRORED IN `isIndexable` (src/crawl/persist.ts), which stamps
- * `pages.is_indexable` at crawl time from the same two robots sources. The two
- * must agree — a page this function calls noindex and that column calls
- * indexable is a contradiction the report cannot resolve. Change one, change
- * the other.
  */
 export function saysNoindex(value: string | null): boolean {
-  return present(value) && (/noindex/i.test(value) || NONE_DIRECTIVE.test(value));
+  return present(value) && directiveSaysNoindex(value);
 }
 
 /** The two robots channels a page can carry a directive on. */
@@ -722,8 +710,8 @@ const VALUE_DIRECTIVES = new Set(["max-snippet", "max-image-preview", "max-video
  * commas AND on whitespace, lower-cased, with a leading `<bot>:` prefix dropped.
  *
  * Whitespace delimits as a comma does: `content="noindex nofollow"` is two
- * directives to a search engine, and `saysNoindex` / `NONE_DIRECTIVE` already
- * read it that way, so a rule over these tokens must too.
+ * directives to a search engine, and `saysNoindex` (src/crawl/robots-directives.ts)
+ * already reads it that way, so a rule over these tokens must too.
  *
  * The prefix is ignored, as `saysNoindex` ignores it: a directive for one bot is
  * read as a directive for the page, and bot-specific judgement is 26b's job.
@@ -953,19 +941,30 @@ export function indexabilityOf(page: IndexabilityInput): {
 }
 
 /**
- * `saysNoindex` over one aliased robots column, in SQL. The same two tests on
- * the verbatim value: the substring `noindex`, or `none` as a whole directive
- * (`NONE_DIRECTIVE`'s pattern, case-insensitive). `present` is not restated: a
- * value holding either token is not blank. NULL coalesces to false so the
- * enclosing `case` reads "no directive" rather than "unknown".
+ * A robots column with its value directives (`max-snippet`, `max-image-preview`,
+ * `max-video-preview`, each with its value) cut out, in SQL: what is left is
+ * read for `none` and `nofollow` as whole tokens. `max-image-preview: none` is
+ * a value, not the `none` directive (src/crawl/robots-directives.ts).
+ */
+const WITHOUT_VALUE_DIRECTIVES = (column: string): string =>
+  `regexp_replace(${column}, 'max-(snippet|image-preview|video-preview)[[:space:]]*:[[:space:]]*[^[:space:],]*', '', 'gi')`;
+
+/**
+ * `saysNoindex` over one aliased robots column, in SQL: the substring
+ * `noindex`, or `none` as a whole directive once the value directives are cut
+ * out, a bot prefix's colon counting as a left bound (`googlebot:none`), as in
+ * src/crawl/robots-directives.ts (parity pinned in
+ * test/rules/robots-nofollow-sql.test.ts). `present` is not restated: a value
+ * holding either token is not blank. NULL coalesces to false so the enclosing
+ * `case` reads "no directive" rather than "unknown".
  *
  * `\s` is Postgres's `[[:space:]]`, which for ASCII is JavaScript's `\s`; the
  * two differ only on non-ASCII spaces (U+00A0 and friends), where a value like
  * `none` flanked by one is a noindex here and not there. That is the direction
  * that keeps the page out of the index count, never the one that silences.
  */
-const SAYS_NOINDEX = (column: string): string =>
-  `coalesce(${column} ~* 'noindex' or ${column} ~* '(^|[\\s,])none([\\s,]|$)', false)`;
+export const SAYS_NOINDEX = (column: string): string =>
+  `coalesce(${column} ~* 'noindex' or ${WITHOUT_VALUE_DIRECTIVES(column)} ~* '(^|[\\s,:])none([\\s,]|$)', false)`;
 
 /**
  * `nofollow` over one aliased robots column, in SQL: the whole directive
@@ -983,8 +982,7 @@ const SAYS_NOINDEX = (column: string): string =>
  * it differs from JavaScript's.
  */
 export const SAYS_NOFOLLOW = (column: string): string =>
-  `coalesce(regexp_replace(${column}, 'max-(snippet|image-preview|video-preview)[[:space:]]*:[[:space:]]*[^[:space:],]*', '', 'gi')` +
-  ` ~* '(^|[\\s,:])(nofollow|none)([\\s,]|$)', false)`;
+  `coalesce(${WITHOUT_VALUE_DIRECTIVES(column)} ~* '(^|[\\s,:])(nofollow|none)([\\s,]|$)', false)`;
 
 /**
  * `indexabilityOf(row).status` as a SQL expression over an aliased `pages`, so a

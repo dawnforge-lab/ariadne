@@ -536,8 +536,8 @@ describe("check universe", () => {
     // unreachable robots.txt (docsFetched > 0), where it was silent; no copy or other rule moved.
     // 0.26.0: Phase 29a — structured data validated (microdata, RDFa, two thresholds), then the
     // 2026-11-16 rework: judged by web standards, not Google; registry.ts carries the grounds.
-    // 0.28.0: Phase 29c — crawl analysis (one bump for the phase); registry.ts carries the grounds.
-    expect(RULESET_VERSION).toBe("0.28.0");
+    // 0.28.1: the robots `none` fix (value directives keep their value); registry.ts carries the grounds.
+    expect(RULESET_VERSION).toBe("0.28.1");
   });
   it("every listed check id is a well-formed CHECK-NN and unique", () => {
     expect(new Set(CRAWL_CHECK_IDS).size).toBe(CRAWL_CHECK_IDS.length);

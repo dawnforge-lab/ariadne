@@ -2096,8 +2096,8 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
       title: "What changed between two crawls of one site",
       description:
         "Two crawls of the SAME site, rule by rule: what appeared, what went away, " +
-        "and what is still there. Answers {base, head, comparable, caveats, rules}.\n\n" +
-        "base and head each carry {crawlId, siteUrl, rulesRunAt, rulesetVersions, " +
+        "and what is still there. Answers {base, head, matchedBy, comparable, caveats, rules}.\n\n" +
+        "base and head each carry {crawlId, siteUrl, landedOn, rulesRunAt, rulesetVersions, " +
         "findingCap, findingsCount}. rulesetVersions is read off the FINDINGS' own " +
         "stamp, not off the crawl row — a crawl made under one ruleset and judged " +
         "later under another is stamped with the one that judged it — and it is a " +
@@ -2132,6 +2132,19 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "persisting, and baseUrls = resolved + persisting. A site-wide finding has " +
         "no page URL and compares by rule presence alone; it appears in the " +
         "drill-down as url null.\n\n" +
+        "WHERE EACH CRAWL LANDED. base.landedOn and head.landedOn are the origins " +
+        "each crawl's start url's redirect chain ended on (null for a list crawl, " +
+        "which has no start page) — the crawler follows the site's redirects and " +
+        "stays where it is sent. Two crawls that landed on one origin pair findings " +
+        "on the exact page URL (matchedBy url), whatever address each was typed as. " +
+        "When they landed on different origins (the site moved between them, e.g. " +
+        "http to https), matchedBy is path: each base page URL on the base's landing " +
+        "origin is read in the head's first, so a moved site is not every finding " +
+        "resolved and new; path and query still match exactly, and a base URL on any " +
+        "other host is matched as it is. If two of one rule's base URLs would pair " +
+        "with one head URL, the comparison is refused with 409 naming the rule and " +
+        "both; a spider crawl with no stored page for its start url is refused with " +
+        "409 too.\n\n" +
         "READ comparable BEFORE READING A CHANGE. It is false when the engine can " +
         "see that the two sides' numbers were produced under different conditions, " +
         "and every reason is in caveats as {code, message}:\n" +
@@ -2178,7 +2191,7 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
     {
       title: "The URLs behind one comparison count",
       description:
-        "One rule's URLs in one of crawl_compare's three sets: {url}. This is the " +
+        "One rule's URLs in one of crawl_compare's three sets: {url, baseUrl}. This is the " +
         "drill-down — crawl_compare gives you 'links.orphan: 43 new' in one small " +
         "object, and this gives you the 43 URLs when you want them.\n\n" +
         `set is one of: ${COMPARE_SETS.join(", ")}. new is URLs the head crawl has ` +
@@ -2188,6 +2201,11 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "URLs as the count said.\n\n" +
         "url is null for a site-wide finding — a fact about the crawl rather than " +
         "about a page, which compares by whether the rule fired at all.\n\n" +
+        "url is the URL the sets are keyed on: the head's own, or, when the two " +
+        "crawls landed on different origins (crawl_compare's matchedBy path), a base " +
+        "URL read in the head's origin. baseUrl is the base crawl's own stored URL " +
+        "for that finding (resolved and persisting), null for new and for a " +
+        "site-wide finding; it equals url unless the crawls landed apart.\n\n" +
         "A rule that fires more than once on a page appears ONCE per URL here, for " +
         "the reason crawl_compare's description sets out: the page URL is the only " +
         "identity a finding keeps across two crawls.\n\n" +
@@ -2232,12 +2250,27 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
       title: "What changed on each page between two crawls of one site",
       description:
         "Two crawls of the SAME site, field by field, over what each crawl stored " +
-        "(nothing is fetched). Answers {base, head, thresholds, urls, fields}. base and " +
-        "head are {crawlId, siteUrl, rulesRunAt, pages}. urls is {common, added, " +
+        "(nothing is fetched). Answers {base, head, matchedBy, thresholds, urls, fields}. " +
+        "base and head are {crawlId, siteUrl, landedOn, rulesRunAt, pages}. urls is {common, added, " +
         "removed}: URLs both crawls hold, URLs only the head holds, URLs only the " +
         "base held. Pages are paired on the stored url exactly, so '/Page' and " +
         "'/page', or '/a' and '/a/', are different pages and never one removed and " +
         "one added.\n\n" +
+        "WHERE EACH CRAWL LANDED. The crawler follows redirects and stays on the " +
+        "address the site sends it to, so base.landedOn and head.landedOn are the " +
+        "origins each crawl's start url's redirect chain ended on (null for a list " +
+        "crawl, which has no start page). Two crawls typed as http://example.com and " +
+        "https://www.example.com of a site that redirects one to the other landed on " +
+        "one origin and are paired on the exact url (matchedBy url). When they landed " +
+        "on different origins (the site moved between them, e.g. http to https), " +
+        "matchedBy is path: each base url on the base's landing origin is read in the " +
+        "head's first (http://example.com/a pairs with https://www.example.com/a), so " +
+        "a moved site diffs page by page; path and query still match exactly, and a " +
+        "base url on any other host is matched as it is. The base's canonicals are " +
+        "read the same way, so a self-canonical that moved with the site is unchanged " +
+        "and a head canonical still naming the old address is a change. If two base " +
+        "pages would pair with one head url, the diff is refused with 409 naming both; " +
+        "a spider crawl with no stored page for its start url is refused with 409 too.\n\n" +
         "fields is one {field, changed, notComparable} per field, in this order: " +
         `${DIFF_FIELD_NAMES.join(", ")}. Counts are over the common URLs. ` +
         "changed is the pages whose value differs. notComparable is the pages where " +
@@ -2287,7 +2320,10 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
       description:
         "The pages behind one of crawl_diff's counts, with what each looked like in " +
         "the two crawls. Answers {items, nextCursor, field, state, thresholds}; each " +
-        "item is {url, before, after}, ordered by URL. before is the BASE crawl's " +
+        "item is {url, baseUrl, before, after}, ordered by url. url is the page's " +
+        "address in the HEAD crawl's site (for a removed page, the base's url as it " +
+        "was matched); baseUrl is the BASE crawl's own stored url, null for an added " +
+        "page. The two differ only when crawl_diff's matchedBy is path. before is the BASE crawl's " +
         "stored value and after the HEAD crawl's, as stored (text is capped as it " +
         "was stored): a string for title, metaDescription, h1, fetchClass (the " +
         "fetch class, e.g. ok, client_error) and metaRobots (the robots meta content " +
