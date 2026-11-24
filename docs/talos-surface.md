@@ -1,6 +1,6 @@
 # The Ariadne surface Talos codes against
 
-**Status:** the contract as of Phase 29c (ruleset 0.28.1, migrations 0000–0060,
+**Status:** the contract as of Phase 29c (ruleset 0.29.0, migrations 0000–0060,
 38 MCP tools / 38 HTTP routes; every column label in this document is served
 under the ruleset version the engine reports — `rules_catalog`'s
 `rulesetVersion`, which the metric-table pass moves).
@@ -4440,7 +4440,7 @@ Six postures a Talos integrator should know about rather than discover:
 
 ## 11. Versioning, and what a ruleset change does to a served crawl
 
-`RULESET_VERSION` (**0.28.1** after Phase 29c) stamps **judgement**: bump it when
+`RULESET_VERSION` (**0.29.0** after Phase 29d) stamps **judgement**: bump it when
 a rule's verdict or copy changes. Adding a rule or a metric family adds rows
 without changing a verdict — `metrics` rows carry no version column at all —
 which is the argument Phase 10 held 0.7.0 on.

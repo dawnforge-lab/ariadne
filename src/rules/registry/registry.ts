@@ -1104,7 +1104,12 @@ const KINDS = ["page", "query", "metric"] as const satisfies readonly AnyRule["k
 //        writer's `is_indexable` stamp, and spelled in SQL as `SAYS_NOINDEX`.
 //        Verdicts change on such pages: `indexability.noindex` and every
 //        finding's indexability label. Rule count unchanged.
-export const RULESET_VERSION = "0.28.1";
+// 0.29.0: Phase 29d, Phase 29 backlog.
+//        Page types: a numeric last segment keeps `:id` beside a slug type. A
+//        pagination page (`/blog/10/`) is its own page type and is no longer absorbed
+//        into `/blog/:slug` at crawl end, so `schema.template-inconsistent` no longer
+//        files listing pages against a post template. Later 29d tasks append here.
+export const RULESET_VERSION = "0.29.0";
 
 /**
  * The 48 crawl-derived checks (sf-audit checklist, Pre-Crawl + sections 1–11,

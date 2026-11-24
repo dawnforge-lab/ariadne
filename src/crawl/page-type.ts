@@ -73,6 +73,9 @@ export function derivePageType(
 // Phase 2: template inference over the crawl's population.
 // --------------------------------------------------------------------------
 
+/** The placeholder a numeric segment takes (pagination, ids). */
+const ID = ":id";
+
 /** The placeholder a collapsed family's last segment takes. */
 const SLUG = ":slug";
 
@@ -142,6 +145,9 @@ function familyOf(pageType: string): string | null {
   if (detectUrlTemplate(pageType) !== pageType) return null;
   const segments = pageType.split("/").filter(Boolean);
   if (segments.length < 2) return null;
+  // Pagination (`/blog/10/`) types as `:id`; it is its own page type and never
+  // joins the slug family beside it. Its family is itself, so it has one member.
+  if (segments[segments.length - 1] === ID) return pageType;
   return `/${[...segments.slice(0, -1), SLUG].join("/")}`;
 }
 
@@ -324,7 +330,10 @@ export async function inferPageTemplates(
               where seg ~ '^[0-9]+$'
                  or length(seg) - length(replace(seg, '-', '')) >= 2
             )
-          then '/' || array_to_string(segs[1:cardinality(segs) - 1], '/') || '/' || ${SLUG}::text
+          then case
+            when segs[cardinality(segs)] = ${ID}::text then page_type
+            else '/' || array_to_string(segs[1:cardinality(segs) - 1], '/') || '/' || ${SLUG}::text
+          end
         end as family
       from segmented
     ),
