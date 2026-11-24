@@ -130,12 +130,22 @@ New:
 - **A declarer is any 200 response with stored `header` or `html` declarations.** That covers
   `ok` and `non_html` alike. The return-link, invalid-code, non-indexable-target and
   not-crawled rules judge its set like a page's.
-- **What indexable means for a non-HTML response:** a 200 with no `noindex` in `X-Robots-Tag`,
-  and no `Link` canonical pointing elsewhere.
-  - These are the same two facts an HTML page's indexability reads from its headers.
-  - If `pages.is_indexable` is not computed for `non_html` rows today, extraction 5 computes it.
-  - A crawl below extraction 5 reports PDF sets as not measured. It never treats them as
-    indexable.
+- **A PDF is indexable unless its HTTP headers say otherwise** (owner, 2026-11-24).
+  - `pages.is_indexable` is true for a PDF (`content_type` `application/pdf`) that answers 200
+    with no `noindex` (or `none`) in `X-Robots-Tag`. The same `saysNoindex` definition the HTML
+    pages use decides it.
+  - A `Link` canonical does not change it. That is the same as HTML, whose `is_indexable` does
+    not read the canonical either.
+  - Today `isIndexable` (`src/crawl/persist.ts:1062`) requires `fetch_class = 'ok'`, so every
+    PDF is stored non-indexable. That changes at persist for new crawls. A data migration
+    rewrites stored crawls from their stored status and `x_robots_tag`. Both facts have been
+    stored since 26c.
+  - Every reader of `is_indexable` (77 references in 19 files) is checked:
+    - **Readers that mean an indexable document** take PDFs: sitemap, hreflang, link targets,
+      the health counts and the diff.
+    - **Readers that mean an indexable HTML page** gain an explicit `FETCHED_OK` guard: content
+      and duplicate checks, render selection, the page-level indexability and canonical rules.
+  - Other non-HTML types (Word, Excel, images) stay non-indexable.
 - The cluster rules (`hreflang-integrity`, completeness) use the same declarer predicate. There
   is one definition, in `src/rules/helpers.ts`, beside `FETCHED_OK`.
 
@@ -281,8 +291,8 @@ In `test/worker/serve.test.ts`:
   - politeness (9): continuation reads go through the host gate, and presets never bypass a
     challenge.
 - `EXTRACTION_VERSION` 5 and a new ruleset (0.29.0). Each bump is recorded in its doc block.
-- Migrations only through drizzle-kit and `npm run db:migrate`. I expect none: new values sit in
-  jsonb or in existing columns.
+- Migrations only through drizzle-kit and `npm run db:migrate`. One data migration is expected,
+  for stored PDFs' `is_indexable`. Every other new value sits in jsonb or in an existing column.
 - No fallbacks:
   - a missing robots token is derived and stored visibly, or refused;
   - a missing count on an old page is "not measured", never 0.
@@ -296,6 +306,9 @@ In `test/worker/serve.test.ts`:
   null, meaning not measured, below extraction 5.
 - **`schema.unresolved-reference` evidence:** the unresolved references and `unresolvedCount`.
 - **Hreflang findings** can now name a PDF as the declarer.
+- **PDFs count as indexable** unless `X-Robots-Tag` says `noindex`. This shows in `pages_query`,
+  the health counts, sitemap findings and the diff, and stored crawls are rewritten by the
+  migration.
 - **Page types:** a numeric last segment keeps `:id` beside a slug type. This shows in every
   `pageType` filter and cohort.
 - **`render_error`** gains two reasons: invalid measurement shape, and over the total deadline.

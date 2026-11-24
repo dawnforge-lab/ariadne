@@ -17,8 +17,9 @@
 **Architecture:** Ten independent fixes, each in the module that owns the behaviour, plus gate
 tooling.
 - Two version bumps carry them: `RULESET_VERSION` 0.29.0 and `EXTRACTION_VERSION` 5.
-- No migration is expected. New values sit in jsonb (`structured_data_skips`,
-  `validation_jsonb`, `config_jsonb`) or in existing columns (`links.target_page_id`).
+- One data migration (`0061`) rewrites stored PDFs' `is_indexable`. Every other new value sits
+  in jsonb (`structured_data_skips`, `validation_jsonb`, `config_jsonb`) or in an existing
+  column (`links.target_page_id`).
 
 **Tech Stack:** TypeScript strict ESM, Node 22, Postgres 16 + drizzle-kit, vitest, Playwright
 (CDP). There are no new dependencies.
@@ -41,9 +42,11 @@ it on 2026-11-24 ("go ahead").
   - `EXTRACTION_VERSION` goes `4` → `5` in Task 2, documented in the `src/crawl/versions.ts`
     doc block.
   - `RENDER_CAPTURE_VERSION` stays `3`: Task 8 changes no captured value.
-- **Migrations.** Only with `npx drizzle-kit generate` and `npm run db:migrate`. The next number
-  is `0061`. None is expected. A task that finds it needs one stops and reports
-  `NEEDS_CONTEXT`.
+- **Migrations.** Only with `npx drizzle-kit generate` and `npm run db:migrate`.
+  - The next number is `0061`, Task 5a's data migration
+    (`npx drizzle-kit generate --custom --name pdf_indexable`).
+  - No other migration is expected. A task that finds it needs one stops and reports
+    `NEEDS_CONTEXT`.
 - **Not measured is never 0.** A count that a page's extraction did not record is null, and
   surfaces say "not measured".
 - **Commits.** Each commit message ends with:
@@ -121,21 +124,21 @@ it on 2026-11-24 ("go ahead").
 
 ## Rulings made while planning
 
-- **R1 — PDF indexability is judged in the hreflang predicate, not in `pages.is_indexable`.**
-  - The spec says extraction 5 computes `is_indexable` for `non_html` if it is not computed.
-    It is not: `isIndexable` (`src/crawl/persist.ts:1062`) requires `fetch_class = 'ok'`.
-  - Widening it would make PDFs count as indexable pages in every metric and rule that reads
-    the column.
-  - Instead, a new `HREFLANG_DECLARER(alias)` in `src/rules/helpers.ts` is:
-    - `FETCHED_OK(alias)`, or
-    - `fetch_class = 'non_html' and status_code = 200`.
-  - A new `HREFLANG_INDEXABLE(alias)` is:
-    - `is_indexable` for `ok`, or
-    - for `non_html`: `not SAYS_NOINDEX(x_robots_tag)` and (`canonical_header is null` or it
-      equals `url`).
-  - These facts are stored on crawls since 26c, so old crawls are judged too, and the spec's
-    "not measured below extraction 5" does not apply to PDFs.
-  - Cost if wrong: PDF findings on re-judged old crawls, which is visible and reversible.
+- **R1 — PDFs are indexable unless their headers say otherwise (owner, 2026-11-24).**
+  - `pages.is_indexable` is true for a PDF that:
+    - answers 200;
+    - is `fetch_class = 'non_html'` with `content_type` matching `application/pdf`
+      (case-insensitive, parameters ignored);
+    - has no `saysNoindex(x_robots_tag)`.
+  - The canonical is not read, as for HTML.
+  - Task 5a sets it at persist, and data migration `0061` rewrites stored rows with the same
+    SQL `SAYS_NOINDEX` (its parity with the JS `saysNoindex` is already tested).
+  - Task 5a also audits every reader. Each reader that means "an indexable HTML page" gains
+    `FETCHED_OK`.
+  - Task 5b's `HREFLANG_DECLARER(alias)` is `FETCHED_OK(alias)` or (`fetch_class = 'non_html'
+    and status_code = 200`). Indexability reads plain `is_indexable`.
+  - Because the migration rewrites stored crawls, old crawls are judged too after a rules
+    re-run.
 - **R2 — `robotsUserAgent` is resolved once, when the crawl's config is built, and stored.** A
   new crawl's `config_jsonb` always carries it: from the preset, given, or derived. Every
   robots reader takes it from the config.
@@ -182,7 +185,8 @@ it on 2026-11-24 ("go ahead").
 | 2 | `src/crawl/parse/microdata.ts`, `src/crawl/parse/rdfa.ts`, `src/crawl/parse/item-core.ts`, `src/crawl/parse/page-analyzer.ts`, `src/crawl/versions.ts`, `src/crawl/persist.ts` |
 | 3 | `src/api/structured-data.ts`, `src/api/service.ts`, `src/api/csv.ts`, `src/api/mcp.ts`, `docs/talos-surface.md` |
 | 4 | `src/rules/schema-org/validate.ts`, `src/rules/schema-org/blob-sql.ts`, `src/rules/query/schema-validation.ts`, `src/rules/derive/schema-validation.ts`, surfaces |
-| 5 | `src/rules/helpers.ts`, `src/rules/query/hreflang.ts`, `src/rules/query/hreflang-integrity.ts`, `src/rules/query/hreflang-completeness.ts` |
+| 5a | `src/crawl/persist.ts`, `src/crawl/robots-directives.ts`, `drizzle/0061_pdf_indexable.sql`, every HTML-only `is_indexable` reader |
+| 5b | `src/rules/helpers.ts`, `src/rules/query/hreflang.ts`, `src/rules/query/hreflang-integrity.ts`, `src/rules/query/hreflang-completeness.ts` |
 | 6 | new `src/crawl/user-agents.ts`; `src/crawl/loop.ts`, `src/api/config-schema.ts`, `src/crawl/discovery.ts`, `src/crawl/resources/fetch-resources.ts`, `src/rules/query/robots.ts`, `src/rules/crawl-evidence.ts`, `src/api/service.ts`, `src/api/mcp.ts` |
 | 7 | `src/crawl/resources/image-size.ts`, `src/crawl/resources/fetch-resources.ts` |
 | 8 | `src/crawl/render/renderer.ts`, `src/crawl/render/run-render.ts` |
@@ -397,12 +401,60 @@ Task 11 runs first, so later suite runs leave no strays. After that the order is
 - [ ] **Step 4:** Run `npm test` and `npx tsc --noEmit`.
 - [ ] **Step 5:** Commit `fix(schema): unresolved references are found wherever they sit (29d)`.
 
-### Task 5: A PDF's hreflang set is judged
+### Task 5a: PDFs are indexable unless their headers say otherwise
 
 **Files:**
 - Modify:
-  - `src/rules/helpers.ts`: `HREFLANG_DECLARER`, `HREFLANG_INDEXABLE` (R1), beside
-    `FETCHED_OK`;
+  - `src/crawl/persist.ts`: `isIndexable` (`:1062`);
+  - `drizzle/0061_pdf_indexable.sql` (custom, generated);
+  - each `is_indexable` reader that means an HTML page. Audit all 19 files:
+    `grep -rn "is_indexable\|isIndexable" src/`.
+  - `docs/talos-surface.md`.
+- Test: new `test/crawl/pdf-indexable.test.ts`, new `test/db/pdf-indexable-migration.test.ts`
+
+**Interfaces:**
+- Produces: `isPdf(contentType: string | null): boolean`, exported from
+  `src/crawl/robots-directives.ts` beside `saysNoindex`, and its SQL twin
+  `IS_PDF(column: string): string` in `src/rules/helpers.ts`, with a parity test.
+
+- [ ] **Step 1: Write the failing tests:**
+  - **persist:** a 200 `application/pdf` with no `X-Robots-Tag` is stored `is_indexable = true`.
+    These are stored false:
+    - `X-Robots-Tag: noindex`;
+    - `X-Robots-Tag: none`;
+    - a 404 PDF;
+    - a 200 `application/msword`;
+    - a 200 `image/png`.
+
+    `application/PDF; charset=binary` counts as a PDF.
+  - **migration:** insert the same five shapes with `is_indexable = false`, run the migration's
+    SQL, and assert only the plain 200 PDF flips. An HTML row is untouched.
+  - **The reader audit (one test per guarded reader):** a crawl with an indexable PDF and an
+    indexable HTML page.
+    - Each HTML-only reader ignores the PDF: render selection, duplicate titles and
+      descriptions, content rules, page-level indexability and canonical rules.
+    - Each document reader counts it: the health metric's indexable count, sitemap
+      non-indexable (a PDF in the sitemap is no longer flagged), the link-target rules.
+  - **`isPdf` / `IS_PDF` parity** over `application/pdf`, `Application/PDF;x=1`, `text/html`,
+    null.
+- [ ] **Step 2:** Run the new files. Expect a FAIL.
+- [ ] **Step 3: Implement.**
+  - Change `isIndexable`. Generate the custom migration and write its `update pages set
+    is_indexable = true where …` from `IS_PDF` and `SAYS_NOINDEX`. Apply it with
+    `npm run db:migrate`.
+  - Add `FETCHED_OK` to each HTML-only reader. List every reader and its verdict (document or
+    HTML) in the commit message.
+  - Append to the changelog ("PDFs are indexable unless X-Robots-Tag says noindex"). Update the
+    docs, then run the identifier guard.
+- [ ] **Step 4:** Run `npm test` and `npx tsc --noEmit`.
+- [ ] **Step 5:** Commit `fix(indexability): a PDF is indexable unless its headers say
+  otherwise (29d)`.
+
+### Task 5b: A PDF's hreflang set is judged
+
+**Files:**
+- Modify:
+  - `src/rules/helpers.ts`: `HREFLANG_DECLARER` (R1), beside `FETCHED_OK`;
   - `src/rules/query/hreflang.ts`: `isAuditable` (`:305`), `:466`, `:542`, `:620`, `:697`,
     `:924`, `:1013`;
   - `src/rules/query/hreflang-integrity.ts` (`:87`);
@@ -411,7 +463,8 @@ Task 11 runs first, so later suite runs leave no strays. After that the order is
 - Test: new `test/rules/hreflang-pdf-query.test.ts`; update `test/rules/hreflang-query.test.ts:908-914`.
 
 **Interfaces:**
-- Produces: `HREFLANG_DECLARER(alias: string): SQL` and `HREFLANG_INDEXABLE(alias: string): SQL`.
+- Consumes: Task 5a's `is_indexable` for PDFs.
+- Produces: `HREFLANG_DECLARER(alias: string): SQL`.
 
 - [ ] **Step 1: Write the failing tests** in `hreflang-pdf-query.test.ts`. The fixture rows
   follow `test/crawl/persist.test.ts:1131`'s shape.
@@ -422,8 +475,8 @@ Task 11 runs first, so later suite runs leave no strays. After that the order is
   - **`"a PDF with X-Robots-Tag noindex is a non-indexable target"`.** An HTML page declares
     the PDF as an alternate, and the PDF's `x_robots_tag` is `noindex`, so
     `hreflang.non-indexable-target` fires.
-  - **`"a PDF canonicalised elsewhere is not indexable"`:** `canonical_header` points to
-    another URL.
+  - **`"a plain 200 PDF is an indexable target"`:** an HTML page declaring it gets no
+    `hreflang.non-indexable-target`.
   - **`"an invalid code in a PDF's Link header is reported"`.**
   - **`"a 404 PDF is not a declarer"`:** a `non_html` 404 with header rows produces no
     findings.
@@ -431,9 +484,9 @@ Task 11 runs first, so later suite runs leave no strays. After that the order is
     non-200 cases silent.
 - [ ] **Step 2:** Run the new file. Expect a FAIL.
 - [ ] **Step 3: Implement.**
-  - Every declarer gate uses `HREFLANG_DECLARER`. Every indexability read on a declarer or a
-    target uses `HREFLANG_INDEXABLE`.
-  - `FETCHED_OK` and `pages.is_indexable` are not changed (R1).
+  - Every declarer gate uses `HREFLANG_DECLARER`. Indexability reads `is_indexable`, which
+    Task 5a made true for PDFs.
+  - `FETCHED_OK` is not changed.
   - Append to the changelog. Update the docs ("a declarer can be a PDF"), then run the
     identifier guard.
 - [ ] **Step 4:** Run `npx vitest run test/rules/hreflang*`, then `npm test` and
