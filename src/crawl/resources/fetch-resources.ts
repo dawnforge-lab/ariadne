@@ -30,8 +30,11 @@
  * or a third `need`, ends the walk with `header-beyond-limit`. Each window is a
  * buffer of at most 64 KiB, dropped once read, so memory is still one buffer
  * per in-flight request. An image row therefore costs at most 4 requests plus
- * its redirect hops (the first Range GET, then either a plain GET or up to two
- * continuations, never both), where the HEAD path cost 1 for a sized file and 2
+ * its redirect hops, the ceiling the spec states and MAX_ROW_REQUESTS enforces
+ * (redirects + 4). The worst case actually reachable is 3 of them: the first
+ * Range GET, then either one plain GET or up to two continuations (never both,
+ * since a continuation needs a 206 with a total and the plain GET follows its
+ * absence); the fourth is headroom. The HEAD path cost 1 for a sized file and 2
  * for an unsized one: each hop is one Range GET. A row that has fallen back to
  * the plain GET stays plain for any redirect after that, so the fallback is
  * never paid twice. Every Range request, a continuation included, takes a gate
@@ -669,8 +672,8 @@ export async function fetchCrawlResources(
     // What the next request is. An image starts (and, after each redirect,
     // restarts) as a Range GET; css/js start as a HEAD. `plain` is the one
     // counted GET without a Range, which a HEAD that could not size the file,
-    // a 206 of unknown total or a 416 earns (and which, with `range`, makes an
-    // image row's two-request ceiling).
+    // a 206 of unknown total or a 416 earns. `continue` is an image header
+    // walk's read of the next window (29d, ruling R4).
     const firstMode: RequestMode = isImage ? "range" : "head";
     let mode: RequestMode = firstMode;
     let hops = 0;
@@ -709,14 +712,15 @@ export async function fetchCrawlResources(
      * connect). The first read succeeded and is a fact: the row keeps its
      * status, bytes and source, only the dimensions are unknown, and the note
      * names the continuation and its error. A caller's stop never reaches here
-     * (it throws `FetchAbortedError` and leaves the row untouched).
+     * (it throws `FetchAbortedError` and leaves the row untouched). `why` is
+     * "failed: <error>" or "not sent: <why>".
      */
-    const endWalk = (error: string): Promise<void> => {
+    const endWalk = (why: string): Promise<void> => {
       const current = requireWalk(walk);
       fetched += 1;
       return done({
         ...current.verdict,
-        fetchReason: note(`continuation at offset ${current.offset} failed: ${error}`),
+        fetchReason: note(`continuation at offset ${current.offset} ${why}`),
         ...BEYOND_LIMIT,
       });
     };
@@ -749,6 +753,13 @@ export async function fetchCrawlResources(
       // read: the row is left as the per-request check above leaves it, null
       // and unasked.
       if (admission.kind === "aborted") return;
+      // A continuation that cannot be sent leaves the first answer standing
+      // (R4's sibling rule: the first read is a fact, only the size is unknown).
+      if (mode === "continue") {
+        if (admission.kind === "parked") return endWalk(`not sent: ${admission.reason}`);
+        if (admission.kind === "capped") return endWalk(`not sent: ${RESOURCE_CAP_REASON}`);
+        if (admission.kind === "denied") return endWalk(`not sent: ${admission.reason}`);
+      }
       if (admission.kind === "capped") {
         // Unfetched, not failed: the null still means "seen, not yet asked".
         return done(unfetchable(null, RESOURCE_CAP_REASON));
@@ -784,6 +795,7 @@ export async function fetchCrawlResources(
       // requests at a server that has already stopped answering.
       const record = hosts.get(host);
       if (record !== undefined && record.parked !== null) {
+        if (mode === "continue") return endWalk(`not sent: ${record.parked}`);
         failed += 1;
         return done(unfetchable("fetch_error", note(record.parked)));
       }
@@ -814,7 +826,7 @@ export async function fetchCrawlResources(
       if (attempt.kind === "refused") {
         // The connect-time address guard, which is the wall the string-level
         // policy above cannot be: a public name with a private A record.
-        if (mode === "continue") return endWalk(`refused: ${attempt.reason}`);
+        if (mode === "continue") return endWalk(`failed: ${attempt.reason}`);
         failed += 1;
         return done(unfetchable("refused", note(attempt.reason)));
       }
@@ -827,7 +839,7 @@ export async function fetchCrawlResources(
               `(${attempt.reason})`;
           }
         }
-        if (mode === "continue") return endWalk(attempt.reason);
+        if (mode === "continue") return endWalk(`failed: ${attempt.reason}`);
         failed += 1;
         return done(unfetchable("fetch_error", note(attempt.reason)));
       }
@@ -841,7 +853,7 @@ export async function fetchCrawlResources(
         // plain GET and never fails the row: the first answer already measured
         // it. Anything but the window asked for ends the walk (ruling R4).
         const current = requireWalk(walk);
-        const window = continuationWindow(attempt, current.offset);
+        const window = continuationWindow(attempt, current.offset, current.total);
         if (typeof window === "string") {
           fetched += 1;
           return done({ ...current.verdict, fetchReason: note(window), ...BEYOND_LIMIT });
@@ -856,7 +868,11 @@ export async function fetchCrawlResources(
           continue;
         }
         fetched += 1;
-        return done({ ...current.verdict, ...step.dimensions });
+        return done({
+          ...current.verdict,
+          fetchReason: orNull(note(step.note ?? "")),
+          ...step.dimensions,
+        });
       }
 
       if (status >= 300 && status < 400) {
@@ -962,6 +978,8 @@ export async function fetchCrawlResources(
         );
       }
       let dimensions: Dimensions = NO_DIMENSIONS;
+      // Why the walk ended `header-beyond-limit` without a read, when it did.
+      let walkNote = "";
       if (isImage) {
         const read = imageDimensions(attempt.head, contentType, headers);
         if ("need" in read) {
@@ -992,6 +1010,7 @@ export async function fetchCrawlResources(
             continue;
           }
           dimensions = step.dimensions;
+          walkNote = step.note ?? "";
         } else {
           dimensions = read;
         }
@@ -1000,7 +1019,7 @@ export async function fetchCrawlResources(
       const truncatedNote = attempt.countTruncated
         ? `body exceeded the ${maxCountedBytes}-byte counting cap; bytes is a floor`
         : "";
-      const reason = note(truncatedNote);
+      const reason = note([truncatedNote, walkNote].filter((part) => part !== "").join("; "));
       return done({
         fetchClass: "ok",
         fetchReason: reason === "" ? null : reason,
@@ -1223,8 +1242,10 @@ function requireWalk(walk: ImageWalk | null): ImageWalk {
   return walk;
 }
 
+const orNull = (text: string): string | null => (text === "" ? null : text);
+
 type WalkStep =
-  | { kind: "done"; dimensions: Dimensions }
+  | { kind: "done"; dimensions: Dimensions; note?: string }
   | { kind: "ask"; offset: number; state: ImageWalkState; total: number };
 
 /**
@@ -1239,13 +1260,25 @@ function nextStep(
   ctx: { asked: number; lastOffset: number; total: number | null },
 ): WalkStep {
   if (parsed.kind !== "need") return { kind: "done", dimensions: dimensionsOf(parsed) };
-  if (
-    ctx.total === null ||
-    ctx.asked >= MAX_IMAGE_CONTINUATIONS ||
-    parsed.offset >= ctx.total ||
-    parsed.offset <= ctx.lastOffset
-  ) {
-    return { kind: "done", dimensions: BEYOND_LIMIT };
+  const refuse = (note: string): WalkStep => ({ kind: "done", dimensions: BEYOND_LIMIT, note });
+  if (ctx.total === null) {
+    return refuse(
+      `header runs past the ${IMAGE_HEADER_BYTES}-byte read (next bytes at ${parsed.offset}) ` +
+        `and the answer was not a 206 with a total: no continuation sent`,
+    );
+  }
+  if (ctx.asked >= MAX_IMAGE_CONTINUATIONS) {
+    return refuse(
+      `header needs more than ${MAX_IMAGE_CONTINUATIONS} continuation reads (next bytes at ${parsed.offset})`,
+    );
+  }
+  if (parsed.offset >= ctx.total) {
+    return refuse(`header read would start at byte ${parsed.offset}, at or past the total of ${ctx.total}`);
+  }
+  if (parsed.offset <= ctx.lastOffset) {
+    return refuse(
+      `header read at byte ${parsed.offset} does not move past the window read at ${ctx.lastOffset}`,
+    );
   }
   return { kind: "ask", offset: parsed.offset, state: parsed.state, total: ctx.total };
 }
@@ -1258,6 +1291,7 @@ function nextStep(
 function continuationWindow(
   attempt: Extract<Attempt, { kind: "response" }>,
   offset: number,
+  total: number,
 ): Buffer | string {
   if (attempt.statusCode !== 206) {
     return `header read at byte ${offset} answered HTTP ${attempt.statusCode}, not a 206`;
@@ -1268,6 +1302,11 @@ function continuationWindow(
       `header read at byte ${offset} answered a Content-Range that does not start there ` +
       `(${headerValue(attempt.headers, "content-range") ?? "none"})`
     );
+  }
+  // The file changed between the reads: the first window and this one are not
+  // one file's, so no size can be built from both.
+  if (range.total !== null && range.total !== total) {
+    return `header read at byte ${offset} answered a total of ${range.total}, the first answer said ${total}`;
   }
   const encoding = headerValue(attempt.headers, "content-encoding");
   if (encoding !== null && encoding.trim().toLowerCase() !== "identity") {

@@ -74,7 +74,7 @@
  * multi-item AVIF whose items disagree on rotation, which is rare, and is a
  * known limit rather than a handled case.
  *
- * NO GUESSING. A size that cannot be read is `{kind:"none", reason}`, with the
+ * NO GUESSING. A size that cannot be read is `{kind:"reason", reason}`, with the
  * reason saying why, never a default dimension. The reasons:
  *   - `empty`               zero bytes;
  *   - `svg`                 a vector format with no intrinsic pixel size;
@@ -190,9 +190,6 @@ function readPng(head: Uint8Array, resume?: Extract<ImageWalkState, { format: "p
     if (be32(head, 8) !== PNG_IHDR_LENGTH) return none("malformed");
     width = be32(head, 16);
     height = be32(head, 20);
-    // A square image has the same sides turned or not: no chunk can change the
-    // size, so there is nothing to walk for (and nothing to read past 64 KiB).
-    if (width === height) return size("png", width, height);
     orientation = undefined;
     base = 0;
     pos = 8 + 12 + PNG_IHDR_LENGTH;
@@ -201,12 +198,20 @@ function readPng(head: Uint8Array, resume?: Extract<ImageWalkState, { format: "p
     base = resume.at;
     pos = 0;
   }
-  // Ask for the bytes at window index `at` (a chunk header) and carry on there.
-  const need = (at: number): ImageParse => ({
-    kind: "need",
-    offset: base + at,
-    state: { format: "png", at: base + at, width, height, orientation },
-  });
+  // The walk ran out of window at index `at` (a chunk header) with no `eXIf`
+  // read. A square image has the same sides turned or not, so no later chunk
+  // can change its size: it is sized from IHDR. Only here, once every chunk
+  // inside the window has passed the checks below (an IEND or an impossible
+  // length before IDAT is still malformed). Otherwise ask for the bytes at
+  // `at` and carry on there.
+  const need = (at: number): ImageParse =>
+    width === height
+      ? size("png", width, height)
+      : {
+          kind: "need",
+          offset: base + at,
+          state: { format: "png", at: base + at, width, height, orientation },
+        };
   // The chunks between IHDR and the first IDAT, for an `eXIf` (module
   // header). Each: length (4), type (4), data, CRC (4).
   for (;;) {
@@ -313,10 +318,15 @@ function readJpeg(head: Uint8Array, resume?: Extract<ImageWalkState, { format: "
     const markerStart = pos;
     // Find the next marker: 0xFF, then any number of 0xFF fill bytes.
     while (pos < head.length && head[pos] !== 0xff) pos++;
+    const junk = pos > markerStart;
     while (pos < head.length && head[pos] === 0xff) pos++;
     if (pos >= head.length) {
-      // No marker yet. Bytes already scanned held none; a trailing 0xFF may
-      // start one, so the next window begins on it.
+      // Non-0xFF bytes where a marker belonged are not a segment boundary
+      // running out: reading on would scan junk for a spurious marker.
+      if (junk) return none("header-beyond-limit");
+      // Otherwise the segment ended at the window's end, or only fill bytes
+      // were left: a trailing 0xFF may start a marker, so the next window
+      // begins on it.
       return need(head.length > markerStart && head[head.length - 1] === 0xff ? head.length - 1 : head.length);
     }
     const marker = head[pos]!;

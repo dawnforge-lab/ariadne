@@ -1924,6 +1924,27 @@ describe("an image header past 64 KiB costs at most two continuation reads (29d,
   const wide = pngWithChunkBeforeIdat(pngBytes(40, 20), 100 * KIB);
   const wideThree = pngWithChunkBeforeIdat(pngBytes(40, 20), 100 * KIB, 3);
   const jpeg = Buffer.concat([jpegHeader(800, 600, 100 * KIB), Buffer.alloc(5_000)]);
+  // A chunk length that points far past the end of a file the server says is ~70 KB.
+  const lying = (() => {
+    const base = pngBytes(40, 20);
+    const chunk = Buffer.alloc(12 + 70_000, 0x61);
+    chunk.writeUInt32BE(1_000_000, 0);
+    chunk.write("prVt", 4, "ascii");
+    return Buffer.concat([base.subarray(0, 33), chunk]);
+  })();
+  // An eXIf chunk bigger than one window: the second read opens on the same chunk.
+  const hugeExif = (() => {
+    const base = pngBytes(40, 20);
+    const chunk = Buffer.alloc(12 + 70_000, 0);
+    chunk.writeUInt32BE(70_000, 0);
+    chunk.write("eXIf", 4, "ascii");
+    return Buffer.concat([base.subarray(0, 33), chunk, base.subarray(33)]);
+  })();
+  const deadRoute = {
+    handler: (req: IncomingMessage) => {
+      req.socket.destroy();
+    },
+  };
   const slice = (bytes: Buffer, range: string): { first: number; last: number; body: Buffer } => {
     const m = /^bytes=(\d+)-(\d+)$/.exec(range);
     if (m === null) throw new Error(`unexpected range ${range}`);
@@ -1932,7 +1953,7 @@ describe("an image header past 64 KiB costs at most two continuation reads (29d,
     return { first, last, body: bytes.subarray(first, last + 1) };
   };
   /** A server that answers the first window honestly and the continuation as `variant` says. */
-  const route = (bytes: Buffer, variant: "honour" | "200" | "wrong-start" | "416" | "timeout" | "reset") => ({
+  const route = (bytes: Buffer, variant: "honour" | "200" | "wrong-start" | "416" | "timeout" | "reset" | "changed-total") => ({
     handler: (req: IncomingMessage, res: ServerResponse) => {
       const range = req.headers.range;
       if (range === undefined) throw new Error("test server: a plain GET must not happen here");
@@ -1949,6 +1970,15 @@ describe("an image header past 64 KiB costs at most two continuation reads (29d,
       if (variant === "200") {
         res.writeHead(200, { "content-type": "image/png", "content-length": String(bytes.length) });
         res.end(bytes);
+        return;
+      }
+      if (variant === "changed-total") {
+        res.writeHead(206, {
+          "content-type": "image/png",
+          "content-range": `bytes ${first}-${last}/${bytes.length + 1}`,
+          "content-length": String(body.length),
+        });
+        res.end(body);
         return;
       }
       if (variant === "reset") {
@@ -1980,6 +2010,15 @@ describe("an image header past 64 KiB costs at most two continuation reads (29d,
       "/wide-416.png": route(wide, "416"),
       "/wide-timeout.png": route(wide, "timeout"),
       "/wide-reset.png": route(wide, "reset"),
+      "/wide-changed.png": route(wide, "changed-total"),
+      "/wide-ignore.png": { bytes: wide, contentType: "image/png", range: "ignore" },
+      "/wide-star.png": { bytes: wide, contentType: "image/png", range: "star" },
+      "/lying-length.png": route(lying, "honour"),
+      "/huge-exif.png": route(hugeExif, "honour"),
+      "/a-wide.png": route(wide, "honour"),
+      "/b-dead1.png": deadRoute,
+      "/b-dead2.png": deadRoute,
+      "/b-dead3.png": deadRoute,
       "/wide-three.png": route(wideThree, "honour"),
       "/wide.jpg": { bytes: jpeg, contentType: "image/jpeg", range: "honour" },
       "/small.png": { bytes: pngBytes(40, 20), contentType: "image/png", range: "honour" },
@@ -2094,6 +2133,69 @@ describe("an image header past 64 KiB costs at most two continuation reads (29d,
     expect(row.fetchReason).toContain(`continuation at offset ${33 + 12 + 100 * KIB} failed:`);
     expect(summary.failed).toBe(0);
     expect(hitsOf("/wide-reset.png")).toHaveLength(2);
+  });
+
+  it("a continuation whose total differs from the first answer's ends header-beyond-limit with that said", async () => {
+    const { row } = await measureWithGate("/wide-changed.png");
+    expect(row).toMatchObject({ statusCode: 206, bytes: wide.length, width: null, dimensionsReason: "header-beyond-limit" });
+    expect(row.fetchReason).toContain("total of");
+    expect(hitsOf("/wide-changed.png")).toHaveLength(2);
+  });
+
+  it("a header past 64 KiB on a host that ignores Range (200) is header-beyond-limit with no extra request", async () => {
+    const { row, acquires, summary } = await measureWithGate("/wide-ignore.png");
+    expect(row).toMatchObject({ statusCode: 200, bytesSource: "counted", width: null, dimensionsReason: "header-beyond-limit" });
+    expect(row.fetchReason).toContain("not a 206 with a total");
+    expect(hitsOf("/wide-ignore.png")).toHaveLength(1);
+    expect(summary.requests).toBe(1);
+    expect(acquires).toBe(1);
+  });
+
+  it("a header past 64 KiB on the plain-GET path (206 of unknown total) is header-beyond-limit with no continuation", async () => {
+    const { row, acquires } = await measureWithGate("/wide-star.png");
+    expect(row).toMatchObject({ statusCode: 200, bytesSource: "counted", width: null, dimensionsReason: "header-beyond-limit" });
+    expect(row.fetchReason).toContain("not a 206 with a total");
+    expect(hitsOf("/wide-star.png").map((h) => h.range)).toEqual(["bytes=0-65535", null]);
+    expect(acquires).toBe(2);
+  });
+
+  it("an offset at or past the total sends no continuation and says why", async () => {
+    const { row, acquires } = await measureWithGate("/lying-length.png");
+    expect(row).toMatchObject({ statusCode: 206, width: null, dimensionsReason: "header-beyond-limit" });
+    expect(row.fetchReason).toContain("at or past the total");
+    expect(hitsOf("/lying-length.png")).toHaveLength(1);
+    expect(acquires).toBe(1);
+  });
+
+  it("an offset that does not move past the window just read ends the walk and says why", async () => {
+    const { row } = await measureWithGate("/huge-exif.png");
+    expect(row).toMatchObject({ statusCode: 206, width: null, dimensionsReason: "header-beyond-limit" });
+    expect(row.fetchReason).toContain("does not move past");
+    expect(hitsOf("/huge-exif.png")).toHaveLength(2);
+  });
+
+  it("a host parked before the continuation keeps the first answer and sends nothing more", async () => {
+    // One worker per row, a 150 ms gate spacing and url order: the wide row's first
+    // request takes the first slot, three dead rows take the next three and park the
+    // host, and the wide row's continuation waits behind them and finds it parked.
+    const crawlId = await seedCrawl(images.base);
+    const urls = ["/a-wide.png", "/b-dead1.png", "/b-dead2.png", "/b-dead3.png"].map((p) => `${images.base}${p}`);
+    await seedResources(crawlId, urls.map((url) => ({ url, kind: "image" })));
+    const gate = new HostGate({ perHostDelayMs: 150, robotsCrawlDelaySec: null });
+    const summary = await runPass(crawlId, images.base, { gate, maxConcurrency: 4 });
+    const row = await rowFor(crawlId, urls[0]!);
+    expect(row).toMatchObject({
+      fetchClass: "ok",
+      statusCode: 206,
+      bytes: wide.length,
+      bytesSource: "header",
+      width: null,
+      dimensionsReason: "header-beyond-limit",
+    });
+    expect(row.fetchReason).toContain("not sent");
+    expect(row.fetchReason).toContain("parked");
+    expect(hitsOf("/a-wide.png")).toHaveLength(1);
+    expect(summary.failed).toBe(3);
   });
 
   it("a third need ends header-beyond-limit after exactly two continuations", async () => {

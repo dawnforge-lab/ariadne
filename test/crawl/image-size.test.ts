@@ -318,9 +318,19 @@ describe("parseImageHead: nothing is guessed", () => {
     expect(parseImageHead(new Uint8Array(2048).fill(0x41), "image/png")).toEqual({ kind: "reason", reason: "unknown-format" });
   });
 
-  it("a JPEG window with no marker left in it asks for the bytes after it", () => {
+  it("a JPEG window ending on junk where a marker belonged is header-beyond-limit, not a need", () => {
     const head = bytes([0xff, 0xd8], new Array<number>(IMAGE_HEADER_BYTES - 2).fill(0));
-    expect(parseImageHead(head, "image/jpeg")).toMatchObject({ kind: "need", offset: IMAGE_HEADER_BYTES });
+    expect(parseImageHead(head, "image/jpeg")).toEqual({ kind: "reason", reason: "header-beyond-limit" });
+  });
+
+  it("a JPEG window whose last segment ends exactly at its end, or that ends on fill bytes, asks to go on", () => {
+    const seg = (n: number): number[] => [0xff, 0xe2, ...be16(n + 2), ...new Array<number>(n).fill(0)];
+    const exact = bytes([0xff, 0xd8], seg(IMAGE_HEADER_BYTES - 2 - 4));
+    expect(exact.length).toBe(IMAGE_HEADER_BYTES);
+    expect(parseImageHead(exact, "image/jpeg")).toMatchObject({ kind: "need", offset: IMAGE_HEADER_BYTES });
+    const fill = bytes([0xff, 0xd8], seg(IMAGE_HEADER_BYTES - 2 - 4 - 3), [0xff, 0xff, 0xff]);
+    expect(fill.length).toBe(IMAGE_HEADER_BYTES);
+    expect(parseImageHead(fill, "image/jpeg")).toMatchObject({ kind: "need", offset: IMAGE_HEADER_BYTES - 1 });
   });
 
   it("an AVIF whose meta box is cut off before ispe is header-beyond-limit", () => {
@@ -390,14 +400,14 @@ describe("parseImageHead: headers past the 64 KiB window (29d)", () => {
     const need = parseImageHead(full.subarray(0, IMAGE_HEADER_BYTES), "image/png");
     expect(need).toMatchObject({ kind: "need", offset: 33 + 8 + 100 * 1024 + 4 });
     if (need.kind !== "need") throw new Error("expected need");
-    expect(parseImageHead(full.subarray(need.offset), "image/png", need.state)).toEqual({ kind: "size", format: "png", width: 40, height: 20 });
+    expect(parseImageHead(full.subarray(need.offset, need.offset + IMAGE_HEADER_BYTES), "image/png", need.state)).toEqual({ kind: "size", format: "png", width: 40, height: 20 });
   });
 
   it("an eXIf of orientation 6 found in the continuation window resolves to 20x40", () => {
     const full = png(40, 20, pngChunk("prVt", new Array<number>(100 * 1024).fill(0x41)), pngChunk("eXIf", tiffOrientation("MM", 6)));
     const need = parseImageHead(full.subarray(0, IMAGE_HEADER_BYTES), "image/png");
     if (need.kind !== "need") throw new Error("expected need");
-    expect(parseImageHead(full.subarray(need.offset), "image/png", need.state)).toEqual({ kind: "size", format: "png", width: 20, height: 40 });
+    expect(parseImageHead(full.subarray(need.offset, need.offset + IMAGE_HEADER_BYTES), "image/png", need.state)).toEqual({ kind: "size", format: "png", width: 20, height: 40 });
   });
 
   it("a continuation window that ends before IDAT with no eXIf asks again", () => {
@@ -421,7 +431,7 @@ describe("parseImageHead: headers past the 64 KiB window (29d)", () => {
     if (first.kind !== "need") throw new Error("expected need");
     // SOI (2), then each segment is its marker (2), length (2) and payload.
     expect(first.offset).toBe(2 + 4 + 60_000 + 4 + 40_000);
-    expect(parseImageHead(full.subarray(first.offset), "image/jpeg", first.state)).toEqual({ kind: "size", format: "jpeg", width: 800, height: 533 });
+    expect(parseImageHead(full.subarray(first.offset, first.offset + IMAGE_HEADER_BYTES), "image/jpeg", first.state)).toEqual({ kind: "size", format: "jpeg", width: 800, height: 533 });
   });
 
   it("an Exif APP1 cut by the window is read whole from its marker", () => {
@@ -430,6 +440,57 @@ describe("parseImageHead: headers past the 64 KiB window (29d)", () => {
     const full = bytes([0xff, 0xd8], filler, exif, jpegSof(0xc0, 800, 533));
     const first = parseImageHead(full.subarray(0, IMAGE_HEADER_BYTES), "image/jpeg");
     if (first.kind !== "need") throw new Error("expected need");
-    expect(parseImageHead(full.subarray(first.offset), "image/jpeg", first.state)).toEqual({ kind: "size", format: "jpeg", width: 533, height: 800 });
+    expect(parseImageHead(full.subarray(first.offset, first.offset + IMAGE_HEADER_BYTES), "image/jpeg", first.state)).toEqual({ kind: "size", format: "jpeg", width: 533, height: 800 });
+  });
+});
+
+describe("parseImageHead: a square PNG is sized only where the walk runs out of window (29d fix)", () => {
+  it("a square PNG with IEND before IDAT is malformed, not its IHDR size", () => {
+    expect(parseImageHead(bytes(PNG_SIG, IHDR(300, 300), pngChunk("IEND", [])), null)).toEqual({ kind: "reason", reason: "malformed" });
+  });
+
+  it("a square PNG with a chunk length past the spec's ceiling is malformed", () => {
+    expect(parseImageHead(bytes(PNG_SIG, IHDR(300, 300), be32(0x80000000), ascii("tEXt")), null)).toEqual({ kind: "reason", reason: "malformed" });
+  });
+
+  it("a square PNG with a malformed IHDR length is still malformed", () => {
+    const longIhdr = bytes(PNG_SIG, be32(14), ascii("IHDR"), be32(300), be32(300), [8, 2, 0, 0, 0, 0], [0, 0, 0, 0], IDAT_START);
+    expect(parseImageHead(longIhdr, null)).toEqual({ kind: "reason", reason: "malformed" });
+  });
+
+  it("a square PNG whose eXIf is cut by the window is sized from IHDR", () => {
+    const cut = png(300, 300, pngChunk("eXIf", tiffOrientation("MM", 6)));
+    expect(parseImageHead(cut.subarray(0, 33 + 8 + 10), "image/png")).toEqual({ kind: "size", format: "png", width: 300, height: 300 });
+  });
+});
+
+describe("parseImageHead: the resume path never throws (29d fix)", () => {
+  it("random 64 KiB windows fed to every state a first read can leave", () => {
+    const starts: Uint8Array[] = [
+      png(40, 20, pngChunk("prVt", new Array<number>(100 * 1024).fill(0x41))).subarray(0, IMAGE_HEADER_BYTES),
+      bytes([0xff, 0xd8], [0xff, 0xe2, ...be16(40_002), ...new Array<number>(40_000).fill(0)], [0xff, 0xe2, ...be16(40_002), ...new Array<number>(20_000).fill(0)]).subarray(0, IMAGE_HEADER_BYTES),
+      bytes([0xff, 0xd8], exifApp1("MM", [[ORIENTATION, SHORT, 1, 6]]), [0xff, 0xe2, ...be16(65_000)]).subarray(0, 60),
+    ];
+    let seed = 0x1badf00d;
+    const next = (): number => {
+      seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
+      return seed;
+    };
+    let resumed = 0;
+    for (const start of starts) {
+      for (let i = 0; i < 300; i++) {
+        let r = parseImageHead(start, null);
+        for (let step = 0; step < 3 && r.kind === "need"; step++) {
+          const window = new Uint8Array(i % 3 === 0 ? IMAGE_HEADER_BYTES : next() % 400);
+          for (let j = 0; j < window.length; j++) window[j] = next() & 0xff;
+          // Some windows open on something that parses, so the walk goes on.
+          if (i % 2 === 0 && window.length > 12) window.set(r.state.format === "png" ? [0, 0, 0, 4, ...ascii("prVt")] : [0xff, 0xe2, 0, 6]);
+          r = parseImageHead(window, null, r.state);
+          resumed++;
+          expect(["size", "need", "reason"]).toContain(r.kind);
+        }
+      }
+    }
+    expect(resumed).toBeGreaterThan(500);
   });
 });
