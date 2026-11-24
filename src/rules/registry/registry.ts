@@ -1121,6 +1121,15 @@ const KINDS = ["page", "query", "metric"] as const satisfies readonly AnyRule["k
 //        sets `idsTruncated`, and the page's answer is then a lower bound, said as
 //        `unresolvedAtLeast` (rule), `infoCountAtLeast` (listing) and a note on each
 //        CSV row. A verdict whose count and list disagree is stale.
+//        PDFs are indexable unless X-Robots-Tag says noindex (owner ruling, R1): the
+//        crawl stamps a 200 PDF `is_indexable` true unless its header says noindex or
+//        none (`isDocumentOk`, src/crawl/robots-directives.ts), migration 0061 rewrites
+//        stored crawls, and `indexabilityOf` / `INDEXABILITY_STATUS_SQL` read a PDF as
+//        an `ok` row. Document readers take it: `sitemap.non-indexable` (`DOCUMENT_OK`)
+//        and `canonical.non-indexable-target` report a noindexed PDF. HTML-page readers
+//        (on-page, content, duplicates, page canonical/indexability rules, render
+//        selection, `site.health`) were already gated on `FETCHED_OK` / `isAuditable`
+//        / `JUDGED` and are unchanged. Other non-HTML types stay non-indexable.
 export const RULESET_VERSION = "0.29.0";
 
 /**

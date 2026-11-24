@@ -1780,7 +1780,9 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "  pageType   — a template cohort as this crawl typed it; '(untyped)' for " +
         "the pages it could not type\n" +
         "  statusCode — an exact HTTP status, 100..599\n" +
-        "  indexable  — true or false. A page whose indexability the crawl never " +
+        "  indexable  — true or false. A 200 PDF is indexable unless its " +
+        "X-Robots-Tag says noindex; other non-HTML answers are false. A page " +
+        "whose indexability the crawl never " +
         "settled comes back with indexable null and matches NEITHER value; read " +
         "those off an unfiltered listing.\n" +
         "  rendered   — true or false: whether the render pass re-fetched it. " +

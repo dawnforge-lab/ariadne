@@ -3,7 +3,11 @@ import { sql, type SQL } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import { normalizeUrl } from "../crawl/parse/url-utils.js";
 import { ROBOTS_BLOCKED_REASON_PREFIX } from "../crawl/discovery.js";
-import { saysNoindex as directiveSaysNoindex } from "../crawl/robots-directives.js";
+import {
+  isDocumentOk,
+  isPdf,
+  saysNoindex as directiveSaysNoindex,
+} from "../crawl/robots-directives.js";
 import { copyFor } from "./registry/copy/index.js";
 import type { MetricTable } from "./registry/metric-table.js";
 import { defineRule, RULESET_VERSION } from "./registry/registry.js";
@@ -47,6 +51,43 @@ export function isAuditable(page: Pick<PageRecord, "fetchClass" | "statusCode">)
  */
 export const FETCHED_OK = (alias: string): SQL =>
   sql.raw(`${alias}.fetch_class = 'ok' and ${alias}.status_code = 200`);
+
+/**
+ * "Is this a PDF" and "is this a 200 whose indexability its robots directives
+ * decide", defined in src/crawl/robots-directives.ts beside `saysNoindex` and
+ * read by the crawl writer's stamp, re-exported here for the rule layer.
+ */
+export { isDocumentOk, isPdf };
+
+/**
+ * `isPdf` (src/crawl/robots-directives.ts) over one aliased content-type
+ * column, in SQL: the media type `application/pdf`, case-insensitive,
+ * parameters ignored. Parity pinned in test/crawl/pdf-indexable.test.ts.
+ * Migration 0061 (drizzle/0061_pdf_indexable.sql) carries this text verbatim,
+ * pinned in test/db/pdf-indexable-migration.test.ts. NULL coalesces to false
+ * (no content type is not a PDF).
+ *
+ * `[[:space:]]` is JavaScript's `\s` for ASCII; see `SAYS_NOINDEX` for the one
+ * place the two differ.
+ */
+export const IS_PDF = (column: string): string =>
+  `coalesce(${column} ~* '^[[:space:]]*application/pdf[[:space:]]*(;|$)', false)`;
+
+/**
+ * `isDocumentOk` (src/crawl/robots-directives.ts) for a rule that asks in SQL:
+ * a 200 whose indexability its robots directives decide — an HTML page fetched
+ * OK, or a PDF (Phase 29d R1). The cohort of "an indexable DOCUMENT" readers
+ * (`sitemap.non-indexable`), where `FETCHED_OK` is the cohort of "an indexable
+ * HTML PAGE" readers. On it, `is_indexable` is false exactly when a robots
+ * channel says noindex; off it, `is_indexable` is false by construction.
+ *
+ * PARENTHESISED: it contains an `or`.
+ */
+export const DOCUMENT_OK = (alias: string): SQL =>
+  sql.raw(
+    `(${alias}.status_code = 200 and (${alias}.fetch_class = 'ok' or ` +
+      `(${alias}.fetch_class = 'non_html' and ${IS_PDF(`${alias}.content_type`)})))`,
+  );
 
 /**
  * A row the crawl RECORDED and NEVER REQUESTED because robots.txt disallowed it
@@ -761,7 +802,7 @@ export function robotsTokens(value: string | null): string[] {
  */
 export type IndexabilityInput = CanonicalDeclaration &
   RobotsDeclaration &
-  Pick<PageRecord, "fetchClass" | "statusCode" | "isIndexable">;
+  Pick<PageRecord, "fetchClass" | "statusCode" | "contentType" | "isIndexable">;
 
 /** The two words the `indexability` column can hold. */
 export type Indexability = "Indexable" | "Non-Indexable";
@@ -809,11 +850,21 @@ export type IndexabilityStatus =
  *  4. `blocked`             -> `Blocked by bot protection`
  *  5. `disallowed`          -> `Blocked by robots.txt`
  *  6. `timeout`, `network_error` -> `No Response`
- *  7. `non_html`, `too_large`, `unsupported_encoding` -> `Not HTML`
+ *  7. `non_html`, `too_large`, `unsupported_encoding` -> `Not HTML`, except
+ *     a `non_html` PDF (Phase 29d R1), which is read as an `ok` row is below
  *  8. `ok` and a status that is not 200 -> `Not HTML`
  *  9. `ok` 200 + noindex on either robots channel -> `Noindex`
  * 10. `ok` 200 + a canonical naming another URL   -> `Canonicalised`
  * 11. otherwise                                    -> `Indexable`, status `""`
+ *
+ * A PDF IS A DOCUMENT (owner ruling 2026-11-24: "Pdf should be reported
+ * indexable unless http headers specify otherwise"). A `non_html` row whose
+ * content type is a PDF goes through 8-11 like an `ok` row: a 200 PDF is
+ * `Noindex` when its `X-Robots-Tag` says so, `Canonicalised` when its `Link`
+ * canonical names another URL, and otherwise `Indexable` — and the stamp check
+ * below applies to it. Every other `non_html` answer (a Word file, an image)
+ * stays `Not HTML`. `isDocumentOk` (src/crawl/robots-directives.ts) is the one
+ * definition the writer's stamp reads too.
  *
  * Three of those groupings are decisions rather than readings, and each is a
  * choice between members of a closed vocabulary rather than a place to invent
@@ -847,9 +898,10 @@ export type IndexabilityStatus =
  * ## `is_indexable` is asserted against, not read
  *
  * The column is the crawler's own stamp (`isIndexable`, src/crawl/persist.ts):
- * a 200, fetched ok, with no noindex on either channel. That is exactly cases
- * 8-11 above minus the canonical, so this function computes the same answer
- * from the same columns and — on every `ok` row, the non-200s included — uses
+ * a 200, fetched ok (or a PDF), with no noindex on either channel. That is
+ * exactly cases 8-11 above minus the canonical, so this function computes the
+ * same answer from the same columns and — on every `ok` row and every PDF, the
+ * non-200s included — uses
  * the stored boolean as a CHECK on itself: a row
  * where the two disagree — `is_indexable = true` on a page this function calls
  * `Noindex`, say — is a writer defect or a hand-edited row, and it throws
@@ -893,6 +945,9 @@ export function indexabilityOf(page: IndexabilityInput): {
     case "network_error":
       return nonIndexable("No Response");
     case "non_html":
+      // A PDF is a document: read below as an `ok` row is (Phase 29d R1).
+      if (isPdf(page.contentType)) break;
+      return nonIndexable("Not HTML");
     case "too_large":
     case "unsupported_encoding":
       return nonIndexable("Not HTML");
@@ -910,18 +965,18 @@ export function indexabilityOf(page: IndexabilityInput): {
       );
   }
 
-  // An `ok` row that is not a 200 goes through the same check as the rest: the
-  // writer requires the 200 too, so `is_indexable = true` beside a 204 is the
-  // same class of writer defect as a `true` beside a noindex, and returning
-  // early here would be the one `ok` row that escaped its own audit.
-  const answer =
-    page.statusCode !== 200
-      ? nonIndexable("Not HTML")
-      : hasNoindex(page)
-        ? nonIndexable("Noindex")
-        : isCanonicalisedElsewhere(page)
-          ? nonIndexable("Canonicalised")
-          : { indexability: "Indexable" as const, status: "" as const };
+  // An `ok` row (or a PDF) that is not a 200 goes through the same check as
+  // the rest: the writer requires the 200 too (`isDocumentOk`), so
+  // `is_indexable = true` beside a 204 is the same class of writer defect as a
+  // `true` beside a noindex, and returning early here would be the one row
+  // that escaped its own audit.
+  const answer = !isDocumentOk(page)
+    ? nonIndexable("Not HTML")
+    : hasNoindex(page)
+      ? nonIndexable("Noindex")
+      : isCanonicalisedElsewhere(page)
+        ? nonIndexable("Canonicalised")
+        : { indexability: "Indexable" as const, status: "" as const };
 
   // The stored column as a check on this computation, never as its source. The
   // canonical is invisible to `is_indexable`, so a `Canonicalised` row is the
@@ -991,8 +1046,9 @@ export const SAYS_NOFOLLOW = (column: string): string =>
  *
  * ONE PRECEDENCE, TWO SPELLINGS. Each branch below is the same-numbered case of
  * `indexabilityOf`, in the same order, reading the same columns
- * (`fetch_class`, `status_code`, `robots_meta`, `x_robots_tag`,
- * `canonical_html`, `canonical_header`, `url`). `test/rules/indexability-sql.test.ts`
+ * (`fetch_class`, `status_code`, `content_type`, `robots_meta`, `x_robots_tag`,
+ * `canonical_html`, `canonical_header`, `url`); a `non_html` PDF takes the
+ * `ok` row's branch, as it does there (Phase 29d R1). `test/rules/indexability-sql.test.ts`
  * pins the two against each other over every status. Change one, change the other.
  *
  * WHERE THE TWO CANNOT BE IDENTICAL, and what this does about it:
@@ -1011,8 +1067,14 @@ export const SAYS_NOFOLLOW = (column: string): string =>
  *    this expression does not read it. A writer defect still surfaces through
  *    `indexabilityOf` on the listing surfaces.
  */
-export const INDEXABILITY_STATUS_SQL = (alias: string): SQL =>
-  sql`(${sql.raw(
+export const INDEXABILITY_STATUS_SQL = (alias: string): SQL => {
+  // Cases 8-11, for an `ok` row and for a PDF alike (Phase 29d R1).
+  const document = sql`(case${sql.raw(
+    ` when ${alias}.status_code is distinct from 200 then 'Not HTML'` +
+      ` when ${SAYS_NOINDEX(`${alias}.robots_meta`)} or ${SAYS_NOINDEX(`${alias}.x_robots_tag`)} then 'Noindex'` +
+      ` when `,
+  )}${CANONICALISED_ELSEWHERE(alias)}${sql.raw(` then 'Canonicalised' else '' end)`)}`;
+  return sql`(${sql.raw(
     `case ${alias}.fetch_class` +
       ` when 'redirect' then 'Redirected'` +
       ` when 'client_error' then 'Client Error'` +
@@ -1022,18 +1084,17 @@ export const INDEXABILITY_STATUS_SQL = (alias: string): SQL =>
       ` when 'excluded' then 'Excluded by crawl settings'` +
       ` when 'timeout' then 'No Response'` +
       ` when 'network_error' then 'No Response'` +
-      ` when 'non_html' then 'Not HTML'` +
+      ` when 'non_html' then (case when ${IS_PDF(`${alias}.content_type`)} then `,
+  )}${document}${sql.raw(
+    ` else 'Not HTML' end)` +
       ` when 'too_large' then 'Not HTML'` +
       ` when 'unsupported_encoding' then 'Not HTML'` +
-      ` when 'ok' then (case` +
-      ` when ${alias}.status_code is distinct from 200 then 'Not HTML'` +
-      ` when ${SAYS_NOINDEX(`${alias}.robots_meta`)} or ${SAYS_NOINDEX(`${alias}.x_robots_tag`)} then 'Noindex'` +
-      ` when `,
-  )}${CANONICALISED_ELSEWHERE(alias)}${sql.raw(
-    ` then 'Canonicalised' else '' end)` +
-      ` else ('indexabilityOf: unknown fetch_class ' || coalesce(${alias}.fetch_class, 'NULL'))::int::text` +
+      ` when 'ok' then `,
+  )}${document}${sql.raw(
+    ` else ('indexabilityOf: unknown fetch_class ' || coalesce(${alias}.fetch_class, 'NULL'))::int::text` +
       ` end`,
   )})`;
+};
 
 /**
  * The identity a finding is stamped with. `pageRule` hands this to the rule

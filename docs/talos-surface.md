@@ -1,6 +1,6 @@
 # The Ariadne surface Talos codes against
 
-**Status:** the contract as of Phase 29d (ruleset 0.29.0, migrations 0000–0060,
+**Status:** the contract as of Phase 29d (ruleset 0.29.0, migrations 0000–0061,
 38 MCP tools / 38 HTTP routes; every column label in this document is served
 under the ruleset version the engine reports — `rules_catalog`'s
 `rulesetVersion`, which the metric-table pass moves).
@@ -2719,11 +2719,23 @@ read:
 | `disallowed` | Non-Indexable | `Blocked by robots.txt` |
 | `excluded` (Phase 27c: the crawl's own scope refused it, never requested) | Non-Indexable | `Excluded by crawl settings` |
 | `timeout`, `network_error` | Non-Indexable | `No Response` |
-| `non_html`, `too_large`, `unsupported_encoding` | Non-Indexable | `Not HTML` |
-| `ok`, status ≠ 200 | Non-Indexable | `Not HTML` |
-| `ok` 200 + noindex on either robots channel | Non-Indexable | `Noindex` |
-| `ok` 200 + a canonical naming another URL | Non-Indexable | `Canonicalised` |
-| `ok` 200, otherwise | Indexable | `""` |
+| `non_html` (a PDF excepted), `too_large`, `unsupported_encoding` | Non-Indexable | `Not HTML` |
+| `ok` or a PDF, status ≠ 200 | Non-Indexable | `Not HTML` |
+| `ok` or PDF 200 + noindex on either robots channel | Non-Indexable | `Noindex` |
+| `ok` or PDF 200 + a canonical naming another URL | Non-Indexable | `Canonicalised` |
+| `ok` or PDF 200, otherwise | Indexable | `""` |
+
+**A PDF is a document, not "no HTML"** (Phase 29d). A `non_html` row whose
+`Content-Type` is `application/pdf` (case-insensitive, parameters ignored) is read
+as an `ok` row is: a 200 PDF is `Indexable` unless its `X-Robots-Tag` says
+`noindex` (or `none`), `Noindex` when it does, and `Canonicalised` when its `Link`
+canonical names another URL. The stored `indexable` (`pages_query`, the
+`internal_urls` CSV, `crawl_diff`) is true for a 200 PDF on the same terms, the
+canonical not read, as for HTML (`isDocumentOk` in src/crawl/robots-directives.ts is
+the one definition both read). Every other non-HTML answer — a Word file, a
+spreadsheet, an image — stays `Not HTML` and `indexable: false`. Crawls stored
+before 29d were rewritten by migration 0061 from their stored status, content type
+and `X-Robots-Tag`.
 
 The order is the order in the table, most decisive first: a redirect is never
 indexed whatever its HTML says, and a 200's own directives only matter once
@@ -3938,6 +3950,8 @@ an empty cell rather than a nought nobody counted.)
   108 = 551), asserted by the rule itself, by its unit test and end to end in
   the fixture harness. Which kinds those are is a
   `pages_query` question; a non-HTML 200 is counted by no other table at all.
+  An indexable PDF (Phase 29d) is a document, not an HTML page, and stays here:
+  this census is the HTML pages the on-page rules judge.
 - **The four counts are the authority; `cleanRatio` is a convenience.** Four
   decimal places collapse at scale: 1 clean page in 50,000 rounds to `0.0000`
   and 49,999 in 50,000 to `1.0000`. Work percentages out from the counts.
@@ -4497,7 +4511,19 @@ the `structured_data` listing's `infoCount` and `problemsCapped` and the CSV's
 characters each, 256 KiB per block); a block that left ids out makes the page's answer a
 lower bound, said as `unresolvedAtLeast` (rule), `infoCountAtLeast` (listing) and a note
 on each CSV row. A verdict stored without them is
-stale and the next rules run rewrites it.
+stale and the next rules run rewrites it. PDFs are indexable unless X-Robots-Tag says
+noindex: a 200 PDF is stored `indexable: true` unless its `X-Robots-Tag` says `noindex`
+or `none` (migration 0061 rewrote stored crawls), and its `indexability` /
+`indexabilityStatus` read `Indexable`, `Noindex` or `Canonicalised` as an HTML page's
+do (§4.4 table). The readers that mean an indexable DOCUMENT take it:
+`sitemap.non-indexable` reports a listed PDF noindexed by its header (a plain PDF in a
+sitemap is not reported), `canonical.non-indexable-target` reports a canonical at a
+noindexed PDF, the Crawl Overview's `indexability` counts a plain PDF as `Indexable`,
+and `pages_query`'s `indexable` filter and `crawl_diff`'s `indexable` field read the new
+stamp. The readers that mean an indexable HTML PAGE do not: every on-page, content and
+duplicate rule, the page-level canonical and indexability rules, render selection and
+`site.health`'s census (a PDF stays in `pagesNotAuditable`). Other non-HTML types stay
+non-indexable.
 
 **0.28.1 is a fix, not a phase.** A robots value's `none` is the directive (noindex,
 nofollow) only as a whole token: `max-image-preview: none` asks for no image preview and

@@ -48,7 +48,7 @@ import { isSameOrigin } from "../../crawl/parse/url-utils.js";
 import type { Db } from "../../db/client.js";
 import {
   CANONICALISED_ELSEWHERE,
-  FETCHED_OK,
+  DOCUMENT_OK,
   hasNoindex,
   JUDGED,
   queryFinding,
@@ -330,6 +330,13 @@ export const sitemapRules: QueryRule[] = [
   // testing it alone would report a listed 404 under copy about a robots
   // directive that page never had.
   //
+  // THE SUBJECT IS A DOCUMENT, NOT ONLY AN HTML PAGE (Phase 29d R1): the 200 is
+  // `DOCUMENT_OK`, an HTML page fetched OK or a PDF. A PDF is indexable unless
+  // its `X-Robots-Tag` says noindex, so a listed PDF with that header is
+  // reported here and a plain one is not. Every other non-HTML 200 (a Word
+  // file, an image) is false by construction rather than by a directive, and
+  // stays out: this rule's copy is about a directive it never carried.
+  //
   // THE CANONICALISED CASE ARRIVED IN PHASE 22 §1, and it is the inverse of the
   // same phase's other move. Every other rule STOPPED judging canonicalised
   // pages, because the defect belongs to the URL they defer to — but a sitemap
@@ -386,7 +393,7 @@ export const sitemapRules: QueryRule[] = [
         NON_INDEXABLE,
         db,
         crawlId,
-        sql`${FETCHED_OK("p")}
+        sql`${DOCUMENT_OK("p")}
             and (p.is_indexable is not true or ${CANONICALISED_ELSEWHERE("p")})`,
         (row) => ({
           url: row.url,

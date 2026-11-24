@@ -161,13 +161,13 @@ beforeAll(async () => {
       { path: "/c", responseTimeMs: 1000 },
       { path: "/d", responseTimeMs: 1999 },
       { path: "/e", responseTimeMs: 2000 },
-      NOT_JUDGED({
+      { ...NOT_JUDGED({
         path: "/file.pdf",
         fetchClass: "non_html",
         contentType: "application/pdf",
         responseTimeMs: 100,
         title: null,
-      }),
+      }), isIndexable: true }, // a 200 PDF is indexable (Phase 29d R1)
       NOT_JUDGED({ path: "/missing", fetchClass: "client_error", statusCode: 404, responseTimeMs: 120 }),
       NOT_JUDGED({
         path: "/private",
@@ -310,10 +310,10 @@ describe("crawl_overview on a judged, unrendered crawl", () => {
     expect(entry(o, "status-class", "No response").value).toBe(1);
     expect(sum(section(o, "indexability"))).toBe(n);
     expect(section(o, "indexability").entries[0]!.label).toBe("Indexable");
-    expect(entry(o, "indexability", "Indexable").value).toBe(6);
+    expect(entry(o, "indexability", "Indexable").value).toBe(7); // six pages and the PDF
     expect(entry(o, "indexability", "Client Error").value).toBe(1);
     expect(entry(o, "indexability", "Blocked by robots.txt").value).toBe(1);
-    expect(entry(o, "indexability", "Not HTML").value).toBe(1);
+    expect(section(o, "indexability").entries.map((e) => e.label)).not.toContain("Not HTML");
     expect(entry(o, "fetch-class", "ok").percent).toBe(66.7);
   });
 

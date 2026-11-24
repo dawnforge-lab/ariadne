@@ -2,7 +2,7 @@ import { and, asc, gt, isNotNull, or, sql, eq } from "drizzle-orm";
 
 import type { Db } from "../../db/client.js";
 import { pages } from "../../db/schema.js";
-import { isAuditable, queryFinding, type RuleIdentity } from "../helpers.js";
+import { isAuditable, isDocumentOk, queryFinding, type RuleIdentity } from "../helpers.js";
 import { resolveEffectiveCanonical } from "../page/canonical.js";
 import { copyFor } from "../registry/copy/index.js";
 import {
@@ -404,15 +404,21 @@ export const linkTargetRules: QueryRule[] = [
       ),
   }),
 
-  // The target answers with a 200 OK page, and that page tells search engines
-  // to keep it out of the index.
+  // The target answers with a 200 OK document, and that document tells search
+  // engines to keep it out of the index.
   //
-  // `isAuditable` is half the condition, and it is what makes this rule and the
-  // one above disjoint. `is_indexable` is a plain boolean the writer sets false
-  // for every 404, redirect, 5xx and non-HTML response, so testing it alone
-  // would report a canonical pointing at a 404 as "points at a noindexed page"
-  // — a second finding for the same fault, carrying copy about a robots
+  // `isDocumentOk` is half the condition, and it is what makes this rule and
+  // the one above disjoint. `is_indexable` is a plain boolean the writer sets
+  // false for every 404, redirect, 5xx and non-HTML response, so testing it
+  // alone would report a canonical pointing at a 404 as "points at a noindexed
+  // page" — a second finding for the same fault, carrying copy about a robots
   // directive that page never had.
+  //
+  // A DOCUMENT, NOT ONLY AN HTML PAGE (Phase 29d R1): a PDF target is indexable
+  // unless its `X-Robots-Tag` says noindex, so a canonical at a noindexed PDF
+  // is reported and a canonical at a plain one is not. A Word file or an image
+  // is non-indexable by construction, with no directive for this rule's copy to
+  // name, and stays out — `isAuditable` (HTML only) before 29d.
   defineRule<QueryRule>({
     kind: "query",
     id: NON_INDEXABLE.id,
@@ -434,7 +440,7 @@ export const linkTargetRules: QueryRule[] = [
         db,
         crawlId,
         ({ target }) =>
-          isAuditable(target) && target.isIndexable === false
+          isDocumentOk(target) && target.isIndexable === false
             ? { targetRobotsMeta: target.robotsMeta, targetXRobotsTag: target.xRobotsTag }
             : null,
         capsOr(caps),

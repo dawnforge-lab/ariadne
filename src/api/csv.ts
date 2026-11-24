@@ -450,6 +450,7 @@ interface IndexabilityRow {
   page_url: string | null;
   status_code: number | null;
   fetch_class: string | null;
+  content_type: string | null;
   robots_meta: string | null;
   x_robots_tag: string | null;
   is_indexable: boolean | null;
@@ -462,7 +463,7 @@ interface IndexabilityRow {
  *
  * ONE DERIVATION, shared with the JSON listing through `indexabilityOf`: the
  * spreadsheet and the API answer the same three words about a page because they
- * run the same function over the same eight columns.
+ * run the same function over the same nine columns.
  *
  * `fetch_class` is `not null` on a `pages` row, so a null here is the left join
  * finding nothing — no page, and three EMPTY cells rather than invented ones.
@@ -478,6 +479,7 @@ function standardCells(row: IssueRow & IndexabilityRow): Record<string, string> 
           url: row.page_url ?? "",
           fetchClass: row.fetch_class,
           statusCode: row.status_code,
+          contentType: row.content_type,
           robotsMeta: row.robots_meta,
           xRobotsTag: row.x_robots_tag,
           isIndexable: row.is_indexable,
@@ -716,7 +718,7 @@ export const CSV_VIEW_DEFS: Record<CsvQueryViewName, CsvView> = {
              i.details_jsonb->>'pageUrl' as url,
              i.details_jsonb as evidence,
              i.dedupe_key,
-             p.url as page_url, p.status_code, p.fetch_class,
+             p.url as page_url, p.status_code, p.fetch_class, p.content_type,
              p.robots_meta, p.x_robots_tag, p.is_indexable,
              p.canonical_html, p.canonical_header
       from issues i

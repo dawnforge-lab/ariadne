@@ -6255,7 +6255,7 @@ export class ApiService {
     // columns. A finding names a page (`issues.page_id`), names a URL with no
     // page row behind it, or names nothing at all — an inner join would drop the
     // last two silently, which is a listing that says a rule found fewer things
-    // than it did (hard rule 7). The eight columns are the projection
+    // than it did (hard rule 7). The nine columns are the projection
     // `indexabilityOf` reads and nothing else: this is a listing, not
     // `pages_query`.
     const result = await this.db.execute<{
@@ -6266,6 +6266,7 @@ export class ApiService {
       page_url: string | null;
       status_code: number | null;
       fetch_class: string | null;
+      content_type: string | null;
       robots_meta: string | null;
       x_robots_tag: string | null;
       is_indexable: boolean | null;
@@ -6276,7 +6277,7 @@ export class ApiService {
              coalesce(i.details_jsonb->>'pageUrl', '') as url_key,
              i.details_jsonb as evidence,
              i.dedupe_key,
-             p.url as page_url, p.status_code, p.fetch_class,
+             p.url as page_url, p.status_code, p.fetch_class, p.content_type,
              p.robots_meta, p.x_robots_tag, p.is_indexable,
              p.canonical_html, p.canonical_header
       from issues i
@@ -6303,6 +6304,7 @@ export class ApiService {
               url: row.page_url ?? "",
               fetchClass: row.fetch_class,
               statusCode: row.status_code,
+              contentType: row.content_type,
               robotsMeta: row.robots_meta,
               xRobotsTag: row.x_robots_tag,
               isIndexable: row.is_indexable,
