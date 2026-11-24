@@ -3039,7 +3039,20 @@ when max and min agree within 1e-9 relative), null outside the link graph; a pag
 robots meta or X-Robots-Tag says nofollow or none passes none (its edges are dropped;
 counts above are unchanged). All four are null on a crawl judged before 29c: not
 measured, never zero. The raw score is not published. `renderError` is why an **attempted** render produced
-nothing; null there is not "it worked".
+nothing; null there is not "it worked". **Two new forms from Phase 29d, each costing that
+page and never the pass.** `"render over <n> s in total (during <phase>)"`: every render
+has one deadline from the end of its gate wait, the navigation budget plus 30 s plus
+35 s (110 s at the default 1 s spacing, the render lease's own sum without the gate wait
+and the settle), and `<phase>` is where the page was when it ran out: `navigation`,
+`settle`, `measure`, `images`, `content` or `axe`. The page was stopped (its script
+terminated, its browser context discarded) and counts as not rendered; when the phase is
+`axe` its `render_a11y_status` is `timeout`, the one not-rendered page with a status.
+`"measurement returned an invalid shape: <value>"`: the in-page word and link counts
+came back as something other than five non-negative integers. The counts are read in an
+isolated world of the page since 29d, so a page that overrides `Array.from`,
+`Array.prototype.filter` or the like is measured as it is, rather than failing as
+`navigation error: …`; `RENDER_CAPTURE_VERSION` stays 3, because a page that broke
+nothing measures exactly as before.
 
 **The last five are the two observations, and they were added to a projection
 this document calls deliberately slim — so the argument, rather than the fact.**

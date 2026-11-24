@@ -45,7 +45,7 @@ import { storableText } from "../storable-text.js";
 export const AXE_TIMEOUT_MS = 30_000;
 /**
  * How long, after `Runtime.terminateExecution`, the renderer waits for the
- * page's thread to answer one trivial evaluation (`RenderTraffic.terminateAxe`)
+ * page's thread to answer one trivial evaluation (`RenderTraffic.terminateScript`)
  * before it moves on. With `AXE_TIMEOUT_MS` it bounds the whole axe step, and
  * the render lease counts both (`renderLeaseSeconds`, run-render.ts).
  */

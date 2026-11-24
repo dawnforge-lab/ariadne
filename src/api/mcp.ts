@@ -836,7 +836,11 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "throttle record. The navigation budget grows with the spacing (15 s + 30 " +
         "spacings, at most 120 s; at least 60 s on Shopify); a page that cannot load " +
         "inside it fails with renderError 'timeout under pacing (N requests paced)', " +
-        "which means too heavy to render politely, not a broken site. So this is " +
+        "which means too heavy to render politely, not a broken site. Every page " +
+        "also has one deadline in total (the budget + 65 s); a page that runs it " +
+        "out — one that never yields, never loads or never lets the checks run — " +
+        "fails with renderError 'render over N s in total (during <phase>)' and " +
+        "the pass carries on. So this is " +
         "not a second, ruder visit — a named list is no faster per page, only " +
         "better spent.\n\n" +
         "requests counts the pass's requests to the site: paced waited their turn " +

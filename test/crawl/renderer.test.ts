@@ -3789,3 +3789,394 @@ describe("PageRenderer accessibility (Phase 29b)", () => {
     expect(refused.a11y).toBeNull();
   });
 });
+
+// ---------------------------------------------------------------------------
+// Phase 29d Task 8: a hostile page costs one page, never the pass.
+//
+// Appended, with its own imports below, so no line above moves (cited tests
+// keep their numbers). ESM hoists an `import` wherever it is written.
+// ---------------------------------------------------------------------------
+
+import { isMeasurement } from "../../src/crawl/render/renderer.js";
+import {
+  RENDER_POST_SETTLE_ALLOWANCE_MS,
+  renderPageDeadlineMs,
+} from "../../src/crawl/render/run-render.js";
+
+describe("a hostile page costs one page (29d)", () => {
+  let db: Db;
+  let renderer: PageRenderer;
+  let htmlDir: string;
+  let htmlRoot: string;
+  /** Read on every render: a test sets what it needs and deletes it after. */
+  const faults: RenderTestFaults = {};
+  const createdCrawls: string[] = [];
+  /** Responses `/never` holds open, destroyed in `afterAll` so the server can close. */
+  const held: ServerResponse[] = [];
+  let site: { base: string; count: (path: string) => number; close(): Promise<void> };
+
+  /**
+   * One body for every page here, so a hostile page's counts can be compared
+   * with the plain one's. Hand-derived, through `innerText`: 12 words ("Home
+   * Sorted", "Plain words here", "One two three four five.", "Red",
+   * "Contact"), 4 links, 2 in `<nav>`, 1 in `<footer>`, 2 filters
+   * (`/b?sort=asc` has a `?`, `/facet/red` the word).
+   */
+  const BODY =
+    `<nav><a href="/a">Home</a> <a href="/b?sort=asc">Sorted</a></nav>` +
+    `<main><h1>Plain words here</h1><p>One two three four five.</p><a href="/facet/red">Red</a></main>` +
+    `<footer><a href="/c">Contact</a></footer>`;
+  const MEASURED = {
+    wordCount: 12,
+    linkCount: 4,
+    navLinkCount: 2,
+    footerLinkCount: 1,
+    filterLinkCount: 2,
+  };
+  const withHead = (head: string): string =>
+    `<!doctype html><html lang="en"><head><title>Hostile</title>${head}</head>` +
+    `<body>${BODY}</body></html>`;
+  const PAGES: Record<string, string> = {
+    "/plain": withHead(""),
+    // Every global the measurement used to lean on, broken or bent in the
+    // page's MAIN world: a main-world measurement throws or miscounts here.
+    "/globals": withHead(
+      `<script>` +
+        `Array.from = function () { throw new Error("no from"); };` +
+        `Array.prototype.filter = function () { throw new Error("no filter"); };` +
+        `String.prototype.split = function () { return ["bent"]; };` +
+        `String.prototype.indexOf = function () { return -1; };` +
+        `RegExp.prototype.test = function () { return false; };` +
+        `Document.prototype.querySelectorAll = function () { return []; };` +
+        `Object.defineProperty(HTMLAnchorElement.prototype, "href", { get: function () { return "x"; } });` +
+        `</script>`,
+    ),
+    // Loads, then never yields: the thread every script of ours needs is
+    // taken from the load event on.
+    "/spin": withHead(
+      `<script>window.addEventListener("load", function () {` +
+        `setTimeout(function () { for (;;) {} }, 0); });</script>`,
+    ),
+    // Keeps fetching for as long as it is open.
+    "/fetching": withHead(
+      `<script>setInterval(function () { fetch("/ping?" + Date.now()); }, 50);</script>`,
+    ),
+  };
+
+  function launch(overrides: Partial<Parameters<typeof PageRenderer.launch>[0]> = {}) {
+    return PageRenderer.launch({
+      origin: site.base,
+      htmlDir,
+      imageDimensions: null,
+      accessibility: true,
+      userAgent: "AriadneBot/0.1 (render hostile test)",
+      perHostDelayMs: 0,
+      settleMs: SETTLE_MS,
+      allowPrivate: true,
+      testFaults: faults,
+      ...overrides,
+    });
+  }
+
+  /** Render `path` with `set` applied to the faults for this render only. */
+  async function renderWith(path: string, set: RenderTestFaults): Promise<RenderResult> {
+    Object.assign(faults, set);
+    try {
+      return await renderer.render(`${site.base}${path}`);
+    } finally {
+      for (const key of Object.keys(set)) delete faults[key as keyof RenderTestFaults];
+    }
+  }
+
+  /** The measurement family of a result, for comparing two renders. */
+  function measuredOf(result: RenderResult) {
+    return {
+      wordCount: result.wordCount,
+      linkCount: result.linkCount,
+      navLinkCount: result.navLinkCount,
+      footerLinkCount: result.footerLinkCount,
+      filterLinkCount: result.filterLinkCount,
+    };
+  }
+
+  /** A crawl with page rows for `paths`, done in the frontier, as `runRenderPass` selects. */
+  async function newCrawl(paths: string[]): Promise<string> {
+    const id = `crawl_${randomUUID()}`;
+    await db.insert(crawls).values({
+      tenantId: LOCAL_TENANT,
+      id,
+      siteUrl: site.base,
+      hostKey: hostKeyOf(site.base),
+      config: {},
+      rulesetVersion: "test",
+      status: "finished",
+    });
+    createdCrawls.push(id);
+    await db.insert(pages).values(
+      paths.map((path) => ({
+        id: `page_${randomUUID()}`,
+        crawlId: id,
+        url: `${site.base}${path}`,
+        urlNormalised: `${site.base}${path}`,
+        pageType: "content",
+        fetchClass: "ok",
+        statusCode: 200,
+        isIndexable: true,
+        wordCount: 2,
+        htmlBytes: 1_000,
+        title: "A page",
+        depth: 1,
+        discoveredVia: "link",
+      })),
+    );
+    const urls = paths.map((path) => `${site.base}${path}`);
+    await enqueueUrls(
+      db,
+      id,
+      urls.map((url) => ({ url, depth: 1, discoveredVia: "link" })),
+    );
+    await completeUrls(db, id, urls);
+    return id;
+  }
+
+  async function pageRow(crawlId: string, path: string) {
+    const rows = await db
+      .select()
+      .from(pages)
+      .where(and(eq(pages.crawlId, crawlId), eq(pages.url, `${site.base}${path}`)));
+    return rows[0]!;
+  }
+
+  beforeAll(async () => {
+    db = createDb(databaseUrl());
+    await runMigrations(db);
+    site = await startCounting((path, res) => {
+      // Never answered — no status line, no headers — until `afterAll`.
+      if (path === "/never") {
+        held.push(res);
+        return;
+      }
+      if (path === "/ping") {
+        res.writeHead(204, { "cache-control": "no-store" });
+        res.end();
+        return;
+      }
+      const page = PAGES[path];
+      if (page !== undefined) {
+        res.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" });
+        res.end(page);
+        return;
+      }
+      res.writeHead(404, { "content-type": "text/plain" });
+      res.end("no");
+    });
+    htmlDir = await mkdtemp(join(tmpdir(), "ariadne-render-hostile-"));
+    htmlRoot = await mkdtemp(join(tmpdir(), "ariadne-render-hostile-pass-"));
+    renderer = await launch();
+  }, 120_000);
+
+  afterAll(async () => {
+    await renderer.close();
+    for (const res of held) res.destroy();
+    await site.close();
+    for (const id of createdCrawls) await db.delete(crawls).where(eq(crawls.id, id));
+    await closeDb(db);
+    await rm(htmlDir, { recursive: true, force: true });
+    await rm(htmlRoot, { recursive: true, force: true });
+  });
+
+  it("a page that overrides Array.from and Array.prototype.filter is measured", async () => {
+    const plain = await renderer.render(`${site.base}/plain`);
+    const hostile = await renderer.render(`${site.base}/globals`);
+
+    expect(plain.error).toBeNull();
+    expect(measuredOf(plain)).toEqual(MEASURED);
+    // The isolated world: the page's globals neither stop nor bend it.
+    expect(hostile.error).toBeNull();
+    expect(hostile.rendered).toBe(true);
+    expect(measuredOf(hostile)).toEqual(measuredOf(plain));
+  });
+
+  it("isMeasurement accepts five non-negative integers and nothing else (shape)", () => {
+    expect(isMeasurement(MEASURED)).toBe(true);
+    expect(isMeasurement({ ...MEASURED, wordCount: 0 })).toBe(true);
+    expect(isMeasurement({ words: "x" })).toBe(false);
+    expect(isMeasurement({ ...MEASURED, linkCount: "4" })).toBe(false);
+    expect(isMeasurement({ ...MEASURED, linkCount: 1.5 })).toBe(false);
+    expect(isMeasurement({ ...MEASURED, linkCount: -1 })).toBe(false);
+    expect(isMeasurement({ ...MEASURED, linkCount: Number.NaN })).toBe(false);
+    expect(isMeasurement({ ...MEASURED, linkCount: 2 ** 31 })).toBe(false);
+    const { filterLinkCount: _dropped, ...missing } = MEASURED;
+    expect(isMeasurement(missing)).toBe(false);
+    expect(isMeasurement(null)).toBe(false);
+    expect(isMeasurement(undefined)).toBe(false);
+    expect(isMeasurement([1, 2, 3, 4, 5])).toBe(false);
+  });
+
+  it("a measurement of the wrong shape fails that page only", async () => {
+    const bad = await renderWith("/plain", { measureExpression: `({ words: "x" })` });
+
+    expect(bad.rendered).toBe(false);
+    expect(bad.error).toBe(`measurement returned an invalid shape: {"words":"x"}`);
+    expect(measuredOf(bad)).toEqual({
+      wordCount: null,
+      linkCount: null,
+      navLinkCount: null,
+      footerLinkCount: null,
+      filterLinkCount: null,
+    });
+    expect(bad.a11y).toBeNull();
+    expect(bad.console).not.toBeNull();
+
+    // The row takes it: the value never reached an integer column.
+    const crawlId = await newCrawl(["/plain"]);
+    await writeRenderResult(db, crawlId, bad);
+    const row = await pageRow(crawlId, "/plain");
+    expect(row.rendered).toBe(false);
+    expect(row.renderError).toMatch(/^measurement returned an invalid shape/);
+    expect(row.renderedWordCount).toBeNull();
+
+    // The next page renders.
+    const next = await renderer.render(`${site.base}/plain`);
+    expect(next.error).toBeNull();
+    expect(measuredOf(next)).toEqual(MEASURED);
+  });
+
+  it("a page that never yields is stopped at the deadline", async () => {
+    const result = await renderWith("/spin", { pageDeadlineMs: 3_000 });
+
+    expect(result.rendered).toBe(false);
+    expect(result.error).toBe("render over 3 s in total (during measure)");
+    expect(result.wordCount).toBeNull();
+    expect(result.images).toBeNull();
+    expect(result.a11y).toBeNull();
+    expect(result.console).not.toBeNull();
+
+    // The following page renders, at the production deadline.
+    const next = await renderer.render(`${site.base}/plain`);
+    expect(next.error).toBeNull();
+    expect(measuredOf(next)).toEqual(MEASURED);
+    expect(next.a11y).toMatchObject({ status: "ran" });
+  }, 60_000);
+
+  it("a pass carries on past a page that never yields, and completes (deadline)", async () => {
+    const crawlId = await newCrawl(["/spin", "/plain"]);
+    const summary = await runRenderPass(db, crawlId, {
+      siteUrl: site.base,
+      userAgent: "AriadneBot/0.1 (render hostile pass test)",
+      perHostDelayMs: 0,
+      renderBudgetPct: 100,
+      allowPrivate: true,
+      settleMs: SETTLE_MS,
+      renderHtmlDir: htmlRoot,
+      renderConcurrency: 1,
+      renderAccessibility: false,
+      // Both pages render under it: 8 s against a page that takes well under one.
+      renderTestFaults: { pageDeadlineMs: 8_000 },
+    });
+
+    expect(summary.rendered).toBe(1);
+    expect(summary.failures).toBe(1);
+    expect(summary.unrendered).toBe(0);
+    const spin = await pageRow(crawlId, "/spin");
+    expect(spin.rendered).toBe(false);
+    expect(spin.renderError).toBe("render over 8 s in total (during measure)");
+    const plain = await pageRow(crawlId, "/plain");
+    expect(plain.rendered).toBe(true);
+    expect(plain.renderedWordCount).toBe(MEASURED.wordCount);
+    expect((await frontierCounts(db, crawlId)).renderPending).toBe(0);
+  }, 60_000);
+
+  it("the deadline names the navigation phase: a server that never answers", async () => {
+    const result = await renderWith("/never", { pageDeadlineMs: 1_000 });
+
+    expect(result.rendered).toBe(false);
+    expect(result.error).toBe("render over 1 s in total (during navigation)");
+    const next = await renderer.render(`${site.base}/plain`);
+    expect(next.error).toBeNull();
+  }, 60_000);
+
+  it("the deadline names the settle phase: a page that keeps fetching", async () => {
+    // Its own browser, with a settle far past the deadline: the page is on its
+    // feet and fetching when the deadline comes, and nothing else is waited on.
+    const settling = await launch({
+      settleMs: 60_000,
+      accessibility: false,
+      testFaults: { pageDeadlineMs: 2_000 },
+    });
+    try {
+      const result = await settling.render(`${site.base}/fetching`);
+
+      expect(result.rendered).toBe(false);
+      expect(result.error).toBe("render over 2 s in total (during settle)");
+      expect(site.count("/ping")).toBeGreaterThan(0);
+    } finally {
+      await settling.close();
+    }
+  }, 60_000);
+
+  it("the deadline names the images phase: the thread taken just before it", async () => {
+    const result = await renderWith("/plain", {
+      pageDeadlineMs: 4_000,
+      beforePhase: async (phase, page) => {
+        if (phase === "images") await page.evaluate("for (;;) {}");
+      },
+    });
+
+    expect(result.rendered).toBe(false);
+    expect(result.error).toBe("render over 4 s in total (during images)");
+    expect(result.wordCount).toBeNull();
+    const next = await renderer.render(`${site.base}/plain`);
+    expect(next.error).toBeNull();
+  }, 60_000);
+
+  it("the deadline names the content phase: the thread taken just before it", async () => {
+    const result = await renderWith("/plain", {
+      pageDeadlineMs: 4_000,
+      beforePhase: async (phase, page) => {
+        if (phase === "content") await page.evaluate("for (;;) {}");
+      },
+    });
+
+    expect(result.rendered).toBe(false);
+    expect(result.error).toBe("render over 4 s in total (during content)");
+    expect(result.htmlPath).toBeNull();
+    const next = await renderer.render(`${site.base}/plain`);
+    expect(next.error).toBeNull();
+  }, 60_000);
+
+  it("the deadline names the axe phase, and the accessibility status is timeout", async () => {
+    // axe's own seam: the page takes its thread just before the run, and the
+    // run's own 30 s budget is far past the deadline, so only the deadline ends it.
+    const result = await renderWith("/plain", {
+      pageDeadlineMs: 4_000,
+      beforeAxe: async (page) => {
+        await page.evaluate("for (;;) {}");
+      },
+    });
+
+    expect(result.rendered).toBe(false);
+    expect(result.error).toBe("render over 4 s in total (during axe)");
+    expect(result.wordCount).toBeNull();
+    expect(result.a11y).toMatchObject({ status: "timeout", error: null, violations: [] });
+    expect(result.a11y!.ms).not.toBeNull();
+    const next = await renderer.render(`${site.base}/plain`);
+    expect(next.error).toBeNull();
+    expect(next.a11y).toMatchObject({ status: "ran" });
+  }, 60_000);
+
+  it("renderPageDeadlineMs is the lease's sum", () => {
+    // Navigation budget + the post-settle allowance + the accessibility run's.
+    expect(renderPageDeadlineMs(45_000)).toBe(
+      45_000 + RENDER_POST_SETTLE_ALLOWANCE_MS + RENDER_AXE_ALLOWANCE_MS,
+    );
+    expect(renderPageDeadlineMs(45_000)).toBe(110_000);
+    expect(renderPageDeadlineMs(RENDERER_DEFAULTS.navigationTimeoutMs)).toBe(80_000);
+    // The lease is the gate wait and the settle on top of the same sum, so a
+    // live render's lease always outlasts its deadline.
+    expect(
+      renderLeaseSeconds({ renderConcurrency: 4, navigationTimeoutMs: 45_000, settleMs: 3_000 }) *
+        1000,
+    ).toBe(9 * 30_000 + 3_000 + renderPageDeadlineMs(45_000));
+  });
+});

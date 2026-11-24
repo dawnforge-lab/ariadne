@@ -169,7 +169,8 @@
  *
  *  1. **`MEASURE_SCRIPT`, in the page** (P5-T4): `innerText` and
  *     `querySelectorAll` — what a READER sees, which no tokenizer can compute
- *     without doing layout.
+ *     without doing layout. In the page's isolated world since Phase 29d, so
+ *     the page's own globals cannot break or bend it.
  *  2. **`analyzeHtml`, over the serialised post-JS DOM** (P8-T1): the SAME
  *     streaming analyzer the crawl ran over the bytes the server sent.
  *
@@ -245,6 +246,7 @@ import {
   type AxeFault,
   type RenderA11y,
 } from "./a11y.js";
+import { renderPageDeadlineMs } from "./deadline.js";
 import { analyzeHtml, type RawPageAnalysis } from "../parse/page-analyzer.js";
 import { hostnameSpellings, isSameOrigin, normalizeUrl } from "../parse/url-utils.js";
 import { credentialHeadersOf, type CredentialTarget } from "../credentials.js";
@@ -393,6 +395,10 @@ export interface RendererOptions {
    * most 120 s, at least a platform profile's 60 s. Every paced request the document
    * needs before that event is inside this budget, so a page with k uncached
    * same-origin render-blocking assets needs about k × spacing of it.
+   *
+   * It also sets every page's render deadline (Phase 29d):
+   * `renderPageDeadlineMs` of it (deadline.ts), the budget plus the 30 s
+   * post-settle and 35 s accessibility allowances — the lease's own sum.
    */
   navigationTimeoutMs?: number;
   /** Fixed wait after `domcontentloaded`, for the app to paint. Default 3s. */
@@ -561,8 +567,11 @@ export interface RenderResult {
    *
    * Non-null on every successful render — `disabled` when the crawl turned it
    * off, and `timeout`, `interrupted` or `error` when the page stopped it,
-   * with every other measurement kept — and null on EVERY failed one: a page
-   * that did not finish rendering was not checked.
+   * with every other measurement kept — and null on every failed one: a page
+   * that did not finish rendering was not checked. ONE EXCEPTION (Phase 29d,
+   * ruling R5): a render whose deadline ran out DURING the run is a failed
+   * render whose run is `timeout` — the run was started and the page stopped
+   * it, which is what `timeout` says.
    */
   a11y: RenderA11y | null;
 }
@@ -592,8 +601,9 @@ const CONTEXT_GONE =
   /Execution context was destroyed|Cannot find context with specified id|Inspected target navigated or closed/i;
 
 /**
- * The isolated world the srcset lookup, the image measurement and (Phase 29b)
- * the accessibility run happen in. The name predates the third; it is a label.
+ * The isolated world the srcset lookup, the image measurement, (Phase 29b)
+ * the accessibility run and (Phase 29d) `MEASURE_SCRIPT` happen in. The name
+ * predates the third; it is a label.
  */
 const ISOLATED_WORLD_NAME = "ariadne-render-images";
 
@@ -667,6 +677,52 @@ interface Measurement {
   filterLinkCount: number;
 }
 
+/** The keys of a `Measurement`, each an integer column of `pages`. */
+const MEASUREMENT_KEYS = [
+  "wordCount",
+  "linkCount",
+  "navLinkCount",
+  "footerLinkCount",
+  "filterLinkCount",
+] as const satisfies readonly (keyof Measurement)[];
+
+/** The largest value a Postgres `integer` column holds. */
+const PG_INTEGER_MAX = 2_147_483_647;
+
+/**
+ * Whether an in-page measurement came back as five counts the `rendered_*`
+ * integer columns can hold (Phase 29d): a non-negative integer, at most
+ * `PG_INTEGER_MAX`, under each key. Extra keys are allowed and dropped by the
+ * reader; a missing, non-number, fractional, negative or oversized one is not.
+ *
+ * THE VALUE COMES OUT OF THE PAGE, so it is checked rather than cast: before
+ * 29d a cast let anything through to `writeRenderResult`, whose update then
+ * failed inside the worker's transaction and stopped the pass. Now a wrong
+ * shape is that page's `render_error` (see `render`), never the pass's.
+ */
+export function isMeasurement(value: unknown): value is Measurement {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const record = value as Record<string, unknown>;
+  return MEASUREMENT_KEYS.every((key) => {
+    const count = record[key];
+    return Number.isInteger(count) && (count as number) >= 0 && (count as number) <= PG_INTEGER_MAX;
+  });
+}
+
+/**
+ * How a measurement of the wrong shape is quoted in its `render_error`: as
+ * JSON (a `returnByValue` reply is JSON by construction), or `undefined` when
+ * nothing came back, cut to `INVALID_MEASUREMENT_QUOTE_CHARS` so a page cannot
+ * write an essay into the row.
+ */
+const INVALID_MEASUREMENT_QUOTE_CHARS = 200;
+function quoteMeasurement(value: unknown): string {
+  const text = JSON.stringify(value) ?? String(value);
+  return text.length > INVALID_MEASUREMENT_QUOTE_CHARS
+    ? `${text.slice(0, INVALID_MEASUREMENT_QUOTE_CHARS)}…`
+    : text;
+}
+
 /**
  * The in-page measurement, as a string because this project has no `dom` lib
  * (tsconfig `types: ["node"]`) and adding one to typecheck five selectors would
@@ -685,6 +741,12 @@ interface Measurement {
  * and what the raw-side `word_count` is meant to be compared against. A page
  * with no `<body>` measures zero rather than throwing; that is a real document
  * (an XML response rendered by the browser), not a failure.
+ *
+ * IT RUNS IN THE ISOLATED WORLD (Phase 29d, `RenderTraffic.measure`): the same
+ * DOM and layout, so `innerText`, `href` and the selector counts are the
+ * values the page's own world would read, but its own `Array`, `String`,
+ * `RegExp` and DOM prototypes, so nothing the page assigns to them reaches
+ * this script. Its answer is shape-checked (`isMeasurement`) before use.
  */
 const MEASURE_SCRIPT = `(() => {
   const body = document.body;
@@ -1227,6 +1289,23 @@ class RenderTraffic {
   }
 
   /**
+   * The family-1 counts (`MEASURE_SCRIPT`, or the expression a test put in
+   * its place) of the document now in the main frame, read in the isolated
+   * world (Phase 29d) so the page's own globals can neither break nor falsify
+   * them — the world the image measurement and axe use. What comes back is
+   * returned UNREAD: `render` shape-checks it (`isMeasurement`) before any of
+   * it is trusted. A script that threw throws here — `render` calls it in
+   * phase 1, where that is classified.
+   */
+  async measure(expression: string): Promise<unknown> {
+    const reply = await this.isolatedEvaluate(expression);
+    if (reply.exceptionDetails !== undefined) {
+      throw new Error(`measurement threw in the isolated world: ${reply.exceptionDetails.text}`);
+    }
+    return reply.result.value;
+  }
+
+  /**
    * Every `<img>` box of the document now in the main frame
    * (`IMAGES_MEASURE_SCRIPT`), read in the isolated world so the page's own
    * globals can neither break nor falsify it. Throws on anything else —
@@ -1267,7 +1346,7 @@ class RenderTraffic {
    *  - `gone` — the context is gone: the page navigated (or its document was
    *    replaced) before or during the run. The page's doing.
    *  - `timeout` — no answer in `timeoutMs`: the run is terminated
-   *    (`terminateAxe`) and abandoned.
+   *    (`terminateScript`) and abandoned.
    *
    * Anything else the protocol answers — our session gone while the render is
    * open, a command the browser refused — propagates: it is ours. NO RETRY on
@@ -1310,13 +1389,29 @@ class RenderTraffic {
     }
     const ms = Date.now() - started;
     if (settled === "timeout") {
-      await this.terminateAxe();
+      await this.terminateScript();
       return { kind: "timeout", ms };
     }
     if (settled.exceptionDetails !== undefined) {
       return { kind: "threw", message: exceptionText(settled.exceptionDetails), ms };
     }
     return { kind: "ran", value: settled.result.value ?? null, ms };
+  }
+
+  /**
+   * `Runtime.terminateExecution` on the page's thread, and nothing after it:
+   * whatever is running there — the isolated world's script or the page's
+   * own — stops now, else the next execution does.
+   *
+   * The render deadline (Phase 29d, `PageRenderer.render`) ends a page with
+   * this alone, whatever phase it was in. Unlike `terminateScript` it does not
+   * flush an armed termination with a trivial evaluation: the page's context
+   * is discarded right after (`release`), so nothing of ours runs in that
+   * thread again, and an evaluation sent into a page mid-navigation is one
+   * more thing that page could stall.
+   */
+  async terminateExecution(): Promise<void> {
+    await this.cdp.send("Runtime.terminateExecution");
   }
 
   /**
@@ -1335,9 +1430,10 @@ class RenderTraffic {
    * wait is bounded (`AXE_TERMINATE_GRACE_MS`): a thread still busy past it
    * is busy with something that already took the termination, and the run is
    * `timeout` either way.
+   *
    */
-  private async terminateAxe(): Promise<void> {
-    await this.cdp.send("Runtime.terminateExecution");
+  private async terminateScript(): Promise<void> {
+    await this.terminateExecution();
     const flush = (this.cdp.send("Runtime.evaluate", { expression: "0" }) as Promise<unknown>).then(
       () => undefined,
       (error: unknown) => {
@@ -2023,6 +2119,85 @@ export interface RenderTestFaults {
    * context-id filter keeps it out of `render_console` (29b final review M1).
    */
   isolatedNoise?: string;
+  /**
+   * Replaces the render deadline (`renderPageDeadlineMs` of the navigation
+   * budget, Phase 29d), so a suite can watch a page run it out without
+   * waiting eighty seconds. Read on every render.
+   */
+  pageDeadlineMs?: number;
+  /**
+   * Replaces `MEASURE_SCRIPT` (Phase 29d), so a suite can hand the shape
+   * check a value no real page produces in the isolated world. Read on every
+   * render.
+   */
+  measureExpression?: string;
+  /**
+   * Awaited at the start of each deadline phase (Phase 29d), inside the
+   * deadline, with the render's page — so a suite can take the page's thread
+   * at exactly the phase it means (`page.evaluate("for (;;) {}")` never
+   * returns until the deadline terminates it) instead of racing a page timer
+   * against the renderer.
+   */
+  beforePhase?: (phase: RenderPhase, page: Page) => Promise<void>;
+}
+
+/**
+ * Where a render was when its deadline ran out (Phase 29d, ruling R5): the
+ * page's navigation, the settle after it, `MEASURE_SCRIPT`, the image
+ * measurement, `page.content()` (with the analysis and the write after it)
+ * and the accessibility run.
+ */
+export type RenderPhase = "navigation" | "settle" | "measure" | "images" | "content" | "axe";
+
+/** The render deadline ran out. Raised only by `RenderDeadline`, caught only by `render`. */
+class RenderDeadlineExpired extends Error {
+  constructor(readonly text: string) {
+    super(text);
+    this.name = "RenderDeadlineExpired";
+  }
+}
+
+/**
+ * One page's render deadline (Phase 29d): one timer, the phase the render is
+ * in, and a promise that rejects with `RenderDeadlineExpired` when the time
+ * is up. Every awaited step a page can stall is raced against it (`run`), so
+ * a stall anywhere ends at the deadline with the phase it happened in.
+ *
+ * The phase is read WHEN THE TIMER FIRES, not when a race notices: a step
+ * that is not raced (the analysis, the write — ours) can let the time run out
+ * and the next raced step reject at once, and the text still names where the
+ * time went.
+ */
+class RenderDeadline {
+  private phase: RenderPhase = "navigation";
+  private readonly timer: NodeJS.Timeout;
+  /** Set when the timer fired: where the render was. */
+  expiredIn: RenderPhase | null = null;
+  readonly expired: Promise<never>;
+
+  constructor(readonly ms: number) {
+    let fire!: (error: RenderDeadlineExpired) => void;
+    this.expired = new Promise<never>((_, reject) => {
+      fire = reject;
+    });
+    // Raced, not always awaited: a render that ends before its deadline, or
+    // runs it out in a step nothing races, must not leave an unhandled rejection.
+    this.expired.catch(() => undefined);
+    this.timer = setTimeout(() => {
+      this.expiredIn = this.phase;
+      fire(new RenderDeadlineExpired(`render over ${ms / 1000} s in total (during ${this.phase})`));
+    }, ms);
+  }
+
+  /** Enter `phase` and race `work` against the deadline. */
+  run<T>(phase: RenderPhase, work: () => Promise<T>): Promise<T> {
+    this.phase = phase;
+    return Promise.race([work(), this.expired]);
+  }
+
+  clear(): void {
+    clearTimeout(this.timer);
+  }
 }
 
 /** Where the network fence listens. */
@@ -2408,6 +2583,15 @@ export class PageRenderer {
    * database as `render_error: navigation error: …` — a bug of ours wearing
    * site-evidence clothes, which is what it did before this split and which
    * `render.coverage` would have counted as the site's failure.
+   *
+   * ONE DEADLINE BOUNDS THE WHOLE RENDER (Phase 29d), from the end of the
+   * document's gate wait: `renderPageDeadlineMs` of the navigation budget. It
+   * covers navigation, settle, measurement, images, `page.content()` and the
+   * accessibility run, in either phase, because each is a wait on the page's
+   * thread or network. Running it out is the page's doing, never the pass's:
+   * the page's thread is terminated, its context discarded, and the result is
+   * `render_error: "render over N s in total (during <phase>)"` (ruling R5).
+   * A throw of our own in phase 2 still stops the pass (rule 7).
    */
   async render(url: string): Promise<RenderResult> {
     const verdict = await isUrlAllowed(url, { allowPrivate: this.opts.allowPrivate });
@@ -2452,8 +2636,55 @@ export class PageRenderer {
     page.on("crash", () => {
       crashed = true;
     });
+    /** The render's one deadline (Phase 29d), from the end of the gate wait. */
+    let deadline: RenderDeadline | null = null;
+    /** The deadline ran out: the page is terminated and its context discarded. */
+    let ranOut = false;
 
     try {
+      // The DOCUMENT's wait is spent HERE, after the page and its
+      // interception exist (that setup is ours and must not be spent out of
+      // the site's spacing, rule 9) and BEFORE `goto`, so it is not charged
+      // to the navigation budget. Its slot is CLAIMED in the interception,
+      // beside the request, like every other request's: a slot claimed here
+      // would be followed by our own navigation latency, which the site would
+      // see as a shorter gap before the document's first asset. (Another
+      // worker may claim the slot in between; the document then waits for
+      // the next one inside the budget, bounded as `renderLeaseSeconds`
+      // says.)
+      // The document's OWN host (a `www.` page waits on `www.`'s state, not
+      // the apex's), as every request in the interception is keyed.
+      const wait = this.gate.msUntilFree(gateKey(url));
+      if (wait > 0) await new Promise((resolve) => setTimeout(resolve, wait));
+
+      // THE RENDER DEADLINE (Phase 29d) starts now that the gate wait — our
+      // own politeness, the lease's to bound — is over. From here every step
+      // a page can stall runs through `step`: raced against the deadline,
+      // named by its phase. A page that never finishes loading, never yields
+      // its thread or never lets axe start costs that page (`expire`), never
+      // the pass. Our own synchronous work (`analyzeHtml`) and our own disk
+      // write are not raced; the time they take still counts.
+      const clock = new RenderDeadline(
+        this.opts.testFaults?.pageDeadlineMs ?? renderPageDeadlineMs(this.opts.navigationTimeoutMs),
+      );
+      deadline = clock;
+      const step = <T>(phase: RenderPhase, work: () => Promise<T>): Promise<T> =>
+        clock.run(phase, async () => {
+          await this.opts.testFaults?.beforePhase?.(phase, page);
+          return work();
+        });
+      // Where the deadline ran out: the page's thread is terminated (the
+      // `Runtime.terminateExecution` axe's timeout uses), and the page and its
+      // context go in `release`. Ours first, as everywhere: a protocol command
+      // of ours that broke the render is the error, not the deadline. A
+      // crashed page has no thread left to terminate.
+      const expire = async (expired: RenderDeadlineExpired, evidence: TrafficEvidence) => {
+        if (traffic.failure !== null) throw traffic.failure;
+        ranOut = true;
+        if (!crashed) await traffic.terminateExecution();
+        return failure(url, expired.text, traffic.offSite, evidence);
+      };
+
       // ---------------------------------------------------------------------
       // PHASE 1 — what the SITE does. Everything in this inner try is
       // classified rather than thrown, because every way it can fail is a fact
@@ -2462,33 +2693,22 @@ export class PageRenderer {
       // ---------------------------------------------------------------------
       let navigated: { finalUrl: string; measured: Measurement; imageRows: ImageMeasurement };
       try {
-        // The DOCUMENT's wait is spent HERE, after the page and its
-        // interception exist (that setup is ours and must not be spent out of
-        // the site's spacing, rule 9) and BEFORE `goto`, so it is not charged
-        // to the navigation budget. Its slot is CLAIMED in the interception,
-        // beside the request, like every other request's: a slot claimed here
-        // would be followed by our own navigation latency, which the site would
-        // see as a shorter gap before the document's first asset. (Another
-        // worker may claim the slot in between; the document then waits for
-        // the next one inside the budget, bounded as `renderLeaseSeconds`
-        // says.)
-        // The document's OWN host (a `www.` page waits on `www.`'s state, not
-        // the apex's), as every request in the interception is keyed.
-        const wait = this.gate.msUntilFree(gateKey(url));
-        if (wait > 0) await new Promise((resolve) => setTimeout(resolve, wait));
-
         // Raced against `traffic.broken`: a protocol command of ours that
         // failed has shut the render, and waiting out the navigation budget
         // for requests it will now never release would only delay the throw.
-        await Promise.race([
-          page.goto(url, {
-            waitUntil: "domcontentloaded",
-            timeout: this.opts.navigationTimeoutMs,
-          }),
-          traffic.broken,
-        ]);
+        await step("navigation", () =>
+          Promise.race([
+            page.goto(url, {
+              waitUntil: "domcontentloaded",
+              timeout: this.opts.navigationTimeoutMs,
+            }),
+            traffic.broken,
+          ]),
+        );
         if (this.opts.settleMs > 0) {
-          await Promise.race([page.waitForTimeout(this.opts.settleMs), traffic.broken]);
+          await step("settle", () =>
+            Promise.race([page.waitForTimeout(this.opts.settleMs), traffic.broken]),
+          );
         }
         if (traffic.failure !== null) throw traffic.failure;
 
@@ -2510,22 +2730,41 @@ export class PageRenderer {
         }
 
         // IN PHASE 1 RATHER THAN PHASE 2, deliberately, even though it is one
-        // of our own instruments: `page.evaluate` runs INSIDE the document, so
-        // the way it fails in practice is a page navigating away underneath it
-        // ("Execution context was destroyed"), which is the site doing
-        // something and is right to classify.
-        const measured = (await page.evaluate(MEASURE_SCRIPT)) as Measurement;
+        // of our own instruments: it runs INSIDE the document, so the way it
+        // fails in practice is a page navigating away underneath it ("Execution
+        // context was destroyed"), which is the site doing something and is
+        // right to classify. IN THE ISOLATED WORLD (Phase 29d), as the image
+        // measurement and axe are, so the page's globals — `Array.from`,
+        // `filter`, `split`, a bent `href` getter — can neither stop nor bend
+        // it. What comes back is checked before it is believed: a value that is
+        // not five counts is this page's `render_error`, and never reaches the
+        // integer columns, where its update would fail in the worker's
+        // transaction and stop the pass.
+        const measured = await step("measure", () =>
+          traffic.measure(this.opts.testFaults?.measureExpression ?? MEASURE_SCRIPT),
+        );
+        if (!isMeasurement(measured)) {
+          return failure(
+            url,
+            `measurement returned an invalid shape: ${quoteMeasurement(measured)}`,
+            null,
+            traffic.evidence(),
+          );
+        }
         // Every `<img>` box (Phase 29b), after the settle and in the same
         // document — in the isolated world, so the page's globals cannot
         // break or bend it, and here for the same reason as the line above:
         // a navigation under it is the page's doing and is classified.
-        const imageRows = await traffic.measureImages();
+        const imageRows = await step("images", () => traffic.measureImages());
         navigated = { finalUrl, measured, imageRows };
       } catch (error) {
         // Ours first: a protocol command the interception could not issue
         // shut the render, and whatever failed after it is our defect, not
         // the site's.
         if (traffic.failure !== null) throw traffic.failure;
+        // The deadline next: whatever else the page was doing when it ran
+        // out, the render is over its total and the page is stopped.
+        if (error instanceof RenderDeadlineExpired) return await expire(error, traffic.evidence());
         // Order matters: a page that redirected itself before it finished
         // loading aborts its own navigation, and "we stopped it" is a truer
         // classification than the `net::ERR_ABORTED` the browser reports for it.
@@ -2566,12 +2805,18 @@ export class PageRenderer {
       // measurement OF THE DOCUMENT THE BROWSER ENDED ON, exactly as family 1
       // above is (the same reason the same page's `rendered_word_count` reports
       // the destination of a JavaScript redirect).
+      //
+      // `page.content()` runs in the page, on its thread, so it is under the
+      // deadline (Phase 29d) like every step above: a page holding its thread
+      // here is the page's doing and costs the page. `analyzeHtml` is ours,
+      // synchronous and bounded by its own caps, and is not raced.
       let serialised: string;
       let analysis: RawPageAnalysis;
       try {
-        serialised = await page.content();
+        serialised = await step("content", () => page.content());
         analysis = analyzeHtml(serialised, finalUrl);
       } catch (error) {
+        if (error instanceof RenderDeadlineExpired) return await expire(error, traffic.evidence());
         // Re-thrown with the real cause named, because the bare message a
         // tokenizer or a serialiser produces says nothing about which URL it
         // was reading. It stays a plain `Error`: this is a 500, not a "the
@@ -2596,10 +2841,27 @@ export class PageRenderer {
 
       // THE ACCESSIBILITY RUN (Phase 29b), last: every measurement above is
       // already taken, so nothing axe does — or a page does to axe — can cost
-      // one (ruling R10). How it can end is `accessibility`'s to say.
-      const a11y = this.opts.accessibility
-        ? await this.accessibility(page, traffic, () => crashed)
-        : a11yDisabled();
+      // one (ruling R10). How it can end is `accessibility`'s to say — except
+      // the render deadline (Phase 29d): the run is under it like every page
+      // step, and a page that holds its thread past it fails the page with
+      // the run's status `timeout` (ruling R5), its evidence as snapshotted.
+      let a11y: RenderA11y;
+      if (this.opts.accessibility) {
+        const axeStarted = Date.now();
+        try {
+          a11y = await step("axe", () => this.accessibility(page, traffic, () => crashed));
+        } catch (error) {
+          if (!(error instanceof RenderDeadlineExpired)) throw error;
+          const result = await expire(error, trafficEvidence);
+          if (clock.expiredIn !== "axe") return result;
+          return {
+            ...result,
+            a11y: { status: "timeout", ms: Date.now() - axeStarted, error: null, violations: [] },
+          };
+        }
+      } else {
+        a11y = a11yDisabled();
+      }
       if (traffic.failure !== null) throw traffic.failure;
 
       return {
@@ -2644,12 +2906,15 @@ export class PageRenderer {
       // while it unloads is released, and nothing it held is let go by the
       // close. Then the state is cleared through the janitor.
       // The page is released even if the shut threw — closed and cleaned
-      // either way — and then the shut's error surfaces.
+      // either way — and then the shut's error surfaces. A render whose
+      // deadline ran out has its context discarded with the page, as a
+      // crashed one does (`release`).
+      deadline?.clear();
       try {
         await traffic.shut();
         await this.opts.testFaults?.holdAfterShut?.();
       } finally {
-        await this.release(slot, page, traffic, crashed);
+        await this.release(slot, page, traffic, crashed || ranOut);
       }
     }
   }
@@ -2660,7 +2925,7 @@ export class PageRenderer {
    *
    * THE PAGE'S DOING IS A STATUS, NEVER A STOPPED PASS (controller ruling B):
    * a run the page blocked past the budget is `timeout` (terminated, see
-   * `RenderTraffic.terminateAxe`); a document that went away under it — a
+   * `RenderTraffic.terminateScript`); a document that went away under it — a
    * navigation, or a page that crashed — is `interrupted`; an axe the page's
    * DOM made throw is `error`, its first line kept. OURS PROPAGATES: the axe
    * source that cannot be read, a result shape `shapeAxeResults` does not
@@ -2778,14 +3043,21 @@ export class PageRenderer {
    * context is closed rather than reused — the next render opens a fresh one,
    * with an empty cache, which costs requests but never isolation. A close or
    * a clear that fails otherwise is ours, and throws.
+   *
+   * A page whose render DEADLINE ran out (Phase 29d) is discarded the same
+   * way, with its context: its thread was terminated, but a page that stalled
+   * once can stall again — an interval re-entering its loop — and `silence`
+   * and the clear both need that thread, so the clean path could wait on it
+   * forever. Closing the context is the browser's own act and needs nothing
+   * from the page. `discard` is either.
    */
   private async release(
     slot: ContextSlot,
     page: Page,
     traffic: RenderTraffic,
-    crashed: boolean,
+    discard: boolean,
   ): Promise<void> {
-    if (crashed) {
+    if (discard) {
       await slot.context.close();
       return;
     }

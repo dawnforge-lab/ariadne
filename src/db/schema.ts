@@ -1101,7 +1101,11 @@ export const pages = pgTable("pages", {
   //
   // NULLABLE: null means the page was not rendered, its render failed (or was
   // refused before a browser page opened), or it was rendered before capture 3
-  // (`render_version` < 3).
+  // (`render_version` < 3). One failed render is not null (Phase 29d, ruling
+  // R5): a render whose deadline ran out during the run is `rendered = false`
+  // with `timeout` here — the run was started and the page stopped it. The
+  // `a11y.*` rules read `ran` rows only, and `render-a11y`'s counts rendered
+  // pages only, so neither reads it.
   renderA11yStatus: text("render_a11y_status").$type<A11yStatus>(),
   // Wall time of the axe run in ms (injection included), so the gate can report
   // its median and p95. Set for every status but `disabled`; null exactly when
