@@ -4288,11 +4288,11 @@ describe("a hostile page costs one page (29d)", () => {
     );
     expect(renderPageDeadlineMs(45_000)).toBe(110_000);
     expect(renderPageDeadlineMs(RENDERER_DEFAULTS.navigationTimeoutMs)).toBe(80_000);
-    // The lease is the gate wait and the settle on top of the same sum, so a
-    // live render's lease always outlasts its deadline.
+    // The lease is the gate wait, the settle and an expiry's 5 s termination grace
+    // (AXE_TERMINATE_GRACE_MS) on the same sum: it outlasts a live render.
     expect(
       renderLeaseSeconds({ renderConcurrency: 4, navigationTimeoutMs: 45_000, settleMs: 3_000 }) *
         1000,
-    ).toBe(9 * 30_000 + 3_000 + renderPageDeadlineMs(45_000));
+    ).toBe(9 * 30_000 + 3_000 + renderPageDeadlineMs(45_000) + 5_000);
   });
 });
