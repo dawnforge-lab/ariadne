@@ -2024,7 +2024,7 @@ describe("GET /crawls/:id/robots", () => {
     // site's own public document: the blob it comes out of holds the sitemap
     // walk's counters too, and none of them are here.
     expect(Object.keys(res.body).sort()).toEqual([
-      "crawlDelaySec", "crawlId", "note", "outcome", "raw", "robotsUrl",
+      "crawlDelaySec", "crawlId", "note", "outcome", "raw", "robotsUrl", "robotsUserAgent",
       "sitemapSources", "suppliedSitemaps", "truncated", "userAgent",
     ]);
   });

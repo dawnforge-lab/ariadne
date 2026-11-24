@@ -315,6 +315,8 @@ export interface ResourcePassOpts {
   /** The crawl's seed URL: what makes a resource same-origin or third-party. */
   siteUrl: string;
   userAgent: string;
+  /** The robots token another host's robots.txt is matched with (Phase 29d). */
+  robotsUserAgent: string;
   /**
    * The gate the PAGE crawl used, not a new one. See the module header: this is
    * how a host that earned wider spacing keeps it for its resources.
@@ -562,6 +564,7 @@ export async function fetchCrawlResources(
                   new URL(url).origin,
                   {
                     userAgent: opts.userAgent,
+                    robotsUserAgent: opts.robotsUserAgent,
                     allowPrivate,
                     robotsTiming: { headersMs: timeoutMs, idleMs: timeoutMs, totalMs: timeoutMs },
                     retryBackoffMs: opts.robotsRetryBackoffMs,

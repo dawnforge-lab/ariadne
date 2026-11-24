@@ -55,6 +55,12 @@ crawler inside Talos. The intended shape:
    fixed per-host delay honoured alongside adaptive concurrency, branded UA
    (Talos crawls as TalosBot; Ariadne default `AriadneBot`, configurable so a
    Talos-driven crawl can present Talos's identity), back-off on 403/429.
+   Since 29d a crawl may instead take a `userAgentPreset` (Googlebot smartphone or
+   desktop, bingbot): it sets the header and the robots token together, so the
+   site's rules for that crawler apply. The seam's limit is plain: a spoofed bot
+   identity fails any site that verifies bots by IP address or reverse DNS
+   (Cloudflare, most CDNs), a preset only helps on a site that filters by
+   user-agent alone, and it never bypasses a challenge. The branded default stays.
    Met as of Phase 6 Task 6b: a `blocked` answer halves the concurrency window,
    and a refusal that NAMES A RATE (a 429, or anything carrying `Retry-After`)
    also DOUBLES that host's spacing — capped at 30s (until Phase 24a, for the

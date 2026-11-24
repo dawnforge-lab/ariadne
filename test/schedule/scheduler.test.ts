@@ -82,7 +82,7 @@ function configFor(siteUrl: string, extra: Record<string, unknown> = {}): Stored
     siteUrl,
     maxPages: 10,
     maxDepth: 3,
-    userAgent: "AriadneBot-scheduler-test",
+    userAgent: "AriadneBot-scheduler-test", robotsUserAgent: "AriadneBot-scheduler-test", userAgentPreset: null,
     perHostDelayMs: 0,
     maxConcurrency: 1,
     ...extra,

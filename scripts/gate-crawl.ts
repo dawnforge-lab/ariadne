@@ -148,6 +148,8 @@ async function main(): Promise<number> {
       maxPages: budget,
       maxDepth: CRAWL_DEFAULTS.maxDepth,
       userAgent: CRAWL_DEFAULTS.userAgent,
+      robotsUserAgent: CRAWL_DEFAULTS.robotsUserAgent,
+      userAgentPreset: null,
       // The fixture is ours and its robots.txt says `Crawl-delay: 0`. Nothing
       // about this waiver applies to a real origin (rule 9).
       perHostDelayMs: 0,

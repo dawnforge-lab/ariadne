@@ -520,7 +520,14 @@ export interface DiscoverOpts extends DiscoveryOpts {
 }
 
 export interface DiscoveryOpts {
+  /** The `User-Agent` request header: the full string. */
   userAgent: string;
+  /**
+   * The one product token robots.txt groups and `Crawl-delay` are matched
+   * against (Phase 29d). Never the header: `Mozilla/5.0 (compatible;
+   * Googlebot/2.1...)` would match the group 'mozilla'.
+   */
+  robotsUserAgent: string;
   /**
    * Sitemaps to walk in addition to the ones robots.txt declares — documents
    * somebody NAMED (the site's owner, through the operator or the agent that
@@ -1118,7 +1125,7 @@ export function robotsBlockedReason(line: string): string {
 export function robotsRulesOf(
   robotsUrl: string,
   raw: string,
-  userAgent: string,
+  robotsUserAgent: string,
 ): {
   parsed: RobotsRules;
   isAllowed: (url: string) => boolean;
@@ -1132,9 +1139,12 @@ export function robotsRulesOf(
   return {
     parsed,
     isAllowed: (url: string) =>
-      parsed.isAllowed(onRulesOrigin(url, rulesOrigin), userAgent) !== false,
+      parsed.isAllowed(onRulesOrigin(url, rulesOrigin), robotsUserAgent) !== false,
     matchingRule: (url: string) => {
-      const line = parsed.getMatchingLineNumber(onRulesOrigin(url, rulesOrigin), userAgent);
+      const line = parsed.getMatchingLineNumber(
+        onRulesOrigin(url, rulesOrigin),
+        robotsUserAgent,
+      );
       if (!Number.isInteger(line) || line < 1) return null;
       const text = lines[line - 1];
       if (text === undefined) {
@@ -1229,8 +1239,8 @@ export async function fetchRobots(
   }
 
   const raw = decodeBody(doc.body, doc.contentType);
-  const userAgent = opts.userAgent;
-  const rules = robotsRulesOf(doc.url, raw, userAgent);
+  const robotsUserAgent = opts.robotsUserAgent;
+  const rules = robotsRulesOf(doc.url, raw, robotsUserAgent);
 
   return {
     fetched: true,
@@ -1239,7 +1249,7 @@ export async function fetchRobots(
     status: doc.status,
     isAllowed: rules.isAllowed,
     matchingRule: rules.matchingRule,
-    crawlDelaySec: rules.parsed.getCrawlDelay(userAgent) ?? null,
+    crawlDelaySec: rules.parsed.getCrawlDelay(robotsUserAgent) ?? null,
     sitemapUrls: rules.parsed.getSitemaps(),
     raw,
     truncated: doc.truncated,

@@ -22,6 +22,7 @@ import {
   noteTruncation,
   readCrawlEvidence,
   robotsUnreadable,
+  robotsUserAgentOf,
   userAgentOf,
 } from "./crawl-evidence.js";
 
@@ -130,6 +131,10 @@ async function blockedFindings(db: Db, crawlId: string, caps: RuleCaps): Promise
   if (raw === null) return [];
 
   const userAgent = userAgentOf(evidence, BLOCKS.id, crawlId);
+  // The token the crawl matched groups with; a crawl stored before 29d has none
+  // and was matched with its full user agent, so it is read that way.
+  const robotsUserAgent = robotsUserAgentOf(evidence, BLOCKS.id, crawlId);
+  const matchedAs = robotsUserAgent ?? userAgent;
   const robotsUrl = new URL("/robots.txt", evidence.siteUrl).href;
   const rulesOrigin = new URL(robotsUrl).origin;
   const parsed = robotsParser(robotsUrl, raw);
@@ -151,7 +156,7 @@ async function blockedFindings(db: Db, crawlId: string, caps: RuleCaps): Promise
     // its parameters in an order the crawler never used, and could disagree
     // with the enqueue check that actually governed the crawl.
     const judged = onRulesOrigin(urlNormalised, rulesOrigin);
-    if (parsed.isAllowed(judged, userAgent) !== false) return;
+    if (parsed.isAllowed(judged, matchedAs) !== false) return;
     total++;
     if (caps.listing !== null && findings.length >= caps.listing) return;
 
@@ -159,7 +164,7 @@ async function blockedFindings(db: Db, crawlId: string, caps: RuleCaps): Promise
     // is a place in a file rather than a claim to be taken on trust. -1 means
     // robots-parser matched no numbered rule, and then there is nothing honest
     // to quote.
-    const line = parsed.getMatchingLineNumber(judged, userAgent);
+    const line = parsed.getMatchingLineNumber(judged, matchedAs);
     const text = line > 0 ? lines[line - 1] : undefined;
     findings.push(
       queryFinding(BLOCKS, {
@@ -175,6 +180,7 @@ async function blockedFindings(db: Db, crawlId: string, caps: RuleCaps): Promise
         evidence: {
           url,
           userAgent,
+          ...(robotsUserAgent === null ? {} : { robotsUserAgent }),
           ...(text === undefined ? {} : { matchedBy: { line, text: text.trim() } }),
         },
         dedupeKey: url,
@@ -353,6 +359,7 @@ export const robotsRules: QueryRule[] = [
     severity: BLOCKS.severity,
     columns: [
       { key: "userAgent", label: "User Agent" },
+      { key: "robotsUserAgent", label: "Robots Token", optional: true },
       { key: "matchedBy", label: "Matched Rule", optional: true },
     ],
     ...copyFor(BLOCKS.id),

@@ -760,7 +760,7 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
      was refused — a robots-shaped block that shows up as a fetch outcome.
   3. **`robots_get` — the file itself, as this crawl read it.** It answers
      `{crawlId, robotsUrl, outcome, raw, truncated, crawlDelaySec, note,
-     sitemapSources, suppliedSitemaps, userAgent}`: `raw` is the text the crawl
+     sitemapSources, suppliedSitemaps, userAgent, robotsUserAgent}`: `raw` is the text the crawl
      obeyed, `outcome` is `read` / `absent` / `unreachable` (and `unreachable` is NOT
      `absent` — a site that could not tell us its rules is a finding, not an
      allow-all), `truncated` means `raw` is only the first 500KB so anything
@@ -3665,7 +3665,7 @@ through an empty listing rests on that timestamp.
 | `issues_list` | one row per rule that found something: `{ruleId, checkIds, severity, type, priority, typeOverridden, priorityOverridden, category, title, count, sampleUrls}` (the `…Overridden` flags only where the crawl's judgement sets the value; a disabled rule is left out and named in `disabledRules`) | the verdict on a check, and its size |
 | `issue_urls` | one row per finding: `{url, address, statusCode, indexability, indexabilityStatus, evidence}`, with the response's own `columns` saying how to print them | the report a developer gets: the URL, whether it is indexable and why not, and the rule's own evidence |
 | `metrics_get` | `{metricId, scope, scopeValue, value, title, explanation, checkIds, category}` | every number a report quotes |
-| `robots_get` | `{crawlId, robotsUrl, outcome, raw, truncated, crawlDelaySec, note, sitemapSources, suppliedSitemaps, userAgent}` | the robots.txt this crawl obeyed, as stored (CHECK-03, CHECK-06) |
+| `robots_get` | `{crawlId, robotsUrl, outcome, raw, truncated, crawlDelaySec, note, sitemapSources, suppliedSitemaps, userAgent, robotsUserAgent}` | the robots.txt this crawl obeyed, as stored (CHECK-03, CHECK-06) |
 
 **Filters that matter for a checklist walk:**
 

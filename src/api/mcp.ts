@@ -328,7 +328,14 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "restarts) — never logged or answered — and are deleted on cancel and delete. If " +
         "the stored copy cannot be read, crawl_resume / crawl_render refuse with code " +
         "CREDENTIALS_REQUIRED until they are sent again there. They cannot change the " +
-        "user agent, the pacing floor or robots.txt.",
+        "user agent, the pacing floor or robots.txt.\n\n" +
+        "IDENTITY. userAgentPreset (ariadne, googlebot-smartphone, googlebot-desktop, " +
+        "bingbot) sets both the User-Agent header and the robots.txt token the site's " +
+        "groups are matched with; a custom userAgent derives its token (set " +
+        "robotsUserAgent when it starts with 'Mozilla/'). The default stays AriadneBot. " +
+        "A spoofed bot identity fails any site that verifies bots by IP address or " +
+        "reverse DNS (Cloudflare, most CDNs): a preset only helps on a site that " +
+        "filters by user-agent alone, and it never bypasses a challenge.",
       // The crawl-start body schema itself: one declaration for both
       // transports, so an argument this refuses is a body POST /crawls refuses.
       inputSchema: service.startBodySchema(),
@@ -1137,7 +1144,7 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "renderMaxPages, renderSamplePerType, renderAccessibility, exclude, include, maxRedirectHops, " +
         "requestHeaders, httpAuth, cookies), and only while the crawl is queued " +
         "or paused: pause a running crawl with crawl_pause, set, then " +
-        "crawl_resume. A never field (siteUrl, userAgent, the host lists, " +
+        "crawl_resume. A never field (siteUrl, userAgent, userAgentPreset, robotsUserAgent, the host lists, " +
         "fetchResources, mode, urls, maxUrlLength) is refused 409 when its value " +
         "changes. ANY field sent with the value crawl_config_get shows is no " +
         "change, on any status — a credential sent back as '[redacted]' included — " +
@@ -1216,7 +1223,8 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "The crawl_start arguments as a JSON Schema (draft 2020-12): {schema, " +
         "rulesetVersion}. Every field carries its description, its default where " +
         "it has one, and x-ariadne-mutable — never (fixed for the crawl's life: " +
-        "siteUrl, userAgent, probeHosts, legacyHosts, sitemapUrls, fetchResources), " +
+        "siteUrl, userAgent, userAgentPreset, robotsUserAgent, probeHosts, legacyHosts, " +
+        "sitemapUrls, fetchResources), " +
         "whenPaused (maxPages, maxDepth, perHostDelayMs, maxConcurrency, the " +
         "render budgets and renderAccessibility) or always (findingCap and the judgement block). The " +
         "judgement block lists every rule id it may name and every overridable " +
@@ -1973,7 +1981,7 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
       description:
         "The robots.txt this crawl actually obeyed, out of its stored evidence: " +
         "{crawlId, robotsUrl, outcome, raw, truncated, crawlDelaySec, note, " +
-        "sitemapSources, suppliedSitemaps, userAgent}. Nothing is re-fetched — this is the text the " +
+        "sitemapSources, suppliedSitemaps, userAgent, robotsUserAgent}. Nothing is re-fetched — this is the text the " +
         "crawler read at crawl time, which is what its findings were judged " +
         "against. A file that has changed since is a fact about the site, and " +
         "fetching the current one here would hide it.\n\n" +
@@ -1993,8 +2001,15 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "the finding: a sitemap that only appears in suppliedSitemaps is one the site " +
         "publishes and does not declare, and a document in both was declared and " +
         "re-supplied — the walk fetched it once. userAgent " +
-        "is the string the crawl identified as — the groups in the file that " +
-        "governed it, which matters when the file has per-agent sections.\n\n" +
+        "is the header string the crawl identified as; robotsUserAgent is the one " +
+        "product token its groups and crawl-delay were matched against (Googlebot, " +
+        "bingbot, AriadneBot or a custom one) — the groups in the file that " +
+        "governed it, which matters when the file has per-agent sections. " +
+        "robotsUserAgent is null for a crawl stored before it existed, which " +
+        "matched its full userAgent. A crawl started with a userAgentPreset " +
+        "presented a spoofed bot identity: a site that verifies bots by IP " +
+        "address or reverse DNS (Cloudflare, most CDNs) fails it, and a preset " +
+        "never bypasses a challenge.\n\n" +
         "Refused for a crawl that never completed discovery: there is no stored " +
         "copy, and 'we have no record' must not be served as 'the site has no " +
         "robots.txt'.",

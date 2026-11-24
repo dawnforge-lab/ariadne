@@ -1730,7 +1730,7 @@ webhooks**: polling `crawl_status` is the contract until Talos asks otherwise.
 
 | MCP tool | HTTP | Arguments |
 |---|---|---|
-| `crawl_start` | `POST /crawls` | `siteUrl` (required), `maxPages`, `maxDepth`, `userAgent`, `perHostDelayMs`, `maxConcurrency`, `probeHosts`, `legacyHosts[]`, `sitemapUrls[]`, `renderBudgetPct`, `renderMaxPages`, `renderSamplePerType`, `findingCap`, `fetchResources`, `judgement` (the block `crawl_config_set` changes later, §4.9); since 27c `mode`, `urls[]`, `exclude[]`, `include[]`, `requestHeaders`, `httpAuth`, `cookies`, `maxRedirectHops`, `maxUrlLength` (§4.1) |
+| `crawl_start` | `POST /crawls` | `siteUrl` (required), `maxPages`, `maxDepth`, `userAgent`, `userAgentPreset`, `robotsUserAgent`, `perHostDelayMs`, `maxConcurrency`, `probeHosts`, `legacyHosts[]`, `sitemapUrls[]`, `renderBudgetPct`, `renderMaxPages`, `renderSamplePerType`, `findingCap`, `fetchResources`, `judgement` (the block `crawl_config_set` changes later, §4.9); since 27c `mode`, `urls[]`, `exclude[]`, `include[]`, `requestHeaders`, `httpAuth`, `cookies`, `maxRedirectHops`, `maxUrlLength` (§4.1) |
 | `crawl_status` | `GET /crawls/:id` | — |
 | `crawl_list` | `GET /crawls` | `siteUrl`, `limit`, `cursor` |
 | `crawl_resume` | `POST /crawls/:id/resume` | `requestHeaders`, `httpAuth`, `cookies` (optional: the crawl's credentials, re-supplied after a restart, §4.1a). A paused crawl resumes; a cancelled one is final and refused |
@@ -2119,7 +2119,7 @@ swallowed.
 JSON Schema **draft 2020-12**, generated from the one zod schema both transports
 parse with. Every field carries its `description`, its `default` where the
 engine has one, and `x-ariadne-mutable` — `never` (`siteUrl`, `userAgent`,
-`probeHosts`, `legacyHosts`, `sitemapUrls`, `fetchResources`), `whenPaused`
+`userAgentPreset`, `robotsUserAgent`, `probeHosts`, `legacyHosts`, `sitemapUrls`, `fetchResources`), `whenPaused`
 (`maxPages`, `maxDepth`, `perHostDelayMs`, `maxConcurrency`, the three render
 budgets, `renderAccessibility`) or `always` (`findingCap` and `judgement`). `judgement.rules` lists
 every page and query rule id as `propertyNames.enum` (zod's spelling of a
@@ -3229,7 +3229,10 @@ and so is another tenant's").
 ### 4.7 `robots_get` → the robots.txt this crawl obeyed
 
 `{crawlId, robotsUrl, outcome, raw, truncated, crawlDelaySec, note,
-sitemapSources[], suppliedSitemaps[], userAgent}`. It is **stored evidence, never
+sitemapSources[], suppliedSitemaps[], userAgent, robotsUserAgent}`. `userAgent` is the
+header; `robotsUserAgent` is the one product token the groups and `Crawl-delay` were
+matched against (null on a crawl stored before 29d, which matched its full `userAgent`).
+It is **stored evidence, never
 a re-fetch**: the file as the crawl read it, which is the only honest answer to
 "what did this crawl obey". `outcome ∈ read | absent | unreachable`, and
 `unreachable` is not "there are no rules" (RFC 9309 §2.3.1.4).
@@ -3386,7 +3389,7 @@ it); and every crawl's `crawl` adds `scopeChangedAt` (ISO, or null until
 carries `listUrlCount` and `listDuplicates`, as `effective` did; the URLs are never
 shown. It diverges from `effective` after a `crawl_config_set`.
 `mutability` says, per `crawl` key, when it can change: **`never`** (`siteUrl`,
-`userAgent`, `probeHosts`, `legacyHosts`, `sitemapUrls`, `fetchResources`, since 27c
+`userAgent`, `userAgentPreset`, `robotsUserAgent`, `probeHosts`, `legacyHosts`, `sitemapUrls`, `fetchResources`, since 27c
 `mode`, `urls` and `maxUrlLength`, the reported facts `listUrlCount`,
 `listDuplicates` and `scopeChangedAt`, and the operator-only stored budgets
 `maxResources`, `maxResourceHosts`, `maxBlockedUrls` and `platformProfiles`, which are
@@ -4334,7 +4337,9 @@ controls.
 
 | knob | default | notes |
 |---|---|---|
-| `userAgent` | `AriadneBot/0.1 (+https://github.com/dawnforge-lab/ariadne)` | **Set it.** A Talos-driven crawl should present Talos's identity, and the UA is what a client allowlists in their WAF. |
+| `userAgent` | `AriadneBot/0.1 (+https://github.com/dawnforge-lab/ariadne)` | **Set it.** A Talos-driven crawl should present Talos's identity, and the UA is what a client allowlists in their WAF. A custom value derives its robots token from the product it starts with; one starting `Mozilla/` needs `robotsUserAgent` (refused otherwise). |
+| `userAgentPreset` | `ariadne` | `googlebot-smartphone`, `googlebot-desktop` or `bingbot`: sets the header AND the robots token (`Googlebot`, `bingbot`); refused beside `userAgent` or `robotsUserAgent`. A spoofed bot identity fails any site that verifies bots by IP address or reverse DNS (Cloudflare, most CDNs); a preset only helps on a site that filters by user-agent alone and never bypasses a challenge. `never` mutable. |
+| `robotsUserAgent` | derived | One product token (letters, digits, `-`, `_`). Resolved once at start and stored with the crawl; `crawl_get` / `crawl_config_get` echo `userAgent`, `robotsUserAgent` and `userAgentPreset`. |
 | `perHostDelayMs` | 1000 | Floor **250** for anything that arrives over the wire — refused below it, never clamped. Genuinely polite is 1000–2000; the crawl skill recommends 2000 on anything Cloudflare-fronted. |
 | `maxConcurrency` | 16 | The window, not the rate: the per-host delay and the governor bind first. |
 | `maxPages` | 500 (API default) | A first look at a site. Say so when you want more. |

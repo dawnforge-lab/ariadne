@@ -1139,6 +1139,11 @@ const KINDS = ["page", "query", "metric"] as const satisfies readonly AnyRule["k
 //        counted as a return link. `hreflang.non-indexable-target` reads a PDF target
 //        by its `is_indexable` (a plain 200 PDF is indexable, a noindexed one is not).
 //        A redirect's, 404's or blocked row's declarations are still not judged.
+//        User-agent presets: a crawl stores `robotsUserAgent` (the one token its
+//        robots.txt groups and Crawl-delay are matched against) and `userAgentPreset`
+//        beside `userAgent` (the header). `robots.blocks-sitemap-urls` matches the
+//        stored token and its evidence carries `robotsUserAgent`; a crawl stored
+//        before 29d has none and is read with its full `userAgent`, as it was crawled.
 export const RULESET_VERSION = "0.29.0";
 
 /**

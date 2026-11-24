@@ -728,7 +728,7 @@ beforeAll(async () => {
     siteUrl: app.base,
     maxPages: 500,
     maxDepth: 10,
-    userAgent: "AriadneBot-fixture",
+    userAgent: "AriadneBot-fixture", robotsUserAgent: "AriadneBot-fixture", userAgentPreset: null,
     perHostDelayMs: 0,
     maxConcurrency: 8,
     // The second name the fixture server answers to. It is the same machine and
@@ -1146,7 +1146,7 @@ describe("the fixture site end to end", () => {
       {
         pageUrl: blockedUrl,
         url: blockedUrl,
-        userAgent: "AriadneBot-fixture",
+        userAgent: "AriadneBot-fixture", robotsUserAgent: "AriadneBot-fixture",
         matchedBy: { line: 3, text: "Disallow: /private/" },
       },
     ]);

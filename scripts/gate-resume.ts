@@ -157,6 +157,8 @@ async function main(): Promise<number> {
     maxPages: pages + budgetHeadroom(pages),
     maxDepth: CRAWL_DEFAULTS.maxDepth,
     userAgent: CRAWL_DEFAULTS.userAgent,
+    robotsUserAgent: CRAWL_DEFAULTS.robotsUserAgent,
+    userAgentPreset: null,
     perHostDelayMs: 0,
     maxConcurrency: 16,
     allowPrivate: true,

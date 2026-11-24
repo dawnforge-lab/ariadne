@@ -924,6 +924,8 @@ async function runAriadne(base: string, legacyBase: string): Promise<AriadneResu
       maxPages: 3000,
       maxDepth: 20,
       userAgent: "AriadneBot-fixture",
+      robotsUserAgent: "AriadneBot-fixture",
+      userAgentPreset: null,
       perHostDelayMs: 0,
       maxConcurrency: 8,
       legacyHosts: [legacyBase],

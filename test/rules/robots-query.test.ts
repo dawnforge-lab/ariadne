@@ -269,6 +269,36 @@ describe("the robots rules against the database", () => {
     await expect(run("robots.blocks-sitemap-urls", crawlId)).rejects.toThrow(/user agent/i);
   });
 
+  // Phase 29d, Task 6: the stored robots token picks the group, and the
+  // evidence names it. A crawl stored before 29d has none and is read with the
+  // full userAgent, as it was crawled.
+  it("matches the stored robots token, and the evidence carries it", async () => {
+    const raw = "User-agent: Googlebot\nDisallow: /admin\n\nUser-agent: *\nAllow: /\n";
+    const crawlId = await newCrawl(mkDiscovery({ robots: { raw } }), {
+      maxPages: 500,
+      userAgent: "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)",
+      robotsUserAgent: "Googlebot",
+      userAgentPreset: "googlebot-desktop",
+    });
+    await addSitemapUrls(crawlId, [`${SITE}/admin/secret`]);
+    const found = await run("robots.blocks-sitemap-urls", crawlId);
+    expect(found).toHaveLength(1);
+    expect(found[0]!.evidence).toMatchObject({ robotsUserAgent: "Googlebot" });
+  });
+
+  it("reads a pre-29d crawl (no token stored) with its full userAgent", async () => {
+    const raw = `User-agent: ${UA}\nDisallow: /admin\n`;
+    const crawlId = await newCrawl(mkDiscovery({ robots: { raw } }), {
+      maxPages: 500,
+      userAgent: UA,
+    });
+    await addSitemapUrls(crawlId, [`${SITE}/admin/secret`]);
+    const found = await run("robots.blocks-sitemap-urls", crawlId);
+    expect(found).toHaveLength(1);
+    expect(found[0]!.evidence).toMatchObject({ userAgent: UA });
+    expect(found[0]!.evidence).not.toHaveProperty("robotsUserAgent");
+  });
+
   it("is silent when robots.txt is absent: allow-all disallows nothing", async () => {
     const crawlId = await newCrawl(mkDiscovery({ robots: { outcome: "absent", raw: null } }));
     await addSitemapUrls(crawlId, [`${SITE}/admin/secret`]);

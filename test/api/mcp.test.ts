@@ -2391,7 +2391,7 @@ describe("robots_get", () => {
     // The wrapper is closed: the sitemap walk's counters live in the same blob
     // and none of them are here.
     expect(Object.keys(body).sort()).toEqual([
-      "crawlDelaySec", "crawlId", "note", "outcome", "raw", "robotsUrl",
+      "crawlDelaySec", "crawlId", "note", "outcome", "raw", "robotsUrl", "robotsUserAgent",
       "sitemapSources", "suppliedSitemaps", "truncated", "userAgent",
     ]);
   });

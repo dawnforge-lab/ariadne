@@ -89,6 +89,11 @@ import {
   type CrawlMode,
 } from "../crawl/loop.js";
 import {
+  CrawlIdentityError,
+  resolveCrawlIdentity,
+  type CrawlIdentity,
+} from "../crawl/user-agents.js";
+import {
   credentialFieldError,
   describeShape,
   redactedCredentials,
@@ -368,6 +373,10 @@ export interface StartCrawlInput {
   maxPages?: number;
   maxDepth?: number;
   userAgent?: string;
+  /** Phase 29d: a named crawler identity; sets both the header and the robots token. */
+  userAgentPreset?: string;
+  /** Phase 29d: the one robots.txt product token; derived from `userAgent` when absent. */
+  robotsUserAgent?: string;
   perHostDelayMs?: number;
   maxConcurrency?: number;
   probeHosts?: boolean;
@@ -1318,6 +1327,11 @@ export interface RobotsEvidence {
    * assumed to be `*`.
    */
   userAgent: string | null;
+  /**
+   * The product token the groups were matched against (Phase 29d). Null on a
+   * crawl stored before 29d, which matched its full `userAgent`.
+   */
+  robotsUserAgent: string | null;
 }
 
 /** A page of results, in the surface's one pagination shape. */
@@ -3149,7 +3163,19 @@ export class ApiService {
 
     // The scope and the URL limit as the crawl will run with them — the
     // request over the operator's defaults over the engine's.
-    const preliminary = this.effectiveConfig(siteUrl, crawlInput, null, undefined);
+    // The identity, resolved once: the request's own fields, else the
+    // operator's defaults', else the branded default (Phase 29d, R2).
+    let identity: CrawlIdentity;
+    try {
+      identity = this.identityOf(crawlInput);
+    } catch (error) {
+      if (error instanceof CrawlIdentityError) {
+        errors.push({ path: error.field, code: "invalid", message: error.message });
+        return refused(errors);
+      }
+      throw error;
+    }
+    const preliminary = this.effectiveConfig(siteUrl, crawlInput, null, undefined, identity);
     const scope: CrawlScope = {
       exclude: preliminary.exclude ?? [],
       include: preliminary.include ?? [],
@@ -3204,7 +3230,7 @@ export class ApiService {
     const credentials = shapeOf(supplied) === null ? undefined : supplied;
 
     const listCount = listed === null ? null : listed.urls.length;
-    const crawlConfig = this.effectiveConfig(siteUrl, crawlInput, listCount, credentials);
+    const crawlConfig = this.effectiveConfig(siteUrl, crawlInput, listCount, credentials, identity);
     if (listCount !== null && crawlConfig.maxPages < listCount) {
       errors.push({
         path: "maxPages",
@@ -3901,6 +3927,11 @@ export class ApiService {
     const config = row.config;
     const userAgent =
       isRecord(config) && typeof config["userAgent"] === "string" ? config["userAgent"] : null;
+    // Null on a crawl stored before 29d: it matched its full user agent.
+    const robotsUserAgent =
+      isRecord(config) && typeof config["robotsUserAgent"] === "string"
+        ? config["robotsUserAgent"]
+        : null;
 
     return {
       crawlId,
@@ -3913,6 +3944,7 @@ export class ApiService {
       sitemapSources: robots.sitemapSources,
       suppliedSitemaps: robots.suppliedSitemaps,
       userAgent,
+      robotsUserAgent,
     };
   }
 
@@ -8227,6 +8259,29 @@ export class ApiService {
   }
 
   /**
+   * The crawl identity a request runs with (Phase 29d). The request's own three
+   * fields win as a set: a request naming a preset must not collide with the
+   * operator's `userAgent` default, so the operator's fields apply only when the
+   * request names none. Throws `CrawlIdentityError`.
+   */
+  private identityOf(input: CrawlRequestFields): CrawlIdentity {
+    const requested = stripUndefined({
+      userAgentPreset: input.userAgentPreset,
+      userAgent: input.userAgent,
+      robotsUserAgent: input.robotsUserAgent,
+    });
+    if (Object.keys(requested).length > 0) return resolveCrawlIdentity(requested);
+    const defaults = this.config.crawlDefaults;
+    return resolveCrawlIdentity(
+      stripUndefined({
+        userAgent: defaults?.userAgent,
+        robotsUserAgent: defaults?.robotsUserAgent,
+        userAgentPreset: defaults?.userAgentPreset ?? undefined,
+      }),
+    );
+  }
+
+  /**
    * The crawl config a request runs with. `listCount` is a list crawl's
    * distinct URLs (null for a spider crawl, or before the list is checked);
    * `credentials` the values, whose shape joins the config beside them (the
@@ -8237,6 +8292,7 @@ export class ApiService {
     input: CrawlRequestFields,
     listCount: number | null,
     credentials: CrawlCredentials | undefined,
+    identity: CrawlIdentity,
   ): CrawlConfig {
     const shape = credentials === undefined ? null : shapeOf(credentials);
     // Precedence, low to high: the engine's defaults (with the 27c fields
@@ -8255,6 +8311,9 @@ export class ApiService {
       ...(listCount === null ? API_CRAWL_DEFAULTS : { maxPages: 2 * listCount }),
       ...stripUndefined(this.config.crawlDefaults ?? {}),
       ...stripUndefined({ ...input, siteUrl }),
+      // After the request: the resolved trio is what is stored, whichever of
+      // the three the request spelled.
+      ...identity,
       ...(listCount === null ? {} : { listUrlCount: listCount }),
       ...(credentials === undefined || shape === null ? {} : { credentials, credentialShape: shape }),
     } as CrawlConfig;

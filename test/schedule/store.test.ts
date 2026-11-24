@@ -64,7 +64,7 @@ function configFor(siteUrl: string): StoredConfig {
     siteUrl,
     maxPages: 10,
     maxDepth: 3,
-    userAgent: "AriadneBot-store-test",
+    userAgent: "AriadneBot-store-test", robotsUserAgent: "AriadneBot-store-test", userAgentPreset: null,
     perHostDelayMs: 0,
     maxConcurrency: 1,
   });

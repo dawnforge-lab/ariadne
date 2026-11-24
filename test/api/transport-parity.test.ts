@@ -189,7 +189,7 @@ function validValue(field: string, spec: JsonSchema): unknown {
   if (spec.default !== undefined) return spec.default;
   const fixtures: Record<string, unknown> = {
     siteUrl: `${site}/`,
-    legacyHosts: ["localhost"],
+    legacyHosts: ["localhost"], robotsUserAgent: "ParityBot",
     sitemapUrls: [`${site}/sitemap.xml`],
     judgement: { rules: { "title.too-long": { priority: "low" } }, thresholds: { SLOW_MS: 800 } },
     // Phase 27c. `urls` is only valid beside `mode: "list"` (`COMPANIONS`).
@@ -367,8 +367,8 @@ afterAll(async () => {
 describe("contract clause 1: both transports accept and refuse the same fields", () => {
   it("walks the published schema and drives every body through POST /crawls and crawl_start", async () => {
     const { valid, invalid } = await buildCases();
-    // 25 from Phase 29b: `renderAccessibility` joined the published fields.
-    expect(valid.length).toBe(25);
+    // 25 from 29b (`renderAccessibility`); 27 from 29d (`userAgentPreset`, `robotsUserAgent`).
+    expect(valid.length).toBe(27);
 
     for (const c of valid) {
       const viaHttp = await call("POST", "/crawls", c.body);

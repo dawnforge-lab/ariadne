@@ -117,7 +117,7 @@ function cfg(urls: string[], overrides: Partial<CrawlConfig> = {}): CrawlConfig 
     siteUrl: `${base}/`,
     maxPages: 100,
     maxDepth: 10,
-    userAgent: "AriadneBot-list-test",
+    userAgent: "AriadneBot-list-test", robotsUserAgent: "AriadneBot-list-test", userAgentPreset: null,
     perHostDelayMs: 0,
     maxConcurrency: 1,
     allowPrivate: true,

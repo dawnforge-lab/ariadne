@@ -73,7 +73,7 @@ describe("the published schema", () => {
   it("marks every field with whether it can change after the crawl starts", () => {
     const expected: Record<string, string> = {
       siteUrl: "never",
-      userAgent: "never",
+      userAgent: "never", userAgentPreset: "never", robotsUserAgent: "never",
       probeHosts: "never",
       legacyHosts: "never",
       sitemapUrls: "never",
@@ -514,5 +514,15 @@ describe("the 27c fields (list mode, scope, credentials, limits)", () => {
     expect(list).toMatchObject({ path: "urls", code: "out_of_range" });
     expect(list.message).toContain("10000");
     expect(first({ siteUrl: SITE, mode: "crawl" })).toMatchObject({ path: "mode", code: "invalid" });
+  });
+
+  // Phase 29d, Task 6.
+  it("accepts userAgentPreset and robotsUserAgent on a start body, and refuses a non-string", () => {
+    const ok = parseStartBody({ siteUrl: SITE, userAgentPreset: "bingbot" }, registry);
+    expect(ok.ok && ok.value.userAgentPreset).toBe("bingbot");
+    const token = parseStartBody({ siteUrl: SITE, userAgent: "Acme/1.0", robotsUserAgent: "Acme" }, registry);
+    expect(token.ok && token.value.robotsUserAgent).toBe("Acme");
+    expect(first({ siteUrl: SITE, userAgentPreset: 3 }).path).toBe("userAgentPreset");
+    expect(first({ siteUrl: SITE, robotsUserAgent: 3 }).path).toBe("robotsUserAgent");
   });
 });

@@ -73,7 +73,7 @@ function config(overrides: Partial<CrawlConfig> = {}): CrawlConfig {
     siteUrl: base,
     maxPages: 20,
     maxDepth: 2,
-    userAgent: "AriadneBot-test",
+    userAgent: "AriadneBot-test", robotsUserAgent: "AriadneBot-test", userAgentPreset: null,
     perHostDelayMs: 0,
     maxConcurrency: 2,
     allowPrivate: true,

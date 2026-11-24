@@ -320,7 +320,7 @@ function cfg(overrides: Partial<CrawlConfig> = {}): CrawlConfig {
     siteUrl: `${base}/`,
     maxPages: 50,
     maxDepth: 5,
-    userAgent: "AriadneBot-credentials-test",
+    userAgent: "AriadneBot-credentials-test", robotsUserAgent: "AriadneBot-credentials-test", userAgentPreset: null,
     perHostDelayMs: 0,
     maxConcurrency: 2,
     allowPrivate: true,
