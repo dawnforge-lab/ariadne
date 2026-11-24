@@ -228,12 +228,19 @@ validated before it is refused (409, "re-run the rules"), never read.
     Has Parse Errors`): a block on the page could not be parsed, so the id may be defined
     in a block that was not read. The rule is gated: silent on a crawl not wholly at
     extraction 4. A `@graph` member that is only `{"@id": …}` is a reference at `$`,
-    checked as one, and not a node.
+    checked as one, and not a node. From Phase 29d every reference is checked, wherever it
+    sits: the block verdict holds `unresolved` (the resolved ids no node of the block
+    defines, up to 50, in walk order) and `unresolvedCount` (exact), and the evidence
+    carries `unresolved` (the page's unresolved ids, up to 50, columns `Unresolved Ids`),
+    `unresolvedCount` (`Unresolved Count`, exact) and `problemsCapped` (true when
+    `unresolvedCount` is over 50). `problems` (the path of each) comes from each block's
+    first 50 references, so it may hold fewer entries than the count, and `problemCount`
+    equals `unresolvedCount`.
   - **`problemsCapped`** (column `Problems Capped`) is on the evidence of every per-node
     rule (`unknown-type`, `unknown-property`, `property-pending-or-superseded`,
     `embedded-type-mismatch`, `empty-value`, `unresolved-reference`): each block's list
     of a kind stops at 50 entries, and when one the rule reads did, `problemCount` is
-    short.
+    short. For `unresolved-reference` it is true when `unresolvedCount` is over 50.
   - **`schema.property-coverage`** (metric, CHECK-44) writes one row per top-level type,
     under the new public metric scope **`schema_type`** (the scopes are now `site |
     page_type | sitemap_doc | schema_type`): the type as the markup states it, an
@@ -3088,10 +3095,15 @@ blocksDropped, nodesDropped, problemsCapped
   or a page below it that holds them, throws naming the crawl and the page.
 - **`problemsCapped`** is true when a block on the page cut one of the lists the two
   counts read at its per-block limit (50): `warningCount` / `infoCount` may be short
-  (an empty-value list cut at 50 holds more problems than it shows; a references list
-  cut at 50 may or may not hold more unresolved ones).
-  The `structured_data_nodes` CSV holds the same lists, so its rows for one problem
-  stop at 50 per block too; the cap is per block.
+  (an empty-value list cut at 50 holds more problems than it shows). The unresolved
+  part of `infoCount` is not cut by the references list (Phase 29d): it is exact, a
+  reference past the 50th included, unless one block holds more than 50 references
+  that no node of that block defines. Such a block lists 50 ids and counts the rest,
+  which another block of the page may define, so the count may be high there and
+  `problemsCapped` is true.
+  The `structured_data_nodes` CSV holds the first 50 of each list, so its rows for one
+  problem stop at 50 per block; a reference past the 50th is counted by the listing and
+  the rule but has no CSV row.
 - **`notMeasured`** is `{id, reason}[]`. On a crawl not wholly at extraction 4 the
   unresolved-reference count is not measured and `notMeasured` names
   `schema.unresolved-reference`; `infoCount` then holds no references. It is `[]`
@@ -4460,7 +4472,11 @@ node's `types` lists them all, and the stored skips gain `blocksDropped` and
 `nodesDropped`. The `structured_data` listing (§4.6a) and its MCP tool answer both as
 `blocksDropped` / `nodesDropped` (null below extraction 5), and the `structured_data_nodes`
 CSV (§12) ends with `Blocks Dropped` and `Nodes Dropped` columns. The two columns are appended at the end: consumers reading by header name are unaffected, and positional consumers see 9 columns where they saw 7. A crawl at extraction 4
-keeps answering null for both until it is re-crawled.
+keeps answering null for both until it is re-crawled. `schema.unresolved-reference` finds a
+reference wherever it sits, past the 50th too: the block verdict gains `unresolved` (up to
+50 ids) and `unresolvedCount` (exact), its evidence is `{unresolved, unresolvedCount,
+problemsCapped}`, and the `structured_data` listing's `infoCount` reads the same count. A
+verdict stored without them is stale and the next rules run rewrites it.
 
 **0.28.1 is a fix, not a phase.** A robots value's `none` is the directive (noindex,
 nofollow) only as a whole token: `max-image-preview: none` asks for no image preview and

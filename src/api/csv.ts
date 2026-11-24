@@ -1081,6 +1081,9 @@ export const CSV_VIEW_DEFS: Record<CsvQueryViewName, CsvView> = {
    * block's problem lists holds at most `MAX_PROBLEMS_PER_LIST` entries, so a
    * block's rows for one problem stop there; the listing's `problemsCapped`
    * and the findings' Problems Capped say when they did (the cap is per block).
+   * The unresolved-reference rows come from the first 50 references, so a
+   * reference past the 50th has no row though the listing and the finding
+   * count it (29d).
    */
   structured_data_nodes: defineCsvView<{
     id: string;

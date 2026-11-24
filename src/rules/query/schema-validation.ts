@@ -49,7 +49,12 @@ import {
 } from "../registry/registry.js";
 import type { RuleCaps } from "../registry/types.js";
 import { staleBlob } from "../schema-org/blob-sql.js";
-import { blockValidationSchema, type BlockValidation, type ListName } from "../schema-org/validate.js";
+import {
+  MAX_PROBLEMS_PER_LIST,
+  blockValidationSchema,
+  type BlockValidation,
+  type ListName,
+} from "../schema-org/validate.js";
 import { assertCrawl, capsOr, limitTo, noteTruncation } from "./crawl-evidence.js";
 import { v4Gate } from "./page-facts.js";
 import { judgementOr } from "../registry/types.js";
@@ -151,6 +156,16 @@ interface PerPageSpec {
    */
   readsDefinedIds?: true;
   /**
+   * A rule whose count is not the length of `problems`: the page's exact count,
+   * the ids behind it, and whether the count may be off. It replaces the
+   * `problemCount` / `problemsCapped` the lists give, and the page is filed on
+   * the strength of its count, not of `problems`.
+   */
+  summary?: (
+    blocks: readonly BlockView[],
+    page: PageContext,
+  ) => { unresolved: string[]; unresolvedCount: number; problemsCapped: boolean };
+  /**
    * Silent on a crawl not wholly at extraction 4 (ruling R0.7): the answer
    * depends on blocks a page read before microdata and RDFa were extracted
    * would not have.
@@ -173,19 +188,51 @@ const listHas = (key: string) => (): SQL =>
   sql`coalesce(jsonb_array_length(sd.validation_jsonb -> ${sql.raw(`'${key}'`)}), 0) > 0`;
 
 /**
- * A reference of block `sd` that no block of page `p` defines. A sibling block
- * whose verdict is null defines nothing here; the page is then selected and
- * the reader throws on that block, so the null is never read as "undefined".
+ * A reference of block `sd` that no block of page `p` defines, read from the
+ * block's `unresolved` ids (references no node of the block itself defines;
+ * 29d), which cover every reference walked, not the first 50 recorded in
+ * `references`. A block whose `unresolvedCount` exceeds the ids it lists has
+ * references the page cannot be checked against here, so it is selected and
+ * the reader counts them (`unresolvedSummary`). A sibling block whose verdict
+ * is null defines nothing here; the page is then selected and the reader
+ * throws on that block, so the null is never read as "undefined".
  */
 const unresolvedHas = (crawlId: string): SQL =>
-  sql`exists (
-    select 1 from jsonb_array_elements(sd.validation_jsonb -> 'references') r(ref)
-    where not exists (
-      select 1 from structured_data d
-      where d.crawl_id = ${crawlId} and d.page_id = p.id
-        and d.validation_jsonb -> 'definedIds' @> jsonb_build_array(r.ref -> 'id')
-    )
-  )`;
+  sql`((sd.validation_jsonb ->> 'unresolvedCount')::int > 0 and (
+    (sd.validation_jsonb ->> 'unresolvedCount')::int > jsonb_array_length(sd.validation_jsonb -> 'unresolved')
+    or exists (
+      select 1 from jsonb_array_elements(sd.validation_jsonb -> 'unresolved') r(id)
+      where not exists (
+        select 1 from structured_data d
+        where d.crawl_id = ${crawlId} and d.page_id = p.id
+          and d.validation_jsonb -> 'definedIds' @> jsonb_build_array(r.id)
+      )
+    )))`;
+
+/**
+ * `unresolved-reference`'s evidence: the page's unresolved ids (up to
+ * `MAX_PROBLEMS_PER_LIST`, in block then walk order) and their exact count. A
+ * block that listed fewer ids than it counted (more than 50 references no node
+ * of that block defines) cannot say which of the unlisted ones another block
+ * of the page defines, so they are counted as unresolved and `problemsCapped`
+ * says the count may be high.
+ */
+function unresolvedSummary(
+  blocks: readonly BlockView[],
+  page: PageContext,
+): { unresolved: string[]; unresolvedCount: number; problemsCapped: boolean } {
+  const ids: string[] = [];
+  let count = 0;
+  for (const b of blocks) {
+    for (const id of b.unresolved) {
+      if (page.definedIds.has(id)) continue;
+      count += 1;
+      if (ids.length < MAX_PROBLEMS_PER_LIST) ids.push(id);
+    }
+    count += b.unresolvedCount - b.unresolved.length;
+  }
+  return { unresolved: ids, unresolvedCount: count, problemsCapped: count > MAX_PROBLEMS_PER_LIST };
+}
 
 /** Every id the page's blocks define, as one set (`PageContext`); empty for a rule that reads none. */
 function pageContext(blocks: readonly BlockView[]): PageContext {
@@ -270,9 +317,10 @@ async function perPageFindings(
     }
     const page = pageContext(parsed.map((b) => b.validation));
     const all: Problem[] = parsed.flatMap((b) => spec.problems(b.validation, b.format, page));
+    const summary = spec.summary?.(parsed.map((b) => b.validation), page);
     // The SQL selected the page on the strength of some block, so an empty
     // list here means the SQL pre-filter and the reader disagree.
-    if (all.length === 0) {
+    if ((summary === undefined ? all.length : summary.unresolvedCount) === 0) {
       throw new Error(
         `${ruleId}: ${row.url} was selected but no block lists a problem — the SQL pre-filter and the reader disagree`,
       );
@@ -284,8 +332,14 @@ async function perPageFindings(
         evidence: {
           ...(spec.pageEvidence?.of({ blockCount: row.blocks.length, hasParseErrors: row.has_parse_errors }) ?? {}),
           problems: all.slice(0, MAX_PROBLEMS_IN_EVIDENCE),
-          problemCount: all.length,
-          problemsCapped: parsed.some((b) => b.validation.cappedLists.some((name) => spec.lists.includes(name))),
+          ...(summary === undefined
+            ? {
+                problemCount: all.length,
+                problemsCapped: parsed.some((b) =>
+                  b.validation.cappedLists.some((name) => spec.lists.includes(name)),
+                ),
+              }
+            : { ...summary, problemCount: summary.unresolvedCount }),
         },
         dedupeKey: row.url,
       }),
@@ -461,6 +515,7 @@ const SPECS = {
     hasProblems: unresolvedHas,
     lists: ["references"],
     readsDefinedIds: true,
+    summary: unresolvedSummary,
     problems: (b, format, page) =>
       b.references
         .filter((r) => !page.definedIds.has(r.id))
@@ -484,6 +539,10 @@ const SPECS = {
 const PROBLEMS_COLUMN = { key: "problems", label: "Problems" };
 const COUNT_COLUMN = { key: "problemCount", label: "Problem Count" };
 const CAPPED_COLUMN = { key: "problemsCapped", label: "Problems Capped" };
+const UNRESOLVED_COLUMNS = [
+  { key: "unresolved", label: "Unresolved Ids" },
+  { key: "unresolvedCount", label: "Unresolved Count" },
+];
 
 function perPageRule(spec: PerPageSpec, checkIds: string[]): QueryRule {
   return defineRule<QueryRule>({
@@ -492,7 +551,13 @@ function perPageRule(spec: PerPageSpec, checkIds: string[]): QueryRule {
     checkIds,
     category: CATEGORY,
     severity: spec.identity.severity,
-    columns: [PROBLEMS_COLUMN, ...(spec.pageEvidence?.columns ?? []), COUNT_COLUMN, CAPPED_COLUMN],
+    columns: [
+      PROBLEMS_COLUMN,
+      ...(spec.pageEvidence?.columns ?? []),
+      ...(spec.summary === undefined ? [] : UNRESOLVED_COLUMNS),
+      COUNT_COLUMN,
+      CAPPED_COLUMN,
+    ],
     ...copyFor(spec.identity.id),
     rulesetVersion: RULESET_VERSION,
     run: (db, crawlId, caps) => perPageFindings(db, crawlId, capsOr(caps), spec),

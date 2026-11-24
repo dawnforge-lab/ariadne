@@ -1109,6 +1109,11 @@ const KINDS = ["page", "query", "metric"] as const satisfies readonly AnyRule["k
 //        pagination page (`/blog/10/`) is its own page type and is no longer absorbed
 //        into `/blog/:slug` at crawl end, so `schema.template-inconsistent` no longer
 //        files listing pages against a post template. Later 29d tasks append here.
+//        Structured data: `schema.unresolved-reference` finds a reference wherever it
+//        sits, past the 50th too. The block verdict gains `unresolved` (up to 50 ids)
+//        and `unresolvedCount` (exact); a verdict without them is stale (re-run the
+//        rules), the evidence is {unresolved, unresolvedCount, problemsCapped}, and
+//        the listing's infoCount reads the same exact count.
 export const RULESET_VERSION = "0.29.0";
 
 /**

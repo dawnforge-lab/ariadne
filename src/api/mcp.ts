@@ -1865,9 +1865,12 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "how many blocks past the per-page limit were not stored. nodesDropped: how many " +
         "nodes past the per-block limit were not stored. Both are null on a page crawled at " +
         "an extraction below version 5, which did not count them. problemsCapped: a block cut one of the lists these counts " +
-        "read at its per-block limit, so the counts may be short. The " +
+        "read at its per-block limit, so the counts may be short; the unresolved-reference part of infoCount is " +
+        "exact (a reference past the 50th is found) unless a block holds more than 50 references no node of " +
+        "that block defines, where it may count ones another block defines and problemsCapped is true. The " +
         "problem-by-problem detail is the structured_data_nodes CSV view " +
-        "(export_crawl format=csv), one row per block and problem.\n\n" +
+        "(export_crawl format=csv), one row per block and problem; its unresolved-reference rows " +
+        "come from each block's first 50 references, so a reference past the 50th is counted but has no row.\n\n" +
         "NULL IS NOT ZERO. microdataErrors and skips are null on a page crawled " +
         "before microdata was read (extraction below version 4): nobody looked, " +
         "so warningCount there has no microdata errors in it. skips counts what " +

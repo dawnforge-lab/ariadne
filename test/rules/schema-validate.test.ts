@@ -811,3 +811,32 @@ describe("validateBlock — whether the block was judged against schema.org (fin
     expect(validate({ "@context": "https://example.org/vocab/", "@type": "Product", name: "x" }).judged).toBe(false);
   });
 });
+
+// Phase 29d, Task 4. Appended so no earlier line moves.
+describe("validateBlock — unresolved references wherever they sit (29d)", () => {
+  it("finds an unresolved reference past the 50th", () => {
+    const v = validate({
+      "@context": CTX,
+      "@type": "ItemList",
+      hasPart: Array.from({ length: 59 }, (_, i) => ({ "@id": `#part${i}`, "@type": "WebPage" })),
+      itemListElement: [
+        ...Array.from({ length: 59 }, (_, i) => ({ "@id": `#part${i}` })),
+        { "@id": "#nowhere" },
+      ],
+    });
+    expect(v.references).toHaveLength(MAX_PROBLEMS_PER_LIST);
+    expect(v.unresolvedCount).toBe(1);
+    expect(v.unresolved).toEqual([`${DOC}#nowhere`]);
+  });
+
+  it("counts every unresolved reference", () => {
+    const v = validate({
+      "@context": CTX,
+      "@type": "ItemList",
+      itemListElement: Array.from({ length: 70 }, (_, i) => ({ "@id": `#gone${i}` })),
+    });
+    expect(v.unresolved).toHaveLength(MAX_PROBLEMS_PER_LIST);
+    expect(v.unresolvedCount).toBe(70);
+    expect(v.unresolved[0]).toBe(`${DOC}#gone0`);
+  });
+});

@@ -53,7 +53,12 @@
  *  - `references`: every bare `{"@id": …}` (`bareReferenceId`) with its path,
  *    the id resolved (`id`) and as written (`written`). Whether it resolves is
  *    a question about the PAGE — another block may define the id — so it is
- *    answered at rules time, not here.
+ *    answered at rules time, not here;
+ *  - `unresolved` / `unresolvedCount` (29d): the references no node of this
+ *    block defines (the page's other blocks may) as resolved ids in walk
+ *    order, up to `MAX_PROBLEMS_PER_LIST`, with the exact count. Taken from
+ *    every reference walked, so one past the 50th that `references` had no
+ *    room for is still found.
  *
  * **Ids are IRIs, resolved against the document base** (JSON-LD 1.1 §IRIs, as
  * microdata `itemid` and RDFa `resource` already are at extraction): the page
@@ -137,6 +142,14 @@ export const blockValidationSchema = z.strictObject({
   definedIds: z.array(z.string().min(1)),
   // `id` resolved against the document base (the compared value); `written` as authored.
   references: list(z.strictObject({ path, id: z.string().min(1), written: z.string().min(1) })),
+  /**
+   * The resolved ids of the references no node of THIS block defines, in walk
+   * order, whether or not `references` had room for them (29d). The page may
+   * define one in another block: the rule subtracts those. Capped at
+   * `MAX_PROBLEMS_PER_LIST`; `unresolvedCount` is exact.
+   */
+  unresolved: z.array(z.string().min(1)).max(MAX_PROBLEMS_PER_LIST),
+  unresolvedCount: z.number().int().nonnegative(),
   nodes: list(
     z.strictObject({
       path,
@@ -250,6 +263,12 @@ class Walker {
   };
   /** Insertion-ordered and deduplicated; never capped (see the header). */
   readonly definedIds = new Set<string>();
+  /**
+   * The resolved id of every reference walked, in order, uncapped: whether one
+   * is defined is known only when the walk ends. Bounded by the block's stored
+   * size (`MAX_LD_JSON_CHARS`), as `definedIds` is.
+   */
+  readonly referenceIds: string[] = [];
   /** The lists that were cut, in the order they were (`cappedLists`). */
   readonly cappedLists = new Set<ListName>();
   outside = 0;
@@ -283,13 +302,20 @@ class Walker {
     target.push(entry);
   }
 
+  /** Record a bare reference: always in `referenceIds`, in `references` while it has room. */
+  private reference(path: string, written: string): void {
+    const id = this.resolveId(written);
+    this.referenceIds.push(id);
+    this.push("references", { path, id, written });
+  }
+
   /**
    * A block that is only a reference (`{"@id": …}`, its `@context` aside): an
    * `@graph` member the analyzer stored as a block of its own. It is checked
    * as the bare reference it is, at `$`, and is not a node (final review M2).
    */
   rootReference(id: string): void {
-    this.push("references", { path: "$", id: this.resolveId(id), written: id });
+    this.reference("$", id);
   }
 
   /**
@@ -443,7 +469,7 @@ class Walker {
     }
     const reference = bareReferenceId(value);
     if (reference !== null) {
-      this.push("references", { path, id: this.resolveId(reference), written: reference });
+      this.reference(path, reference);
       return;
     }
     if (Array.isArray(value)) {
@@ -540,6 +566,7 @@ export function validateBlock(raw: unknown, documentUrl: string): BlockValidatio
   let topType: string | null = null;
   if (onlyId !== null) walker.rootReference(onlyId);
   else topType = walker.node(raw, "$", 1, []);
+  const unresolvedAll = walker.referenceIds.filter((id) => !walker.definedIds.has(id));
   return {
     topType,
     unknownTypes: walker.lists.unknownTypes,
@@ -549,6 +576,8 @@ export function validateBlock(raw: unknown, documentUrl: string): BlockValidatio
     emptyValues: walker.lists.emptyValues,
     definedIds: [...walker.definedIds],
     references: walker.lists.references,
+    unresolved: unresolvedAll.slice(0, MAX_PROBLEMS_PER_LIST),
+    unresolvedCount: unresolvedAll.length,
     nodes: walker.lists.nodes,
     outsideVocabulary: walker.outside,
     listsCapped: walker.capped,

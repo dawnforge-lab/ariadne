@@ -2109,7 +2109,7 @@ describe("structured-data copy after the final review", () => {
       "schema.unresolved-reference",
     ]) {
       const text = copyFor(id).explanation;
-      expect(text, id).toContain(`stops at ${MAX_PROBLEMS_PER_LIST}`);
+      expect(text, id).toContain(id === "schema.unresolved-reference" ? `lists up to ${MAX_PROBLEMS_PER_LIST}` : `stops at ${MAX_PROBLEMS_PER_LIST}`);
       expect(text, id).toContain("Problems Capped");
     }
   });

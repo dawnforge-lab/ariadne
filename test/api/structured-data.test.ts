@@ -802,3 +802,41 @@ describe("blocksDropped and nodesDropped (29d)", () => {
     for (const row of four.slice(1)) expect(row.endsWith(",,\r\n")).toBe(true);
   });
 });
+
+// Phase 29d, Task 4: unresolved references past the 50th are counted. Appended so no earlier line moves.
+describe("unresolved references past the 50th (29d)", () => {
+  const manyId = `crawl_sd_listing_unresolved_${runId}`;
+
+  beforeAll(async () => {
+    allCrawls.push(manyId);
+    const ids = await seedCrawl(manyId);
+    // "/": 59 resolved references, then one that is not. "/article": 70 that are not.
+    await db.insert(structuredData).values([
+      {
+        crawlId: manyId, pageId: ids.get("/")!, schemaType: "ItemList", format: "jsonld",
+        raw: {
+          "@context": C, "@type": "ItemList",
+          hasPart: Array.from({ length: 59 }, (_, i) => ({ "@id": `#part${i}`, "@type": "WebPage" })),
+          itemListElement: [...Array.from({ length: 59 }, (_, i) => ({ "@id": `#part${i}` })), { "@id": "#nowhere" }],
+        },
+      },
+      {
+        crawlId: manyId, pageId: ids.get("/article")!, schemaType: "ItemList", format: "jsonld",
+        raw: { "@context": C, "@type": "ItemList", itemListElement: Array.from({ length: 70 }, (_, i) => ({ "@id": `#gone${i}` })) },
+      },
+    ]);
+    await service.runRulesForCrawl(LOCAL_TENANT, manyId);
+  }, 120_000);
+
+  it("counts the 60th reference and the 70 unresolved ones exactly; problemsCapped only past 50", async () => {
+    const many = await service.listStructuredData(LOCAL_TENANT, manyId, {});
+    const base = await service.listStructuredData(LOCAL_TENANT, crawlId, {});
+    // "/" holds only the first block; "/article" holds the shared seed's blocks too.
+    expect(many.items.find((r) => r.url === `${SITE}/`)!.infoCount).toBe(1);
+    expect(many.items.find((r) => r.url === `${SITE}/article`)!.infoCount).toBe(
+      base.items.find((r) => r.url === `${SITE}/article`)!.infoCount + 70,
+    );
+    expect(many.items.find((r) => r.url === `${SITE}/`)!.problemsCapped).toBe(false);
+    expect(many.items.find((r) => r.url === `${SITE}/article`)!.problemsCapped).toBe(true);
+  });
+});

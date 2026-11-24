@@ -31,6 +31,7 @@ import { sql, type SQL } from "drizzle-orm";
 import type { StructuredDataFormat, StructuredDataSkips } from "../crawl/parse/page-analyzer.js";
 import { V4 } from "../rules/query/page-facts.js";
 import { staleBlob } from "../rules/schema-org/blob-sql.js";
+import { MAX_PROBLEMS_PER_LIST } from "../rules/schema-org/validate.js";
 import type { NotMeasured } from "./overview.js";
 import { ServiceError, clip } from "./errors.js";
 
@@ -135,6 +136,7 @@ const VALIDATION_LISTS = [
   "emptyValues",
   "definedIds",
   "references",
+  "unresolved",
   "nodes",
 ] as const;
 
@@ -186,10 +188,11 @@ const MALFORMED_ENTRIES = [
   'lax $.references[*] ? (@.type() != "object" || !exists(@.id) || @.id.type() != "string"' +
     ' || !exists(@.written) || @.written.type() != "string")',
   'lax $.definedIds[*] ? (@.type() != "string")',
+  'lax $.unresolved[*] ? (@.type() != "string")',
 ];
 
 /**
- * True when `blob` is an object holding all eight lists as arrays, and the
+ * True when `blob` is an object holding every list in `VALIDATION_LISTS` as an array, and the
  * entries the surface reads by key are the shape the validator writes.
  *
  * Without it a blob missing a list would count as zero in `jsonb_array_length`'s
@@ -241,23 +244,28 @@ export function referencesMeasured(crawlId: string): SQL {
  * extraction 4 (`referencesMeasured`). Ids are stored resolved against the
  * page (validate.ts), so the comparison is of strings.
  */
-function unresolved(ref: SQL, crawlId: string, pageId: SQL): SQL {
+function unresolved(ref: SQL, crawlId: string, pageId: SQL, isEntry = true): SQL {
+  // `ref` is a reference entry (`{path, id, written}`), or with `isEntry` false the id itself.
+  const id = isEntry ? sql`${ref} -> 'id'` : ref;
   return sql`${referencesMeasured(crawlId)} and not exists (
     select 1 from structured_data d
      where d.crawl_id = ${crawlId} and d.page_id = ${pageId}
-       and d.validation_jsonb -> 'definedIds' @> jsonb_build_array(${ref} -> 'id'))`;
+       and d.validation_jsonb -> 'definedIds' @> jsonb_build_array(${id}))`;
 }
 
 /**
  * Whether one block cut a list the counts read (`cappedLists`, final review
  * I1): the page's counts are then short, and the row says so
- * (`problemsCapped`). `references` counts only where references are measured.
+ * (`problemsCapped`). The unresolved count no longer reads `references` (29d):
+ * it is exact up to a block that counted more than 50 unresolved ids, where
+ * unlisted ones are counted as unresolved and the count may be high, so the
+ * row says so there, where references are measured.
  */
 export function blockProblemsCapped(blob: SQL, crawlId: string): SQL {
-  return sql`exists (
+  return sql`(exists (
     select 1 from jsonb_array_elements_text(${list(blob, "cappedLists")}) as c(name)
-     where c.name in ('unknownTypes', 'unknownProperties', 'propertyStatus', 'typeMismatches', 'emptyValues')
-        or (c.name = 'references' and ${referencesMeasured(crawlId)}))`;
+     where c.name in ('unknownTypes', 'unknownProperties', 'propertyStatus', 'typeMismatches', 'emptyValues'))
+    or (${referencesMeasured(crawlId)} and (${blob} ->> 'unresolvedCount')::int > ${MAX_PROBLEMS_PER_LIST}))`;
 }
 
 /**
@@ -283,9 +291,16 @@ export function blockWarnings(blob: SQL): SQL {
  * references no block of the page defines. Null when the blob is unreadable.
  */
 export function blockInfos(blob: SQL, crawlId: string, pageId: SQL): SQL {
+  // From the block's `unresolved` ids and exact `unresolvedCount` (29d), not
+  // the first 50 `references`. A block that counted more than it listed has
+  // unlisted references the page cannot be checked against: they are counted,
+  // as the rule counts them, and `blockProblemsCapped` says the count may be high.
   return sql`(jsonb_array_length(${list(blob, "propertyStatus")})
-    + (select count(*) from jsonb_array_elements(${list(blob, "references")}) as r(ref)
-        where ${unresolved(sql`r.ref`, crawlId, pageId)}))`;
+    + (select count(*) from jsonb_array_elements_text(${list(blob, "unresolved")}) as u(id)
+        where ${unresolved(sql`to_jsonb(u.id)`, crawlId, pageId, false)})
+    + case when ${referencesMeasured(crawlId)}
+           then (${blob} ->> 'unresolvedCount')::int - jsonb_array_length(${list(blob, "unresolved")})
+           else 0 end)`;
 }
 
 /**

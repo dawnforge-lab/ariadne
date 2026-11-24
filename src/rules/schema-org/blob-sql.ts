@@ -25,7 +25,8 @@ const MALFORMED_NODE =
 /**
  * True for a non-null verdict NOT in the shape this ruleset writes: one from
  * before the 29a rework (no `nodes`), from before a later field existed
- * (`definedIds`, `cappedLists`, `judged`, a node's `types` / `typesCapped`),
+ * (`definedIds`, `cappedLists`, `judged`, `unresolved` / `unresolvedCount`,
+ * a node's `types` / `typesCapped`),
  * or a node entry of the wrong shape. Such a blob is refused with "re-run the
  * rules" wherever it is met, never read. True on a null blob too; a caller
  * that words "no verdict at all" differently tests `is null` first.
@@ -35,5 +36,7 @@ export function staleBlob(blob: SQL): SQL {
     or jsonb_typeof(${blob} -> 'definedIds') is distinct from 'array'
     or jsonb_typeof(${blob} -> 'cappedLists') is distinct from 'array'
     or jsonb_typeof(${blob} -> 'judged') is distinct from 'boolean'
+    or jsonb_typeof(${blob} -> 'unresolved') is distinct from 'array'
+    or jsonb_typeof(${blob} -> 'unresolvedCount') is distinct from 'number'
     or jsonb_path_exists(${blob}, ${sql.raw(`'${MALFORMED_NODE}'`)}))`;
 }

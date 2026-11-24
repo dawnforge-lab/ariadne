@@ -348,7 +348,7 @@ describe("the schema validation rules against the database", () => {
       expect(found[0]!.evidence).toEqual({
         blocksAtCap: false, pageHasParseErrors: false,
         problems: [{ format: "jsonld", path: "$.about[1]", id: `${url("/a")}#topic`, written: "#topic" }],
-        problemCount: 1, problemsCapped: false,
+        unresolved: [`${url("/a")}#topic`], unresolvedCount: 1, problemCount: 1, problemsCapped: false,
       });
     });
 
@@ -367,7 +367,7 @@ describe("the schema validation rules against the database", () => {
             written: "https://parent.example/#org",
           },
         ],
-        problemCount: 1, problemsCapped: false,
+        unresolved: ["https://parent.example/#org"], unresolvedCount: 1, problemCount: 1, problemsCapped: false,
       });
     });
 
@@ -643,7 +643,7 @@ describe("the schema validation rules against the database", () => {
     });
 
     it("declares the Blocks At Cap column beside the problems", () => {
-      expect(rule(ID).columns.map((c) => c.key)).toEqual(["problems", "blocksAtCap", "pageHasParseErrors", "problemCount", "problemsCapped"]);
+      expect(rule(ID).columns.map((c) => c.key)).toEqual(["problems", "blocksAtCap", "pageHasParseErrors", "unresolved", "unresolvedCount", "problemCount", "problemsCapped"]);
     });
   });
 });
@@ -774,7 +774,12 @@ describe("the per-page schema rules after the final review", () => {
     const empty = await rule("schema.empty-value").run(db, crawlId);
     expect(empty[0]!.evidence).toMatchObject({ problemCount: MAX_PROBLEMS_PER_LIST, problemsCapped: true });
     const unresolved = await rule("schema.unresolved-reference").run(db, crawlId);
-    expect(unresolved[0]!.evidence).toMatchObject({ problemCount: MAX_PROBLEMS_PER_LIST, problemsCapped: true });
+    // The count is exact, not the stored list's length (29d).
+    expect(unresolved[0]!.evidence).toMatchObject({
+      unresolvedCount: MAX_PROBLEMS_PER_LIST + 1,
+      problemsCapped: true,
+    });
+    expect((unresolved[0]!.evidence["unresolved"] as string[]).length).toBe(MAX_PROBLEMS_PER_LIST);
     // A list the rule does not read was not cut, whatever the others did.
     expect(await rule("schema.unknown-type").run(db, crawlId)).toEqual([]);
   });
@@ -821,5 +826,53 @@ describe("the per-page schema rules after the final review", () => {
     await db.execute(sql`
       update structured_data set validation_jsonb = validation_jsonb - 'definedIds' where crawl_id = ${crawlId}`);
     await expect(rule("schema.empty-value").run(db, crawlId)).rejects.toThrow(/re-run the rules/);
+  });
+
+  // Phase 29d, Task 4: appended so no earlier line moves.
+  const list59 = {
+    "@context": ctx,
+    "@type": "ItemList",
+    hasPart: Array.from({ length: 59 }, (_, i) => ({ "@id": `#part${i}`, "@type": "WebPage" })),
+    itemListElement: [
+      ...Array.from({ length: 59 }, (_, i) => ({ "@id": `#part${i}` })),
+      { "@id": "#nowhere" },
+    ],
+  };
+
+  it("29d: files a page whose only unresolved reference is the 60th", async () => {
+    const crawlId = await crawlWith([{ path: "/a", raws: [list59] }]);
+    const found = await rule("schema.unresolved-reference").run(db, crawlId);
+    expect(found).toHaveLength(1);
+    expect(found[0]!.evidence).toMatchObject({
+      unresolved: [`${url("/a")}#nowhere`],
+      unresolvedCount: 1,
+      problemsCapped: false,
+    });
+  });
+
+  it("29d: a blob written without unresolvedCount is stale; a rules run rewrites it and the finding appears", async () => {
+    const crawlId = await crawlWith([{ path: "/a", raws: [list59] }]);
+    await db.execute(sql`
+      update structured_data
+         set validation_jsonb = (validation_jsonb - 'unresolvedCount') - 'unresolved'
+       where crawl_id = ${crawlId}`);
+    await expect(rule("schema.unresolved-reference").run(db, crawlId)).rejects.toThrow(/re-run the rules/);
+    await deriveSchemaValidation(db, crawlId);
+    const found = await rule("schema.unresolved-reference").run(db, crawlId);
+    expect(found).toHaveLength(1);
+    expect(found[0]!.evidence).toMatchObject({ unresolvedCount: 1 });
+  });
+
+  it("29d: a reference another block of the page defines is not counted", async () => {
+    const crawlId = await crawlWith([
+      {
+        path: "/a",
+        raws: [
+          { "@context": ctx, "@type": "WebPage", name: "Home", publisher: { "@id": "#org" } },
+          { "@context": ctx, "@type": "Organization", "@id": "#org", name: "Org" },
+        ],
+      },
+    ]);
+    expect(await rule("schema.unresolved-reference").run(db, crawlId)).toEqual([]);
   });
 });
