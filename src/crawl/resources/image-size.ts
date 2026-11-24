@@ -1,5 +1,7 @@
 /**
- * Intrinsic image size from the first 64 KiB of a response body.
+ * Intrinsic image size from the first 64 KiB of a response body, and from up
+ * to two further windows of it when a PNG or JPEG header runs past the first
+ * (Phase 29d: the answer `need` names the offset, and the state to resume with).
  *
  * Pure: no I/O, no dependencies, and it never decodes a pixel. It reads the
  * width and height a format records in its own header, turned as the file
@@ -43,12 +45,13 @@
  *    BEFORE IDAT counts — the PNG spec places it there, and Chromium ignores
  *    one after (verified against the pinned Chromium: 40x20 with `eXIf`
  *    orientation 6 before IDAT lays out 20x40, after IDAT 40x20). A walk that
- *    runs past the bytes we hold before IDAT, with no `eXIf` read yet, is
- *    `header-beyond-limit`: an `eXIf` could still follow, so the displayed
- *    size is unknown. That costs a size only on a PNG carrying more than
- *    64 KiB of chunks before its image data (a large ICC profile or text
- *    metadata), which is rare on images prepared for the web; reporting the
- *    IHDR size there would be a guess about the displayed one.
+ *    runs past the bytes we hold before IDAT, with no `eXIf` read yet, answers
+ *    `need` at the next chunk header's offset: an `eXIf` could still follow, so
+ *    the displayed size is unknown until the bytes there are read. A SQUARE PNG
+ *    needs no walk at all (turned or not, its sides are the same). Whether the
+ *    caller reads on is its business (the resource pass reads at most twice,
+ *    ruling R4); a walk it cannot finish is `header-beyond-limit`, never the
+ *    IHDR size, which would be a guess about the displayed one.
  *  - WebP: not turned. Chromium does not apply a WebP `EXIF` chunk's
  *    orientation (verified as above), so the VP8/VP8L/VP8X size is what it
  *    lays out.
@@ -78,12 +81,17 @@
  *   - `unknown-format`      no known signature (the content type is not trusted
  *                           to name a raster format: bytes decide);
  *   - `header-beyond-limit` the structure is sound so far but runs past the
- *                           bytes we hold before any size appears (a JPEG with
- *                           a huge APP segment, an AVIF with a big `meta`), or
- *                           before the rotation is known (a PNG with over
- *                           64 KiB of chunks before IDAT and no `eXIf` read, an
- *                           AVIF `ipco` cut off after its `ispe`);
+ *                           bytes we hold before any size appears (an AVIF with
+ *                           a big `meta`), or before the rotation is known (an
+ *                           AVIF `ipco` cut off after its `ispe`). The parser
+ *                           itself never says this for a PNG or JPEG: it
+ *                           answers `need`, and the caller ends the walk with
+ *                           this reason when it cannot read on;
  *   - `malformed`           the structure is wrong or a dimension is 0.
+ *
+ * A PNG or JPEG walk that runs out of window answers
+ * `{kind:"need", offset, state}`: the file offset to read on from, and what the
+ * walk has learnt, to hand back with the bytes found there.
  *
  * Every read is bounds-checked against `head.length`, and the function never
  * throws on any input: a fuzz test pins that.
@@ -92,14 +100,32 @@
 /** How many leading bytes of an image the resource pass keeps for this parser. */
 export const IMAGE_HEADER_BYTES = 65_536;
 
-export type ImageSize =
+/**
+ * Where a PNG or JPEG walk stands when its window runs out, so a read of the
+ * bytes at `at` can carry it on. Only what the walk has learnt is kept: a PNG's
+ * stored IHDR size and the EXIF orientation found so far (`undefined` before
+ * any, `null` when one was found and could not be read); a JPEG's orientation.
+ * `at` is the absolute offset the next window must start at, the same number
+ * the `need` answer carries.
+ */
+export type ImageWalkState =
+  | { format: "png"; at: number; width: number; height: number; orientation: number | null | undefined }
+  | { format: "jpeg"; at: number; orientation: number | null | undefined };
+
+/**
+ * What a read of the head says: a size, a reason none can be had, or `need`,
+ * the walk is sound so far and goes on at byte `offset` of the file (hand the
+ * bytes there to `parseImageHead` with `state`).
+ */
+export type ImageParse =
   | { kind: "size"; format: "png" | "jpeg" | "gif" | "webp" | "avif"; width: number; height: number }
-  | { kind: "none"; reason: "svg" | "unknown-format" | "header-beyond-limit" | "malformed" | "empty" };
+  | { kind: "reason"; reason: "svg" | "unknown-format" | "header-beyond-limit" | "malformed" | "empty" }
+  | { kind: "need"; offset: number; state: ImageWalkState };
 
-type NoneReason = Extract<ImageSize, { kind: "none" }>["reason"];
-type Format = Extract<ImageSize, { kind: "size" }>["format"];
+type NoneReason = Extract<ImageParse, { kind: "reason" }>["reason"];
+type Format = Extract<ImageParse, { kind: "size" }>["format"];
 
-const none = (reason: NoneReason): ImageSize => ({ kind: "none", reason });
+const none = (reason: NoneReason): ImageParse => ({ kind: "reason", reason });
 
 /**
  * The largest dimension kept: 2^31-1, the PNG spec's own ceiling and the top of
@@ -110,7 +136,7 @@ const none = (reason: NoneReason): ImageSize => ({ kind: "none", reason });
 export const MAX_IMAGE_DIMENSION = 2_147_483_647;
 
 /** A found size, or malformed when either dimension is 0 or past the ceiling. */
-function size(format: Format, width: number, height: number): ImageSize {
+function size(format: Format, width: number, height: number): ImageParse {
   if (width <= 0 || height <= 0) return none("malformed");
   if (width > MAX_IMAGE_DIMENSION || height > MAX_IMAGE_DIMENSION) return none("malformed");
   return { kind: "size", format, width, height };
@@ -151,21 +177,44 @@ const PNG_IHDR_LENGTH = 13;
 /** The PNG spec's ceiling on a chunk's data length. */
 const PNG_MAX_CHUNK = 0x7fffffff;
 
-function readPng(head: Uint8Array): ImageSize {
-  // Signature (8), IHDR length (4), "IHDR" (4), width (4), height (4).
-  if (head.length < 24 || !fourcc(head, 12, "IHDR")) return none("malformed");
-  if (be32(head, 8) !== PNG_IHDR_LENGTH) return none("malformed");
-  const width = be32(head, 16);
-  const height = be32(head, 20);
+function readPng(head: Uint8Array, resume?: Extract<ImageWalkState, { format: "png" }>): ImageParse {
+  let width: number;
+  let height: number;
+  let orientation: number | null | undefined;
+  // `base` is the file offset of head[0]; `pos` indexes `head`.
+  let base: number;
+  let pos: number;
+  if (resume === undefined) {
+    // Signature (8), IHDR length (4), "IHDR" (4), width (4), height (4).
+    if (head.length < 24 || !fourcc(head, 12, "IHDR")) return none("malformed");
+    if (be32(head, 8) !== PNG_IHDR_LENGTH) return none("malformed");
+    width = be32(head, 16);
+    height = be32(head, 20);
+    // A square image has the same sides turned or not: no chunk can change the
+    // size, so there is nothing to walk for (and nothing to read past 64 KiB).
+    if (width === height) return size("png", width, height);
+    orientation = undefined;
+    base = 0;
+    pos = 8 + 12 + PNG_IHDR_LENGTH;
+  } else {
+    ({ width, height, orientation } = resume);
+    base = resume.at;
+    pos = 0;
+  }
+  // Ask for the bytes at window index `at` (a chunk header) and carry on there.
+  const need = (at: number): ImageParse => ({
+    kind: "need",
+    offset: base + at,
+    state: { format: "png", at: base + at, width, height, orientation },
+  });
   // The chunks between IHDR and the first IDAT, for an `eXIf` (module
   // header). Each: length (4), type (4), data, CRC (4).
-  let orientation: number | null | undefined;
-  let pos = 8 + 12 + PNG_IHDR_LENGTH;
   for (;;) {
     if (pos + 8 > head.length) {
       // Past our bytes before IDAT: an `eXIf` already read decides; without
-      // one, a later chunk could still be one, and the size is unknown.
-      if (orientation === undefined) return none("header-beyond-limit");
+      // one, a later chunk could still be one, and the size is unknown until
+      // the bytes there are read.
+      if (orientation === undefined) return need(pos);
       break;
     }
     const length = be32(head, pos);
@@ -176,8 +225,8 @@ function readPng(head: Uint8Array): ImageSize {
     const data = pos + 8;
     const end = data + length;
     if (orientation === undefined && fourcc(head, pos + 4, "eXIf")) {
-      // A truncated `eXIf` cannot be read, and is not a malformed one.
-      if (end > head.length) return none("header-beyond-limit");
+      // A truncated `eXIf` cannot be read: read it whole from its header.
+      if (end > head.length) return need(pos);
       orientation = tiffOrientation(head, data, end);
     }
     pos = end + 4;
@@ -185,7 +234,7 @@ function readPng(head: Uint8Array): ImageSize {
   return quarterTurned(orientation ?? null) ? size("png", height, width) : size("png", width, height);
 }
 
-function readGif(head: Uint8Array): ImageSize {
+function readGif(head: Uint8Array): ImageParse {
   // "GIF8?a" (6), then the logical screen width and height, little-endian.
   if (head.length < 10) return none("malformed");
   return size("gif", le16(head, 6), le16(head, 8));
@@ -248,15 +297,28 @@ function tiffOrientation(head: Uint8Array, tiff: number, end: number): number | 
 /** Orientations 5 to 8 turn the image a quarter, so its sides swap. */
 const quarterTurned = (orientation: number | null): boolean => orientation !== null && orientation >= 5;
 
-function readJpeg(head: Uint8Array): ImageSize {
-  let pos = 2; // past SOI
+function readJpeg(head: Uint8Array, resume?: Extract<ImageWalkState, { format: "jpeg" }>): ImageParse {
+  // `base` is the file offset of head[0]; `pos` indexes `head`.
+  const base = resume === undefined ? 0 : resume.at;
+  let pos = resume === undefined ? 2 : 0; // past SOI on a first read
   // `undefined` until the first Exif APP1 is read; null when it had none we could read.
-  let orientation: number | null | undefined;
+  let orientation: number | null | undefined = resume?.orientation;
+  // Ask for the bytes at window index `at` (a marker) and carry on there.
+  const need = (at: number): ImageParse => ({
+    kind: "need",
+    offset: base + at,
+    state: { format: "jpeg", at: base + at, orientation },
+  });
   for (;;) {
+    const markerStart = pos;
     // Find the next marker: 0xFF, then any number of 0xFF fill bytes.
     while (pos < head.length && head[pos] !== 0xff) pos++;
     while (pos < head.length && head[pos] === 0xff) pos++;
-    if (pos >= head.length) return none("header-beyond-limit");
+    if (pos >= head.length) {
+      // No marker yet. Bytes already scanned held none; a trailing 0xFF may
+      // start one, so the next window begins on it.
+      return need(head.length > markerStart && head[head.length - 1] === 0xff ? head.length - 1 : head.length);
+    }
     const marker = head[pos]!;
     pos++;
     if (marker === 0x00) continue; // a stuffed zero, not a marker
@@ -264,27 +326,34 @@ function readJpeg(head: Uint8Array): ImageSize {
     if (marker === 0x01 || (marker >= 0xd0 && marker <= 0xd8)) continue;
     // EOI or SOS before any SOF: the frame header never came.
     if (marker === 0xd9 || marker === 0xda) return none("malformed");
-    if (pos + 2 > head.length) return none("header-beyond-limit");
+    // `pos - 2` is the 0xFF in front of the marker byte.
+    if (pos + 2 > head.length) return need(pos - 2);
     const length = be16(head, pos);
     if (length < 2) return none("malformed");
     if (isSof(marker)) {
       // length(2) precision(1) height(2) width(2)
       if (length < 7) return none("malformed");
-      if (pos + 7 > head.length) return none("header-beyond-limit");
+      if (pos + 7 > head.length) return need(pos - 2);
       const width = be16(head, pos + 5);
       const height = be16(head, pos + 3);
       return quarterTurned(orientation ?? null) ? size("jpeg", height, width) : size("jpeg", width, height);
     }
-    if (pos + length > head.length) return none("header-beyond-limit");
-    // APP1, and no Exif block read yet: the payload starts past the length.
-    if (marker === 0xe1 && orientation === undefined && hasAt(head, pos + 2, EXIF_SIGNATURE)) {
-      orientation = exifOrientation(head, pos + 2, pos + length);
+    // APP1 that is, or may be (its signature is cut off), the first Exif block.
+    const exifWanted =
+      marker === 0xe1 &&
+      orientation === undefined &&
+      (pos + 2 + EXIF_SIGNATURE.length > head.length || hasAt(head, pos + 2, EXIF_SIGNATURE));
+    if (pos + length > head.length) {
+      // The segment runs past the window: an Exif one is read whole from its
+      // marker, any other is skipped to the marker after it.
+      return exifWanted ? need(pos - 2) : need(pos + length);
     }
+    if (exifWanted) orientation = exifOrientation(head, pos + 2, pos + length);
     pos += length;
   }
 }
 
-function readWebp(head: Uint8Array): ImageSize {
+function readWebp(head: Uint8Array): ImageParse {
   // RIFF (4) size (4) "WEBP" (4), then the first chunk's fourcc at 12 and its data at 20.
   if (!fourcc(head, 8, "WEBP") || head.length < 20) return none("malformed");
   if (fourcc(head, 12, "VP8 ")) {
@@ -340,7 +409,7 @@ function boxAt(head: Uint8Array, pos: number, limit: number): BoxHeader | "beyon
  * whole box is walked, because `irot` usually follows `ispe`. Null when the
  * `ipco` holds no `ispe` at all.
  */
-function readIpco(head: Uint8Array, from: number, to: number): ImageSize | null {
+function readIpco(head: Uint8Array, from: number, to: number): ImageParse | null {
   let stored: { width: number; height: number } | null = null;
   let angle: number | null = null;
   let pos = from;
@@ -379,7 +448,7 @@ function readIpco(head: Uint8Array, from: number, to: number): ImageSize | null 
  * through `path` to the `ipco`, then read it (`readIpco`). Returns the size,
  * or the reason none was found.
  */
-function findIpcoSize(head: Uint8Array, from: number, to: number, path: readonly string[]): ImageSize | null {
+function findIpcoSize(head: Uint8Array, from: number, to: number, path: readonly string[]): ImageParse | null {
   const want = path[0]!;
   let pos = from;
   while (pos < to) {
@@ -405,7 +474,7 @@ function findIpcoSize(head: Uint8Array, from: number, to: number, path: readonly
   return null;
 }
 
-function readAvif(head: Uint8Array): ImageSize {
+function readAvif(head: Uint8Array): ImageParse {
   const ftyp = boxAt(head, 0, head.length);
   if (ftyp === "beyond") return none("header-beyond-limit");
   if (ftyp === "bad" || ftyp.type !== "ftyp") return none("malformed");
@@ -427,13 +496,19 @@ function isAvif(head: Uint8Array): boolean {
 }
 
 /**
- * Read the intrinsic size from the leading bytes of an image.
+ * Read the intrinsic size from the leading bytes of an image, or carry on a
+ * walk a previous read left.
  *
  * `contentType` is consulted only to recognise SVG; raster formats are told
  * apart by their signature bytes, because a mislabelled body is exactly the
  * kind of thing this audit exists to report.
+ *
+ * With `state` (from an earlier `need`), `head` is the window of the file that
+ * starts at `state.at`, not the start of it: there is no signature to find and
+ * the walk resumes where it stopped.
  */
-export function readImageSize(head: Uint8Array, contentType: string | null): ImageSize {
+export function parseImageHead(head: Uint8Array, contentType: string | null, state?: ImageWalkState): ImageParse {
+  if (state !== undefined) return state.format === "png" ? readPng(head, state) : readJpeg(head, state);
   if (head.length === 0) return none("empty");
   if (looksLikeSvg(head, contentType)) return none("svg");
   if (hasAt(head, 0, PNG_SIGNATURE)) return readPng(head);

@@ -67,8 +67,13 @@ re-judged, to gain the new facts (see "Which crawls have them", below).
   can now be **206**; a 206 counts as success, exactly as a 200 does. A server that
   ignores the range answers 200, the body is counted as a plain GET always was, and
   only its first 64 KiB is read for the size. Per image row
-  the pass makes at most two requests plus redirect hops, and usually one; only a 206
-  of unknown total length or a 416 earns the second, plain GET. CSS and JS rows are
+  the pass makes at most four requests plus redirect hops, and usually one; a 206
+  of unknown total length or a 416 earns a second, plain GET. A PNG or JPEG whose
+  header runs past the first 64 KiB (more than 64 KiB of chunks before the PNG's image
+  data, or of metadata before the JPEG's frame header) earns up to two continuation
+  Range reads, each through the same per-host gate, and only when the first answer was a
+  206 that carried a total; a continuation that is not a 206 starting at the offset
+  asked for ends the row `header-beyond-limit`. CSS and JS rows are
   unchanged. Politeness is unchanged: the pass still waits for the per-host gate, and
   the body is bounded, not downloaded.
 - **Three new `resources` columns:** `width` and `height` (integer pixels, the image's
@@ -76,7 +81,7 @@ re-judged, to gain the new facts (see "Which crawls have them", below).
   **not measured**, never zero and never a guess, and `dimensions_reason` says why on an
   `ok` image row: `svg` (a vector format has no pixel size), `encoded` (a
   content-encoded body is compressed bytes and is not parsed), `unknown-format`,
-  `header-beyond-limit` (the size lies past the 64 KiB read), `malformed`, `empty`, or
+  `header-beyond-limit` (the size lies past the 64 KiB read and the two continuation reads could not reach it), `malformed`, `empty`, or
   `not-image` (a 2xx whose content type is not `image/*`). All three are null on CSS
   and JS rows and on every row that is not `ok`. They are stored columns: the
   `resources` CSV view does not export them, and `pages_query` does not carry them.

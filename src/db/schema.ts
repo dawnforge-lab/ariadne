@@ -1403,7 +1403,7 @@ export const resources = pgTable("resources", {
   shareImage: boolean("share_image").notNull().default(false),
   // Phase 29b (migration 0055): an image's INTRINSIC size in pixels, read from
   // the format's own header in the first 64 KiB of the body the resource pass's
-  // one Range GET returned (`readImageSize`, src/crawl/resources/image-size.ts),
+  // one Range GET returned (`parseImageHead`, src/crawl/resources/image-size.ts),
   // as DISPLAYED: a JPEG's or PNG's EXIF orientation 5-8 or an AVIF's `irot` 1/3 swaps
   // the stored pair, as the browser does.
   // Null means NOT MEASURED and `dimensions_reason` says why; a size is never
@@ -1413,7 +1413,7 @@ export const resources = pgTable("resources", {
   height: integer("height"),
   // Why `width`/`height` are null on an `ok` image row: `svg` (a vector format
   // has no intrinsic pixel size), `encoded` (a content-encoded body is compressed bytes, never parsed), `unknown-format`, `header-beyond-limit` (the
-  // size lies past the 64 KiB read), `malformed`, `empty`, or `not-image` (a 2xx
+  // size lies past the 64 KiB read and up to two continuation reads), `malformed`, `empty`, or `not-image` (a 2xx
   // whose content type is not `image/*`). Null when a size WAS read, and null on
   // css/js and non-ok rows, where no measurement was attempted.
   dimensionsReason: text("dimensions_reason"),

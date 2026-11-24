@@ -6,7 +6,7 @@
  * dimension is derived from the bytes written below and not from a library.
  */
 import { describe, expect, it } from "vitest";
-import { IMAGE_HEADER_BYTES, readImageSize } from "../../src/crawl/resources/image-size.js";
+import { IMAGE_HEADER_BYTES, parseImageHead } from "../../src/crawl/resources/image-size.js";
 
 const ascii = (s: string): number[] => [...s].map((c) => c.charCodeAt(0));
 const be16 = (n: number): number[] => [(n >>> 8) & 0xff, n & 0xff];
@@ -80,19 +80,19 @@ const rotatedAvif = (w: number, h: number, ...extra: number[][]): Uint8Array =>
     ),
   );
 
-describe("readImageSize: the size the browser lays out, rotation applied (29b final review F3)", () => {
+describe("parseImageHead: the size the browser lays out, rotation applied (29b final review F3)", () => {
   it("a JPEG whose EXIF orientation is 6 is its stored size turned, in either byte order", () => {
     for (const order of ["II", "MM"] as const) {
-      expect(readImageSize(orientedJpeg(order, 6), "image/jpeg"), order).toEqual({ kind: "size", format: "jpeg", width: 3000, height: 4000 });
+      expect(parseImageHead(orientedJpeg(order, 6), "image/jpeg"), order).toEqual({ kind: "size", format: "jpeg", width: 3000, height: 4000 });
     }
   });
 
   it("orientations 5, 7 and 8 turn it too; 1 to 4 do not", () => {
     for (const o of [5, 6, 7, 8]) {
-      expect(readImageSize(orientedJpeg("MM", o), null), String(o)).toMatchObject({ width: 3000, height: 4000 });
+      expect(parseImageHead(orientedJpeg("MM", o), null), String(o)).toMatchObject({ width: 3000, height: 4000 });
     }
     for (const o of [1, 2, 3, 4]) {
-      expect(readImageSize(orientedJpeg("II", o), null), String(o)).toMatchObject({ width: 4000, height: 3000 });
+      expect(parseImageHead(orientedJpeg("II", o), null), String(o)).toMatchObject({ width: 4000, height: 3000 });
     }
   });
 
@@ -102,13 +102,13 @@ describe("readImageSize: the size the browser lays out, rotation applied (29b fi
       exifApp1("II", [[0x010f, 2, 4, 0], [0x0110, 2, 4, 0], [ORIENTATION, SHORT, 1, 8], [0x011a, 5, 1, 0]]),
       jpegSof(0xc2, 640, 480),
     );
-    expect(readImageSize(head, "image/jpeg")).toEqual({ kind: "size", format: "jpeg", width: 480, height: 640 });
+    expect(parseImageHead(head, "image/jpeg")).toEqual({ kind: "size", format: "jpeg", width: 480, height: 640 });
   });
 
   it("an APP1 that is not Exif (XMP) leaves the stored size alone", () => {
     const xmp = [...ascii("http://ns.adobe.com/xap/1.0/"), 0, ...ascii("<x:xmpmeta/>")];
     const head = bytes([0xff, 0xd8], [0xff, 0xe1, ...be16(xmp.length + 2), ...xmp], jpegSof(0xc0, 4000, 3000));
-    expect(readImageSize(head, null)).toMatchObject({ width: 4000, height: 3000 });
+    expect(parseImageHead(head, null)).toMatchObject({ width: 4000, height: 3000 });
   });
 
   it("a malformed EXIF block is ignored for orientation, never thrown on: the stored size stands", () => {
@@ -129,17 +129,17 @@ describe("readImageSize: the size the browser lays out, rotation applied (29b fi
     };
     for (const [name, segment] of Object.entries(cases)) {
       const head = bytes([0xff, 0xd8], segment, jpegSof(0xc0, 4000, 3000));
-      expect(readImageSize(head, "image/jpeg"), name).toEqual(stored);
+      expect(parseImageHead(head, "image/jpeg"), name).toEqual(stored);
     }
   });
 
   it("an AVIF whose irot angle is 1 or 3 is its ispe turned; 0 and 2 are not", () => {
-    expect(readImageSize(rotatedAvif(1920, 1080, irot(1)), "image/avif")).toEqual({ kind: "size", format: "avif", width: 1080, height: 1920 });
-    expect(readImageSize(rotatedAvif(1920, 1080, irot(3)), "image/avif")).toMatchObject({ width: 1080, height: 1920 });
-    expect(readImageSize(rotatedAvif(1920, 1080, irot(2)), "image/avif")).toMatchObject({ width: 1920, height: 1080 });
-    expect(readImageSize(rotatedAvif(1920, 1080, irot(0)), "image/avif")).toMatchObject({ width: 1920, height: 1080 });
+    expect(parseImageHead(rotatedAvif(1920, 1080, irot(1)), "image/avif")).toEqual({ kind: "size", format: "avif", width: 1080, height: 1920 });
+    expect(parseImageHead(rotatedAvif(1920, 1080, irot(3)), "image/avif")).toMatchObject({ width: 1080, height: 1920 });
+    expect(parseImageHead(rotatedAvif(1920, 1080, irot(2)), "image/avif")).toMatchObject({ width: 1920, height: 1080 });
+    expect(parseImageHead(rotatedAvif(1920, 1080, irot(0)), "image/avif")).toMatchObject({ width: 1920, height: 1080 });
     // The six reserved bits above the angle are not part of it.
-    expect(readImageSize(rotatedAvif(1920, 1080, irot(0xfc | 1)), "image/avif")).toMatchObject({ width: 1080, height: 1920 });
+    expect(parseImageHead(rotatedAvif(1920, 1080, irot(0xfc | 1)), "image/avif")).toMatchObject({ width: 1080, height: 1920 });
   });
 
   it("an irot before the ispe counts the same", () => {
@@ -147,12 +147,12 @@ describe("readImageSize: the size the browser lays out, rotation applied (29b fi
       box("ftyp", ascii("avif"), be32(0), ascii("avif")),
       box("meta", [0, 0, 0, 0], box("iprp", box("ipco", irot(1), box("ispe", [0, 0, 0, 0], be32(300), be32(200))))),
     );
-    expect(readImageSize(head, "image/avif")).toMatchObject({ width: 200, height: 300 });
+    expect(parseImageHead(head, "image/avif")).toMatchObject({ width: 200, height: 300 });
   });
 
   it("an AVIF whose ipco is cut off after its ispe is header-beyond-limit: an irot may follow", () => {
     const full = rotatedAvif(1920, 1080, box("colr", ascii("nclx"), [0, 0, 0, 0, 0]), irot(1));
-    expect(readImageSize(full.subarray(0, full.length - 4), "image/avif")).toEqual({ kind: "none", reason: "header-beyond-limit" });
+    expect(parseImageHead(full.subarray(0, full.length - 4), "image/avif")).toEqual({ kind: "reason", reason: "header-beyond-limit" });
   });
 });
 
@@ -163,10 +163,10 @@ const tiffOrientation = (order: "II" | "MM", orientation: number): number[] => {
   return [...ascii(order), ...w16(42), ...w32(8), ...w16(1), ...w16(0x0112), ...w16(3), ...w32(1), ...w16(orientation), 0, 0, ...w32(0)];
 };
 
-describe("readImageSize: a PNG eXIf before IDAT turns the size (29b re-review)", () => {
+describe("parseImageHead: a PNG eXIf before IDAT turns the size (29b re-review)", () => {
   it("an eXIf orientation of 6 before IDAT swaps the sides, in either byte order", () => {
     for (const order of ["II", "MM"] as const) {
-      expect(readImageSize(png(40, 20, pngChunk("eXIf", tiffOrientation(order, 6))), "image/png"), order).toEqual({
+      expect(parseImageHead(png(40, 20, pngChunk("eXIf", tiffOrientation(order, 6))), "image/png"), order).toEqual({
         kind: "size",
         format: "png",
         width: 20,
@@ -177,13 +177,13 @@ describe("readImageSize: a PNG eXIf before IDAT turns the size (29b re-review)",
 
   it("orientation 8 swaps, 3 does not, and an eXIf behind other chunks still counts", () => {
     const text = pngChunk("tEXt", ascii("Comment\0made by hand"));
-    expect(readImageSize(png(40, 20, text, pngChunk("eXIf", tiffOrientation("MM", 8))), null)).toMatchObject({ width: 20, height: 40 });
-    expect(readImageSize(png(40, 20, pngChunk("eXIf", tiffOrientation("MM", 3))), null)).toMatchObject({ width: 40, height: 20 });
+    expect(parseImageHead(png(40, 20, text, pngChunk("eXIf", tiffOrientation("MM", 8))), null)).toMatchObject({ width: 20, height: 40 });
+    expect(parseImageHead(png(40, 20, pngChunk("eXIf", tiffOrientation("MM", 3))), null)).toMatchObject({ width: 40, height: 20 });
   });
 
   it("an eXIf after IDAT is not read: the browser ignores it", () => {
     const head = bytes(PNG_SIG, IHDR(40, 20), pngChunk("IDAT", [0, 0]), pngChunk("eXIf", tiffOrientation("MM", 6)));
-    expect(readImageSize(head, "image/png")).toEqual({ kind: "size", format: "png", width: 40, height: 20 });
+    expect(parseImageHead(head, "image/png")).toEqual({ kind: "size", format: "png", width: 40, height: 20 });
   });
 
   it("a malformed eXIf falls back to the IHDR size and never throws", () => {
@@ -195,37 +195,43 @@ describe("readImageSize: a PNG eXIf before IDAT turns the size (29b re-review)",
       "an orientation of 9": tiffOrientation("II", 9),
     };
     for (const [name, payload] of Object.entries(bad)) {
-      expect(readImageSize(png(40, 20, pngChunk("eXIf", payload)), "image/png"), name).toEqual({ kind: "size", format: "png", width: 40, height: 20 });
+      expect(parseImageHead(png(40, 20, pngChunk("eXIf", payload)), "image/png"), name).toEqual({ kind: "size", format: "png", width: 40, height: 20 });
     }
   });
 
-  it("chunks running past the window before IDAT are header-beyond-limit: an eXIf could follow", () => {
+  it("chunks running past the window before IDAT ask for the next chunk header: an eXIf could follow", () => {
     const full = png(40, 20, pngChunk("iCCP", new Array<number>(70_000).fill(0x41)), pngChunk("eXIf", tiffOrientation("MM", 6)));
-    expect(readImageSize(full.subarray(0, IMAGE_HEADER_BYTES), "image/png")).toEqual({ kind: "none", reason: "header-beyond-limit" });
+    const need = parseImageHead(full.subarray(0, IMAGE_HEADER_BYTES), "image/png");
+    // 33 (signature + IHDR) + 8 (iCCP header) + 70,000 data + 4 CRC.
+    expect(need).toMatchObject({ kind: "need", offset: 33 + 8 + 70_000 + 4 });
+    if (need.kind !== "need") throw new Error("expected need");
+    // Fed the window that starts there, the eXIf turns it.
+    const resumed = parseImageHead(full.subarray(need.offset, need.offset + IMAGE_HEADER_BYTES), "image/png", need.state);
+    expect(resumed).toEqual({ kind: "size", format: "png", width: 20, height: 40 });
     // Once the eXIf is read, a cut-off before IDAT changes nothing.
     const read = png(40, 20, pngChunk("eXIf", tiffOrientation("MM", 6)), pngChunk("iTXt", new Array<number>(70_000).fill(0x41)));
-    expect(readImageSize(read.subarray(0, IMAGE_HEADER_BYTES), "image/png")).toMatchObject({ width: 20, height: 40 });
+    expect(parseImageHead(read.subarray(0, IMAGE_HEADER_BYTES), "image/png")).toMatchObject({ width: 20, height: 40 });
     // A truncated eXIf cannot be read.
     const cut = png(40, 20, pngChunk("eXIf", tiffOrientation("MM", 6)));
-    expect(readImageSize(cut.subarray(0, 33 + 8 + 10), "image/png")).toEqual({ kind: "none", reason: "header-beyond-limit" });
+    expect(parseImageHead(cut.subarray(0, 33 + 8 + 10), "image/png")).toMatchObject({ kind: "need", offset: 33 });
   });
 
   it("IEND before any IDAT, a bad IHDR length or a chunk length past the spec's ceiling is malformed", () => {
-    expect(readImageSize(bytes(PNG_SIG, IHDR(40, 20), pngChunk("IEND", [])), null)).toEqual({ kind: "none", reason: "malformed" });
+    expect(parseImageHead(bytes(PNG_SIG, IHDR(40, 20), pngChunk("IEND", [])), null)).toEqual({ kind: "reason", reason: "malformed" });
     const longIhdr = bytes(PNG_SIG, be32(14), ascii("IHDR"), be32(40), be32(20), [8, 2, 0, 0, 0, 0], [0, 0, 0, 0], IDAT_START);
-    expect(readImageSize(longIhdr, null)).toEqual({ kind: "none", reason: "malformed" });
-    expect(readImageSize(bytes(PNG_SIG, IHDR(40, 20), be32(0x80000000), ascii("tEXt")), null)).toEqual({ kind: "none", reason: "malformed" });
+    expect(parseImageHead(longIhdr, null)).toEqual({ kind: "reason", reason: "malformed" });
+    expect(parseImageHead(bytes(PNG_SIG, IHDR(40, 20), be32(0x80000000), ascii("tEXt")), null)).toEqual({ kind: "reason", reason: "malformed" });
   });
 });
 
-describe("readImageSize: AVIF boxes are bounded by their own end (29b re-review)", () => {
+describe("parseImageHead: AVIF boxes are bounded by their own end (29b re-review)", () => {
   const avifWith = (...ipco: number[][]): Uint8Array =>
     bytes(box("ftyp", ascii("avif"), be32(0), ascii("avif")), box("meta", [0, 0, 0, 0], box("iprp", box("ipco", ...ipco))));
   const ispe = box("ispe", [0, 0, 0, 0], be32(300), be32(200));
 
   it("an empty irot or a short ispe is malformed, not read from the next box", () => {
-    expect(readImageSize(avifWith(ispe, box("irot")), "image/avif")).toEqual({ kind: "none", reason: "malformed" });
-    expect(readImageSize(avifWith(box("ispe", [0, 0, 0, 0], be32(300)), irot(1)), "image/avif")).toEqual({ kind: "none", reason: "malformed" });
+    expect(parseImageHead(avifWith(ispe, box("irot")), "image/avif")).toEqual({ kind: "reason", reason: "malformed" });
+    expect(parseImageHead(avifWith(box("ispe", [0, 0, 0, 0], be32(300)), irot(1)), "image/avif")).toEqual({ kind: "reason", reason: "malformed" });
   });
 
   it("a child box running past its ipco's declared end is malformed", () => {
@@ -233,7 +239,7 @@ describe("readImageSize: AVIF boxes are bounded by their own end (29b re-review)
     const ispeBytes = box("ispe", [0, 0, 0, 0], be32(300), be32(200));
     const ipco = [...be32(8 + ispeBytes.length - 8), ...ascii("ipco"), ...ispeBytes];
     const head = bytes(box("ftyp", ascii("avif"), be32(0), ascii("avif")), box("meta", [0, 0, 0, 0], box("iprp", ipco)));
-    expect(readImageSize(head, "image/avif")).toEqual({ kind: "none", reason: "malformed" });
+    expect(parseImageHead(head, "image/avif")).toEqual({ kind: "reason", reason: "malformed" });
     // The same contradiction in a file cut off inside its ipco: the child's
     // header is held, and its declared end already passes the ipco's.
     const cut = bytes(
@@ -243,102 +249,100 @@ describe("readImageSize: AVIF boxes are bounded by their own end (29b re-review)
       [...be32(108), ...ascii("ipco")],
       [...be32(200), ...ascii("free"), 0, 0, 0, 0],
     );
-    expect(readImageSize(cut, "image/avif")).toEqual({ kind: "none", reason: "malformed" });
+    expect(parseImageHead(cut, "image/avif")).toEqual({ kind: "reason", reason: "malformed" });
   });
 });
 
-describe("readImageSize: a dimension past int4 is malformed, never a size", () => {
+describe("parseImageHead: a dimension past int4 is malformed, never a size", () => {
   it("an AVIF ispe of 0xFFFFFFFF", () => {
-    expect(readImageSize(avif(0xffffffff, 100), "image/avif")).toEqual({ kind: "none", reason: "malformed" });
-    expect(readImageSize(avif(100, 0xffffffff), "image/avif")).toEqual({ kind: "none", reason: "malformed" });
+    expect(parseImageHead(avif(0xffffffff, 100), "image/avif")).toEqual({ kind: "reason", reason: "malformed" });
+    expect(parseImageHead(avif(100, 0xffffffff), "image/avif")).toEqual({ kind: "reason", reason: "malformed" });
   });
   it("a PNG with width 0x80000000, and height 0xFFFFFFFF", () => {
-    expect(readImageSize(png(0x80000000, 10), "image/png")).toEqual({ kind: "none", reason: "malformed" });
-    expect(readImageSize(png(10, 0xffffffff), "image/png")).toEqual({ kind: "none", reason: "malformed" });
+    expect(parseImageHead(png(0x80000000, 10), "image/png")).toEqual({ kind: "reason", reason: "malformed" });
+    expect(parseImageHead(png(10, 0xffffffff), "image/png")).toEqual({ kind: "reason", reason: "malformed" });
   });
   it("2^31-1 itself is still a size", () => {
-    expect(readImageSize(png(0x7fffffff, 1), "image/png")).toEqual({ kind: "size", format: "png", width: 2147483647, height: 1 });
+    expect(parseImageHead(png(0x7fffffff, 1), "image/png")).toEqual({ kind: "size", format: "png", width: 2147483647, height: 1 });
   });
 });
 
-describe("readImageSize: one per format", () => {
+describe("parseImageHead: one per format", () => {
   it("PNG 1600x1200", () => {
-    expect(readImageSize(png(1600, 1200), "image/png")).toEqual({ kind: "size", format: "png", width: 1600, height: 1200 });
+    expect(parseImageHead(png(1600, 1200), "image/png")).toEqual({ kind: "size", format: "png", width: 1600, height: 1200 });
   });
 
   it("JPEG with an APP1 segment before SOF2, 800x533", () => {
     const head = bytes([0xff, 0xd8], jpegApp1(300), jpegSof(0xc2, 800, 533), [0xff, 0xda]);
-    expect(readImageSize(head, "image/jpeg")).toEqual({ kind: "size", format: "jpeg", width: 800, height: 533 });
+    expect(parseImageHead(head, "image/jpeg")).toEqual({ kind: "size", format: "jpeg", width: 800, height: 533 });
   });
 
   it("GIF 1x1", () => {
     const head = bytes(ascii("GIF89a"), le16(1), le16(1), [0, 0, 0]);
-    expect(readImageSize(head, "image/gif")).toEqual({ kind: "size", format: "gif", width: 1, height: 1 });
+    expect(parseImageHead(head, "image/gif")).toEqual({ kind: "size", format: "gif", width: 1, height: 1 });
   });
 
   it("WebP VP8 640x480", () => {
     const head = bytes(ascii("RIFF"), le32(30), ascii("WEBP"), ascii("VP8 "), le32(18), [0, 0, 0], [0x9d, 0x01, 0x2a], le16(640), le16(480), [0, 0, 0, 0]);
-    expect(readImageSize(head, "image/webp")).toEqual({ kind: "size", format: "webp", width: 640, height: 480 });
+    expect(parseImageHead(head, "image/webp")).toEqual({ kind: "size", format: "webp", width: 640, height: 480 });
   });
 
   it("WebP VP8L 641x481", () => {
     const packed = ((641 - 1) | ((481 - 1) << 14)) >>> 0;
     const head = bytes(ascii("RIFF"), le32(30), ascii("WEBP"), ascii("VP8L"), le32(10), [0x2f], le32(packed), [0, 0, 0, 0, 0]);
-    expect(readImageSize(head, "image/webp")).toEqual({ kind: "size", format: "webp", width: 641, height: 481 });
+    expect(parseImageHead(head, "image/webp")).toEqual({ kind: "size", format: "webp", width: 641, height: 481 });
   });
 
   it("WebP VP8X 4000x3000", () => {
     const head = bytes(ascii("RIFF"), le32(30), ascii("WEBP"), ascii("VP8X"), le32(10), [0, 0, 0, 0], le24(3999), le24(2999));
-    expect(readImageSize(head, "image/webp")).toEqual({ kind: "size", format: "webp", width: 4000, height: 3000 });
+    expect(parseImageHead(head, "image/webp")).toEqual({ kind: "size", format: "webp", width: 4000, height: 3000 });
   });
 
   it("AVIF ispe 1920x1080", () => {
-    expect(readImageSize(avif(1920, 1080), "image/avif")).toEqual({ kind: "size", format: "avif", width: 1920, height: 1080 });
+    expect(parseImageHead(avif(1920, 1080), "image/avif")).toEqual({ kind: "size", format: "avif", width: 1920, height: 1080 });
   });
 });
 
-describe("readImageSize: nothing is guessed", () => {
+describe("parseImageHead: nothing is guessed", () => {
   it("SVG by content type", () => {
     const svg = bytes(ascii('<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"/>'));
-    expect(readImageSize(svg, "image/svg+xml")).toEqual({ kind: "none", reason: "svg" });
+    expect(parseImageHead(svg, "image/svg+xml")).toEqual({ kind: "reason", reason: "svg" });
   });
 
   it("SVG by a leading <svg or <?xml with no useful content type", () => {
-    expect(readImageSize(bytes(ascii("  <svg/>")), null)).toEqual({ kind: "none", reason: "svg" });
-    expect(readImageSize(bytes(ascii('<?xml version="1.0"?><svg/>')), "application/octet-stream")).toEqual({ kind: "none", reason: "svg" });
+    expect(parseImageHead(bytes(ascii("  <svg/>")), null)).toEqual({ kind: "reason", reason: "svg" });
+    expect(parseImageHead(bytes(ascii('<?xml version="1.0"?><svg/>')), "application/octet-stream")).toEqual({ kind: "reason", reason: "svg" });
   });
 
   it("2 KB of 0x41 under image/png is unknown-format", () => {
-    expect(readImageSize(new Uint8Array(2048).fill(0x41), "image/png")).toEqual({ kind: "none", reason: "unknown-format" });
+    expect(parseImageHead(new Uint8Array(2048).fill(0x41), "image/png")).toEqual({ kind: "reason", reason: "unknown-format" });
   });
 
-  it("a JPEG whose 70 KB APP1 pushes SOF past the limit is header-beyond-limit", () => {
-    const full = bytes([0xff, 0xd8], jpegApp1(70_000), jpegSof(0xc0, 800, 533));
-    const head = full.subarray(0, IMAGE_HEADER_BYTES);
-    expect(head.length).toBe(65_536);
-    expect(readImageSize(head, "image/jpeg")).toEqual({ kind: "none", reason: "header-beyond-limit" });
+  it("a JPEG window with no marker left in it asks for the bytes after it", () => {
+    const head = bytes([0xff, 0xd8], new Array<number>(IMAGE_HEADER_BYTES - 2).fill(0));
+    expect(parseImageHead(head, "image/jpeg")).toMatchObject({ kind: "need", offset: IMAGE_HEADER_BYTES });
   });
 
   it("an AVIF whose meta box is cut off before ispe is header-beyond-limit", () => {
     const full = avif(1920, 1080);
-    expect(readImageSize(full.subarray(0, full.length - 20), "image/avif")).toEqual({ kind: "none", reason: "header-beyond-limit" });
+    expect(parseImageHead(full.subarray(0, full.length - 20), "image/avif")).toEqual({ kind: "reason", reason: "header-beyond-limit" });
   });
 
   it("PNG with width 0 is malformed", () => {
-    expect(readImageSize(png(0, 10), "image/png")).toEqual({ kind: "none", reason: "malformed" });
+    expect(parseImageHead(png(0, 10), "image/png")).toEqual({ kind: "reason", reason: "malformed" });
   });
 
   it("a JPEG SOF excludes DHT/JPG/DAC markers", () => {
     const head = bytes([0xff, 0xd8], [0xff, 0xc4, ...be16(4), 0, 0], jpegSof(0xc1, 20, 10));
-    expect(readImageSize(head, null)).toEqual({ kind: "size", format: "jpeg", width: 20, height: 10 });
+    expect(parseImageHead(head, null)).toEqual({ kind: "size", format: "jpeg", width: 20, height: 10 });
   });
 
   it("an empty array is empty", () => {
-    expect(readImageSize(new Uint8Array(0), "image/png")).toEqual({ kind: "none", reason: "empty" });
+    expect(parseImageHead(new Uint8Array(0), "image/png")).toEqual({ kind: "reason", reason: "empty" });
   });
 });
 
-describe("readImageSize: never throws", () => {
+describe("parseImageHead: never throws", () => {
   it("8000 random buffers behind real signatures always return a kind", () => {
     const sigs: number[][] = [
       PNG_SIG,
@@ -369,8 +373,63 @@ describe("readImageSize: never throws", () => {
       for (let j = 0; j < len; j++) buf[j] = next() & 0xff;
       const sig = sigs[i % sigs.length]!;
       buf.set(sig.slice(0, len));
-      const r = readImageSize(buf, null);
-      expect(["size", "none"]).toContain(r.kind);
+      const r = parseImageHead(buf, null);
+      expect(["size", "need", "reason"]).toContain(r.kind);
     }
+  });
+});
+
+describe("parseImageHead: headers past the 64 KiB window (29d)", () => {
+  it("a square PNG past 64 KiB reports its IHDR size", () => {
+    const full = png(300, 300, pngChunk("iCCP", new Array<number>(100 * 1024).fill(0x41)));
+    expect(parseImageHead(full.subarray(0, IMAGE_HEADER_BYTES), "image/png")).toEqual({ kind: "size", format: "png", width: 300, height: 300 });
+  });
+
+  it("a 40x20 PNG with 100 KiB of private chunks answers need at the next chunk header, then resolves to 40x20", () => {
+    const full = png(40, 20, pngChunk("prVt", new Array<number>(100 * 1024).fill(0x41)));
+    const need = parseImageHead(full.subarray(0, IMAGE_HEADER_BYTES), "image/png");
+    expect(need).toMatchObject({ kind: "need", offset: 33 + 8 + 100 * 1024 + 4 });
+    if (need.kind !== "need") throw new Error("expected need");
+    expect(parseImageHead(full.subarray(need.offset), "image/png", need.state)).toEqual({ kind: "size", format: "png", width: 40, height: 20 });
+  });
+
+  it("an eXIf of orientation 6 found in the continuation window resolves to 20x40", () => {
+    const full = png(40, 20, pngChunk("prVt", new Array<number>(100 * 1024).fill(0x41)), pngChunk("eXIf", tiffOrientation("MM", 6)));
+    const need = parseImageHead(full.subarray(0, IMAGE_HEADER_BYTES), "image/png");
+    if (need.kind !== "need") throw new Error("expected need");
+    expect(parseImageHead(full.subarray(need.offset), "image/png", need.state)).toEqual({ kind: "size", format: "png", width: 20, height: 40 });
+  });
+
+  it("a continuation window that ends before IDAT with no eXIf asks again", () => {
+    const chunk = pngChunk("prVt", new Array<number>(100 * 1024).fill(0x41));
+    const full = png(40, 20, chunk, chunk);
+    const first = parseImageHead(full.subarray(0, IMAGE_HEADER_BYTES), "image/png");
+    if (first.kind !== "need") throw new Error("expected need");
+    const second = parseImageHead(full.subarray(first.offset, first.offset + IMAGE_HEADER_BYTES), "image/png", first.state);
+    expect(second).toMatchObject({ kind: "need", offset: 33 + 2 * (8 + 100 * 1024 + 4) });
+  });
+
+  it("a JPEG with 100 KiB of APP segments before SOF answers need, then its size", () => {
+    const full = bytes(
+      [0xff, 0xd8],
+      jpegApp1(60_000),
+      [0xff, 0xe2, ...be16(40_002), ...new Array<number>(40_000).fill(0)],
+      jpegSof(0xc0, 800, 533),
+    );
+    const first = parseImageHead(full.subarray(0, IMAGE_HEADER_BYTES), "image/jpeg");
+    expect(first).toMatchObject({ kind: "need" });
+    if (first.kind !== "need") throw new Error("expected need");
+    // SOI (2), then each segment is its marker (2), length (2) and payload.
+    expect(first.offset).toBe(2 + 4 + 60_000 + 4 + 40_000);
+    expect(parseImageHead(full.subarray(first.offset), "image/jpeg", first.state)).toEqual({ kind: "size", format: "jpeg", width: 800, height: 533 });
+  });
+
+  it("an Exif APP1 cut by the window is read whole from its marker", () => {
+    const filler = [0xff, 0xe2, ...be16(65_500), ...new Array<number>(65_498).fill(0)];
+    const exif = exifApp1("MM", [[ORIENTATION, SHORT, 1, 6]]);
+    const full = bytes([0xff, 0xd8], filler, exif, jpegSof(0xc0, 800, 533));
+    const first = parseImageHead(full.subarray(0, IMAGE_HEADER_BYTES), "image/jpeg");
+    if (first.kind !== "need") throw new Error("expected need");
+    expect(parseImageHead(full.subarray(first.offset), "image/jpeg", first.state)).toEqual({ kind: "size", format: "jpeg", width: 533, height: 800 });
   });
 });
