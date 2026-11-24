@@ -134,9 +134,10 @@ async function parseErrorFindings(db: Db, crawlId: string, caps: RuleCaps): Prom
   return noteTruncation(findings, result.rows[0]?.total_matches ?? 0);
 }
 
-/** What a page's blocks say together: every id any of them defines. */
+/** What a page's blocks say together: every id any of them defines, and how many left ids out (`idsTruncated`). */
 interface PageContext {
   definedIds: ReadonlySet<string>;
+  truncatedBlocks: number;
 }
 
 interface PerPageSpec {
@@ -169,7 +170,7 @@ interface PerPageSpec {
   summary?: (
     blocks: readonly BlockView[],
     page: PageContext,
-  ) => { unresolved: string[]; unresolvedCount: number; problemsCapped: boolean };
+  ) => { unresolved: string[]; unresolvedCount: number; unresolvedAtLeast: boolean; problemsCapped: boolean };
   /**
    * Silent on a crawl not wholly at extraction 4 (ruling R0.7): the answer
    * depends on blocks a page read before microdata and RDFa were extracted
@@ -195,39 +196,55 @@ const listHas = (key: string) => (): SQL =>
 /**
  * A reference of block `sd` that no block of page `p` defines, read from the
  * block's `unresolved` ids (the references no node of the block itself
- * defines; 29d). That list is complete (every reference walked, not the first
- * 50 recorded in `references`), so the page-level answer is exact. A sibling
- * block whose verdict is null defines nothing here; the page is then selected
- * and the reader throws on that block, so the null is never read as "undefined".
+ * defines; 29d). The list holds every one unless the block left ids out
+ * (`idsTruncated`: one over `MAX_RESOLVED_ID_CHARS`, or past the block's
+ * `MAX_BLOCK_ID_CHARS`), so the page-level answer is exact unless a block is
+ * truncated. A block's ids count only while no OTHER block of the page is
+ * truncated: that block's missing `definedIds` could have defined them, and
+ * what is reported is a lower bound that must never rest on a guess
+ * (`pageUnresolved` applies the same rule). A sibling block whose verdict is
+ * null defines nothing here; the page is then selected and the reader throws
+ * on that block, so the null is never read as "undefined".
  */
 const unresolvedHas = (crawlId: string): SQL =>
-  sql`exists (
+  sql`(exists (
     select 1 from jsonb_array_elements(sd.validation_jsonb -> 'unresolved') r(id)
     where not exists (
       select 1 from structured_data d
       where d.crawl_id = ${crawlId} and d.page_id = p.id
         and d.validation_jsonb -> 'definedIds' @> jsonb_build_array(r.id)
     )
-  )`;
+  ) and not exists (
+    select 1 from structured_data t
+    where t.crawl_id = ${crawlId} and t.page_id = p.id and t.id <> sd.id
+      and t.validation_jsonb ->> 'idsTruncated' = 'true'
+  ))`;
 
-/** The ids of a block's `unresolved` that no block of the page defines, in walk order. */
+/**
+ * The ids of a block's `unresolved` that no block of the page defines, in walk
+ * order: none while another block of the page left ids out (see `unresolvedHas`).
+ */
 function pageUnresolved(b: BlockView, page: PageContext): string[] {
+  if (page.truncatedBlocks - (b.idsTruncated ? 1 : 0) > 0) return [];
   return b.unresolved.filter((id) => !page.definedIds.has(id));
 }
 
 /**
  * `unresolved-reference`'s evidence: the page's unresolved ids (up to
- * `MAX_PROBLEMS_PER_LIST`, in block then walk order), their exact count, and
- * `problemsCapped`, true exactly when the count is over that limit.
+ * `MAX_PROBLEMS_PER_LIST`, in block then walk order), their count, and
+ * `problemsCapped`, true exactly when the count is over that limit. The count is
+ * exact unless a block left ids out: `unresolvedAtLeast` is then true and the
+ * count is a lower bound ("at least N").
  */
 function unresolvedSummary(
   blocks: readonly BlockView[],
   page: PageContext,
-): { unresolved: string[]; unresolvedCount: number; problemsCapped: boolean } {
+): { unresolved: string[]; unresolvedCount: number; unresolvedAtLeast: boolean; problemsCapped: boolean } {
   const all = blocks.flatMap((b) => pageUnresolved(b, page));
   return {
     unresolved: all.slice(0, MAX_PROBLEMS_PER_LIST),
     unresolvedCount: all.length,
+    unresolvedAtLeast: page.truncatedBlocks > 0,
     problemsCapped: all.length > MAX_PROBLEMS_PER_LIST,
   };
 }
@@ -249,7 +266,10 @@ function unresolvedProblems(b: BlockView, format: string, page: PageContext): Pr
 
 /** Every id the page's blocks define, as one set (`PageContext`); empty for a rule that reads none. */
 function pageContext(blocks: readonly BlockView[]): PageContext {
-  return { definedIds: new Set(blocks.flatMap((b) => b.definedIds ?? [])) };
+  return {
+    definedIds: new Set(blocks.flatMap((b) => b.definedIds ?? [])),
+    truncatedBlocks: blocks.filter((b) => b.idsTruncated).length,
+  };
 }
 
 async function perPageFindings(
@@ -552,6 +572,7 @@ const CAPPED_COLUMN = { key: "problemsCapped", label: "Problems Capped" };
 const UNRESOLVED_COLUMNS = [
   { key: "unresolved", label: "Unresolved Ids" },
   { key: "unresolvedCount", label: "Unresolved Count" },
+  { key: "unresolvedAtLeast", label: "Unresolved At Least" },
 ];
 
 function perPageRule(spec: PerPageSpec, checkIds: string[]): QueryRule {

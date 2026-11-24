@@ -47,19 +47,22 @@
  *    `sameAs: ["", x]` is `$.sameAs[0]` — with the type of the node holding it
  *    (null when that node is untyped) and the property's name;
  *  - `definedIds`: the `@id` of every node that carries a `@type` or a
- *    property, each once. NEVER capped: a defined id dropped for want of room
- *    would turn every reference to it into a false "unresolved" (the block's
- *    stored size, `MAX_LD_JSON_CHARS` in the analyzer, bounds it);
+ *    property, each once. Not capped at 50: a defined id dropped for want of room
+ *    would turn every reference to it into a false "unresolved". Bounded by
+ *    `MAX_RESOLVED_ID_CHARS` and `MAX_BLOCK_ID_CHARS`, because ids are stored
+ *    resolved and the analyzer's input bound (`MAX_LD_JSON_CHARS`) does not
+ *    bound that output; an id left out sets `idsTruncated`;
  *  - `references`: every bare `{"@id": …}` (`bareReferenceId`) with its path,
  *    the id resolved (`id`) and as written (`written`). Whether it resolves is
  *    a question about the PAGE — another block may define the id — so it is
  *    answered at rules time, not here;
  *  - `unresolved` / `unresolvedCount` (29d): the references no node of this
  *    block defines (the page's other blocks may) as resolved ids, one per
- *    reference, in walk order, and their count. NEVER capped, like
+ *    reference, in walk order, and their exact count. Not capped at 50, like
  *    `definedIds`: taken from every reference walked, so one past the 50th
  *    that `references` had no room for is found, and the page-level answer
- *    (which of them another block defines) is exact.
+ *    (which of them another block defines) is exact, unless a block set
+ *    `idsTruncated`, when the page's answer is a lower bound.
  *
  * **Ids are IRIs, resolved against the document base** (JSON-LD 1.1 §IRIs, as
  * microdata `itemid` and RDFa `resource` already are at extraction): the page
@@ -89,6 +92,8 @@
  * Paths: `$` is the block, then `.prop` (or `["prop"]` for a key that is not an
  * identifier) and `[i]` where the value is an array, e.g. `$.offers[0].seller`.
  */
+import { createHash } from "node:crypto";
+
 import { z } from "zod";
 
 import { MAX_LD_JSON_NESTING } from "../../crawl/parse/page-analyzer.js";
@@ -106,6 +111,30 @@ import {
 
 /** Each problem list stops here and sets `listsCapped`. */
 export const MAX_PROBLEMS_PER_LIST = 50;
+
+/**
+ * The longest resolved id the verdict stores: 2 KiB, the length URLs are
+ * generally held to in practice (CDNs, proxies and browsers refuse or truncate
+ * past about it). A longer one is not stored; it is still compared (by hash)
+ * while the block is walked, and the block's `idsTruncated` says one was left out.
+ *
+ * Why a cap at all: ids are stored RESOLVED against the document base, so the
+ * analyzer's input bound (`MAX_LD_JSON_CHARS`, 100k characters) does not bound
+ * the output: thousands of short references under a long `@base` resolve to
+ * thousands of long ids. Same precedent as `MAX_ITEM_WRITTEN_CHARS`
+ * (item-core.ts), which bounds output the input size does not.
+ */
+export const MAX_RESOLVED_ID_CHARS = 2048;
+
+/**
+ * The characters of resolved ids one block stores, `definedIds` and
+ * `unresolved` together: 256 KiB, a little over twice the 100k-character input
+ * a block can be stored from, so an ordinary block (ids the size of what they
+ * were written as) never reaches it, and the worst a page can hold is 50
+ * blocks x 256 KiB = 12.5 MiB. `definedIds` fills it first, in walk order, then
+ * `unresolved`; what does not fit is left out and `idsTruncated` says so.
+ */
+export const MAX_BLOCK_ID_CHARS = 256 * 1024;
 
 const path = z.string().min(1);
 
@@ -145,13 +174,21 @@ export const blockValidationObject = z.strictObject({
   references: list(z.strictObject({ path, id: z.string().min(1), written: z.string().min(1) })),
   /**
    * The resolved id of every reference no node of THIS block defines, one per
-   * reference, in walk order (29d). NEVER capped, like `definedIds` (the block's
-   * stored size bounds it): the page may define an id in another block, and the
-   * rule can only subtract those from a complete list. `unresolvedCount` is its
-   * length (`blockValidationSchema` enforces it).
+   * reference, in walk order (29d). Not capped at 50, like `definedIds`: the page
+   * may define an id in another block, and the rule can only subtract those from
+   * a complete list. Bounded by `MAX_RESOLVED_ID_CHARS` and `MAX_BLOCK_ID_CHARS`;
+   * `unresolvedCount` is the exact count, and equals the length unless
+   * `idsTruncated` (`blockValidationSchema` enforces it).
    */
   unresolved: z.array(z.string().min(1)),
   unresolvedCount: z.number().int().nonnegative(),
+  /**
+   * An id was left out of `definedIds`, `unresolved` or `references` for being
+   * longer than `MAX_RESOLVED_ID_CHARS`, or for the block's `MAX_BLOCK_ID_CHARS`
+   * budget. `unresolvedCount` is still the exact count for this block; the lists
+   * are then incomplete, so the page's answer is a lower bound.
+   */
+  idsTruncated: z.boolean(),
   nodes: list(
     z.strictObject({
       path,
@@ -179,10 +216,16 @@ export const blockValidationObject = z.strictObject({
   judged: z.boolean(),
 });
 
-/** `unresolvedCount` is the length of `unresolved`: the one invariant between the two. */
-export const unresolvedCountMatches = (v: { unresolved: readonly string[]; unresolvedCount: number }): boolean =>
-  v.unresolvedCount === v.unresolved.length;
-export const UNRESOLVED_COUNT_ISSUE = { message: "unresolvedCount must equal the length of unresolved", path: ["unresolvedCount"] };
+/** `unresolvedCount` is the length of `unresolved`, unless ids were left out (`idsTruncated`): then at least that. */
+export const unresolvedCountMatches = (v: {
+  unresolved: readonly string[];
+  unresolvedCount: number;
+  idsTruncated: boolean;
+}): boolean => (v.idsTruncated ? v.unresolvedCount >= v.unresolved.length : v.unresolvedCount === v.unresolved.length);
+export const UNRESOLVED_COUNT_ISSUE = {
+  message: "unresolvedCount must equal the length of unresolved (at least that, when idsTruncated)",
+  path: ["unresolvedCount"],
+};
 
 /** What readers parse a stored `validation_jsonb` blob with. */
 export const blockValidationSchema = blockValidationObject.refine(unresolvedCountMatches, UNRESOLVED_COUNT_ISSUE);
@@ -256,6 +299,36 @@ function statedTypes(node: Record<string, unknown>): string[] {
   return [...out];
 }
 
+/** What an id is compared by: itself, or a hash when it is too long to be stored. */
+const OVERSIZE_PREFIX = "\u0000sha256:";
+function idKey(id: string): string {
+  return id.length > MAX_RESOLVED_ID_CHARS ? OVERSIZE_PREFIX + createHash("sha256").update(id).digest("hex") : id;
+}
+const storable = (key: string): boolean => !key.startsWith(OVERSIZE_PREFIX);
+
+/**
+ * The ids to store, in order: the storable ones, until `budget` characters are
+ * used. `left` says one did not fit or was too long.
+ */
+function takeIds(keys: Iterable<string>, budget: number): { ids: string[]; used: number; left: boolean } {
+  const ids: string[] = [];
+  let used = 0;
+  let left = false;
+  for (const key of keys) {
+    if (!storable(key)) {
+      left = true;
+      continue;
+    }
+    if (used + key.length > budget) {
+      left = true;
+      break;
+    }
+    ids.push(key);
+    used += key.length;
+  }
+  return { ids, used, left };
+}
+
 /** A property key's name: its schema.org name in any spelling, else the key as written. */
 function propertyName(key: string): string {
   return schemaOrgName(key) ?? key;
@@ -271,14 +344,18 @@ class Walker {
     references: [],
     nodes: [],
   };
-  /** Insertion-ordered and deduplicated; never capped (see the header). */
+  /**
+   * Insertion-ordered and deduplicated, as `idKey`s (the id itself, or a hash
+   * of one over `MAX_RESOLVED_ID_CHARS`). Bounded only when stored (`validateBlock`).
+   */
   readonly definedIds = new Set<string>();
   /**
-   * The resolved id of every reference walked, in order, uncapped: whether one
-   * is defined is known only when the walk ends. Bounded by the block's stored
-   * size (`MAX_LD_JSON_CHARS`), as `definedIds` is.
+   * The `idKey` of every reference walked, in order: whether one is defined is
+   * known only when the walk ends.
    */
   readonly referenceIds: string[] = [];
+  /** A reference's resolved id was too long to store in `references`. */
+  referenceOmitted = false;
   /** The lists that were cut, in the order they were (`cappedLists`). */
   readonly cappedLists = new Set<ListName>();
   outside = 0;
@@ -315,7 +392,11 @@ class Walker {
   /** Record a bare reference: always in `referenceIds`, in `references` while it has room. */
   private reference(path: string, written: string): void {
     const id = this.resolveId(written);
-    this.referenceIds.push(id);
+    this.referenceIds.push(idKey(id));
+    if (id.length > MAX_RESOLVED_ID_CHARS) {
+      this.referenceOmitted = true;
+      return;
+    }
     this.push("references", { path, id, written });
   }
 
@@ -409,7 +490,7 @@ class Walker {
       );
     }
     const id = definedId(node);
-    if (id !== null) this.definedIds.add(this.resolveId(id));
+    if (id !== null) this.definedIds.add(idKey(this.resolveId(id)));
 
     if (!this.judged) {
       const type = statedType(node);
@@ -576,7 +657,10 @@ export function validateBlock(raw: unknown, documentUrl: string): BlockValidatio
   let topType: string | null = null;
   if (onlyId !== null) walker.rootReference(onlyId);
   else topType = walker.node(raw, "$", 1, []);
-  const unresolvedAll = walker.referenceIds.filter((id) => !walker.definedIds.has(id));
+  const unresolvedAll = walker.referenceIds.filter((key) => !walker.definedIds.has(key));
+  // The definedIds fill the id budget first, then `unresolved` gets what is left.
+  const defined = takeIds(walker.definedIds, MAX_BLOCK_ID_CHARS);
+  const unresolved = takeIds(unresolvedAll, MAX_BLOCK_ID_CHARS - defined.used);
   return {
     topType,
     unknownTypes: walker.lists.unknownTypes,
@@ -584,10 +668,11 @@ export function validateBlock(raw: unknown, documentUrl: string): BlockValidatio
     propertyStatus: walker.lists.propertyStatus,
     typeMismatches: walker.lists.typeMismatches,
     emptyValues: walker.lists.emptyValues,
-    definedIds: [...walker.definedIds],
+    definedIds: defined.ids,
     references: walker.lists.references,
-    unresolved: unresolvedAll,
+    unresolved: unresolved.ids,
     unresolvedCount: unresolvedAll.length,
+    idsTruncated: defined.left || unresolved.left || walker.referenceOmitted,
     nodes: walker.lists.nodes,
     outsideVocabulary: walker.outside,
     listsCapped: walker.capped,

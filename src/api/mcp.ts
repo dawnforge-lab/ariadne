@@ -1867,10 +1867,13 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "an extraction below version 5, which did not count them. problemsCapped: a block cut one of the lists these counts " +
         "read at its per-block limit, so the counts may be short; the unresolved-reference part of infoCount is " +
         "exact, a reference past the 50th included, and problemsCapped is also true when the page has more than " +
-        "50 unresolved references (the finding lists 50 ids and gives the exact count). The " +
+        "50 unresolved references (the finding lists 50 ids and gives the exact count). infoCountAtLeast: " +
+        "a block left ids out of its verdict (an id over 2 KiB once resolved, or more than 256 KiB of ids), so " +
+        "infoCount is a lower bound, at least that many, never a guess; false otherwise. The " +
         "problem-by-problem detail is the structured_data_nodes CSV view " +
         "(export_crawl format=csv), one row per block and problem; its unresolved-reference rows " +
-        "are not cut at 50, and say '(path not recorded)' for a reference past a block's first 50.\n\n" +
+        "are not cut at 50, say '(path not recorded)' for a reference past a block's first 50, and say the list " +
+        "is incomplete when infoCountAtLeast is true.\n\n" +
         "NULL IS NOT ZERO. microdataErrors and skips are null on a page crawled " +
         "before microdata was read (extraction below version 4): nobody looked, " +
         "so warningCount there has no microdata errors in it. skips counts what " +

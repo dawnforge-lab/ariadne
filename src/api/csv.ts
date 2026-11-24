@@ -1083,7 +1083,8 @@ export const CSV_VIEW_DEFS: Record<CsvQueryViewName, CsvView> = {
    * and the findings' Problems Capped say when they did (the cap is per block).
    * The unresolved-reference rows are not cut at 50 (29d): there is one for
    * every unresolved id, as the listing and the finding count them; Path says
-   * "(path not recorded)" for one past the block's first 50 references.
+   * "(path not recorded)" for one past the block's first 50 references, and
+   * the Detail says the list is incomplete when a block of the page left ids out.
    */
   structured_data_nodes: defineCsvView<{
     id: string;
@@ -1114,7 +1115,7 @@ export const CSV_VIEW_DEFS: Record<CsvQueryViewName, CsvView> = {
       join pages p on p.crawl_id = ${crawlId} and p.id = sd.page_id
       cross join lateral (
         select case when ${validationReadable(sql`sd.validation_jsonb`)}
-                    then ${blockProblems(sql`sd.validation_jsonb`, crawlId, sql`sd.page_id`)}
+                    then ${blockProblems(sql`sd.validation_jsonb`, crawlId, sql`sd.page_id`, sql`sd.id`)}
                     else '[]'::jsonb end as problems
       ) b
       cross join lateral (

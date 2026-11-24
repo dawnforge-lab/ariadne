@@ -236,21 +236,36 @@ export function referencesMeasured(crawlId: string): SQL {
 }
 
 /**
- * True for a reference entry `ref` (jsonb) whose id no block of the page
+ * True for an id `id` (jsonb) of block `blockId` that no block of the page
  * `pageId` defines — what makes a reference an `unresolved-reference`. Per PAGE,
  * not per block: a graph split over two scripts is one graph, so a sibling
  * block's definition resolves it. The same test `schema.unresolved-reference`
  * applies, under the same gate: never true on a crawl not wholly at
  * extraction 4 (`referencesMeasured`). Ids are stored resolved against the
  * page (validate.ts), so the comparison is of strings.
+ *
+ * Never true while ANOTHER block of the page left ids out (`idsTruncated`):
+ * that block's missing `definedIds` could have defined this id, so counting it
+ * would be a guess. What is counted is then a lower bound
+ * (`blockIdsTruncated`), the rule's reading exactly (`pageUnresolved`).
  */
-function unresolved(ref: SQL, crawlId: string, pageId: SQL, isEntry = true): SQL {
-  // `ref` is a reference entry (`{path, id, written}`), or with `isEntry` false the id itself.
-  const id = isEntry ? sql`${ref} -> 'id'` : ref;
+function unresolved(id: SQL, crawlId: string, pageId: SQL, blockId: SQL): SQL {
   return sql`${referencesMeasured(crawlId)} and not exists (
     select 1 from structured_data d
      where d.crawl_id = ${crawlId} and d.page_id = ${pageId}
-       and d.validation_jsonb -> 'definedIds' @> jsonb_build_array(${id}))`;
+       and d.validation_jsonb -> 'definedIds' @> jsonb_build_array(${id}))
+    and not exists (
+    select 1 from structured_data t
+     where t.crawl_id = ${crawlId} and t.page_id = ${pageId} and t.id <> ${blockId}
+       and t.validation_jsonb ->> 'idsTruncated' = 'true')`;
+}
+
+/**
+ * Whether one block left ids out of its verdict (`idsTruncated`, validate.ts):
+ * the page's unresolved count is then "at least", not exact.
+ */
+export function blockIdsTruncated(blob: SQL): SQL {
+  return sql`((${blob} ->> 'idsTruncated')::boolean)`;
 }
 
 /**
@@ -291,8 +306,8 @@ export function blockWarnings(blob: SQL): SQL {
  * One block's infos (R0.8): its pending or superseded properties and its
  * references no block of the page defines. Null when the blob is unreadable.
  */
-export function blockInfos(blob: SQL, crawlId: string, pageId: SQL): SQL {
-  return sql`(jsonb_array_length(${list(blob, "propertyStatus")}) + ${blockUnresolved(blob, crawlId, pageId)})`;
+export function blockInfos(blob: SQL, crawlId: string, pageId: SQL, blockId: SQL): SQL {
+  return sql`(jsonb_array_length(${list(blob, "propertyStatus")}) + ${blockUnresolved(blob, crawlId, pageId, blockId)})`;
 }
 
 /**
@@ -300,10 +315,13 @@ export function blockInfos(blob: SQL, crawlId: string, pageId: SQL): SQL {
  * block's complete `unresolved` ids (29d), so the page's sum is exact and agrees
  * with `schema.unresolved-reference`. 0 where references are not measured.
  */
-export function blockUnresolved(blob: SQL, crawlId: string, pageId: SQL): SQL {
+export function blockUnresolved(blob: SQL, crawlId: string, pageId: SQL, blockId: SQL): SQL {
   return sql`(select count(*) from jsonb_array_elements_text(${list(blob, "unresolved")}) as u(id)
-        where ${unresolved(sql`to_jsonb(u.id)`, crawlId, pageId, false)})`;
+        where ${unresolved(sql`to_jsonb(u.id)`, crawlId, pageId, blockId)})`;
 }
+
+/** Appended to an `unresolved-reference` Detail when ids were left out of the page's verdicts: the list of rows is a lower bound. */
+export const INCOMPLETE_NOTE = " (the list is incomplete: ids were left out of this page's verdict, so there may be more)";
 
 /** What the `unresolved-reference` row's Path says for an id past the block's first 50 references. */
 export const PATH_NOT_RECORDED = "(path not recorded)";
@@ -315,19 +333,20 @@ export const PATH_NOT_RECORDED = "(path not recorded)";
  * reference, and an id past it gets `PATH_NOT_RECORDED` and its resolved id
  * as `written`. Walk order.
  */
-function unresolvedRows(blob: SQL, crawlId: string, pageId: SQL): SQL {
+function unresolvedRows(blob: SQL, crawlId: string, pageId: SQL, blockId: SQL): SQL {
   return sql`coalesce((
       select jsonb_agg(jsonb_build_object(
                'path', coalesce(r.entry -> 'path', to_jsonb(${PATH_NOT_RECORDED}::text)),
                'id', u.id,
                'written', coalesce(r.entry -> 'written', to_jsonb(u.id)),
+               'incomplete', coalesce(${blockIdsTruncated(blob)}, false),
                'problem', 'unresolved-reference'::text) order by u.n)
         from (select x.id, x.n, row_number() over (partition by x.id order by x.n) as k
                 from jsonb_array_elements_text(${list(blob, "unresolved")}) with ordinality as x(id, n)) u
         left join (select y.entry, row_number() over (partition by y.entry ->> 'id' order by y.n) as k
                      from jsonb_array_elements(${list(blob, "references")}) with ordinality as y(entry, n)) r
                on r.entry ->> 'id' = u.id and r.k = u.k
-       where ${unresolved(sql`to_jsonb(u.id)`, crawlId, pageId, false)}
+       where ${unresolved(sql`to_jsonb(u.id)`, crawlId, pageId, blockId)}
     ), '[]'::jsonb)`;
 }
 
@@ -341,7 +360,7 @@ function unresolvedRows(blob: SQL, crawlId: string, pageId: SQL): SQL {
  * (`unresolved`): the view's row is per block, and the page-level SQL check is
  * what lets it agree with the listing's count and with the rule.
  */
-export function blockProblems(blob: SQL, crawlId: string, pageId: SQL): SQL {
+export function blockProblems(blob: SQL, crawlId: string, pageId: SQL, blockId: SQL): SQL {
   const tagged = (
     name: (typeof VALIDATION_LISTS)[number],
     problem: StructuredDataProblem,
@@ -358,7 +377,7 @@ export function blockProblems(blob: SQL, crawlId: string, pageId: SQL): SQL {
       tagged("propertyStatus", "property-status"),
       tagged("typeMismatches", "type-mismatch"),
       tagged("emptyValues", "empty-value"),
-      unresolvedRows(blob, crawlId, pageId),
+      unresolvedRows(blob, crawlId, pageId, blockId),
     ],
     sql` || `,
   )})`;
@@ -448,7 +467,9 @@ export function problemCells(entry: unknown, where: string): ProblemCells {
         path,
         nodeType: "",
         problem: "unresolved-reference",
-        detail: `${written === id ? id : `${written} (${id})`} is not defined on this page`,
+        detail:
+          `${written === id ? id : `${written} (${id})`} is not defined on this page` +
+          (e["incomplete"] === true ? INCOMPLETE_NOTE : ""),
       };
     }
   }

@@ -348,7 +348,7 @@ describe("the schema validation rules against the database", () => {
       expect(found[0]!.evidence).toEqual({
         blocksAtCap: false, pageHasParseErrors: false,
         problems: [{ format: "jsonld", path: "$.about[1]", id: `${url("/a")}#topic`, written: "#topic" }],
-        unresolved: [`${url("/a")}#topic`], unresolvedCount: 1, problemCount: 1, problemsCapped: false,
+        unresolved: [`${url("/a")}#topic`], unresolvedCount: 1, unresolvedAtLeast: false, problemCount: 1, problemsCapped: false,
       });
     });
 
@@ -367,7 +367,7 @@ describe("the schema validation rules against the database", () => {
             written: "https://parent.example/#org",
           },
         ],
-        unresolved: ["https://parent.example/#org"], unresolvedCount: 1, problemCount: 1, problemsCapped: false,
+        unresolved: ["https://parent.example/#org"], unresolvedCount: 1, unresolvedAtLeast: false, problemCount: 1, problemsCapped: false,
       });
     });
 
@@ -643,7 +643,7 @@ describe("the schema validation rules against the database", () => {
     });
 
     it("declares the Blocks At Cap column beside the problems", () => {
-      expect(rule(ID).columns.map((c) => c.key)).toEqual(["problems", "blocksAtCap", "pageHasParseErrors", "unresolved", "unresolvedCount", "problemCount", "problemsCapped"]);
+      expect(rule(ID).columns.map((c) => c.key)).toEqual(["problems", "blocksAtCap", "pageHasParseErrors", "unresolved", "unresolvedCount", "unresolvedAtLeast", "problemCount", "problemsCapped"]);
     });
   });
 });
@@ -850,6 +850,7 @@ describe("the per-page schema rules after the final review", () => {
       problems: [{ format: "jsonld", path: null, id: `${url("/a")}#nowhere`, written: null }],
       unresolved: [`${url("/a")}#nowhere`],
       unresolvedCount: 1,
+      unresolvedAtLeast: false,
       problemCount: 1,
       problemsCapped: false,
     });
@@ -917,5 +918,52 @@ describe("the per-page schema rules after the final review", () => {
       },
     ]);
     expect(await rule("schema.unresolved-reference").run(db, crawlId)).toEqual([]);
+  });
+
+  // Phase 29d, Task 4 fix round 2: a block that left ids out makes the page's answer a lower bound.
+  const bigBase = `${SITE}/${"x".repeat(1500)}/`;
+  const ampBlock = (n: number): Record<string, unknown> => ({
+    "@context": [ctx, { "@base": bigBase }],
+    "@type": "ItemList",
+    itemListElement: Array.from({ length: n }, (_, i) => ({ "@id": `#a${i}` })),
+  });
+
+  it("29d: an amplification block lists 50, counts at least what it stored, and says unresolvedAtLeast", async () => {
+    const crawlId = await crawlWith([{ path: "/a", raws: [ampBlock(5000)] }]);
+    const found = await rule("schema.unresolved-reference").run(db, crawlId);
+    expect(found).toHaveLength(1);
+    const evidence = found[0]!.evidence;
+    expect(evidence).toMatchObject({ unresolvedAtLeast: true, problemsCapped: true });
+    expect((evidence["unresolved"] as string[]).length).toBe(MAX_PROBLEMS_PER_LIST);
+    expect(evidence["unresolvedCount"] as number).toBeGreaterThan(MAX_PROBLEMS_PER_LIST);
+    expect(evidence["unresolvedCount"] as number).toBeLessThan(5000);
+  });
+
+  it("29d: another block that left ids out could define this block's ids, so they are not counted: no finding, no throw", async () => {
+    const hugeBase = `${SITE}/${"y".repeat(3000)}/`;
+    const crawlId = await crawlWith([
+      {
+        path: "/a",
+        raws: [
+          { "@context": [ctx, { "@base": hugeBase }], "@type": "ItemList", itemListElement: [{ "@id": "#huge" }] },
+          { "@context": ctx, "@type": "WebPage", name: "x", publisher: { "@id": "#q" } },
+        ],
+      },
+    ]);
+    expect(await rule("schema.unresolved-reference").run(db, crawlId)).toEqual([]);
+  });
+
+  it("29d: a verdict written with unresolved cut at 50 and a larger count is refused, and so is one without idsTruncated", async () => {
+    const crawlId = await crawlWith([{ path: "/a", raws: [refsTo(ids("e", 0, 70))] }]);
+    await db.execute(sql`
+      update structured_data
+         set validation_jsonb = jsonb_set(validation_jsonb, '{unresolved}',
+               (select jsonb_agg(x) from (select x from jsonb_array_elements(validation_jsonb -> 'unresolved') x limit 50) t))
+       where crawl_id = ${crawlId}`);
+    await expect(rule("schema.unresolved-reference").run(db, crawlId)).rejects.toThrow(/re-run the rules/);
+    await deriveSchemaValidation(db, crawlId);
+    expect(await rule("schema.unresolved-reference").run(db, crawlId)).toHaveLength(1);
+    await db.execute(sql`update structured_data set validation_jsonb = validation_jsonb - 'idsTruncated' where crawl_id = ${crawlId}`);
+    await expect(rule("schema.unresolved-reference").run(db, crawlId)).rejects.toThrow(/re-run the rules/);
   });
 });

@@ -230,14 +230,24 @@ validated before it is refused (409, "re-run the rules"), never read.
     extraction 4. A `@graph` member that is only `{"@id": …}` is a reference at `$`,
     checked as one, and not a node. From Phase 29d every reference is checked, wherever it
     sits: the block verdict holds `unresolved` (the resolved id of every reference no
-    node of the block defines, in walk order, never capped, as `definedIds` is) and
-    `unresolvedCount` (its length). The rule subtracts the ids the page's other blocks
+    node of the block defines, in walk order, not cut at 50) and `unresolvedCount` (the
+    exact count for the block). The rule subtracts the ids the page's other blocks
     define, so the evidence is exact: `unresolved` (the page's unresolved ids, up to 50,
     column `Unresolved Ids`), `unresolvedCount` (`Unresolved Count`) and `problemsCapped`
     (true exactly when `unresolvedCount` is over 50). `problems` has one entry per
     unresolved id (the first 20 are in the evidence); `path` and `written` are recorded
     for each block's first 50 references and are null for an id past them. `problemCount`
-    equals `unresolvedCount`.
+    equals `unresolvedCount`. **Stored ids are bounded**, because they are stored
+    resolved and the analyzer's input limit does not bound that: an id over 2048
+    characters is not stored, and a block stores at most 256 KiB of ids (`definedIds`
+    first, then `unresolved`). A block that left an id out sets `idsTruncated` in its
+    verdict, and then the page's answer is a lower bound: the evidence carries
+    `unresolvedAtLeast: true` (column `Unresolved At Least`) and `unresolvedCount` means
+    "at least". While a block of the page is truncated, the other blocks' ids are not
+    counted, because the missing ids could have defined them; a page whose only
+    candidates are such ids files no finding. A verdict whose `unresolvedCount` does not
+    match the length of `unresolved` (equal, or at least that with `idsTruncated`), as
+    one written before this change can, is stale: re-run the rules.
   - **`problemsCapped`** (column `Problems Capped`) is on the evidence of every per-node
     rule (`unknown-type`, `unknown-property`, `property-pending-or-superseded`,
     `embedded-type-mismatch`, `empty-value`, `unresolved-reference`): each block's list
@@ -3100,11 +3110,16 @@ blocksDropped, nodesDropped, problemsCapped
   (an empty-value list cut at 50 holds more problems than it shows). The unresolved
   part of `infoCount` is not cut by the references list (Phase 29d): it is exact, a
   reference past the 50th included, and `problemsCapped` is also true when the page has
-  more than 50 unresolved references, as in the rule's evidence.
+  more than 50 unresolved references, as in the rule's evidence. **`infoCountAtLeast`**
+  is true when a block of the page left ids out of its verdict (an id over 2048
+  characters once resolved, or more than 256 KiB of ids): `infoCount` is then a lower
+  bound, "at least that many", never a guess. It is false on a crawl that does not
+  measure references.
   The `structured_data_nodes` CSV holds the first 50 of each other list, so its rows for
   one such problem stop at 50 per block; its `unresolved-reference` rows are not cut, one
   for every unresolved id, with Path `(path not recorded)` for a reference past the
-  block's first 50.
+  block's first 50; when `infoCountAtLeast` is true each such row's Detail says the list
+  is incomplete.
 - **`notMeasured`** is `{id, reason}[]`. On a crawl not wholly at extraction 4 the
   unresolved-reference count is not measured and `notMeasured` names
   `schema.unresolved-reference`; `infoCount` then holds no references. It is `[]`
@@ -4478,7 +4493,10 @@ reference wherever it sits, past the 50th too: the block verdict gains `unresolv
 id no node of the block defines, uncapped) and `unresolvedCount` (its length), the rule's
 evidence is `{unresolved (up to 50), unresolvedCount, problemsCapped}` over the page, and
 the `structured_data` listing's `infoCount` and `problemsCapped` and the CSV's
-`unresolved-reference` rows read the same exact count. A verdict stored without them is
+`unresolved-reference` rows read the same count. Stored resolved ids are bounded (2048
+characters each, 256 KiB per block); a block that left ids out makes the page's answer a
+lower bound, said as `unresolvedAtLeast` (rule), `infoCountAtLeast` (listing) and a note
+on each CSV row. A verdict stored without them is
 stale and the next rules run rewrites it.
 
 **0.28.1 is a fix, not a phase.** A robots value's `none` is the directive (noindex,

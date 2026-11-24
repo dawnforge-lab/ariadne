@@ -1116,6 +1116,11 @@ const KINDS = ["page", "query", "metric"] as const satisfies readonly AnyRule["k
 //        subtracts ids the page's other blocks define, so the evidence is exact:
 //        {unresolved (up to 50), unresolvedCount, problemsCapped (count > 50)}, and the
 //        listing's infoCount, its problemsCapped and the CSV rows read the same count.
+//        Stored resolved ids are bounded (an id over 2 KiB, and 256 KiB of ids per
+//        block, `definedIds` and `unresolved` together); a block that left ids out
+//        sets `idsTruncated`, and the page's answer is then a lower bound, said as
+//        `unresolvedAtLeast` (rule), `infoCountAtLeast` (listing) and a note on each
+//        CSV row. A verdict whose count and list disagree is stale.
 export const RULESET_VERSION = "0.29.0";
 
 /**

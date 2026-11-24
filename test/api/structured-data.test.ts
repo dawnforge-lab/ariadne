@@ -348,7 +348,7 @@ describe("listStructuredData — the rows", () => {
       jsonLdParseErrors: 0,
       microdataErrors: 0,
       skips: SKIPS,
-      blocksAtCap: false, blocksDropped: null, nodesDropped: null, problemsCapped: false,
+      infoCountAtLeast: false, blocksAtCap: false, blocksDropped: null, nodesDropped: null, problemsCapped: false,
     });
     // The empty image is the one warning; the unresolved #brand the one info.
     expect(product?.warningCount).toBe(1);
@@ -359,7 +359,7 @@ describe("listStructuredData — the rows", () => {
     const page = await service.listStructuredData(LOCAL_TENANT, crawlId, {});
     expect(Object.keys(page.items[0]!)).toEqual([
       "url", "pageType", "indexable", "formats", "types", "nodes",
-      "warningCount", "infoCount", "jsonLdParseErrors", "microdataErrors", "skips", "blocksAtCap", "blocksDropped", "nodesDropped", "problemsCapped",
+      "warningCount", "infoCount", "infoCountAtLeast", "jsonLdParseErrors", "microdataErrors", "skips", "blocksAtCap", "blocksDropped", "nodesDropped", "problemsCapped",
     ]);
     expect(Object.keys(page.items[0]!.nodes[0]!)).toEqual(["format", "path", "type", "types", "typesCapped", "properties", "propertiesCapped"]);
   });
@@ -394,7 +394,7 @@ describe("listStructuredData — the rows", () => {
       jsonLdParseErrors: 2,
       microdataErrors: 1,
       skips: { microdataItemrefSkipped: 0, rdfaUnsupported: 0, valuesCapped: 0 },
-      blocksAtCap: false, blocksDropped: null, nodesDropped: null, problemsCapped: false,
+      infoCountAtLeast: false, blocksAtCap: false, blocksDropped: null, nodesDropped: null, problemsCapped: false,
     });
   });
 });
@@ -884,5 +884,46 @@ describe("unresolved references across blocks of one page (29d)", () => {
     expect(row).toMatchObject({ infoCount: 120, problemsCapped: true });
     expect(csv).toHaveLength(120);
     expect(csv.filter((l) => l.includes("(path not recorded)"))).toHaveLength(70);
+  });
+
+  it("an amplification page: the listing says infoCountAtLeast, the CSV rows say the list is incomplete", async () => {
+    const base = `${SITE}/${"x".repeat(1500)}/`;
+    const { row, csv } = await scenario("amp", [
+      { "@context": [C, { "@base": base }], "@type": "ItemList", itemListElement: ids(0, 5000).map((id) => ({ "@id": id })) },
+    ]);
+    expect(row).toMatchObject({ infoCountAtLeast: true, problemsCapped: true });
+    expect(row.infoCount).toBeGreaterThan(MAX_PROBLEMS_PER_LIST);
+    expect(row.infoCount).toBeLessThan(5000);
+    expect(csv.length).toBe(row.infoCount);
+    expect(csv.every((l) => l.includes("the list is incomplete"))).toBe(true);
+  });
+
+  it("a normal page says infoCountAtLeast false and its rows carry no incomplete note", async () => {
+    const { row, csv } = await scenario("normal", [refsTo(ids(0, 3))]);
+    expect(row).toMatchObject({ infoCount: 3, infoCountAtLeast: false });
+    expect(csv.some((l) => l.includes("the list is incomplete"))).toBe(false);
+  });
+
+  it("a verdict written when unresolved was cut at 50 (count 70, 50 listed) is refused: 409 from the listing and the CSV", async () => {
+    const id = `crawl_sd_listing_cut50_${runId}`;
+    allCrawls.push(id);
+    const pageIds = await seedCrawl(id);
+    await db.insert(structuredData).values({
+      crawlId: id, pageId: pageIds.get("/")!, schemaType: "ItemList", format: "jsonld", raw: refsTo(ids(0, 70)),
+    });
+    await service.runRulesForCrawl(LOCAL_TENANT, id);
+    // As 48d70b6 wrote it: no idsTruncated, unresolved cut at 50 beside a count of 70.
+    await db.execute(sql`
+      update structured_data
+         set validation_jsonb = jsonb_set(validation_jsonb - 'idsTruncated', '{unresolved}',
+               (select jsonb_agg(x) from (select x from jsonb_array_elements(validation_jsonb -> 'unresolved') x limit 50) t))
+       where crawl_id = ${id}`);
+    const error = await service.listStructuredData(LOCAL_TENANT, id, {}).catch((e: unknown) => e);
+    expect(error).toMatchObject({ code: "CONFLICT" });
+    expect(String((error as Error).message)).toMatch(/re-run the rules/);
+    await expect(csvLines(id)).rejects.toMatchObject({ code: "CONFLICT" });
+    // The same cut with the flag present (count above the list, flag false) is refused too.
+    await db.execute(sql`update structured_data set validation_jsonb = validation_jsonb || '{"idsTruncated": false}'::jsonb where crawl_id = ${id}`);
+    await expect(service.listStructuredData(LOCAL_TENANT, id, {})).rejects.toMatchObject({ code: "CONFLICT" });
   });
 });

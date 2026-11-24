@@ -275,6 +275,7 @@ import {
 import {
   blockInfos,
   blockProblemsCapped,
+  blockIdsTruncated,
   blockUnresolved,
   UNRESOLVED_CAPPED_AT,
   blockWarnings,
@@ -2467,6 +2468,13 @@ export interface StructuredDataPageRow {
   nodes: StructuredDataNode[];
   warningCount: number;
   infoCount: number;
+  /**
+   * `infoCount` is a lower bound ("at least"): a block of the page left ids out
+   * of its verdict (`idsTruncated`: an id over the length limit, or the block's
+   * id budget), so unresolved references may be missing from it. False on a
+   * crawl that does not measure references.
+   */
+  infoCountAtLeast: boolean;
   jsonLdParseErrors: number;
   microdataErrors: number | null;
   skips: ProjectedSkips | null;
@@ -2484,7 +2492,8 @@ export interface StructuredDataPageRow {
   /**
    * A block on the page cut one of the lists the counts read at
    * `MAX_PROBLEMS_PER_LIST`: `warningCount` / `infoCount` may be short (final
-   * review I1; a cut references list may or may not hide more unresolved ones).
+   * review I1). The unresolved count is exact (`infoCountAtLeast` says when it
+   * is a lower bound); it is capped (true) here when the page has more than 50.
    */
   problemsCapped: boolean;
 }
@@ -7172,6 +7181,7 @@ export class ApiService {
           unreadable: number;
           blocks_at_cap: boolean;
           problems_capped: boolean;
+          info_at_least: boolean;
         }>(sql`
           select p.url, p.page_type, p.is_indexable,
                  p.structured_data_parse_errors as parse_errors,
@@ -7212,17 +7222,19 @@ export class ApiService {
                  coalesce(b.infos, 0)::int as info_count,
                  coalesce(b.unreadable, 0)::int as unreadable,
                  coalesce(b.blocks >= ${MAX_STRUCTURED_DATA_BLOCKS}, false) as blocks_at_cap,
-                 (coalesce(b.problems_capped, false) or coalesce(b.unresolved > ${UNRESOLVED_CAPPED_AT}, false)) as problems_capped
+                 (coalesce(b.problems_capped, false) or coalesce(b.unresolved > ${UNRESOLVED_CAPPED_AT}, false)) as problems_capped,
+                 (coalesce(b.ids_truncated, false) and ${referencesMeasured(crawlId)}) as info_at_least
             from pages p
             left join lateral (
               select array_agg(distinct sd.format order by sd.format) as formats,
                      bool_or(case when ${readable}
                                   then ${blockProblemsCapped(sql`sd.validation_jsonb`)} end) as problems_capped,
                      sum(case when ${readable}
-                              then ${blockUnresolved(sql`sd.validation_jsonb`, crawlId, sql`sd.page_id`)} end) as unresolved,
+                              then ${blockUnresolved(sql`sd.validation_jsonb`, crawlId, sql`sd.page_id`, sql`sd.id`)} end) as unresolved,
+                     bool_or(case when ${readable} then ${blockIdsTruncated(sql`sd.validation_jsonb`)} end) as ids_truncated,
                      sum(case when ${readable} then ${blockWarnings(sql`sd.validation_jsonb`)} end) as warnings,
                      sum(case when ${readable}
-                              then ${blockInfos(sql`sd.validation_jsonb`, crawlId, sql`sd.page_id`)} end) as infos,
+                              then ${blockInfos(sql`sd.validation_jsonb`, crawlId, sql`sd.page_id`, sql`sd.id`)} end) as infos,
                      count(*) filter (where ${readable} is not true) as unreadable,
                      count(*) as blocks
                 from structured_data sd
@@ -7254,6 +7266,7 @@ export class ApiService {
             nodes: projectNodes(row.nodes, crawlId, row.url),
             warningCount: row.warning_count,
             infoCount: row.info_count,
+            infoCountAtLeast: row.info_at_least,
             jsonLdParseErrors: row.parse_errors,
             microdataErrors: row.microdata_errors,
             skips: facts.skips,

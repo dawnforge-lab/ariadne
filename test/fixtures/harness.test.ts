@@ -2017,7 +2017,7 @@ describe("the fixture site end to end", () => {
           written: "https://estuary-supplies.example/#org",
         },
       ],
-      unresolved: [`${url("/authored29a/unresolved-reference")}#series`, "https://estuary-supplies.example/#org"], unresolvedCount: 2, problemCount: 2, problemsCapped: false,
+      unresolved: [`${url("/authored29a/unresolved-reference")}#series`, "https://estuary-supplies.example/#org"], unresolvedCount: 2, unresolvedAtLeast: false, problemCount: 2, problemsCapped: false,
     });
     // Nine of the ten pages of `/authored29a/tpl/:id` carry a Product: the page
     // that does not is the finding, and the evidence is the census.
