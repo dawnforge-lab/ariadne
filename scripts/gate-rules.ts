@@ -112,11 +112,19 @@ const GATE_PEAK_RSS_BYTES = 512 * 1024 * 1024;
 const GATE_RENDER_PCT = 5;
 
 /**
- * Phase 29c: both link derivations (`deriveLinkCounts` + `deriveLinkScore`) must
+ * Phase 29c: the link derivations (`deriveLinkCounts` + `deriveLinkScore`) must
  * finish within this many ms at 50k. Restated here, not imported, for the same
- * reason as `GATE_RENDER_PCT`.
+ * reason as `GATE_RENDER_PCT`. (Phase 29d's plan added a `deriveLinkTargets`
+ * step to this sum; measured at 50k it cost more than it saved and did not
+ * ship — Task 10's commit has the numbers.)
  */
 const GATE_LINK_DERIVE_MS = 60_000;
+
+/**
+ * Phase 29d: `deriveClickDepth` must finish within this many ms at 50k.
+ * Restated here, not imported, for the same reason as `GATE_RENDER_PCT`.
+ */
+const GATE_CLICK_DEPTH_MS = 30_000;
 
 /** How often RSS is sampled — the Phase 1 interval, so the two are comparable. */
 const SAMPLE_MS = 2_000;
@@ -834,7 +842,16 @@ async function main(): Promise<number> {
     rules: number | null;
     /** `deriveLinkCounts` + `deriveLinkScore`, from the rules run's `derivedMs`. */
     linkDerive: number | null;
-  } = { crawl: null, inferPageTemplatesRescanMs: null, render: null, rules: null, linkDerive: null };
+    /** `deriveClickDepth`, from the rules run's `derivedMs`. */
+    clickDepth: number | null;
+  } = {
+    crawl: null,
+    inferPageTemplatesRescanMs: null,
+    render: null,
+    rules: null,
+    linkDerive: null,
+    clickDepth: null,
+  };
   if (exclude.length > 0 && reuse !== null) {
     throw new RangeError("gate: --exclude needs a crawl in this process; GATE_CRAWL_ID runs none");
   }
@@ -1409,17 +1426,28 @@ async function main(): Promise<number> {
       console.log(`  ${name.padEnd(24)}${seconds(ms)}`);
     }
     derivedMs = run.derivedMs;
-    const countsMs = run.derivedMs["deriveLinkCounts"];
-    const scoreMs = run.derivedMs["deriveLinkScore"];
-    if (countsMs === undefined || scoreMs === undefined) {
+    const timed = ["deriveLinkCounts", "deriveLinkScore", "deriveClickDepth"] as const;
+    const unreported = timed.filter((name) => run.derivedMs[name] === undefined);
+    if (unreported.length > 0) {
       return fail(
-        `the rules run reported no derivedMs for ${countsMs === undefined ? "deriveLinkCounts" : "deriveLinkScore"} ` +
+        `the rules run reported no derivedMs for ${unreported.join(", ")} ` +
           `(got ${Object.keys(run.derivedMs).join(", ") || "none"})`,
       );
     }
+    const countsMs = run.derivedMs["deriveLinkCounts"]!;
+    const scoreMs = run.derivedMs["deriveLinkScore"]!;
+    const clickDepthMs = run.derivedMs["deriveClickDepth"]!;
     durationsMs.linkDerive = Math.round(countsMs + scoreMs);
+    durationsMs.clickDepth = Math.round(clickDepthMs);
     console.log(
-      line("link derive", `${seconds(durationsMs.linkDerive)} (deriveLinkCounts ${seconds(countsMs)} + deriveLinkScore ${seconds(scoreMs)}), limit ${seconds(GATE_LINK_DERIVE_MS)}`),
+      line(
+        "link derive",
+        `${seconds(durationsMs.linkDerive)} (deriveLinkCounts ${seconds(countsMs)} + ` +
+          `deriveLinkScore ${seconds(scoreMs)}), limit ${seconds(GATE_LINK_DERIVE_MS)}`,
+      ),
+    );
+    console.log(
+      line("click depth", `${seconds(durationsMs.clickDepth)}, limit ${seconds(GATE_CLICK_DEPTH_MS)}`),
     );
     console.log(
       line("peak RSS", `${megabytes(rulesRss.peakBytes)} (at +${(rulesRss.peakAtMs / 1000).toFixed(0)}s)`),
@@ -1539,6 +1567,11 @@ async function main(): Promise<number> {
     if (isGate && durationsMs.linkDerive > GATE_LINK_DERIVE_MS) {
       failures.push(
         `link derivations took ${seconds(durationsMs.linkDerive)}, over the ${seconds(GATE_LINK_DERIVE_MS)} limit`,
+      );
+    }
+    if (isGate && durationsMs.clickDepth > GATE_CLICK_DEPTH_MS) {
+      failures.push(
+        `deriveClickDepth took ${seconds(durationsMs.clickDepth)}, over the ${seconds(GATE_CLICK_DEPTH_MS)} limit`,
       );
     }
 
