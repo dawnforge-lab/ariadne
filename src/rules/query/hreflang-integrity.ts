@@ -4,6 +4,7 @@ import type { Db } from "../../db/client.js";
 import {
   CANONICALISED_ELSEWHERE,
   FETCHED_OK,
+  HREFLANG_DECLARER,
   queryFinding,
   NEVER_REQUESTED,
   URL_MATCH_KEY,
@@ -84,7 +85,7 @@ const DECLARATIONS = (crawlId: string): SQL => sql`
       from hreflang h
       join pages p on p.id = h.page_id and p.crawl_id = h.crawl_id
       where h.crawl_id = ${crawlId}
-        and ${FETCHED_OK("p")} and not ${CANONICALISED_ELSEWHERE("p")}
+        and ${HREFLANG_DECLARER("p")} and not ${CANONICALISED_ELSEWHERE("p")}
     ) r
     group by r.page_id, r.page_url, r.code, r.target_url
   )`;

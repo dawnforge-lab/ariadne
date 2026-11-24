@@ -53,6 +53,26 @@ export const FETCHED_OK = (alias: string): SQL =>
   sql.raw(`${alias}.fetch_class = 'ok' and ${alias}.status_code = 200`);
 
 /**
+ * A page that DECLARES an hreflang set the rules judge (Phase 29d R1): fetched
+ * OK as HTML with a 200 (`FETCHED_OK`), or any 200 non-HTML response. A `Link`
+ * header is read on every classified response, so a 200 PDF (or any other 200
+ * file) can carry a full alternate set, and that set is a version someone can
+ * be served; a redirect's, a 404's and a robots-blocked row's is not. Indexability
+ * is not part of it: a declarer's `is_indexable` is read from the column where a
+ * rule wants it. `FETCHED_OK` is unchanged: every on-page reader keeps it.
+ */
+export const HREFLANG_DECLARER = (alias: string): SQL =>
+  sql.raw(
+    `((${alias}.fetch_class = 'ok' and ${alias}.status_code = 200) or ` +
+      `(${alias}.fetch_class = 'non_html' and ${alias}.status_code = 200))`,
+  );
+
+/** `HREFLANG_DECLARER` for a rule holding the two columns in TypeScript. */
+export function isHreflangDeclarer(page: Pick<PageRecord, "fetchClass" | "statusCode">): boolean {
+  return page.statusCode === 200 && (page.fetchClass === "ok" || page.fetchClass === "non_html");
+}
+
+/**
  * "Is this a PDF" and "is this a 200 whose indexability its robots directives
  * decide", defined in src/crawl/robots-directives.ts beside `saysNoindex` and
  * read by the crawl writer's stamp, re-exported here for the rule layer.

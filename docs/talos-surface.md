@@ -902,11 +902,14 @@ What changed under existing ids. **Hreflang is read from all three sources**: th
 page's HTML, its HTTP `Link` header (read whole at fetch, on every classified
 response) and the `xhtml:link` alternates of its sitemap entry. Every hreflang
 rule judges the union of a declaring page's sources, and judges a declaring page
-only when it was fetched OK as HTML with a 200. A `Link` header on a non-HTML
-response (a PDF) is recorded, `source = 'header'`, and counts as that file's
-return link when an HTML page names it; the file's own declaration set is not
-judged, so a PDF's missing self-reference, invalid code or source conflict is no
-finding (a known limit, not a pass). The eight that list a declaration carry
+only when it was fetched OK as HTML with a 200, or answered 200 as non-HTML
+(Phase 29d: a declarer can be a PDF). A `Link` header on a 200 non-HTML response
+(a PDF) is recorded, `source = 'header'`, and the file's own declaration set is
+judged like a page's (missing return link, missing x-default, invalid code,
+self-only, source conflict) as well as counting as its return link when an HTML
+page names it. A redirect's, a 404's or a robots-blocked row's declarations are
+still not judged. As a target, an indexable PDF is a cluster member and a
+noindexed one (`X-Robots-Tag`) is reported by `hreflang.non-indexable-target`. The eight that list a declaration carry
 `sources` in their evidence (`html`, `header`, `sitemap`); `hreflang.multiple-entries` counts targets within
 ONE source, so a disagreement between sources is `source-conflict`'s finding and
 never both. **Sitemaps are streamed** to the 50 MB limit (a 10–50 MB sitemap was
@@ -4526,6 +4529,9 @@ stamp. The readers that mean an indexable HTML PAGE do not: every on-page, conte
 duplicate rule, the page-level canonical and indexability rules, render selection and
 `site.health`'s census (a PDF stays in `pagesNotAuditable`). Other non-HTML types stay
 non-indexable.
+Hreflang: a 200 PDF whose `Link` header carries alternates is a declarer, so its own
+set is judged by every hreflang rule (see "Hreflang is read from all three sources"),
+and a PDF target is read by its `indexable` stamp in `hreflang.non-indexable-target`.
 
 **0.28.1 is a fix, not a phase.** A robots value's `none` is the directive (noindex,
 nofollow) only as a whole token: `max-image-preview: none` asks for no image preview and

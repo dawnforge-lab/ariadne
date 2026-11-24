@@ -1132,6 +1132,13 @@ const KINDS = ["page", "query", "metric"] as const satisfies readonly AnyRule["k
 //        (on-page, content, duplicates, page canonical/indexability rules, render
 //        selection, `site.health`) were already gated on `FETCHED_OK` / `isAuditable`
 //        / `JUDGED` and are unchanged. Other non-HTML types stay non-indexable.
+//        Hreflang: a 200 non-HTML response (a PDF) whose `Link` header carries
+//        alternates is a declarer (`HREFLANG_DECLARER`, R1): its own set is judged by
+//        `missing-return-link`, `non-indexable-target`, `missing-x-default`,
+//        `invalid-code`, `alternates-not-crawled` and the integrity rules, not only
+//        counted as a return link. `hreflang.non-indexable-target` reads a PDF target
+//        by its `is_indexable` (a plain 200 PDF is indexable, a noindexed one is not).
+//        A redirect's, 404's or blocked row's declarations are still not judged.
 export const RULESET_VERSION = "0.29.0";
 
 /**
