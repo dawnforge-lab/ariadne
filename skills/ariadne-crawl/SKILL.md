@@ -114,8 +114,10 @@ as `crawl_start` checks it. `schedule_history` says what each slot did (a fired
 crawl's own lifecycle is in `crawl_history`): fired (naming the crawl) or skipped,
 with the reason — overlap (its previous crawl is still queued,
 running or paused, so a schedule never stacks crawls; a crawl you paused holds it until
-you resume or cancel that crawl), not-allowed (the host left the allowlist) or
-credentials_unreadable (send the credentials again with `schedule_update`). Schedules
+you resume or cancel that crawl), not-allowed (the host left the allowlist),
+credentials_unreadable (send the credentials again with `schedule_update`) or
+identity_refused (a schedule stored before robots tokens whose `userAgent` names no
+token of its own: `schedule_update` with a `robotsUserAgent`). Schedules
 fire only while an `api:serve` or `worker:serve` process runs; the stdio server alone
 stores them and never fires them.
 

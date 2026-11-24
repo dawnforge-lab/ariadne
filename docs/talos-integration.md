@@ -153,7 +153,10 @@ crawler inside Talos. The intended shape:
    credentials no process can read (`credentials_unreadable`, which only new values
    continue); and a host a worker's allowlist refused (`not_allowed`). `schedule_history`
    names the crawl on every skip, and `crawl_history` its pause reason. A host the
-   allowlist no longer admits is skipped `not-allowed` at fire time. One process leads
+   allowlist no longer admits is skipped `not-allowed` at fire time, and a schedule stored
+   before Phase 29d whose `userAgent` names no robots token of its own (a `Mozilla/…`
+   header) is skipped `identity_refused` until `schedule_update` gives it a
+   `robotsUserAgent`. One process leads
    the firing (a Postgres advisory lock among every `api:serve` and `worker:serve`; not
    the stdio MCP server); another candidate leads within 30 s of the leader's process or
    database session ending, and a leader cut off by the network has its session ended by

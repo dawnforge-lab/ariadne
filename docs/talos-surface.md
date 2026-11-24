@@ -425,6 +425,17 @@ index that keeps `renderDocuments` from scanning a crawl's pages. Gate evidence:
   - `credentials_unreadable`: the schedule's stored copy cannot be decrypted with the
     leading process's keys. Nothing fires without its credentials;
     `schedule_update` with the credentials again stores a copy the deployment can read.
+  - `identity_refused` (Phase 29d): a schedule stored before 29d holds no
+    `robotsUserAgent`. At fire time its token is resolved from the `userAgent` and
+    `userAgentPreset` it does hold, as `crawl_start` resolves them, and the fired crawl
+    stores the resolved trio (a branded `AriadneBot/…` header fires with
+    `robotsUserAgent: "AriadneBot"`); the schedule row is not rewritten. An identity
+    `crawl_start` would refuse (a `userAgent` whose derived token is `mozilla`) fires
+    nothing: the skip carries `detail.field` (the config field to set), the leading
+    process logs the refusal, and `schedule_update` with a `robotsUserAgent` lets it
+    fire. Pinned by `test/schedule/scheduler.test.ts:996` ("fires with the token
+    resolved from its branded userAgent") and `test/schedule/scheduler.test.ts:1013` ("a
+    Mozilla/ userAgent with no token is refused").
   Either way `nextRunAt` moves to the first slot after now.
 - **Every event carries `scheduleId`** when its crawl was fired by a schedule (the
   crawl's `schedule_id`). **`schedule_delete`** removes the schedule's own fire and skip

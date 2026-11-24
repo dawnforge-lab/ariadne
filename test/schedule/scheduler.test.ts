@@ -981,3 +981,47 @@ async function pidCount(applicationName: string): Promise<number> {
   );
   return r.rows[0]?.n ?? 0;
 }
+
+// Phase 29d final review (Important 2): appended so no cited line moves.
+describe("a schedule stored before robots tokens (29d)", () => {
+  /** The schedule's stored crawl config as a pre-29d process wrote it: a `userAgent`, no token, no preset. */
+  async function asPre29d(s: NewSchedule, userAgent: string): Promise<void> {
+    const { robotsUserAgent: _token, userAgentPreset: _preset, ...old } = configFor(s.siteUrl, { userAgent });
+    await db
+      .update(schedules)
+      .set({ config: { ...s.crawl, config: old as unknown as StoredConfig } })
+      .where(eq(schedules.id, s.id));
+  }
+
+  it("fires with the token resolved from its branded userAgent, stored on the crawl; the schedule row is not rewritten", async () => {
+    // Imported here, not at the top, so no line the surface document cites moves.
+    const { ARIADNE_USER_AGENT } = await import("../../src/crawl/user-agents.js");
+    const t = tenant();
+    const s = await seed(t);
+    await asPre29d(s, ARIADNE_USER_AGENT);
+    const before = (await row(s.id)).config;
+    expect(await fireDue(db, deps(t), NOW)).toEqual({ fired: 1, skipped: 0 });
+    const [fired] = await crawlsOf(s.id);
+    expect(fired!.config).toMatchObject({
+      userAgent: ARIADNE_USER_AGENT,
+      robotsUserAgent: "AriadneBot",
+      userAgentPreset: null,
+    });
+    expect((await row(s.id)).config).toEqual(before);
+  });
+
+  it("a Mozilla/ userAgent with no token is refused: skipped identity_refused naming the field, the refusal logged, no crawl", async () => {
+    const t = tenant();
+    const s = await seed(t);
+    await asPre29d(s, "Mozilla/5.0 (compatible; SchedTest/1.0)");
+    const lines: string[] = [];
+    expect(await fireDue(db, deps(t, { log: (l) => lines.push(l) }), NOW)).toEqual({ fired: 0, skipped: 1 });
+    expect(await crawlsOf(s.id)).toHaveLength(0);
+    expect(await eventsOfSchedule(s.id)).toEqual([
+      { kind: "schedule_skipped", crawlId: null, detail: { reason: "identity_refused", field: "robotsUserAgent" } },
+    ]);
+    expect(lines.join("\n")).toContain(s.id);
+    expect(lines.join("\n")).toMatch(/Mozilla.*Set robotsUserAgent/);
+    expect((await row(s.id)).nextRunAt?.toISOString()).toBe("2026-11-12T11:00:00.000Z");
+  });
+});

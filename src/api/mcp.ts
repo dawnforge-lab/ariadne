@@ -1082,8 +1082,10 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
       description:
         "A schedule's own events, oldest first: {id, at, kind, scheduleId, crawlId, detail}. " +
         "kind is schedule_fired {crawlId} (a crawl was queued; look it up with crawl_status), " +
-        "schedule_skipped {reason: overlap | not-allowed | credentials_unreadable, crawlId on " +
-        "overlap: the crawl still holding the schedule}, or schedule_chain_failed {link, " +
+        "schedule_skipped {reason: overlap | not-allowed | credentials_unreadable | " +
+        "identity_refused, crawlId on overlap: the crawl still holding the schedule, field on " +
+        "identity_refused: a schedule stored before robots tokens whose userAgent names no " +
+        "token of its own, fixed by schedule_update with a robotsUserAgent}, or schedule_chain_failed {link, " +
         "reason} (a fired crawl's render or rules link failed, or the process running it " +
         "stopped). " +
         `Paginated: {items, nextCursor}; limit defaults to ${PAGE_SIZE_DEFAULT}, ` +
