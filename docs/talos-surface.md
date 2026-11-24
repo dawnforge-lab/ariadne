@@ -4516,8 +4516,10 @@ noindex: a 200 PDF is stored `indexable: true` unless its `X-Robots-Tag` says `n
 or `none` (migration 0061 rewrote stored crawls), and its `indexability` /
 `indexabilityStatus` read `Indexable`, `Noindex` or `Canonicalised` as an HTML page's
 do (§4.4 table). The readers that mean an indexable DOCUMENT take it:
-`sitemap.non-indexable` reports a listed PDF noindexed by its header (a plain PDF in a
-sitemap is not reported), `canonical.non-indexable-target` reports a canonical at a
+`sitemap.non-indexable` reports a listed PDF noindexed by its header or canonicalised by
+its `Link` header (a plain PDF in a sitemap is not reported), `pages.not-in-sitemap`
+reports an indexable, self-canonical PDF the sitemap does not list (its copy now says
+"pages and PDFs"), `canonical.non-indexable-target` reports a canonical at a
 noindexed PDF, the Crawl Overview's `indexability` counts a plain PDF as `Indexable`,
 and `pages_query`'s `indexable` filter and `crawl_diff`'s `indexable` field read the new
 stamp. The readers that mean an indexable HTML PAGE do not: every on-page, content and

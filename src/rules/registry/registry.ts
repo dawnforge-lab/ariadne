@@ -1126,7 +1126,9 @@ const KINDS = ["page", "query", "metric"] as const satisfies readonly AnyRule["k
 //        none (`isDocumentOk`, src/crawl/robots-directives.ts), migration 0061 rewrites
 //        stored crawls, and `indexabilityOf` / `INDEXABILITY_STATUS_SQL` read a PDF as
 //        an `ok` row. Document readers take it: `sitemap.non-indexable` (`DOCUMENT_OK`)
-//        and `canonical.non-indexable-target` report a noindexed PDF. HTML-page readers
+//        and `canonical.non-indexable-target` report a noindexed PDF, and
+//        `pages.not-in-sitemap` (`JUDGED_DOCUMENT`) an indexable PDF the sitemap does
+//        not list (its copy says "pages and PDFs"). HTML-page readers
 //        (on-page, content, duplicates, page canonical/indexability rules, render
 //        selection, `site.health`) were already gated on `FETCHED_OK` / `isAuditable`
 //        / `JUDGED` and are unchanged. Other non-HTML types stay non-indexable.

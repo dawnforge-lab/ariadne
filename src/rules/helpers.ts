@@ -77,15 +77,19 @@ export const IS_PDF = (column: string): string =>
  * `isDocumentOk` (src/crawl/robots-directives.ts) for a rule that asks in SQL:
  * a 200 whose indexability its robots directives decide — an HTML page fetched
  * OK, or a PDF (Phase 29d R1). The cohort of "an indexable DOCUMENT" readers
- * (`sitemap.non-indexable`), where `FETCHED_OK` is the cohort of "an indexable
+ * (`sitemap.non-indexable`; `pages.not-in-sitemap` through `JUDGED_DOCUMENT`),
+ * where `FETCHED_OK` is the cohort of "an indexable
  * HTML PAGE" readers. On it, `is_indexable` is false exactly when a robots
  * channel says noindex; off it, `is_indexable` is false by construction.
  *
- * PARENTHESISED: it contains an `or`.
+ * PARENTHESISED: it contains an `or`. TWO-VALUED, unlike `FETCHED_OK`: a NULL
+ * status is `false` here (`is not distinct from`), as `isDocumentOk` says, so
+ * the expression can be negated safely; parity pinned in
+ * test/crawl/pdf-indexable.test.ts.
  */
 export const DOCUMENT_OK = (alias: string): SQL =>
   sql.raw(
-    `(${alias}.status_code = 200 and (${alias}.fetch_class = 'ok' or ` +
+    `(${alias}.status_code is not distinct from 200 and (${alias}.fetch_class = 'ok' or ` +
       `(${alias}.fetch_class = 'non_html' and ${IS_PDF(`${alias}.content_type`)})))`,
   );
 
@@ -484,6 +488,22 @@ export const URL_MATCH_KEY = (value: string): SQL =>
  */
 export const JUDGED = (alias: string): SQL =>
   sql`(${FETCHED_OK(alias)} and ${sql.raw(
+    `${alias}.is_indexable = true`,
+  )} and not ${CANONICALISED_ELSEWHERE(alias)})`;
+
+/**
+ * `JUDGED` over DOCUMENTS (Phase 29d R1): `DOCUMENT_OK` (an HTML page fetched
+ * OK with a 200, or a 200 PDF), indexable, and not canonicalised elsewhere. The
+ * cohort of the readers whose subject is "a URL the site wants indexed" rather
+ * than "an HTML page we judge" — `pages.not-in-sitemap` — so an indexable PDF
+ * missing from the sitemap is reported, as a noindexed PDF in it is
+ * (`sitemap.non-indexable`). A Word file or an image is never in it: its
+ * `is_indexable` is false by construction.
+ *
+ * Same three-valued caveat as `JUDGED`: never negate it.
+ */
+export const JUDGED_DOCUMENT = (alias: string): SQL =>
+  sql`(${DOCUMENT_OK(alias)} and ${sql.raw(
     `${alias}.is_indexable = true`,
   )} and not ${CANONICALISED_ELSEWHERE(alias)})`;
 

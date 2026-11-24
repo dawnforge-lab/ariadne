@@ -53,6 +53,11 @@ afterAll(async () => {
 
 describe("0061 — a stored PDF is indexable unless its headers say otherwise", () => {
   it("spells its predicate with the helpers' SQL, verbatim", () => {
+    // A DRIFT PIN, NOT AN INVITATION TO EDIT 0061. 0061 is applied: editing it
+    // changes nothing on a database that already ran it. If `IS_PDF` or
+    // `SAYS_NOINDEX` changes and this fails, the fix is a NEW migration that
+    // rewrites the stamps under the new predicate (and this pin moved to it),
+    // never an edit to the applied 0061.
     expect(FILE).toContain(IS_PDF("content_type"));
     expect(FILE).toContain(`NOT ${SAYS_NOINDEX("x_robots_tag")}`);
     expect(FILE).toContain("fetch_class = 'non_html'");

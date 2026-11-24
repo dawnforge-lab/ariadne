@@ -27,9 +27,10 @@ import { runMigrations } from "../../src/db/migrate.js";
 import { crawls, pages, sitemapUrls } from "../../src/db/schema.js";
 import { PageWriter } from "../../src/crawl/persist.js";
 import type { FetchResult } from "../../src/crawl/fetch-page.js";
-import { isPdf } from "../../src/crawl/robots-directives.js";
+import { isDocumentOk, isPdf } from "../../src/crawl/robots-directives.js";
 import { selectRenderSet } from "../../src/crawl/render/select.js";
 import {
+  DOCUMENT_OK,
   indexabilityOf,
   INDEXABILITY_STATUS_SQL,
   IS_PDF,
@@ -412,5 +413,122 @@ describe("the reader audit: a crawl with an indexable PDF beside indexable HTML"
       urlsNoindex: 0,
       pagesNotAuditable: 3,
     });
+  });
+});
+
+// ------------------------------------------- fix round 1 (Task 5a review)
+
+describe("DOCUMENT_OK and isDocumentOk decide the same rows", () => {
+  const CORPUS: Array<[string, string, number | null, string | null]> = [
+    ["ok 200", "ok", 200, "text/html; charset=utf-8"],
+    ["ok 204", "ok", 204, "text/html"],
+    ["ok null status", "ok", null, null],
+    ["pdf 200", "non_html", 200, "application/pdf"],
+    ["pdf with parameters", "non_html", 200, "Application/PDF; charset=binary"],
+    ["pdf 206", "non_html", 206, "application/pdf"],
+    ["non_html null content type", "non_html", 200, null],
+    ["word 200", "non_html", 200, "application/msword"],
+    ["image 200", "non_html", 200, "image/png"],
+    ["404 pdf", "client_error", 404, "application/pdf"],
+    ["too large", "too_large", 200, "text/html"],
+    ["redirect", "redirect", 301, "application/pdf"],
+  ];
+
+  it("agrees row for row, and the corpus holds both answers", async () => {
+    const rows = CORPUS.map(
+      ([, fetchClass, statusCode, contentType], i) =>
+        sql`(${i}::int, ${fetchClass}::text, ${statusCode}::int, ${contentType}::text)`,
+    );
+    const res = await db.execute<{ i: number; ok: boolean }>(sql`
+      select p.i, ${DOCUMENT_OK("p")} as ok
+      from (values ${sql.join(rows, sql`, `)}) p(i, fetch_class, status_code, content_type)`);
+    const got = new Map(res.rows.map((r) => [Number(r.i), r.ok]));
+    let yes = 0;
+    CORPUS.forEach(([why, fetchClass, statusCode, contentType], i) => {
+      const js = isDocumentOk({ fetchClass, statusCode, contentType });
+      if (js) yes += 1;
+      expect(got.get(i), why).toBe(js);
+    });
+    expect(yes).toBe(3);
+  });
+});
+
+describe("the sitemap rules over documents", () => {
+  async function addRows(
+    crawlId: string,
+    rows: Array<{
+      path: string;
+      fetchClass?: string;
+      contentType?: string;
+      xRobotsTag?: string;
+      canonicalHeader?: string;
+      isIndexable: boolean;
+    }>,
+  ): Promise<void> {
+    await db.insert(pages).values(
+      rows.map((r) => ({
+        id: `page_${randomUUID()}`,
+        crawlId,
+        url: url(r.path),
+        urlNormalised: normalised(url(r.path)),
+        fetchClass: r.fetchClass ?? "non_html",
+        statusCode: 200,
+        contentType: r.contentType ?? "application/pdf",
+        xRobotsTag: r.xRobotsTag ?? null,
+        isIndexable: r.isIndexable,
+        canonicalHtml: r.fetchClass === "ok" ? url(r.path) : null,
+        canonicalHeader: r.canonicalHeader ?? null,
+        depth: 1,
+        discoveredVia: "link",
+      })),
+    );
+  }
+
+  async function listInSitemap(crawlId: string, paths: string[]): Promise<void> {
+    await db.insert(sitemapUrls).values(
+      paths.map((path) => ({
+        crawlId,
+        url: url(path),
+        urlNormalised: normalised(url(path)),
+        sitemapSource: `${SITE}/sitemap.xml`,
+        seenAt: new Date(),
+        lastmod: null,
+      })),
+    );
+  }
+
+  const rule = (id: string): QueryRule => {
+    const r = sitemapRules.find((x) => x.id === id);
+    if (r === undefined) throw new Error(`no rule '${id}'`);
+    return r;
+  };
+
+  it("pages.not-in-sitemap reports an indexable PDF the sitemap omits, not a noindexed PDF or a Word file", async () => {
+    const crawlId = await newCrawl();
+    await addRows(crawlId, [
+      { path: "/listed", fetchClass: "ok", contentType: "text/html", isIndexable: true },
+      { path: "/unlisted.pdf", isIndexable: true },
+      { path: "/hidden.pdf", xRobotsTag: "noindex", isIndexable: false },
+      { path: "/report.doc", contentType: "application/msword", isIndexable: false },
+      // Canonicalised elsewhere by its Link header: belongs out of a sitemap.
+      { path: "/copy.pdf", canonicalHeader: url("/unlisted.pdf"), isIndexable: true },
+    ]);
+    await listInSitemap(crawlId, ["/listed"]);
+
+    const found = await rule("pages.not-in-sitemap").run(db, crawlId);
+    expect(found.map((f) => f.pageUrl)).toEqual([url("/unlisted.pdf")]);
+  });
+
+  it("sitemap.non-indexable reports a listed PDF canonicalised by its Link header as canonicalised", async () => {
+    const crawlId = await newCrawl();
+    await addRows(crawlId, [
+      { path: "/doc.pdf", isIndexable: true },
+      { path: "/copy.pdf", canonicalHeader: url("/doc.pdf"), isIndexable: true },
+    ]);
+    await listInSitemap(crawlId, ["/doc.pdf", "/copy.pdf"]);
+
+    const found = await rule("sitemap.non-indexable").run(db, crawlId);
+    expect(found.map((f) => f.pageUrl)).toEqual([url("/copy.pdf")]);
+    expect(found[0]!.evidence).toMatchObject({ reason: "canonicalised", xRobotsTag: null });
   });
 });

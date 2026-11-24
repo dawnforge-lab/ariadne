@@ -133,6 +133,12 @@ const CHANGED_SINCE_0_22: Record<string, Partial<Entry>> = {
       .replace(OLD_TAIL, NEW_TAIL),
     howToFix: FIXTURE["hreflang.declarations-incomplete"]!.howToFix.replace(OLD_FIX, NEW_FIX),
   },
+  // 0.29.0, Phase 29d (Task 5a fix round 1): an indexable PDF is in the cohort.
+  "pages.not-in-sitemap": {
+    explanation: FIXTURE["pages.not-in-sitemap"]!.explanation
+      .replace("200 pages that were crawled", "200 pages and PDFs that were crawled")
+      .replace("a canonicalised page belongs", "a canonicalised URL belongs"),
+  },
 };
 const expected = (id: string): Entry => ({ ...FIXTURE[id]!, ...CHANGED_SINCE_0_22[id] });
 

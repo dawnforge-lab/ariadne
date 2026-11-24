@@ -881,7 +881,7 @@ export const COPY_TEMPLATES: Record<string, IssueCopy> = {
   "pages.not-in-sitemap": {
     title: "Sitemaps: Indexable URLs not in sitemap",
     explanation:
-      "Indexable, self-canonical 200 pages that were crawled and are not listed in any sitemap; a canonicalised page belongs out of the sitemap and is not reported. They are discovered only through links and are missing from sitemap coverage reporting. Some omissions are deliberate.",
+      "Indexable, self-canonical 200 pages and PDFs that were crawled and are not listed in any sitemap; a canonicalised URL belongs out of the sitemap and is not reported. They are discovered only through links and are missing from sitemap coverage reporting. Some omissions are deliberate.",
     howToFix:
       "Add the pages to the sitemap, or fix the generator that should have included them. Confirm any deliberate exclusion is a decision rather than an oversight.",
   },

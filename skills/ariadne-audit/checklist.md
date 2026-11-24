@@ -1026,7 +1026,8 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
 - **Priority**: High | **Requires**: Engine
 - **Engine**:
   1. `issues_list` with `checkId: "CHECK-09"` — `pages.not-in-sitemap` (info) is
-     every indexable page the crawl found that the sitemap does not list.
+     every indexable page — and, since 0.29.0, every indexable PDF — the crawl
+     found that the sitemap does not list.
      `issue_urls` for the list.
   2. `issues_list` with `checkId: "CHECK-32"` for the orphan count (`links.orphan`)
      — the other half of the same picture, and a different question: not in the
