@@ -37,9 +37,11 @@ export const RENDER_AXE_ALLOWANCE_MS = AXE_TIMEOUT_MS + AXE_TERMINATE_GRACE_MS;
  * the renderer's own 15 s default, 110 s at the pass's 45 s budget for the
  * default 1 s spacing.
  *
- * THE LEASE'S SUM, so the two agree: `renderLeaseSeconds` is the gate wait
- * and the settle on top of exactly this, and a render a live worker is still
- * inside can never outlive its own lease. The settle is not a term of its
+ * THE LEASE'S SUM, so the two agree: `renderLeaseSeconds` is the gate wait,
+ * the settle and the grace an expiry's termination may wait
+ * (`AXE_TERMINATE_GRACE_MS`, spent after this deadline) on top of exactly
+ * this, and a render a live worker is still inside can never outlive its own
+ * lease. The settle is not a term of its
  * own: it is spent out of the allowance after it, which a page at the 3 s
  * default settle leaves 27 s of.
  *

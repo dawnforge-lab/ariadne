@@ -47,7 +47,9 @@ export const AXE_TIMEOUT_MS = 30_000;
  * How long, after `Runtime.terminateExecution`, the renderer waits for the
  * page's thread to answer one trivial evaluation (`RenderTraffic.terminateScript`)
  * before it moves on. With `AXE_TIMEOUT_MS` it bounds the whole axe step, and
- * the render lease counts both (`renderLeaseSeconds`, run-render.ts).
+ * the render lease counts both (`renderLeaseSeconds`, run-render.ts). The
+ * renderer waits the same grace once more when a page's render deadline runs
+ * out (`terminateExecution`), after the deadline, and the lease counts that too.
  */
 export const AXE_TERMINATE_GRACE_MS = 5_000;
 /** Selectors kept per violated rule; `nodeCount` still counts every element. */

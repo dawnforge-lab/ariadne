@@ -181,7 +181,6 @@ describe("simhash64 vs the pre-29d oracle", () => {
       const fresh = await measure(simhash64);
       expect(oracle).toBeGreaterThan(0);
       expect(fresh).toBeGreaterThan(0);
-      console.log(`simhash allocation: oracle ${oracle} B, new ${fresh} B, ratio ${(oracle / fresh).toFixed(1)}x`);
       expect(oracle / fresh).toBeGreaterThanOrEqual(5);
     } finally {
       session.disconnect();

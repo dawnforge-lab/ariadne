@@ -2568,21 +2568,21 @@ describe("runRenderPass", () => {
   }, 90_000);
 
   it("derives the render lease from the gate cap, the navigation budget, the settle and the axe run", () => {
-    // (2W + 1) × 30 s of gate wait + navigation + settle + 30 s allowance
-    // + 35 s for the accessibility run (Phase 29b: its 30 s budget and the
-    // 5 s grace after terminating it).
+    // (2W + 1) × 30 s of gate wait + navigation + settle + 30 s allowance + 35 s
+    // for the accessibility run (29b: its 30 s budget and 5 s grace) + the 5 s
+    // grace an expired deadline's termination may wait past the deadline (29d).
     expect(RENDER_AXE_ALLOWANCE_MS).toBe(35_000);
     expect(
       renderLeaseSeconds({ renderConcurrency: 4, navigationTimeoutMs: 15_000, settleMs: 3_000 }),
-    ).toBe(353);
+    ).toBe(358);
     // The defaults the docblock works through: four workers, a 45 s budget.
     expect(
       renderLeaseSeconds({ renderConcurrency: 4, navigationTimeoutMs: 45_000, settleMs: 3_000 }),
-    ).toBe(383);
+    ).toBe(388);
     // The Shopify profile: one browser, a 60 s budget.
     expect(
       renderLeaseSeconds({ renderConcurrency: 1, navigationTimeoutMs: 60_000, settleMs: 3_000 }),
-    ).toBe(218);
+    ).toBe(223);
   });
 
   it("leaves its selection alone when the pass is aborted before it starts", async () => {

@@ -1222,8 +1222,10 @@ a profile's own budget (Shopify 60 s) still applies when it is larger, and the c
 never lowers a caller's own larger setting. The render lease is derived from it as
 (2 × renderConcurrency + 1) × 30 s + navigation budget + settle + 30 s, plus 35 s for
 the accessibility run from Phase 29b (its 30 s budget and a 5 s grace after
-terminating it): 383 s at the defaults (four workers, 45 s), 458 s at the cap, 218 s
-under the Shopify profile at 1 s, replacing a fixed 120 s.
+terminating it), plus, from Phase 29d, the same 5 s grace once more for a page whose
+render deadline runs out (its thread is terminated after the deadline): 388 s at the
+defaults (four workers, 45 s), 463 s at the cap, 223 s under the Shopify profile at
+1 s, replacing a fixed 120 s (383 s, 458 s and 218 s before 29d).
 
 **What Phase 23 changed here: proven behaviour.** Ruleset 0.18.0, migrations
 0020–0022, and no tool or route added: 14 rules joined (114 rows in

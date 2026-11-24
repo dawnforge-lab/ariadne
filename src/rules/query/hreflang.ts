@@ -669,9 +669,10 @@ async function missingSelfReferenceFindings(
  * hreflang table, and the alternative — streaming the declarations and counting
  * hosts in a Map — would hold one entry per distinct target URL in memory.
  *
- *  - the declaring page must be auditable (fetched OK with a 200) and not
- *    canonicalised elsewhere, so the marker counts alternates that a rule would
- *    otherwise have had to judge;
+ *  - the declaring page must be a declarer (`HREFLANG_DECLARER`: a 200 HTML
+ *    page, or a 200 non-HTML response such as a PDF declaring through its
+ *    `Link` header, 29d) and not canonicalised elsewhere, so the marker counts
+ *    alternates that a rule would otherwise have had to judge;
  *  - `alternates` is the DISTINCT alternate URLs on that host with no `pages`
  *    row — what crawling the host would cost;
  *  - `pages` is how many pages OF THIS CRAWL name at least one of them — how

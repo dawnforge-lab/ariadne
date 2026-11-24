@@ -111,6 +111,7 @@ import {
 } from "./renderer.js";
 import type { ImageDimensionLookup, StoredImage } from "./image-stand-in.js";
 import { renderPageDeadlineMs } from "./deadline.js";
+import { AXE_TERMINATE_GRACE_MS } from "./a11y.js";
 import { parseStoredPlatformProfile, type StoredPlatformProfile } from "../platform.js";
 import { DEFAULT_MAX_DELAY_MS, HostGate, throttleRecordOf } from "../politeness.js";
 import { UrlPolicyError, type AddressResolver } from "../url-policy.js";
@@ -212,15 +213,20 @@ export {
  *  5. **`RENDER_AXE_ALLOWANCE_MS`** (Phase 29b): the accessibility run after
  *     the document is written, up to its 30 s budget and the 5 s grace after
  *     terminating it — 35 s.
+ *  6. **`AXE_TERMINATE_GRACE_MS` once more** (Phase 29d final review): when
+ *     the deadline runs out, the renderer terminates the page's thread and
+ *     waits up to that grace (5 s) for an answer before it discards the
+ *     context — time spent AFTER the deadline, so the lease counts it and the
+ *     deadline does not.
  *
  * Terms 2, 4 and 5 are `renderPageDeadlineMs`, the deadline the renderer
  * holds every page to from the end of its gate wait (Phase 29d), and the lease
  * is computed through it, so the two cannot drift apart: the lease is always
- * the gate wait and the settle longer than the deadline.
+ * the gate wait, the settle and the expiry's grace longer than the deadline.
  *
  * So four workers at the default 1 s spacing (a 45 s budget): (9 × 30) + 45 +
- * 3 + 30 + 35 = 383 s; four at the 120 s cap: 458 s; a Shopify profile's one
- * worker at 60 s: (3 × 30) + 60 + 3 + 30 + 35 = 218 s. The 120 s this replaced
+ * 3 + 30 + 35 + 5 = 388 s; four at the 120 s cap: 463 s; a Shopify profile's
+ * one worker at 60 s: (3 × 30) + 60 + 3 + 30 + 35 + 5 = 223 s. The 120 s this replaced
  * covered neither the profile's 60 s budget behind a 30 s wait nor four
  * workers queued on one escalated host. The cost of a long lease is only how
  * long a CRASHED worker's URL waits before a re-run may take it.
@@ -298,7 +304,11 @@ export function renderLeaseSeconds(pacing: {
 }): number {
   const gateWaitMs = (2 * pacing.renderConcurrency + 1) * DEFAULT_MAX_DELAY_MS;
   return Math.ceil(
-    (gateWaitMs + pacing.settleMs + renderPageDeadlineMs(pacing.navigationTimeoutMs)) / 1000,
+    (gateWaitMs +
+      pacing.settleMs +
+      renderPageDeadlineMs(pacing.navigationTimeoutMs) +
+      AXE_TERMINATE_GRACE_MS) /
+      1000,
   );
 }
 
