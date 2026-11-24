@@ -382,6 +382,12 @@ export interface RenderPassOptions {
   signal?: AbortSignal;
   /** Told about every third-party request aborted. Diagnostics only. */
   onRequestBlocked?: (url: string) => void;
+  /**
+   * Where the renderer reports what it carried on past (`RendererOptions.log`:
+   * a render deadline's termination refused or unanswered). Absent, the
+   * renderer's own default, `console.error`.
+   */
+  log?: (line: string) => void;
 }
 
 export interface RenderPassSummary {
@@ -719,6 +725,7 @@ export async function runRenderPass(
       ...(opts.onRequestBlocked === undefined
         ? {}
         : { onRequestBlocked: opts.onRequestBlocked }),
+      ...(opts.log === undefined ? {} : { log: opts.log }),
     });
   } catch (error) {
     try {

@@ -199,7 +199,7 @@
  * who disbelieves a finding can re-run the analyzer over the evidence itself.
  */
 import { createHash } from "node:crypto";
-import { writeFile } from "node:fs/promises";
+import { unlink, writeFile } from "node:fs/promises";
 import { createServer as createTcpServer, type AddressInfo, type Server } from "node:net";
 import { join } from "node:path";
 
@@ -410,6 +410,14 @@ export interface RendererOptions {
   allowPrivate?: boolean;
   /** Told about every aborted request. Bounded work only — this is a hot path. */
   onRequestBlocked?: (url: string) => void;
+  /**
+   * Where the renderer reports what it did not get to do but carried on
+   * past — today one thing: a render deadline's `Runtime.terminateExecution`
+   * that was refused or went unanswered (the page's context is discarded
+   * regardless). Defaults to `console.error`, as the worker runner's does;
+   * the render pass hands it the caller's log.
+   */
+  log?: (line: string) => void;
   /**
    * The crawl's credentials (Phase 27c). Every request this pass RELEASES is
    * decided on its own URL (`credentialHeadersFor`): a same-family request
@@ -824,6 +832,25 @@ async function writeSerialisedDom(dir: string, url: string, html: string): Promi
         `(${firstLine(error)}) — this is the render pass's own environment failing, not ` +
         "the site, so the pass stops with the URL still unrendered rather than recording " +
         "a page it cannot show you the document for",
+      { cause: error },
+    );
+  }
+}
+
+/**
+ * Remove a document `writeSerialisedDom` wrote for a render that then failed
+ * (Phase 29d: its deadline ran out after the write). A failed render's row
+ * carries no `rendered_html_path`, so the file would be evidence nobody can
+ * find. A removal that fails is our environment failing, and stops the pass
+ * as the write's own failure does.
+ */
+async function removeSerialisedDom(url: string, path: string): Promise<void> {
+  try {
+    await unlink(path);
+  } catch (error) {
+    throw new Error(
+      `render evidence not removed: the render of ${url} failed after its document was ` +
+        `saved to ${path}, and the file could not be removed (${firstLine(error)})`,
       { cause: error },
     );
   }
@@ -1409,9 +1436,38 @@ class RenderTraffic {
    * is discarded right after (`release`), so nothing of ours runs in that
    * thread again, and an evaluation sent into a page mid-navigation is one
    * more thing that page could stall.
+   *
+   * BOUNDED, AND NEVER THROWS (fix round 1). The reply to
+   * `Runtime.terminateExecution` comes from the page's renderer thread, and a
+   * thread blocked OUTSIDE JavaScript — a synchronous XHR to a server that
+   * never answers — never sends it; a send can also be refused (a crash whose
+   * event has not arrived yet, a termination already in progress from an
+   * abandoned axe run). Neither may hold or stop the pass: the deadline's
+   * promise is that the page is over, and the context is discarded next by
+   * the browser, which needs nothing from the page's thread. So the reply is
+   * waited for at most `graceMs`, and the outcome is RETURNED — the caller
+   * logs anything but `terminated` — never thrown. A late reply or rejection
+   * is handled by the race.
    */
-  async terminateExecution(): Promise<void> {
-    await this.cdp.send("Runtime.terminateExecution");
+  async terminateExecution(graceMs: number): Promise<TerminationOutcome> {
+    const fault = this.testFaults?.failTermination?.() ?? null;
+    const send =
+      fault === null
+        ? (this.cdp.send("Runtime.terminateExecution") as Promise<unknown>)
+        : Promise.reject(fault);
+    const answered = send.then(
+      (): TerminationOutcome => ({ kind: "terminated" }),
+      (error: unknown): TerminationOutcome => ({ kind: "refused", message: firstLine(error) }),
+    );
+    let timer: NodeJS.Timeout | undefined;
+    const grace = new Promise<TerminationOutcome>((resolve) => {
+      timer = setTimeout(() => resolve({ kind: "unanswered", graceMs }), graceMs);
+    });
+    try {
+      return await Promise.race([answered, grace]);
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   /**
@@ -1430,10 +1486,9 @@ class RenderTraffic {
    * wait is bounded (`AXE_TERMINATE_GRACE_MS`): a thread still busy past it
    * is busy with something that already took the termination, and the run is
    * `timeout` either way.
-   *
    */
   private async terminateScript(): Promise<void> {
-    await this.terminateExecution();
+    await this.cdp.send("Runtime.terminateExecution");
     const flush = (this.cdp.send("Runtime.evaluate", { expression: "0" }) as Promise<unknown>).then(
       () => undefined,
       (error: unknown) => {
@@ -2139,6 +2194,13 @@ export interface RenderTestFaults {
    * against the renderer.
    */
   beforePhase?: (phase: RenderPhase, page: Page) => Promise<void>;
+  /**
+   * Called when the render deadline is about to terminate the page's thread
+   * (Phase 29d fix round 1). An `Error` returned is the rejection of the
+   * `Runtime.terminateExecution` send, in place of sending it — the shape of
+   * a browser that refused the command. Read on every render.
+   */
+  failTermination?: () => Error | null;
 }
 
 /**
@@ -2148,6 +2210,17 @@ export interface RenderTestFaults {
  * and the accessibility run.
  */
 export type RenderPhase = "navigation" | "settle" | "measure" | "images" | "content" | "axe";
+
+/**
+ * What the render deadline's `Runtime.terminateExecution` came to
+ * (`RenderTraffic.terminateExecution`): answered, refused with a message, or
+ * no answer inside the grace. Only `terminated` goes unlogged; the page's
+ * context is discarded whichever it is.
+ */
+type TerminationOutcome =
+  | { kind: "terminated" }
+  | { kind: "refused"; message: string }
+  | { kind: "unanswered"; graceMs: number };
 
 /** The render deadline ran out. Raised only by `RenderDeadline`, caught only by `render`. */
 class RenderDeadlineExpired extends Error {
@@ -2513,6 +2586,7 @@ export class PageRenderer {
         onRequestBlocked: options.onRequestBlocked ?? null,
         testFaults: options.testFaults ?? null,
         credentials: options.credentials ?? null,
+        log: options.log ?? ((line) => console.error(line)),
       },
       gate,
     );
@@ -2677,11 +2751,30 @@ export class PageRenderer {
       // `Runtime.terminateExecution` axe's timeout uses), and the page and its
       // context go in `release`. Ours first, as everywhere: a protocol command
       // of ours that broke the render is the error, not the deadline. A
-      // crashed page has no thread left to terminate.
+      // crashed page has no thread left to terminate. The termination is
+      // bounded and never throws (`terminateExecution`): a page whose thread
+      // is blocked outside JavaScript never answers it, and the context is
+      // discarded by the browser either way — so what it came to is logged,
+      // not waited on and not allowed to stop the pass.
       const expire = async (expired: RenderDeadlineExpired, evidence: TrafficEvidence) => {
         if (traffic.failure !== null) throw traffic.failure;
         ranOut = true;
-        if (!crashed) await traffic.terminateExecution();
+        if (!crashed) {
+          const ended = await traffic.terminateExecution(AXE_TERMINATE_GRACE_MS);
+          if (ended.kind === "refused") {
+            this.opts.log(
+              `render deadline: ${url}: Runtime.terminateExecution was refused ` +
+                `(${ended.message}); the page's context is discarded regardless`,
+            );
+          } else if (ended.kind === "unanswered") {
+            this.opts.log(
+              `render deadline: ${url}: Runtime.terminateExecution had no answer in ` +
+                `${ended.graceMs} ms (the page's thread did not answer — blocked outside ` +
+                "script, as a synchronous request is); " +
+                "the page's context is discarded regardless",
+            );
+          }
+        }
         return failure(url, expired.text, traffic.offSite, evidence);
       };
 
@@ -2852,11 +2945,18 @@ export class PageRenderer {
           a11y = await step("axe", () => this.accessibility(page, traffic, () => crashed));
         } catch (error) {
           if (!(error instanceof RenderDeadlineExpired)) throw error;
+          // The run's own time, taken before the termination: cleanup is not
+          // the run (as `runAxe`'s `ms`).
+          const axeMs = Date.now() - axeStarted;
           const result = await expire(error, trafficEvidence);
+          // The document was already written; a failed render has no
+          // document (`htmlPath` null), so its file goes too rather than
+          // being left behind with no row pointing at it.
+          if (htmlPath !== null) await removeSerialisedDom(url, htmlPath);
           if (clock.expiredIn !== "axe") return result;
           return {
             ...result,
-            a11y: { status: "timeout", ms: Date.now() - axeStarted, error: null, violations: [] },
+            a11y: { status: "timeout", ms: axeMs, error: null, violations: [] },
           };
         }
       } else {
@@ -3202,7 +3302,8 @@ function firstLine(error: unknown): string {
  *
  * The accessibility run (Phase 29b, capture 3) writes `render_a11y_status`,
  * `_ms` and `_error` from `RenderResult.a11y` — all three null on a failed
- * render — and REPLACES the page's `render_a11y` rows: the ones there are
+ * render, except one whose deadline ran out during the run (Phase 29d, ruling
+ * R5): `timeout`, its `ms`, null error — and REPLACES the page's `render_a11y` rows: the ones there are
  * deleted, then this render's violations inserted, keyed by the page id the
  * update returned. The caller holds the transaction (`runWorker`), so the
  * page row and its rows land together or not at all.

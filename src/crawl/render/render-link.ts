@@ -127,7 +127,7 @@ export async function runRenderLink(
       renderHtmlDir: opts.renderHtmlDir,
       allowPrivate: opts.allowPrivate,
       ...(opts.resolveAddress === undefined ? {} : { resolveAddress: opts.resolveAddress }),
-    });
+    }, { log: opts.log });
   } catch (error) {
     throw mapRenderPassError(error, crawlId, opts.log);
   }

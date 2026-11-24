@@ -3813,6 +3813,8 @@ describe("a hostile page costs one page (29d)", () => {
   const createdCrawls: string[] = [];
   /** Responses `/never` holds open, destroyed in `afterAll` so the server can close. */
   const held: ServerResponse[] = [];
+  /** What the renderers here logged (`RendererOptions.log`). */
+  const logged: string[] = [];
   let site: { base: string; count: (path: string) => number; close(): Promise<void> };
 
   /**
@@ -3861,6 +3863,12 @@ describe("a hostile page costs one page (29d)", () => {
     "/fetching": withHead(
       `<script>setInterval(function () { fetch("/ping?" + Date.now()); }, 50);</script>`,
     ),
+    // Loads, then blocks its thread OUTSIDE script: a synchronous XHR to the
+    // path the server never answers. No JavaScript is running to terminate.
+    "/sync-xhr": withHead(
+      `<script>window.addEventListener("load", function () { setTimeout(function () {` +
+        `var x = new XMLHttpRequest(); x.open("GET", "/never", false); x.send(); }, 0); });</script>`,
+    ),
   };
 
   function launch(overrides: Partial<Parameters<typeof PageRenderer.launch>[0]> = {}) {
@@ -3874,6 +3882,7 @@ describe("a hostile page costs one page (29d)", () => {
       settleMs: SETTLE_MS,
       allowPrivate: true,
       testFaults: faults,
+      log: (line) => logged.push(line),
       ...overrides,
     });
   }
@@ -4159,10 +4168,117 @@ describe("a hostile page costs one page (29d)", () => {
     expect(result.error).toBe("render over 4 s in total (during axe)");
     expect(result.wordCount).toBeNull();
     expect(result.a11y).toMatchObject({ status: "timeout", error: null, violations: [] });
-    expect(result.a11y!.ms).not.toBeNull();
+    // The run's own time, inside the deadline: the termination is not in it.
+    expect(result.a11y!.ms).toBeGreaterThanOrEqual(0);
+    expect(result.a11y!.ms).toBeLessThan(4_000);
+    // The document was written before axe ran; a failed render keeps none.
+    expect(result.htmlPath).toBeNull();
+    expect(await readdir(htmlDir)).not.toContain(renderedHtmlFilename(`${site.base}/plain`));
+
+    // The row: not rendered, the accessibility run `timeout` with its time.
+    const crawlId = await newCrawl(["/plain"]);
+    await writeRenderResult(db, crawlId, result);
+    const row = await pageRow(crawlId, "/plain");
+    expect(row.rendered).toBe(false);
+    expect(row.renderError).toBe("render over 4 s in total (during axe)");
+    expect([row.renderA11yStatus, row.renderA11yMs, row.renderA11yError]).toEqual([
+      "timeout",
+      result.a11y!.ms,
+      null,
+    ]);
+    expect(row.renderedHtmlPath).toBeNull();
+
     const next = await renderer.render(`${site.base}/plain`);
     expect(next.error).toBeNull();
     expect(next.a11y).toMatchObject({ status: "ran" });
+  }, 60_000);
+
+  it("a page blocked outside script (a sync XHR never answered) is stopped at the deadline", async () => {
+    // Fix round 1: no JavaScript is running, so `Runtime.terminateExecution`
+    // has nothing to interrupt and its reply waits on the blocked thread. The
+    // render must not: it waits the grace, logs, and discards the context.
+    logged.length = 0;
+    const result = await renderWith("/sync-xhr", { pageDeadlineMs: 3_000 });
+
+    expect(result.rendered).toBe(false);
+    expect(result.error).toBe("render over 3 s in total (during measure)");
+    expect(logged).toHaveLength(1);
+    expect(logged[0]).toMatch(
+      /^render deadline: .*\/sync-xhr: Runtime\.terminateExecution had no answer in 5000 ms/,
+    );
+    const next = await renderer.render(`${site.base}/plain`);
+    expect(next.error).toBeNull();
+    expect(measuredOf(next)).toEqual(MEASURED);
+  }, 60_000);
+
+  it("a pass carries on past a page blocked outside script, and completes (deadline)", async () => {
+    const passLog: string[] = [];
+    const crawlId = await newCrawl(["/sync-xhr", "/plain"]);
+    const summary = await runRenderPass(
+      db,
+      crawlId,
+      {
+        siteUrl: site.base,
+        userAgent: "AriadneBot/0.1 (render hostile pass test)",
+        perHostDelayMs: 0,
+        renderBudgetPct: 100,
+        allowPrivate: true,
+        settleMs: SETTLE_MS,
+        renderHtmlDir: htmlRoot,
+        renderConcurrency: 1,
+        renderAccessibility: false,
+        renderTestFaults: { pageDeadlineMs: 8_000 },
+      },
+      { log: (line) => passLog.push(line) },
+    );
+
+    expect(summary.rendered).toBe(1);
+    expect(summary.failures).toBe(1);
+    expect(summary.unrendered).toBe(0);
+    expect((await pageRow(crawlId, "/sync-xhr")).renderError).toBe(
+      "render over 8 s in total (during measure)",
+    );
+    expect((await pageRow(crawlId, "/plain")).rendered).toBe(true);
+    expect(passLog.some((line) => line.includes("had no answer"))).toBe(true);
+  }, 60_000);
+
+  it("a pass carries on when the deadline's termination is refused, and logs it (deadline)", async () => {
+    const passLog: string[] = [];
+    const crawlId = await newCrawl(["/spin", "/plain"]);
+    const summary = await runRenderPass(
+      db,
+      crawlId,
+      {
+        siteUrl: site.base,
+        userAgent: "AriadneBot/0.1 (render hostile pass test)",
+        perHostDelayMs: 0,
+        renderBudgetPct: 100,
+        allowPrivate: true,
+        settleMs: SETTLE_MS,
+        renderHtmlDir: htmlRoot,
+        renderConcurrency: 1,
+        renderAccessibility: false,
+        renderTestFaults: {
+          pageDeadlineMs: 8_000,
+          failTermination: () => new Error("refused for the test"),
+        },
+      },
+      { log: (line) => passLog.push(line) },
+    );
+
+    expect(summary.rendered).toBe(1);
+    expect(summary.failures).toBe(1);
+    expect(summary.unrendered).toBe(0);
+    expect((await pageRow(crawlId, "/spin")).renderError).toBe(
+      "render over 8 s in total (during measure)",
+    );
+    expect((await pageRow(crawlId, "/plain")).rendered).toBe(true);
+    // The spinning page was never terminated, and its context closed anyway.
+    expect(passLog).toEqual([
+      expect.stringMatching(
+        /^render deadline: .*\/spin: Runtime\.terminateExecution was refused \(refused for the test\)/,
+      ),
+    ]);
   }, 60_000);
 
   it("renderPageDeadlineMs is the lease's sum", () => {

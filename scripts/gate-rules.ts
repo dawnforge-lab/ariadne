@@ -744,6 +744,14 @@ async function countWhere(db: Db, query: SQL): Promise<number> {
  * render writer sets a status on every capture-3 page it finishes, so a
  * non-zero there is a defect the gate should show, and it is said rather than
  * folded into a status that does not exist.
+ *
+ * FROM PHASE 29d both queries also see FAILED pages of one kind: a render whose
+ * deadline ran out during the run is `rendered = false` with status `timeout`
+ * and its `ms` set (ruling R5). So `byStatus.timeout` counts axe timeouts on
+ * rendered pages and deadline-in-axe failed pages together, and the `ms`
+ * percentiles include those failed pages' run times. Neither query filters on
+ * `rendered`, deliberately: those runs started and were stopped by the page,
+ * which is what the gate records.
  */
 interface AxeReport {
   runs: number;
