@@ -84,4 +84,9 @@ describe("child reaper", () => {
       await waitDead(pid);
     }
   });
+
+  it("assertNoStrayServe throws, naming the missing /proc, on a platform without one (never reads ENOENT as exited)", () => {
+    const missing = join(dir, "no-proc-here");
+    expect(() => assertNoStrayServe(missing)).toThrow(new RegExp(`${missing}/self.*cannot tell`));
+  });
 });

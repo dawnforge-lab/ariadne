@@ -3164,8 +3164,10 @@ blocksDropped, nodesDropped, problemsCapped
   The `structured_data_nodes` CSV holds the first 50 of each other list, so its rows for
   one such problem stop at 50 per block; its `unresolved-reference` rows are not cut, one
   for every unresolved id, with Path `(path not recorded)` for a reference past the
-  block's first 50; when `infoCountAtLeast` is true each such row's Detail says the list
-  is incomplete.
+  block's first 50, and a Detail naming its resolved id followed by `(written form not
+  recorded)` (the resolved id is never shown as the form written; the rule's evidence
+  says `written: null`); when `infoCountAtLeast` is true each such row's Detail says the
+  list is incomplete.
 - **`notMeasured`** is `{id, reason}[]`. On a crawl not wholly at extraction 4 the
   unresolved-reference count is not measured and `notMeasured` names
   `schema.unresolved-reference`; `infoCount` then holds no references. It is `[]`

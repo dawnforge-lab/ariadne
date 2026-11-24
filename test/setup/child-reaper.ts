@@ -11,7 +11,7 @@
  * is still alive whether or not it was registered.
  */
 import { execFileSync, type ChildProcess } from "node:child_process";
-import { mkdtempSync, readdirSync, readFileSync, readlinkSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -81,8 +81,20 @@ export function reapAndReport(dir: string): void {
   }
 }
 
-/** Throw if a `src/worker/serve.ts` process started from this checkout is alive (registered or not). */
-export function assertNoStrayServe(): void {
+/**
+ * Throw if a `src/worker/serve.ts` process started from this checkout is alive
+ * (registered or not). A pid's checkout is read from `<procRoot>/<pid>/cwd`, so
+ * on a platform with no `/proc` (macOS) every pid would read as "exited" and
+ * the check would pass having checked nothing: it throws instead, once, naming
+ * the missing directory. `procRoot` is a test seam; the suite passes nothing.
+ */
+export function assertNoStrayServe(procRoot = "/proc"): void {
+  if (!existsSync(`${procRoot}/self`)) {
+    throw new Error(
+      `assertNoStrayServe: ${procRoot}/self does not exist, so this platform has no procfs and the ` +
+        `check cannot tell which ${SERVE_PATTERN} processes belong to this checkout`,
+    );
+  }
   let out: string;
   try {
     out = execFileSync("pgrep", ["-f", SERVE_PATTERN], { encoding: "utf8" });
@@ -98,9 +110,10 @@ export function assertNoStrayServe(): void {
     .map(Number)
     .filter((pid) => {
       try {
-        return readlinkSync(`/proc/${pid}/cwd`) === here;
+        return readlinkSync(`${procRoot}/${pid}/cwd`) === here;
       } catch (err) {
-        if ((err as NodeJS.ErrnoException).code === "ENOENT") return false; // exited since pgrep
+        // procfs exists (checked above), so a missing entry is a pid that exited since pgrep.
+        if ((err as NodeJS.ErrnoException).code === "ENOENT") return false;
         throw err;
       }
     });

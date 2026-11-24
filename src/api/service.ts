@@ -3938,11 +3938,19 @@ export class ApiService {
     const config = row.config;
     const userAgent =
       isRecord(config) && typeof config["userAgent"] === "string" ? config["userAgent"] : null;
-    // Null on a crawl stored before 29d: it matched its full user agent.
-    const robotsUserAgent =
-      isRecord(config) && typeof config["robotsUserAgent"] === "string"
-        ? config["robotsUserAgent"]
-        : null;
+    // Null on a crawl stored before 29d (absent): it matched its full user
+    // agent. A token that is present and not a non-empty string is a row no
+    // crawl of ours wrote; read as null it would pass for a pre-29d crawl, so
+    // it is refused as `robotsUserAgentOf` refuses it.
+    const token = isRecord(config) ? config["robotsUserAgent"] : undefined;
+    if (token !== undefined && (typeof token !== "string" || token.trim() === "")) {
+      throw new ServiceError(
+        "CONFLICT",
+        `crawl ${crawlId} stores a robotsUserAgent that is not a non-empty string, so the robots ` +
+          "group it matched cannot be named",
+      );
+    }
+    const robotsUserAgent = token === undefined ? null : token;
 
     return {
       crawlId,

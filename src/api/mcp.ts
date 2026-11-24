@@ -1889,7 +1889,8 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "infoCount is a lower bound, at least that many, never a guess; false otherwise. The " +
         "problem-by-problem detail is the structured_data_nodes CSV view " +
         "(export_crawl format=csv), one row per block and problem; its unresolved-reference rows " +
-        "are not cut at 50, say '(path not recorded)' for a reference past a block's first 50, and say the list " +
+        "are not cut at 50, say '(path not recorded)' and '(written form not recorded)' for a reference past " +
+        "a block's first 50, and say the list " +
         "is incomplete when infoCountAtLeast is true.\n\n" +
         "NULL IS NOT ZERO. microdataErrors and skips are null on a page crawled " +
         "before microdata was read (extraction below version 4): nobody looked, " +

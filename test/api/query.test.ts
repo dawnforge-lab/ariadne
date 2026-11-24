@@ -4571,3 +4571,35 @@ beforeAll(async () => {
                                   and l.source_page_id <> p.id)
      where p.crawl_id = ${crawlF}`);
 });
+
+// Phase 29d final review (Important 7). Appended at the end so no line the
+// surface document cites moves.
+describe("GET /crawls/:id/robots and a malformed robotsUserAgent (29d)", () => {
+  const discovery = {
+    robots: { outcome: "read", crawlDelaySec: null, note: null, raw: ROBOTS_TEXT, truncated: false },
+    sitemapSources: [],
+    truncation: { failures: [], oversizedDocsSkipped: 0, entryLimited: false, docsFetched: 0 },
+    docsFetched: 0,
+  };
+
+  it("409s a present token that is not a non-empty string; an absent one (pre-29d) answers null", async () => {
+    const bad = `crawl_query_robots_badtoken_${Date.now()}`;
+    const empty = `crawl_query_robots_emptytoken_${Date.now()}`;
+    const old = `crawl_query_robots_pre29d_${Date.now()}`;
+    try {
+      await seedCrawl(bad, { config: { siteUrl: `${SITE}/`, userAgent: "AriadneBot/0.1", robotsUserAgent: 7 }, discovery });
+      await seedCrawl(empty, { config: { siteUrl: `${SITE}/`, userAgent: "AriadneBot/0.1", robotsUserAgent: " " }, discovery });
+      await seedCrawl(old, { config: { siteUrl: `${SITE}/`, userAgent: "AriadneBot/0.1" }, discovery });
+      for (const id of [bad, empty]) {
+        const res = await call(`/crawls/${id}/robots`);
+        expect(res.status, id).toBe(409);
+        expect(String(res.body["error"])).toContain("robotsUserAgent");
+      }
+      const pre = await call(`/crawls/${old}/robots`);
+      expect(pre.status).toBe(200);
+      expect(pre.body["robotsUserAgent"]).toBeNull();
+    } finally {
+      for (const id of [bad, empty, old]) await db.delete(crawls).where(eq(crawls.id, id));
+    }
+  });
+});

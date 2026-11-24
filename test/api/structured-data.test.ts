@@ -927,3 +927,28 @@ describe("unresolved references across blocks of one page (29d)", () => {
     await expect(service.listStructuredData(LOCAL_TENANT, id, {})).rejects.toMatchObject({ code: "CONFLICT" });
   });
 });
+
+// Phase 29d final review (Important 8). Appended so no cited line moves.
+describe("an unresolved reference past a block's first 50 in the CSV (29d final review)", () => {
+  it("says its written form was not recorded, as its path does, and never passes the resolved id off as written", async () => {
+    const id = `crawl_sd_listing_written_${runId}`;
+    allCrawls.push(id);
+    const pageIds = await seedCrawl(id);
+    await db.insert(structuredData).values({
+      crawlId: id, pageId: pageIds.get("/")!, schemaType: "ItemList", format: "jsonld",
+      raw: { "@context": C, "@type": "ItemList", itemListElement: Array.from({ length: 60 }, (_, i) => ({ "@id": `#w${i}` })) },
+    });
+    await service.runRulesForCrawl(LOCAL_TENANT, id);
+    const rows = (await csvLines(id)).filter((l) => l.startsWith(`${SITE}/,`) && l.includes(",unresolved-reference,"));
+    expect(rows).toHaveLength(60);
+    // The first 50 were recorded: their path and their form as written ("#w0"), beside the resolved id.
+    expect(rows[0]).toContain(`#w0 (${SITE}/#w0) is not defined on this page`);
+    // Past them, neither was: both say so, and the detail never shows the resolved id as what was written.
+    const past = rows.slice(50);
+    expect(past.every((l) => l.includes(PATH_NOT_RECORDED_TEXT))).toBe(true);
+    expect(past.every((l) => l.includes(`${SITE}/#w`) && l.includes(WRITTEN_NOT_RECORDED_TEXT))).toBe(true);
+    expect(past[0]).toContain(`${SITE}/#w50 ${WRITTEN_NOT_RECORDED_TEXT} is not defined on this page`);
+  }, 120_000);
+});
+const PATH_NOT_RECORDED_TEXT = "(path not recorded)";
+const WRITTEN_NOT_RECORDED_TEXT = "(written form not recorded)";

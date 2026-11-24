@@ -1085,7 +1085,8 @@ export const CSV_VIEW_DEFS: Record<CsvQueryViewName, CsvView> = {
    * and the findings' Problems Capped say when they did (the cap is per block).
    * The unresolved-reference rows are not cut at 50 (29d): there is one for
    * every unresolved id, as the listing and the finding count them; Path says
-   * "(path not recorded)" for one past the block's first 50 references, and
+   * "(path not recorded)" for one past the block's first 50 references, and the
+   * Detail "(written form not recorded)" beside its resolved id, and
    * the Detail says the list is incomplete when a block of the page left ids out.
    */
   structured_data_nodes: defineCsvView<{

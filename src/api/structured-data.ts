@@ -327,18 +327,26 @@ export const INCOMPLETE_NOTE = " (the list is incomplete: ids were left out of t
 export const PATH_NOT_RECORDED = "(path not recorded)";
 
 /**
+ * What the `unresolved-reference` row's Detail says in place of the form as
+ * written, for an id past the block's first 50 references: like the path, it
+ * was not recorded, and the resolved id is never shown as what was written.
+ */
+export const WRITTEN_NOT_RECORDED = "(written form not recorded)";
+
+/**
  * A block's `unresolved-reference` entries, one per unresolved id the page
  * does not define (29d), uncapped: the `references` list stops at 50, so the
  * path and written form come from it by id and occurrence where it holds the
- * reference, and an id past it gets `PATH_NOT_RECORDED` and its resolved id
- * as `written`. Walk order.
+ * reference, and an id past it gets `PATH_NOT_RECORDED` and a null `written`
+ * (the rule's evidence says null too; `problemCells` writes
+ * `WRITTEN_NOT_RECORDED`). Walk order.
  */
 function unresolvedRows(blob: SQL, crawlId: string, pageId: SQL, blockId: SQL): SQL {
   return sql`coalesce((
       select jsonb_agg(jsonb_build_object(
                'path', coalesce(r.entry -> 'path', to_jsonb(${PATH_NOT_RECORDED}::text)),
                'id', u.id,
-               'written', coalesce(r.entry -> 'written', to_jsonb(u.id)),
+               'written', coalesce(r.entry -> 'written', 'null'::jsonb),
                'incomplete', coalesce(${blockIdsTruncated(blob)}, false),
                'problem', 'unresolved-reference'::text) order by u.n)
         from (select x.id, x.n, row_number() over (partition by x.id order by x.n) as k
@@ -460,16 +468,17 @@ export function problemCells(entry: unknown, where: string): ProblemCells {
     }
     case "unresolved-reference": {
       // A bare reference has no type of its own; the id is the whole of it —
-      // as written, and as resolved against the page when that differs.
+      // as written, and as resolved against the page when that differs. Null
+      // `written`: past the block's first 50 references, not recorded.
       const id = text("id");
-      const written = text("written");
+      const written = e["written"] === null ? null : text("written");
+      const named =
+        written === null ? `${id} ${WRITTEN_NOT_RECORDED}` : written === id ? id : `${written} (${id})`;
       return {
         path,
         nodeType: "",
         problem: "unresolved-reference",
-        detail:
-          `${written === id ? id : `${written} (${id})`} is not defined on this page` +
-          (e["incomplete"] === true ? INCOMPLETE_NOTE : ""),
+        detail: `${named} is not defined on this page` + (e["incomplete"] === true ? INCOMPLETE_NOTE : ""),
       };
     }
   }
