@@ -704,6 +704,23 @@ export async function fetchCrawlResources(
         .filter((part) => part !== "")
         .join("; ");
 
+    /**
+     * A continuation read that failed in transport (error, timeout, refused at
+     * connect). The first read succeeded and is a fact: the row keeps its
+     * status, bytes and source, only the dimensions are unknown, and the note
+     * names the continuation and its error. A caller's stop never reaches here
+     * (it throws `FetchAbortedError` and leaves the row untouched).
+     */
+    const endWalk = (error: string): Promise<void> => {
+      const current = requireWalk(walk);
+      fetched += 1;
+      return done({
+        ...current.verdict,
+        fetchReason: note(`continuation at offset ${current.offset} failed: ${error}`),
+        ...BEYOND_LIMIT,
+      });
+    };
+
     for (;;) {
       // The caller's stop, honoured per REQUEST rather than per batch. At a 30s
       // spacing a batch of 200 is well over an hour, and "we stopped asking"
@@ -797,6 +814,7 @@ export async function fetchCrawlResources(
       if (attempt.kind === "refused") {
         // The connect-time address guard, which is the wall the string-level
         // policy above cannot be: a public name with a private A record.
+        if (mode === "continue") return endWalk(`refused: ${attempt.reason}`);
         failed += 1;
         return done(unfetchable("refused", note(attempt.reason)));
       }
@@ -809,6 +827,7 @@ export async function fetchCrawlResources(
               `(${attempt.reason})`;
           }
         }
+        if (mode === "continue") return endWalk(attempt.reason);
         failed += 1;
         return done(unfetchable("fetch_error", note(attempt.reason)));
       }

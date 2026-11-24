@@ -73,7 +73,9 @@ re-judged, to gain the new facts (see "Which crawls have them", below).
   data, or of metadata before the JPEG's frame header) earns up to two continuation
   Range reads, each through the same per-host gate, and only when the first answer was a
   206 that carried a total; a continuation that is not a 206 starting at the offset
-  asked for ends the row `header-beyond-limit`. CSS and JS rows are
+  asked for, or that fails in transport (timeout, reset, refused), ends the row
+  `header-beyond-limit`: the row keeps the first answer's `status_code` and `bytes`,
+  and `fetch_reason` names the continuation and why. CSS and JS rows are
   unchanged. Politeness is unchanged: the pass still waits for the per-host gate, and
   the body is bounded, not downloaded.
 - **Three new `resources` columns:** `width` and `height` (integer pixels, the image's
