@@ -2420,7 +2420,7 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "Destination, Anchor, Status Code, one row per internal link whose target " +
         "answered 4xx or 5xx, the same rows issue_inlinks paginates.\n" +
         "  structured_data_nodes is the structured_data listing's detail — URL, " +
-        "Format, Schema Type, Path, Node Type, Problem, Detail — one row per block " +
+        "Format, Schema Type, Path, Node Type, Problem, Detail, Blocks Dropped, Nodes Dropped — one row per block " +
         "and problem, and one row with an empty Problem for a block with none. " +
         "Refused, as the listing is, on a crawl the rules have not judged or judged " +
         "before structured data validation existed.\n" +

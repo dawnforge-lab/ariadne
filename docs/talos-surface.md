@@ -4459,7 +4459,7 @@ Extraction moves to 5: a microdata `itemtype` and an RDFa `typeof` keep every to
 node's `types` lists them all, and the stored skips gain `blocksDropped` and
 `nodesDropped`. The `structured_data` listing (§4.6a) and its MCP tool answer both as
 `blocksDropped` / `nodesDropped` (null below extraction 5), and the `structured_data_nodes`
-CSV (§12) ends with `Blocks Dropped` and `Nodes Dropped` columns. A crawl at extraction 4
+CSV (§12) ends with `Blocks Dropped` and `Nodes Dropped` columns. The two columns are appended at the end: consumers reading by header name are unaffected, and positional consumers see 9 columns where they saw 7. A crawl at extraction 4
 keeps answering null for both until it is re-crawled.
 
 **0.28.1 is a fix, not a phase.** A robots value's `none` is the directive (noindex,
@@ -4803,7 +4803,7 @@ rest, except that `structured_data_nodes` answers `notMeasured` alone (below).
 | `issues_overview` (Phase 27a) | Issue Name, Issue Type, Issue Priority, Severity, URLs, % of Judged, Description, How To Fix, Rule Id, Check Ids | one rule, as `issues_overview` (§4.3a) answers it | 46 rows / 27,040 B on the gate crawl `crawl_4dd32709` |
 | `crawl_overview` (Phase 27a) | Section, Label, Value, Percent | one entry of one `crawl_overview` section (§4.3b), then one row per `notMeasured` item | 75 rows / 2,332 B on the gate crawl `crawl_4dd32709` |
 | `anchors_by_target` (Phase 29c) | url, pageType, inlinks, distinctAnchors, emptyAnchors, nonDescriptiveAnchors, genericShare, topAnchors | one page with internal inlinks, as `anchors_by_target` (§4.6b) answers it; `topAnchors` is `text (n); text (n)` | — (added P29c-T6) |
-| `structured_data_nodes` (Phase 29a) | URL, Format, Schema Type, Path, Node Type, Problem, Detail | one problem of one structured-data block; a block with none is one row with an empty Problem. Schema Type is every type the block's node states, `\|`-joined; each problem list stops at 50 per block | — (added P29a-T9) |
+| `structured_data_nodes` (Phase 29a) | URL, Format, Schema Type, Path, Node Type, Problem, Detail, Blocks Dropped, Nodes Dropped | one problem of one structured-data block; a block with none is one row with an empty Problem. Schema Type is every type the block's node states, `\|`-joined; each problem list stops at 50 per block | — (added P29a-T9) |
 
 Semantics a consumer must repeat to its own users:
 
@@ -4844,7 +4844,7 @@ Semantics a consumer must repeat to its own users:
   mid-export throws and destroys the connection rather than writing the block as
   clean. The view ends with two page-level columns, `Blocks Dropped` and `Nodes Dropped`
   (Phase 29d), the page's counts repeated on each of its rows and empty for a page below
-  extraction 5, as the listing's nulls. On a crawl not wholly at extraction 4 the view has no `unresolved-reference`
+  extraction 5, as the listing's nulls. The two columns are appended at the end, so consumers reading by header name are unaffected; positional consumers see 9 columns, not 7. On a crawl not wholly at extraction 4 the view has no `unresolved-reference`
   rows: a plain `text/csv` download simply lacks them (an HTTP file has no metadata
   channel), and the MCP `export_crawl` answer names `schema.unresolved-reference` in
   `notMeasured`, as `{id, reason}` (`[]` on any other crawl), here without
