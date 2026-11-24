@@ -78,8 +78,29 @@ const TEXT_WINDOW = 4096;
 
 type Value = string | ItemNode;
 
+/** A type list as `@type` stores it: one name as a string, two or more as an array, none as null. */
+export function typeValue(names: readonly string[]): string | readonly string[] | null {
+  if (names.length === 0) return null;
+  return names.length === 1 ? names[0]! : names;
+}
+
+/** The first type name: what `schema_type` holds. */
+function firstType(type: string | readonly string[]): string {
+  return typeof type === "string" ? type : type[0]!;
+}
+
+/** The characters a type spends from the write budget. */
+function typeChars(type: string | readonly string[] | null): number {
+  if (type === null) return 0;
+  return typeof type === "string" ? type.length : type.reduce((n, t) => n + t.length, 0);
+}
+
 export interface ItemNode {
-  type: string | null;
+  /**
+   * Every type token in document order, deduplicated: a string for one, an
+   * array only for two or more, null for none (extraction 5, Phase 29d).
+   */
+  type: string | readonly string[] | null;
   id: string | null;
   /** Insertion order is first-seen order; each list is in document order. */
   props: Map<string, Value[]>;
@@ -163,14 +184,14 @@ function appendCollapsed(collector: TextCollector, collapsed: string): void {
 function finalize(node: ItemNode, topLevel: boolean, counts: StructuredDataCounts): Record<string, unknown> {
   const entries: [string, unknown][] = [];
   if (topLevel) entries.push(["@context", SCHEMA_ORG_CONTEXT]);
-  if (node.type !== null) entries.push(["@type", node.type]);
+  if (node.type !== null) entries.push(["@type", typeof node.type === "string" ? node.type : [...node.type]]);
   if (node.id !== null) entries.push(["@id", node.id]);
   for (const [name, values] of node.props) {
     const out: unknown[] = [];
     for (let i = 0; i < values.length; i++) {
       const v = values[i]!;
       const chars =
-        name.length + (typeof v === "string" ? v.length : (v.type?.length ?? 0) + (v.id?.length ?? 0));
+        name.length + (typeof v === "string" ? v.length : typeChars(v.type) + (v.id?.length ?? 0));
       if (counts.valuesWritten >= MAX_ITEM_VALUES || counts.charsWritten + chars > MAX_ITEM_WRITTEN_CHARS) {
         // Full: nothing more is written on this page.
         counts.charsWritten = MAX_ITEM_WRITTEN_CHARS;
@@ -266,7 +287,7 @@ export function createItemCore(
     const node = frame.node;
     // `topLevel` frames are only ever made with a type (R0.2).
     if (node.type === null) throw new Error(`${format}: a top-level item has no type`);
-    sink({ type: node.type, format: blockFormat, raw: finalize(node, true, counts) });
+    sink({ type: firstType(node.type), format: blockFormat, raw: finalize(node, true, counts) });
   };
 
   return {

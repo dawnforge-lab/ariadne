@@ -11,7 +11,7 @@ import type { RenderConsole } from "../crawl/render/console-capture.js";
 import type { A11yStatus } from "../crawl/render/a11y.js";
 import type { RenderImages } from "../crawl/render/image-stand-in.js";
 import type { StoredResponseHeaders } from "../crawl/response-headers.js";
-import type { StructuredDataFormat, StructuredDataSkips } from "../crawl/parse/page-analyzer.js";
+import type { StructuredDataFormat, StoredStructuredDataSkips } from "../crawl/parse/page-analyzer.js";
 import type { BlockValidation } from "../rules/schema-org/validate.js";
 import type {
   AnchorCounts, HtmlStructure, InsecureRefs, OverlongUrls, RefreshFact, RobotsMetaEntry, SocialFacts,
@@ -717,9 +717,9 @@ export const pages = pgTable("pages", {
   // a row written below extraction version 4 (never measured); zero means
   // measured and none found.
   structuredDataMicrodataErrors: integer("structured_data_microdata_errors"),
-  // What the microdata/RDFa machines left out (`StructuredDataSkips`), so a
+  // What the microdata/RDFa machines left out (`StructuredDataSkips`; rows below extraction 5 lack the two drop counters), so a
   // property missing for that reason is visible. Null on the same terms.
-  structuredDataSkips: jsonb("structured_data_skips").$type<StructuredDataSkips>(),
+  structuredDataSkips: jsonb("structured_data_skips").$type<StoredStructuredDataSkips>(),
   responseTimeMs: integer("response_time_ms"),
   htmlBytes: integer("html_bytes"),
   domSize: integer("dom_size"),

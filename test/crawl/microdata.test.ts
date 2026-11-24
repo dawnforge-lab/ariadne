@@ -46,6 +46,8 @@ describe("microdata extraction", () => {
       microdataItemrefSkipped: 0,
       rdfaUnsupported: 0,
       valuesCapped: 0,
+      blocksDropped: 0,
+      nodesDropped: 0,
     });
   });
 
@@ -173,6 +175,22 @@ describe("microdata extraction", () => {
     expect(result.structuredData.filter((b) => b.format === "microdata")).toHaveLength(20);
   });
 
+  it("keeps every itemtype token", () => {
+    const blocks = microdata(
+      page(`<div itemscope itemtype="https://schema.org/Event https://schema.org/Festival"></div>`),
+    );
+    expect(blocks).toHaveLength(1);
+    expect(blocks[0]!.type).toBe("Event");
+    expect((blocks[0]!.raw as Record<string, unknown>)["@type"]).toEqual(["Event", "Festival"]);
+  });
+
+  it("deduplicates itemtype tokens and keeps one as a string", () => {
+    const blocks = microdata(
+      page(`<div itemscope itemtype="https://schema.org/Event http://schema.org/Event"></div>`),
+    );
+    expect((blocks[0]!.raw as Record<string, unknown>)["@type"]).toBe("Event");
+  });
+
   it("every value form follows the spec list", () => {
     const blocks = microdata(
       page(
@@ -197,7 +215,8 @@ describe("microdata extraction", () => {
         format: "microdata",
         raw: {
           "@context": "https://schema.org",
-          "@type": "Event",
+          // the second token is a non-schema.org URL: kept as written
+          "@type": ["Event", "http://example.org/Other"],
           "@id": "https://example.com/events/1",
           a: "meta-content",
           b: "https://example.com/x",
@@ -350,6 +369,8 @@ describe("microdata extraction", () => {
       microdataItemrefSkipped: 1,
       rdfaUnsupported: 0,
       valuesCapped: 0,
+      blocksDropped: 0,
+      nodesDropped: 0,
     });
   });
 });

@@ -944,6 +944,8 @@ export class PageWriter {
         microdataItemrefSkipped: 0,
         rdfaUnsupported: 0,
         valuesCapped: 0,
+        blocksDropped: 0,
+        nodesDropped: 0,
       },
     };
   }

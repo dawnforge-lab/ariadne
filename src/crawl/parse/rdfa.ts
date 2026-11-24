@@ -42,6 +42,7 @@
 import {
   createItemCore,
   resolveUrl,
+  typeValue,
   type BlockSink,
   type ItemMachine,
   type ItemNode,
@@ -113,6 +114,25 @@ export function createRdfaMachine(
     return out;
   };
 
+  /**
+   * A `typeof`'s schema.org names, deduplicated in document order (extraction
+   * 5, Phase 29d: extraction 4 kept the first only). A token outside schema.org
+   * is left out beside a schema.org one; an element whose tokens are ALL
+   * outside it has no type this reader models, so null (counted unsupported).
+   * A blank `typeof` is [].
+   */
+  const typeNames = (value: string): string[] | null => {
+    const out = new Set<string>();
+    let tokens = 0;
+    for (const token of value.trim().split(/\s+/)) {
+      if (token === "") continue;
+      tokens += 1;
+      const name = termName(token);
+      if (name !== null) out.add(name);
+    }
+    return tokens > 0 && out.size === 0 ? null : [...out];
+  };
+
   const attributeValue = (name: string, attribs: Record<string, string>): string | undefined => {
     if ("content" in attribs) return attribs["content"];
     if ("resource" in attribs) return resolveUrl(attribs["resource"]!, pageUrl);
@@ -149,7 +169,7 @@ export function createRdfaMachine(
 
       const typeofValue = attribs["typeof"];
       const propertyValue = attribs["property"];
-      const types = typeofValue === undefined ? null : termNames(typeofValue);
+      const types = typeofValue === undefined ? null : typeNames(typeofValue);
       const names = propertyValue === undefined ? null : termNames(propertyValue);
       if ((typeofValue !== undefined && types === null) || (propertyValue !== undefined && names === null)) {
         unsupported = true;
@@ -172,7 +192,7 @@ export function createRdfaMachine(
         core.openItem(depth, propertyNames, types !== null && types.length > 0, () => {
           const resource = attribs["resource"]?.trim();
           return {
-            type: types?.[0] ?? null,
+            type: typeValue(types ?? []),
             id: resource === undefined || resource === "" ? null : resolveUrl(resource, pageUrl),
             props: new Map(),
           } satisfies ItemNode;

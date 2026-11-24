@@ -281,12 +281,13 @@ import {
   UNRESOLVED_NOT_MEASURED,
   projectNodes,
   projectSkips,
+  type ProjectedSkips,
   storedFormat,
   validationReadable,
   type StructuredDataNode,
 } from "./structured-data.js";
 import { MAX_STRUCTURED_DATA_BLOCKS } from "../crawl/parse/page-analyzer.js";
-import type { StructuredDataFormat, StructuredDataSkips } from "../crawl/parse/page-analyzer.js";
+import type { StructuredDataFormat } from "../crawl/parse/page-analyzer.js";
 import { decodeCursor, encodeCursor, parseLimit } from "./paging.js";
 import { staleBlob } from "../rules/schema-org/blob-sql.js";
 import { listEvents, type CrawlEvent } from "../events/events.js";
@@ -2465,7 +2466,7 @@ export interface StructuredDataPageRow {
   infoCount: number;
   jsonLdParseErrors: number;
   microdataErrors: number | null;
-  skips: StructuredDataSkips | null;
+  skips: ProjectedSkips | null;
   /**
    * The page's stored blocks reached the analyzer's cap
    * (`MAX_STRUCTURED_DATA_BLOCKS`): blocks past it were not stored, so an id a

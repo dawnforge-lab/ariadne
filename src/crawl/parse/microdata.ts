@@ -86,6 +86,7 @@
  */
 import {
   createItemCore,
+  typeValue,
   resolveUrl,
   type BlockSink,
   type ItemMachine,
@@ -117,11 +118,17 @@ const URL_ATTRIBUTE: Readonly<Record<string, string>> = {
   track: "src",
 };
 
-/** The first `itemtype` token, normalised to a schema.org name when it is one; null when blank. */
-function itemTypeOf(attribs: Record<string, string>): string | null {
-  const first = (attribs["itemtype"] ?? "").trim().split(/\s+/)[0] ?? "";
-  if (first === "") return null;
-  return schemaOrgName(first) ?? first;
+/**
+ * Every `itemtype` token in document order, deduplicated, each normalised to a
+ * schema.org name when it is one and kept as written when it is not; null when
+ * blank (extraction 5, Phase 29d: extraction 4 kept the first token only).
+ */
+function itemTypeOf(attribs: Record<string, string>): string | readonly string[] | null {
+  const names = new Set<string>();
+  for (const token of (attribs["itemtype"] ?? "").trim().split(/\s+/)) {
+    if (token !== "") names.add(schemaOrgName(token) ?? token);
+  }
+  return typeValue([...names]);
 }
 
 function attributeValue(

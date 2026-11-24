@@ -682,7 +682,25 @@ export interface StructuredDataSkips {
   rdfaUnsupported: number;
   /** Property values dropped by the per-page `MAX_ITEM_VALUES` budget. */
   valuesCapped: number;
+  /**
+   * Blocks (JSON-LD, microdata and RDFa nodes alike) dropped past
+   * `MAX_STRUCTURED_DATA_BLOCKS` (extraction 5, Phase 29d). Always present on
+   * an extraction-5 page; 0 when nothing was dropped.
+   */
+  blocksDropped: number;
+  /**
+   * JSON-LD nodes dropped for sitting deeper than `MAX_LD_JSON_DEPTH` in an
+   * array / `@graph` walk (extraction 5, Phase 29d). Always present on an
+   * extraction-5 page. A block refused for `MAX_LD_JSON_NESTING` is a parse
+   * error, not counted here.
+   */
+  nodesDropped: number;
 }
+
+/** What `pages.structured_data_skips` can hold: extraction 5 rows have every key, version 4 rows lack the two drop counters. */
+export type StoredStructuredDataSkips =
+  | StructuredDataSkips
+  | Omit<StructuredDataSkips, "blocksDropped" | "nodesDropped">;
 
 /** Data extracted from a single page's HTML. */
 export interface PageAnalysis {
@@ -1500,13 +1518,21 @@ function collectLdJsonNodes(
   value: unknown,
   out: unknown[],
   depth: number,
+  skips: StructuredDataSkips,
   inheritedContext?: unknown,
 ): void {
-  if (depth > MAX_LD_JSON_DEPTH || out.length >= MAX_STRUCTURED_DATA_BLOCKS) {
+  // Each drop is counted where it happens, as the nodes it takes with it:
+  // nothing is retained beyond the two counters.
+  if (depth > MAX_LD_JSON_DEPTH) {
+    skips.nodesDropped += countLdJsonNodes(value);
+    return;
+  }
+  if (out.length >= MAX_STRUCTURED_DATA_BLOCKS) {
+    skips.blocksDropped += countLdJsonNodes(value);
     return;
   }
   if (Array.isArray(value)) {
-    for (const entry of value) collectLdJsonNodes(entry, out, depth + 1, inheritedContext);
+    for (const entry of value) collectLdJsonNodes(entry, out, depth + 1, skips, inheritedContext);
     return;
   }
   // Scalars and null are not JSON-LD nodes: valid JSON, nothing to record.
@@ -1524,11 +1550,26 @@ function collectLdJsonNodes(
       graph,
       out,
       depth + 1,
+      skips,
       ownContext ? node["@context"] : inheritedContext,
     );
     return;
   }
   out.push(stored);
+}
+
+/**
+ * How many nodes `collectLdJsonNodes` would have produced from `value` with no
+ * cap: the same array / `@graph` expansion, counted. The value is already
+ * parsed and at most `MAX_LD_JSON_NESTING` deep, so the recursion is bounded.
+ */
+function countLdJsonNodes(value: unknown): number {
+  if (Array.isArray(value)) return value.reduce((n: number, entry) => n + countLdJsonNodes(entry), 0);
+  if (typeof value !== "object" || value === null) return 0;
+  const node = value as Record<string, unknown>;
+  const graph = node["@graph"];
+  if (graph === undefined) return 1;
+  return ("@type" in node ? 1 : 0) + countLdJsonNodes(graph);
 }
 
 /**
@@ -1651,13 +1692,20 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
   // together (Phase 29a): a block past the cap is dropped here.
   const pushStructuredData: BlockSink = (block) => {
     if (structuredData.length < MAX_STRUCTURED_DATA_BLOCKS) structuredData.push(block);
+    else structuredDataCounts.skips.blocksDropped += 1;
   };
   // One counts object per page, shared by every item machine: `errors`, the
   // skips, and `valuesUsed` / `valuesWritten` / `charsWritten`, the per-page
   // budgets the machines spend from together (src/crawl/parse/microdata.ts).
   const structuredDataCounts: StructuredDataCounts = {
     errors: 0,
-    skips: { microdataItemrefSkipped: 0, rdfaUnsupported: 0, valuesCapped: 0 },
+    skips: {
+      microdataItemrefSkipped: 0,
+      rdfaUnsupported: 0,
+      valuesCapped: 0,
+      blocksDropped: 0,
+      nodesDropped: 0,
+    },
     valuesUsed: 0,
     valuesWritten: 0,
     charsWritten: 0,
@@ -2372,9 +2420,9 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
       return;
     }
     const nodes: unknown[] = [];
-    collectLdJsonNodes(parsed, nodes, 0);
+    collectLdJsonNodes(parsed, nodes, 0, structuredDataCounts.skips);
+    // The sink drops (and counts) whatever the page's shared cap has no room for.
     for (const node of nodes) {
-      if (structuredData.length >= MAX_STRUCTURED_DATA_BLOCKS) break;
       pushStructuredData({ type: ldJsonType(node), format: "jsonld", raw: node });
     }
   };

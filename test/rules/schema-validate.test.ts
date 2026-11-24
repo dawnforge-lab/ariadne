@@ -710,10 +710,9 @@ function withoutTypes(v: BlockValidation): unknown {
   return { ...v, nodes: v.nodes.map(({ types: _t, ...node }) => node) };
 }
 
-// 29a rework gate fix, ruling (b): extraction stays at 4, so the microdata and
-// RDFa extractors still store one type (their first itemtype / typeof token).
-// These raws are hand-built in their shape with a `@type` ARRAY, to pin that
-// the validator lists every type any stored block states, whatever its format.
+// 29a rework gate fix, ruling (b); extraction 5 (29d) now stores every itemtype /
+// typeof token as a `@type` array. These raws are hand-built in that shape, to pin
+// that the validator lists every type any stored block states, whatever its format.
 describe("validateBlock — every type of a microdata- or RDFa-shaped node with a @type array", () => {
   it("a microdata-shaped item with two itemtype tokens lists both", () => {
     const v = validate({

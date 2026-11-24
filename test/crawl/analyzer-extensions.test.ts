@@ -1899,3 +1899,58 @@ describe("image alt facts", () => {
     expect(a.imagesEmptyAlt).toBe(0);
   });
 });
+
+describe("structured-data drops are counted (extraction 5, Phase 29d)", () => {
+  const ld = (json: string) => `<script type="application/ld+json">${json}</script>`;
+
+  it("counts blocks past the cap", () => {
+    const blocks = Array.from({ length: 60 }, (_, i) => ld(`{"@type":"T${i}"}`)).join("");
+    const a = analyzePage(`${blocks}${ld("{bad")}`, "https://ex.com/");
+    expect(a.structuredData).toHaveLength(50);
+    expect(a.structuredDataParseErrors).toBe(1);
+    expect(a.structuredDataSkips.blocksDropped).toBe(10);
+    expect(a.structuredDataSkips.nodesDropped).toBe(0);
+  });
+
+  it("counts blocks past the cap inside one array and across formats", () => {
+    const nodes = Array.from({ length: 55 }, (_, i) => `{"@type":"T${i}"}`).join(",");
+    const items = Array.from(
+      { length: 5 },
+      () => `<div itemscope itemtype="https://schema.org/Thing"></div>`,
+    ).join("");
+    const a = analyzePage(`${ld(`[${nodes}]`)}${items}`, "https://ex.com/");
+    expect(a.structuredData).toHaveLength(50);
+    // 5 JSON-LD nodes past the cap, then all 5 microdata items.
+    expect(a.structuredDataSkips.blocksDropped).toBe(10);
+  });
+
+  it("counts nodes past the depth cap", () => {
+    // One level per array wrapper, the outer array at depth 0: entries at depth
+    // 6 and 7 are past MAX_LD_JSON_DEPTH (5). Two nodes sit at depth 6, three at 7.
+    const deep = `[{"@type":"D6a"},{"@type":"D6b"},[{"@type":"D7a"},{"@type":"D7b"},{"@type":"D7c"}]]`;
+    const a = analyzePage(ld(`[[[[[{"@type":"Kept"},${deep}]]]]]`), "https://ex.com/");
+    expect(a.structuredData.map((b) => b.type)).toEqual(["Kept"]);
+    expect(a.structuredDataSkips.nodesDropped).toBe(5);
+    expect(a.structuredDataSkips.blocksDropped).toBe(0);
+  });
+
+  it("counts a typed graph container and its members at the depth cap", () => {
+    const doc = `[[[[[[{"@type":"Container","@graph":[{"@type":"A"},{"@type":"B"}]}]]]]]]`;
+    const a = analyzePage(ld(doc), "https://ex.com/");
+    expect(a.structuredData).toEqual([]);
+    expect(a.structuredDataSkips.nodesDropped).toBe(3);
+  });
+
+  it("zero when nothing is dropped", () => {
+    const a = analyzePage(ld(`{"@type":"Article"}`), "https://ex.com/");
+    expect(a.structuredDataSkips.blocksDropped).toBe(0);
+    expect(a.structuredDataSkips.nodesDropped).toBe(0);
+  });
+
+  it("a block refused for nesting is a parse error, not a dropped node", () => {
+    const deep = `{"@type":"X","a":${"[".repeat(70)}${"]".repeat(70)}}`;
+    const a = analyzePage(ld(deep), "https://ex.com/");
+    expect(a.structuredDataParseErrors).toBe(1);
+    expect(a.structuredDataSkips.nodesDropped).toBe(0);
+  });
+});

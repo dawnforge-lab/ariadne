@@ -36,7 +36,15 @@ import { ServiceError, clip } from "./errors.js";
 
 /** The keys of `StructuredDataSkips`, which a stored `structured_data_skips` must hold exactly. */
 const SKIP_KEYS = ["microdataItemrefSkipped", "rdfaUnsupported", "valuesCapped"] as const satisfies readonly (keyof StructuredDataSkips)[];
-type MissingSkipKey = Exclude<keyof StructuredDataSkips, (typeof SKIP_KEYS)[number]>;
+/**
+ * The two counters extraction 5 adds (Phase 29d). A row stored at version 4
+ * holds `SKIP_KEYS` only; a version 5 row holds both sets. They are validated
+ * here and not yet on the wire (Task 3 of 29d surfaces them).
+ */
+const DROP_KEYS = ["blocksDropped", "nodesDropped"] as const satisfies readonly (keyof StructuredDataSkips)[];
+/** The skips this projection answers: the three counters every stored row has. */
+export type ProjectedSkips = Pick<StructuredDataSkips, (typeof SKIP_KEYS)[number]>;
+type MissingSkipKey = Exclude<keyof StructuredDataSkips, (typeof SKIP_KEYS)[number] | (typeof DROP_KEYS)[number]>;
 const _everySkipKey: MissingSkipKey extends never ? true : never = true;
 void _everySkipKey;
 
@@ -49,7 +57,7 @@ void _everySkipKey;
  * a row this engine did not write, and throws naming the crawl and page rather
  * than dropping a key or answering a partial object.
  */
-export function projectSkips(value: unknown, crawlId: string, url: string): StructuredDataSkips | null {
+export function projectSkips(value: unknown, crawlId: string, url: string): ProjectedSkips | null {
   if (value === null) return null;
   const bad = (why: string): never => {
     throw new Error(`crawl ${crawlId}, page ${url}: structured_data_skips ${why}`);
@@ -57,18 +65,23 @@ export function projectSkips(value: unknown, crawlId: string, url: string): Stru
   if (typeof value !== "object" || Array.isArray(value)) return bad("is not an object");
   const stored = value as Record<string, unknown>;
   const keys = Object.keys(stored).sort();
-  if (keys.join(",") !== [...SKIP_KEYS].sort().join(",")) {
-    return bad(`holds keys [${keys.join(", ")}], not exactly [${SKIP_KEYS.join(", ")}]`);
+  const legacy = [...SKIP_KEYS].sort().join(",");
+  const current = [...SKIP_KEYS, ...DROP_KEYS].sort().join(",");
+  if (keys.join(",") !== legacy && keys.join(",") !== current) {
+    return bad(`holds keys [${keys.join(", ")}], not exactly [${SKIP_KEYS.join(", ")}] or [${[...SKIP_KEYS, ...DROP_KEYS].join(", ")}]`);
   }
-  const count = (key: (typeof SKIP_KEYS)[number]): number => {
+  const count = (key: (typeof SKIP_KEYS)[number] | (typeof DROP_KEYS)[number]): number => {
     const n = stored[key];
     return typeof n === "number" && Number.isInteger(n) && n >= 0 ? n : bad(`has a ${key} that is not a non-negative integer`);
   };
-  return {
+  const projected = {
     microdataItemrefSkipped: count("microdataItemrefSkipped"),
     rdfaUnsupported: count("rdfaUnsupported"),
     valuesCapped: count("valuesCapped"),
   };
+  // A version 5 row's two drop counters must be sound too, though not yet answered.
+  if (keys.length > SKIP_KEYS.length) for (const key of DROP_KEYS) count(key);
+  return projected;
 }
 
 /** The syntaxes a block is stored from — the `format` filter's closed vocabulary. */
