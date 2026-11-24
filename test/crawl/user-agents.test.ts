@@ -75,8 +75,10 @@ describe("resolveCrawlIdentity", () => {
   it("refuses a Mozilla/ agent with no token, and accepts it with one", () => {
     const userAgent = "Mozilla/5.0 (compatible; Acme/1.0)";
     expect(refusal({ userAgent })).toBe(
-      "userAgent starts with Mozilla/; robots rules would be matched as 'mozilla'. Set robotsUserAgent.",
+      "userAgent starts with Mozilla; robots rules would be matched as 'mozilla'. Set robotsUserAgent.",
     );
+    expect(refusal({ userAgent: "Mozilla (compatible; Acme/1.0)" })).toContain("starts with Mozilla");
+    expect(refusal({ userAgent: "MOZILLA/5.0" })).toContain("starts with Mozilla");
     expect(resolveCrawlIdentity({ userAgent, robotsUserAgent: "Acme" }).robotsUserAgent).toBe(
       "Acme",
     );
@@ -86,6 +88,13 @@ describe("resolveCrawlIdentity", () => {
     expect(refusal({ userAgent: "Acme/1.0", robotsUserAgent: "Acme Bot" })).toBe(
       "robotsUserAgent must be one product token (letters, digits, - and _)",
     );
+  });
+
+  it("says a derived token that is not one product token was derived, and how to fix it", () => {
+    expect(refusal({ userAgent: "Acme.Bot/1.0" })).toBe(
+      "the robots token derived from userAgent ('Acme.Bot') must be one product token (letters, digits, - and _); set robotsUserAgent",
+    );
+    expect(resolveCrawlIdentity({ userAgent: "Acme.Bot/1.0", robotsUserAgent: "AcmeBot" }).robotsUserAgent).toBe("AcmeBot");
   });
 
   it("refuses an unknown preset", () => {

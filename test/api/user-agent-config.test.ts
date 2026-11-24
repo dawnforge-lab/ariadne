@@ -12,6 +12,7 @@ import { closeDb, createDb, type Db } from "../../src/db/client.js";
 import { runMigrations } from "../../src/db/migrate.js";
 import { crawls } from "../../src/db/schema.js";
 import { createApiServer, type ApiServer } from "../../src/api/http.js";
+import { ApiService } from "../../src/api/service.js";
 import type { ServiceConfig } from "../../src/api/config.js";
 import { hostKeyOf } from "../../src/crawl/host-key.js";
 import { USER_AGENT_PRESETS } from "../../src/crawl/user-agents.js";
@@ -146,5 +147,27 @@ describe("a stored crawl's identity", () => {
       const set = await call("PATCH", `/crawls/${id}/config`, { crawl: change });
       expect(set.status, set.text).toBe(409);
     }
+  });
+});
+
+describe("the operator's identity defaults are checked at startup", () => {
+  const base: ServiceConfig = {
+    credentialKeys: TEST_CREDENTIAL_KEYS,
+    allowedDomains: ["127.0.0.1"],
+    log: () => undefined,
+  };
+
+  it("refuses a Mozilla/ default userAgent with no token, naming the setting", () => {
+    const bad: ServiceConfig = { ...base, crawlDefaults: { userAgent: "Mozilla/5.0 (compatible; Acme/1.0)" } };
+    expect(() => new ApiService(db, bad)).toThrow(/ServiceConfig\.crawlDefaults: robotsUserAgent: userAgent starts with Mozilla/);
+  });
+
+  it("refuses a default preset beside a default userAgent", () => {
+    const bad: ServiceConfig = { ...base, crawlDefaults: { userAgentPreset: "bingbot", userAgent: "Acme/1.0" } };
+    expect(() => new ApiService(db, bad)).toThrow(/ServiceConfig\.crawlDefaults: userAgent: userAgentPreset and userAgent cannot both be set/);
+  });
+
+  it("accepts a good default", () => {
+    expect(() => new ApiService(db, { ...base, crawlDefaults: { userAgent: "Acme/1.0" } })).not.toThrow();
   });
 });

@@ -133,23 +133,31 @@ export function resolveCrawlIdentity(input: CrawlIdentityInput): CrawlIdentity {
     throw new CrawlIdentityError("userAgent", "userAgent must not be empty");
   }
   let token: string;
+  let derived = false;
   if (robotsUserAgent !== undefined) {
     token = robotsUserAgent;
   } else if (userAgent === undefined) {
     token = USER_AGENT_PRESETS.ariadne.robotsUserAgent;
-  } else if (/^\s*mozilla\//i.test(header)) {
-    throw new CrawlIdentityError(
-      "robotsUserAgent",
-      "userAgent starts with Mozilla/; robots rules would be matched as 'mozilla'. " +
-        "Set robotsUserAgent.",
-    );
   } else {
+    derived = true;
     token = /^\s*([^\s/]+)/.exec(header)?.[1] ?? "";
+    // The derived token, not a prefix of the header: `Mozilla (compatible; X)`
+    // derives `Mozilla` as surely as `Mozilla/5.0 (...)` does.
+    if (token.toLowerCase() === "mozilla") {
+      throw new CrawlIdentityError(
+        "robotsUserAgent",
+        "userAgent starts with Mozilla; robots rules would be matched as 'mozilla'. " +
+          "Set robotsUserAgent.",
+      );
+    }
   }
   if (!TOKEN.test(token)) {
     throw new CrawlIdentityError(
       "robotsUserAgent",
-      "robotsUserAgent must be one product token (letters, digits, - and _)",
+      derived
+        ? `the robots token derived from userAgent ('${token.slice(0, 64)}') must be one product ` +
+            "token (letters, digits, - and _); set robotsUserAgent"
+        : "robotsUserAgent must be one product token (letters, digits, - and _)",
     );
   }
   const isDefault = userAgent === undefined && robotsUserAgent === undefined;

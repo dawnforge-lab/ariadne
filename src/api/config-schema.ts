@@ -362,7 +362,8 @@ export const CRAWL_FIELDS = {
       "(letters, digits, - and _). Derived from the first product of userAgent when " +
       "omitted; required when userAgent starts with 'Mozilla/'. Needs a custom userAgent " +
       "(the default AriadneBot identity always matches the AriadneBot robots group) and " +
-      "cannot be combined with userAgentPreset.",
+      "cannot be combined with userAgentPreset. A request's userAgentPreset, userAgent and " +
+      "robotsUserAgent replace the server's defaults for all three as a set.",
   },
   perHostDelayMs: {
     schema: finiteNumber("perHostDelayMs").min(MIN_PER_HOST_DELAY_MS, {

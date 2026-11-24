@@ -2777,6 +2777,17 @@ export class ApiService {
       }
     }
     this.log = config.log ?? ((line) => console.error(line));
+    // The operator's identity defaults are validated here, once, naming the
+    // setting: a bad default must not surface as a 400 on every start that
+    // names no identity field (Phase 29d).
+    try {
+      this.identityOf({} as CrawlRequestFields);
+    } catch (error) {
+      if (error instanceof CrawlIdentityError) {
+        throw new Error(`ServiceConfig.crawlDefaults: ${error.field}: ${error.message}`);
+      }
+      throw error;
+    }
     // The keys are checked by the vault's constructor, the retention here:
     // both are refused at construction, naming the field, never a value.
     this.vault = new CredentialVault(db, config.credentialKeys);
@@ -8262,7 +8273,9 @@ export class ApiService {
    * The crawl identity a request runs with (Phase 29d). The request's own three
    * fields win as a set: a request naming a preset must not collide with the
    * operator's `userAgent` default, so the operator's fields apply only when the
-   * request names none. Throws `CrawlIdentityError`.
+   * request names none, so `robotsUserAgent` alone on a server whose default
+   * `userAgent` is custom is refused (it is not merged with that default).
+   * Throws `CrawlIdentityError`.
    */
   private identityOf(input: CrawlRequestFields): CrawlIdentity {
     const requested = stripUndefined({
