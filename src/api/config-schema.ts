@@ -360,7 +360,8 @@ export const CRAWL_FIELDS = {
     description:
       "The one product token robots.txt groups and Crawl-delay are matched against " +
       "(letters, digits, - and _). Derived from the first product of userAgent when " +
-      "omitted; required when userAgent starts with 'Mozilla/'. Needs a custom userAgent " +
+      "omitted; required when the token derived from userAgent is 'mozilla' (any case, " +
+      "'Mozilla/5.0 ...' or 'Mozilla (compatible; ...)'). Needs a custom userAgent " +
       "(the default AriadneBot identity always matches the AriadneBot robots group) and " +
       "cannot be combined with userAgentPreset. A request's userAgentPreset, userAgent and " +
       "robotsUserAgent replace the server's defaults for all three as a set.",

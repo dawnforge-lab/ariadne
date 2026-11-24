@@ -122,6 +122,10 @@ it on 2026-11-24 ("go ahead").
      so derived values are unchanged.
    - Pinned in Task 10 and by the gate's before/after comparison.
 
+   As built (2026-11-24): `deriveLinkTargets` did not ship (Task 10's note), so the three
+   derivations still join `links.target_url = pages.url` within the crawl, each with its
+   own fetch-class filter; the gate's before/after comparison is the guard.
+
 ## Rulings made while planning
 
 - **R1 — PDFs are indexable unless their headers say otherwise (owner, 2026-11-24).**
@@ -737,6 +741,21 @@ Task 11 runs first, so later suite runs leave no strays. After that the order is
   - Then `npm test` and `npx tsc --noEmit`.
 - [ ] **Step 5:** Commit `perf(rules): resolve link targets once; integer joins in the link
   derivations (29d)`.
+
+**As built (2026-11-24).** `deriveLinkTargets` was measured and NOT shipped. Persisting
+`links.target_page_id` cost about 70 s at 50k on a first run (68.6 s for the `SET`, against
+about 11 s the integer joins saved). A shared session temp table of resolved targets (no
+persisted id, read by all three derivations) measured 88–89 s for link derive on the
+synthetic 50k, against 70.6 s for the URL joins plus the click-depth frontier table. So all
+three derivations still join `links.target_url = pages.url`, and the `(crawl_id,
+target_page_id)` index stays unused. Click depth uses the `cd_frontier` temp-table pair
+(24.1 → 8.6 s on the synthetic 50k; the partial-index variant measured 24.0 s).
+`GATE_LINK_DERIVE_MS` (60 s) covers counts + score only, and `GATE_CLICK_DEPTH_MS` (30 s)
+click depth. The 40 s target and "comfortable room" are likely unmet: link counts alone is
+about 53 s on the synthetic 50k (24.6 s on the 29c gate crawl). Whether the 60 s clause
+stands is an owner decision at the gate. Shipped as `5ff0892 perf(rules): click-depth frontier table; link-target
+resolution measured and dropped (29d)`, with no `derive-link-targets` test and no change to
+the gate's sum.
 
 ### Task 12: Gate tooling — derived-value export and compare
 

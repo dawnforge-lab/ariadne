@@ -251,6 +251,19 @@ All three derivations (click depth, link counts, link score) join `links.target_
 - Results must not change: the 29c gate's derived values (depths, counts, scores to 1e-9) are
   compared on the 50k fixture before and after.
 
+**As built (2026-11-24).** `deriveLinkTargets` was measured and NOT shipped. Persisting
+`links.target_page_id` cost about 70 s at 50k on a first run (68.6 s for the `SET`, against
+about 11 s the integer joins saved). A shared session temp table of resolved targets (no
+persisted id, read by all three derivations) measured 88–89 s for link derive on the
+synthetic 50k, against 70.6 s for the URL joins plus the click-depth frontier table. So all
+three derivations still join `links.target_url = pages.url`, and the `(crawl_id,
+target_page_id)` index stays unused. Click depth uses the `cd_frontier` temp-table pair
+(24.1 → 8.6 s on the synthetic 50k; the partial-index variant measured 24.0 s).
+`GATE_LINK_DERIVE_MS` (60 s) covers counts + score only, and `GATE_CLICK_DEPTH_MS` (30 s)
+click depth. The 40 s target and "comfortable room" are likely unmet: link counts alone is
+about 53 s on the synthetic 50k (24.6 s on the 29c gate crawl). Whether the 60 s clause
+stands is an owner decision at the gate.
+
 ### 10. The suite leaves no process behind
 
 In `test/worker/serve.test.ts`:
@@ -334,6 +347,11 @@ In `test/worker/serve.test.ts`:
    - link derive ≤ 60 s, with a target of 40 s;
    - click depth ≤ 30 s;
    - derived values identical to a pre-change run.
+
+   As built (2026-11-24): link derive is counts + score only (`deriveLinkTargets` was
+   measured and not shipped, see goal 9's note); the 40 s target is likely unmet (link
+   counts about 53 s on the synthetic 50k), and the 60 s clause is an owner decision at
+   the gate.
 4. **Allocation.** The `simhash64` profile shows at least 5× less garbage per page.
 5. **Real site (needs owner OK at gate time).** A lavishalice.com crawl: the 16 pagination
    pages no longer appear in `schema.template-inconsistent`, and every other rule's count is

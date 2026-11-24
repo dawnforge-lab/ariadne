@@ -220,7 +220,10 @@ documents this crawl was handed. A document in both was declared and re-supplied
 walk fetched it once.
 
 **`userAgent`**, **`perHostDelayMs`** and **`maxConcurrency`** are the politeness
-settings, not tuning knobs for speed. The user agent must stay identifiable, and
+settings, not tuning knobs for speed. A `userAgentPreset` (a Googlebot or bingbot
+identity) is a spoofed bot identity for a site you have permission to crawl as that
+crawler: a site that verifies bots by IP address or reverse DNS (Cloudflare, most
+CDNs) refuses it, and it never bypasses a challenge. The user agent must stay identifiable, and
 robots.txt's own `crawl-delay` wins over `perHostDelayMs` when it is longer. The only
 direction you may ever move the other two is **slower**, and the platform table below
 is when to do it.

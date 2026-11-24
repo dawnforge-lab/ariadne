@@ -4372,7 +4372,7 @@ controls.
 
 | knob | default | notes |
 |---|---|---|
-| `userAgent` | `AriadneBot/0.1 (+https://github.com/dawnforge-lab/ariadne)` | **Set it.** A Talos-driven crawl should present Talos's identity, and the UA is what a client allowlists in their WAF. A custom value derives its robots token from the product it starts with; one starting `Mozilla/` needs `robotsUserAgent` (refused otherwise). |
+| `userAgent` | `AriadneBot/0.1 (+https://github.com/dawnforge-lab/ariadne)` | **Set it.** A Talos-driven crawl should present Talos's identity, and the UA is what a client allowlists in their WAF. A custom value derives its robots token from the product it starts with; one whose derived token is `mozilla` (any case: `Mozilla/5.0 …`, `Mozilla (compatible; …)`) needs `robotsUserAgent` (refused otherwise). |
 | `userAgentPreset` | `ariadne` | `googlebot-smartphone`, `googlebot-desktop` or `bingbot`: sets the header AND the robots token (`Googlebot`, `bingbot`); refused beside `userAgent` or `robotsUserAgent`. A spoofed bot identity fails any site that verifies bots by IP address or reverse DNS (Cloudflare, most CDNs); a preset only helps on a site that filters by user-agent alone and never bypasses a challenge. `never` mutable. |
 | `robotsUserAgent` | derived | One product token (letters, digits, `-`, `_`). Needs a custom `userAgent` (400 otherwise: the default AriadneBot identity always matches the AriadneBot robots group); refused beside `userAgentPreset`. A request's three identity fields replace the server's defaults as a set (so it is refused alone even when the server's default `userAgent` is custom). Resolved once at start and stored with the crawl; `crawl_get` / `crawl_config_get` echo `userAgent`, `robotsUserAgent` and `userAgentPreset`. |
 | `perHostDelayMs` | 1000 | Floor **250** for anything that arrives over the wire — refused below it, never clamped. Genuinely polite is 1000–2000; the crawl skill recommends 2000 on anything Cloudflare-fronted. |
@@ -4538,8 +4538,11 @@ a rule's verdict or copy changes. Adding a rule or a metric family adds rows
 without changing a verdict — `metrics` rows carry no version column at all —
 which is the argument Phase 10 held 0.7.0 on.
 
-**Phase 29d bumps to 0.29.0, once** (Phase 29 backlog; this paragraph lists what has
-landed so far). Page types: a numeric last segment keeps `:id` beside a slug type.
+**Phase 29d bumps to 0.29.0, once** (Phase 29 backlog; this paragraph lists what it
+changed). The rule count is unchanged: 229 rules (72 page / 140 query / 17 metric; 33
+critical / 97 warning / 99 info), as at 0.28.0. Page types: a numeric last segment keeps `:id` beside a slug type.
+Page types are assigned at crawl end, so they change only on a re-crawl: a 0.29.0 rules
+re-run of an older crawl keeps its stored types.
 Extraction moves to 5: a microdata `itemtype` and an RDFa `typeof` keep every token, so a
 node's `types` lists them all, and the stored skips gain `blocksDropped` and
 `nodesDropped`. The `structured_data` listing (§4.6a) and its MCP tool answer both as
@@ -4547,13 +4550,18 @@ node's `types` lists them all, and the stored skips gain `blocksDropped` and
 CSV (§12) ends with `Blocks Dropped` and `Nodes Dropped` columns. The two columns are appended at the end: consumers reading by header name are unaffected, and positional consumers see 9 columns where they saw 7. A crawl at extraction 4
 keeps answering null for both until it is re-crawled. `schema.unresolved-reference` finds a
 reference wherever it sits, past the 50th too: the block verdict gains `unresolved` (every
-id no node of the block defines, uncapped) and `unresolvedCount` (its length), the rule's
+id no node of the block defines, uncapped) and `unresolvedCount` (its length, or at least
+it when `idsTruncated`: the exact count of the block's references, of which the list
+holds those that fitted), the rule's
 evidence is `{unresolved (up to 50), unresolvedCount, problemsCapped}` over the page, and
 the `structured_data` listing's `infoCount` and `problemsCapped` and the CSV's
 `unresolved-reference` rows read the same count. Stored resolved ids are bounded (2048
 characters each, 256 KiB per block); a block that left ids out makes the page's answer a
 lower bound, said as `unresolvedAtLeast` (rule), `infoCountAtLeast` (listing) and a note
-on each CSV row. A verdict stored without them is
+on each CSV row. A block's ids count only while no OTHER block of its page left ids out
+(that block's missing `definedIds` could define them), so a page with two or more
+truncated blocks has no `schema.unresolved-reference` finding at all; the listing's
+`infoCountAtLeast` is true for it, and that is where such a page shows. A verdict stored without them is
 stale and the next rules run rewrites it. PDFs are indexable unless X-Robots-Tag says
 noindex: a 200 PDF is stored `indexable: true` unless its `X-Robots-Tag` says `noindex`
 or `none` (migration 0061 rewrote stored crawls), and its `indexability` /
@@ -4569,9 +4577,22 @@ stamp. The readers that mean an indexable HTML PAGE do not: every on-page, conte
 duplicate rule, the page-level canonical and indexability rules, render selection and
 `site.health`'s census (a PDF stays in `pagesNotAuditable`). Other non-HTML types stay
 non-indexable.
-Hreflang: a 200 PDF whose `Link` header carries alternates is a declarer, so its own
-set is judged by every hreflang rule (see "Hreflang is read from all three sources"),
-and a PDF target is read by its `indexable` stamp in `hreflang.non-indexable-target`.
+Hreflang: any 200 non-HTML response whose `Link` header carries alternates is a
+declarer (`HREFLANG_DECLARER`; a PDF is the common case), so its own set is judged by
+every hreflang rule (see "Hreflang is read from all three sources"), and a PDF target
+is read by its `indexable` stamp in `hreflang.non-indexable-target`.
+`hreflang.unlinked-target` keeps HTML targets (fetched OK with a 200): an unlinked PDF
+alternate is not reported.
+Robots: a crawl stores `robotsUserAgent`, the one product token its robots.txt groups
+and `Crawl-delay` are matched against, beside `userAgent` (the header) and
+`userAgentPreset`; `robots.blocks-sitemap-urls` matches the stored token, and its
+evidence gains the optional `robotsUserAgent` column ("Robots Token"). A crawl stored
+before 29d has no token and is read with its full `userAgent`, as it was crawled, and a
+schedule stored before 29d resolves one when it fires (the Phase 28c summary's skip reasons, `identity_refused`).
+Engine changes beside the ruleset: the render lease adds the 5 s termination grace an
+expired render deadline may wait (388 s at the defaults, was 383 s), and the
+`structured_data_nodes` CSV writes `(written form not recorded)` rather than the
+resolved id for a reference past a block's first 50.
 
 **0.28.1 is a fix, not a phase.** A robots value's `none` is the directive (noindex,
 nofollow) only as a whole token: `max-image-preview: none` asks for no image preview and

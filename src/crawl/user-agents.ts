@@ -95,8 +95,9 @@ const TOKEN = /^[A-Za-z0-9_-]+$/;
 /**
  * The crawl's identity from what a caller supplied. A preset sets both strings
  * and refuses to be mixed with either; a custom `userAgent` derives its token
- * from the product name it starts with, and a `Mozilla/` one must name the
- * token itself, because deriving `mozilla` would match nobody's group.
+ * from the product name it starts with, and one whose derived token is
+ * `mozilla` (any case, `Mozilla/5.0 …` or `Mozilla (compatible; …)`) must name
+ * the token itself, because `mozilla` would match nobody's group.
  */
 export function resolveCrawlIdentity(input: CrawlIdentityInput): CrawlIdentity {
   const { userAgentPreset, userAgent, robotsUserAgent } = input;

@@ -1108,11 +1108,13 @@ const KINDS = ["page", "query", "metric"] as const satisfies readonly AnyRule["k
 //        Page types: a numeric last segment keeps `:id` beside a slug type. A
 //        pagination page (`/blog/10/`) is its own page type and is no longer absorbed
 //        into `/blog/:slug` at crawl end, so `schema.template-inconsistent` no longer
-//        files listing pages against a post template. Later 29d tasks append here.
+//        files listing pages against a post template. Page types are assigned at
+//        crawl end: a 0.29.0 rules re-run of an older crawl keeps its stored types.
 //        Structured data: `schema.unresolved-reference` finds a reference wherever it
 //        sits, past the 50th too. The block verdict gains `unresolved` (every id
 //        no node of the block defines, uncapped like `definedIds`) and `unresolvedCount`
-//        (its length); a verdict without them is stale (re-run the rules). The rule
+//        (its length, or at least it when `idsTruncated`); a verdict without them is
+//        stale (re-run the rules). The rule
 //        subtracts ids the page's other blocks define, so the evidence is exact:
 //        {unresolved (up to 50), unresolvedCount, problemsCapped (count > 50)}, and the
 //        listing's infoCount, its problemsCapped and the CSV rows read the same count.
@@ -1144,6 +1146,7 @@ const KINDS = ["page", "query", "metric"] as const satisfies readonly AnyRule["k
 //        beside `userAgent` (the header). `robots.blocks-sitemap-urls` matches the
 //        stored token and its evidence carries `robotsUserAgent`; a crawl stored
 //        before 29d has none and is read with its full `userAgent`, as it was crawled.
+//        Rule count unchanged: 229 (72 page / 140 query / 17 metric).
 export const RULESET_VERSION = "0.29.0";
 
 /**

@@ -332,7 +332,7 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "IDENTITY. userAgentPreset (ariadne, googlebot-smartphone, googlebot-desktop, " +
         "bingbot) sets both the User-Agent header and the robots.txt token the site's " +
         "groups are matched with; a custom userAgent derives its token (set " +
-        "robotsUserAgent when it starts with 'Mozilla/'; robotsUserAgent alone, without " +
+        "robotsUserAgent when its derived token is 'mozilla', any case; robotsUserAgent alone, without " +
         "a custom userAgent, is refused). The default stays AriadneBot. " +
         "A spoofed bot identity fails any site that verifies bots by IP address or " +
         "reverse DNS (Cloudflare, most CDNs): a preset only helps on a site that " +
@@ -1854,7 +1854,7 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
       description:
         "One row per page that carries structured data — a JSON-LD, microdata or " +
         "RDFa block — or a JSON-LD parse error or microdata error: {url, pageType, " +
-        "indexable, formats, types, nodes, warningCount, infoCount, " +
+        "indexable, formats, types, nodes, warningCount, infoCount, infoCountAtLeast, " +
         "jsonLdParseErrors, microdataErrors, skips, blocksAtCap, blocksDropped, nodesDropped, problemsCapped}. A page with " +
         "neither is not listed. Use it to see which templates publish which markup, and where " +
         "the problems are, before reading the schema.* findings.\n\n" +
@@ -1884,7 +1884,8 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "an extraction below version 5, which did not count them. problemsCapped: a block cut one of the lists these counts " +
         "read at its per-block limit, so the counts may be short; the unresolved-reference part of infoCount is " +
         "exact, a reference past the 50th included, and problemsCapped is also true when the page has more than " +
-        "50 unresolved references (the finding lists 50 ids and gives the exact count). infoCountAtLeast: " +
+        "50 unresolved references (the finding lists 50 ids and gives the exact count, at least that many " +
+        "when infoCountAtLeast). infoCountAtLeast: " +
         "a block left ids out of its verdict (an id over 2 KiB once resolved, or more than 256 KiB of ids), so " +
         "infoCount is a lower bound, at least that many, never a guess; false otherwise. The " +
         "problem-by-problem detail is the structured_data_nodes CSV view " +

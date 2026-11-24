@@ -67,6 +67,17 @@ WHAT CHANGED AFTER IMPORT (the living authority's own change log):
     `render.console-error`, `render.failed-request`).
   - CHECK-49 / 51 / 89 and CHECK-83: the marker `render.not-recorded`.
 
+  Phase 29d (ruleset 0.29.0, 2026-11-24) — engine paragraphs only; no check's id,
+  title, priority, Evaluate criteria or Record list moved.
+  - CHECK-09: an indexable PDF joins the cohort `pages.not-in-sitemap` reports (a
+    PDF the sitemap omits is reported as a page is). Evaluate and Record unchanged.
+  - CHECK-03: the robots guidance reads the file's groups against `robots_get`'s
+    `robotsUserAgent` (the product token they were matched with), and against the
+    full `userAgent` only on a crawl from before 0.29.0, whose token is null.
+  - CHECK-05: a crawl run under a `userAgentPreset` presented a spoofed bot
+    identity, which a site verifying bots by IP or reverse DNS refuses; a preset
+    never bypasses a challenge.
+
 WHAT DID NOT CHANGE, and must not: every CHECK id, every check's title, priority,
 `**Evaluate**` criteria and `**Record**` list. The rule registry's `checkIds`
 trace to the ids in this file and CI asserts the coverage.
@@ -767,8 +778,12 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
      concluded about a rule past that point is unsound, `sitemapSources` is the `Sitemap:` lines in declaration order
      (CHECK-06 reads it), `suppliedSitemaps` is the documents the crawl was HANDED at
      start rather than told about by the file — a sitemap listed only there is one the
-     site publishes and does not declare, and CHECK-06 still fires — and `userAgent`
-     is the UA whose groups actually governed the crawl. **Stored evidence, never
+     site publishes and does not declare, and CHECK-06 still fires — `userAgent` is
+     the header the crawl sent, and `robotsUserAgent` is the one product token the
+     file's groups were matched against (RFC 9309): the groups that actually governed
+     the crawl are the ones that name it. On a crawl from before 0.29.0
+     `robotsUserAgent` is null, and its groups were matched against the full
+     `userAgent`. **Stored evidence, never
      re-fetched**: quote it rather than the live file, and if you also read the live
      file, report the difference as the fact about the site that it is.
 - **The file's contents** (steps 1-4 read `robots_get`'s `raw`; a browser only if the
@@ -776,8 +791,9 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
   1. Read `raw` in full. Note `truncated` in the finding if it is set.
   2. Parse: User-agent blocks, Disallow rules, Sitemap lines, Crawl-delay. `robots_get`
      already extracts the last two as `sitemapSources` and `crawlDelaySec` — quote
-     those rather than re-deriving them, and read the rest against `userAgent`, since
-     a rule in a group the crawler never matched did not apply to it.
+     those rather than re-deriving them, and read the rest against `robotsUserAgent`
+     (against the full `userAgent` only when the token is null: a crawl from before
+     0.29.0), since a rule in a group the crawler never matched did not apply to it.
   3. Check for AI bot rules: GPTBot, ChatGPT-User, Google-Extended, ClaudeBot, Anthropic-AI, PerplexityBot, CCBot
   4. Flag any Disallow rules blocking important content paths (/collections/, /products/, /blogs/)
 - **DevTools** (the part no stored text answers — testing URLs against the rules):
@@ -881,7 +897,11 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
   the same wall is this check's manual question; `issue_urls` gives the URLs.
   Report it against the user agent the crawl actually used (`robots_get`'s
   `userAgent`) — the claim is "this UA was blocked on these URLs", never "all bots are
-  blocked".
+  blocked". A crawl started with a `userAgentPreset` (a Googlebot or bingbot
+  identity) presented a SPOOFED bot identity: a site that verifies bots by IP address
+  or reverse DNS (Cloudflare, most CDNs) refuses it, and a preset never bypasses a
+  challenge. A block on such a crawl says the site checks bot identity, not that the
+  real bot is blocked.
 
   `crawl.unreadable-encoding` (info) is the same kind of NOT MEASURED marker under
   this check: the server answered in a content-encoding the crawler did not request
