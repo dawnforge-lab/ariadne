@@ -1,6 +1,6 @@
 # The Ariadne surface Talos codes against
 
-**Status:** the contract as of Phase 29c (ruleset 0.29.0, migrations 0000–0060,
+**Status:** the contract as of Phase 29d (ruleset 0.29.0, migrations 0000–0060,
 38 MCP tools / 38 HTTP routes; every column label in this document is served
 under the ruleset version the engine reports — `rules_catalog`'s
 `rulesetVersion`, which the metric-table pass moves).
@@ -244,7 +244,7 @@ validated before it is refused (409, "re-run the rules"), never read.
     against schema.org are counted; nodes of blocks in another vocabulary are counted
     apart, as `otherVocabularyNodes` on the site row (a misspelt type in a schema.org
     block is still counted, under its stated name), and `typesCappedNodes` counts the
-    nodes whose type list was cut. JSON-LD lists every type a node states, up to 50 per node (`typesCapped` when cut; the coverage metric counts only the listed types); a microdata `itemtype` or RDFa `typeof` keeps only its first type at extraction 4 — an extraction limit — so a node from those formats lists one. It is bounded: types (100) and properties per type (100)
+    nodes whose type list was cut. JSON-LD lists every type a node states, up to 50 per node (`typesCapped` when cut; the coverage metric counts only the listed types); a microdata `itemtype` or RDFa `typeof` lists every token from extraction 5 (a page crawled at extraction 4 kept only the first, so its node lists one). It is bounded: types (100) and properties per type (100)
     are capped, and `typesNotListed`, `propertiesNotListed` and `propertyListsCapped` are
     counted, never dropped. The engine names no required set of properties; which a type
     needs is the agent's judgement. Like `content.metrics-by-type`, it counts the judged
@@ -3052,7 +3052,7 @@ with none of them is not listed.
 ```
 url, pageType, indexable, formats, types, nodes,
 warningCount, infoCount, jsonLdParseErrors, microdataErrors, skips, blocksAtCap,
-problemsCapped
+blocksDropped, nodesDropped, problemsCapped
 ```
 
 - **`formats`** are the syntaxes found (`jsonld`, `microdata`, `rdfa`), distinct and
@@ -3064,7 +3064,7 @@ problemsCapped
   one, unless it holds only an `@id`, which makes it a reference, not a node): `{format, path, type, types, typesCapped, properties, propertiesCapped}`. `type` is the
   primary type as the markup states it, a name outside schema.org included, and null
   when the node is untyped; `types` is every type the node states, in authored order
-  (`[]` when untyped). JSON-LD lists every type a node states, up to 50 per node (`typesCapped` when cut; the coverage metric counts only the listed types); a microdata `itemtype` or RDFa `typeof` keeps only its first type at extraction 4 — an extraction limit — so a node from those formats lists one. A blob whose nodes lack `types` was written
+  (`[]` when untyped). JSON-LD lists every type a node states, up to 50 per node (`typesCapped` when cut; the coverage metric counts only the listed types); a microdata `itemtype` or RDFa `typeof` lists every token from extraction 5 (a page crawled at extraction 4 kept only the first, so its node lists one). A blob whose nodes lack `types` was written
   before they listed every type and is refused like any old one (409, re-run the rules);
   `properties` are the node's property names, capped per node at 50, with
   `propertiesCapped` true when the list was cut short. Structured data is judged by the
@@ -3076,9 +3076,16 @@ problemsCapped
   `microdataErrors`. `infoCount` is pending or superseded properties and references (a
   bare `@id`) that no block of the same page defines. Linking to an entity defined
   elsewhere is legal, so read those as facts to check.
-- **`blocksAtCap`** is true when the page's stored blocks reached the analyzer's
-  per-page limit (50): blocks past it were not stored, so an id may be defined in a
-  block that was not stored.
+- **`blocksAtCap`** is true when the page had blocks past the analyzer's per-page limit
+  (50): blocks past it were not stored, so an id may be defined in a block that was not
+  stored. From extraction 5 it is exactly `blocksDropped > 0`; on a page crawled below
+  extraction 5 it is true when the stored block count reached 50, as it always was.
+- **`blocksDropped`** and **`nodesDropped`** (Phase 29d) are how many blocks past the
+  per-page limit, and how many nodes past the per-block limit, the analyzer did not
+  store. Both are **null on a page crawled below extraction 5**, which did not count
+  them: not measured, never zero. From extraction 5 the page's stored skips hold all
+  five counters (the three below and these two); a page at extraction 5 without them,
+  or a page below it that holds them, throws naming the crawl and the page.
 - **`problemsCapped`** is true when a block on the page cut one of the lists the two
   counts read at its per-block limit (50): `warningCount` / `infoCount` may be short
   (an empty-value list cut at 50 holds more problems than it shows; a references list
@@ -3089,7 +3096,8 @@ problemsCapped
   unresolved-reference count is not measured and `notMeasured` names
   `schema.unresolved-reference`; `infoCount` then holds no references. It is `[]`
   otherwise.
-- **Null is not zero.** `microdataErrors` and `skips` are null on a page crawled below
+- **Null is not zero.** `blocksDropped` and `nodesDropped` are null below extraction 5
+  (above). `microdataErrors` and `skips` are null on a page crawled below
   extraction version 4: nobody looked for microdata, so `warningCount` there holds no
   microdata errors. `skips` is `{microdataItemrefSkipped, rdfaUnsupported,
   valuesCapped}` where the reader dropped something: `itemref` elements it does not
@@ -3108,8 +3116,8 @@ problemsCapped
   validated by an earlier ruleset (a validation in the shape written before the
   rework) are 409 (`CONFLICT`): run `crawl_rules` and ask again. An empty listing would
   read as a site whose markup has no problems. A stored value this engine could not
-  have written (a format outside the three, a skips blob that is not exactly the three
-  counters, a validation blob that is not readable) throws naming the crawl and the
+  have written (a format outside the three, a skips blob that does not hold exactly the
+  counters its page's extraction writes (three below extraction 5, five from it), a validation blob that is not readable) throws naming the crawl and the
   page; it is never coerced.
 - The problem-by-problem detail is the `structured_data_nodes` CSV view (§12), one row
   per block and problem. The findings are the `schema.*` rules (`issues_list`
@@ -4445,6 +4453,15 @@ a rule's verdict or copy changes. Adding a rule or a metric family adds rows
 without changing a verdict — `metrics` rows carry no version column at all —
 which is the argument Phase 10 held 0.7.0 on.
 
+**Phase 29d bumps to 0.29.0, once** (Phase 29 backlog; this paragraph lists what has
+landed so far). Page types: a numeric last segment keeps `:id` beside a slug type.
+Extraction moves to 5: a microdata `itemtype` and an RDFa `typeof` keep every token, so a
+node's `types` lists them all, and the stored skips gain `blocksDropped` and
+`nodesDropped`. The `structured_data` listing (§4.6a) and its MCP tool answer both as
+`blocksDropped` / `nodesDropped` (null below extraction 5), and the `structured_data_nodes`
+CSV (§12) ends with `Blocks Dropped` and `Nodes Dropped` columns. A crawl at extraction 4
+keeps answering null for both until it is re-crawled.
+
 **0.28.1 is a fix, not a phase.** A robots value's `none` is the directive (noindex,
 nofollow) only as a whole token: `max-image-preview: none` asks for no image preview and
 no longer reads as noindex (the unspaced `max-image-preview:none` already did not), and a
@@ -4825,7 +4842,9 @@ Semantics a consumer must repeat to its own users:
   before structured data validation existed, or validated by an earlier ruleset
   (re-run the rules); a block met with no validation blob, or one in an older shape,
   mid-export throws and destroys the connection rather than writing the block as
-  clean. On a crawl not wholly at extraction 4 the view has no `unresolved-reference`
+  clean. The view ends with two page-level columns, `Blocks Dropped` and `Nodes Dropped`
+  (Phase 29d), the page's counts repeated on each of its rows and empty for a page below
+  extraction 5, as the listing's nulls. On a crawl not wholly at extraction 4 the view has no `unresolved-reference`
   rows: a plain `text/csv` download simply lacks them (an HTTP file has no metadata
   channel), and the MCP `export_crawl` answer names `schema.unresolved-reference` in
   `notMeasured`, as `{id, reason}` (`[]` on any other crawl), here without

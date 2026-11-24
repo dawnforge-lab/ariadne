@@ -348,7 +348,7 @@ describe("listStructuredData — the rows", () => {
       jsonLdParseErrors: 0,
       microdataErrors: 0,
       skips: SKIPS,
-      blocksAtCap: false, problemsCapped: false,
+      blocksAtCap: false, blocksDropped: null, nodesDropped: null, problemsCapped: false,
     });
     // The empty image is the one warning; the unresolved #brand the one info.
     expect(product?.warningCount).toBe(1);
@@ -359,7 +359,7 @@ describe("listStructuredData — the rows", () => {
     const page = await service.listStructuredData(LOCAL_TENANT, crawlId, {});
     expect(Object.keys(page.items[0]!)).toEqual([
       "url", "pageType", "indexable", "formats", "types", "nodes",
-      "warningCount", "infoCount", "jsonLdParseErrors", "microdataErrors", "skips", "blocksAtCap", "problemsCapped",
+      "warningCount", "infoCount", "jsonLdParseErrors", "microdataErrors", "skips", "blocksAtCap", "blocksDropped", "nodesDropped", "problemsCapped",
     ]);
     expect(Object.keys(page.items[0]!.nodes[0]!)).toEqual(["format", "path", "type", "types", "typesCapped", "properties", "propertiesCapped"]);
   });
@@ -394,7 +394,7 @@ describe("listStructuredData — the rows", () => {
       jsonLdParseErrors: 2,
       microdataErrors: 1,
       skips: { microdataItemrefSkipped: 0, rdfaUnsupported: 0, valuesCapped: 0 },
-      blocksAtCap: false, problemsCapped: false,
+      blocksAtCap: false, blocksDropped: null, nodesDropped: null, problemsCapped: false,
     });
   });
 });
@@ -474,7 +474,7 @@ describe("listStructuredData — refusals", () => {
 describe("the structured_data_nodes CSV view", () => {
   it("writes the header and one row per (block, problem), a clean block as one row", async () => {
     const lines = await csvLines(crawlId);
-    expect(lines[0]).toBe("URL,Format,Schema Type,Path,Node Type,Problem,Detail\r\n");
+    expect(lines[0]).toBe("URL,Format,Schema Type,Path,Node Type,Problem,Detail,Blocks Dropped,Nodes Dropped\r\n");
     const P = `${SITE}/product`;
     const A = `${SITE}/article`;
     expect(lines.slice(1)).toEqual(
@@ -492,7 +492,8 @@ describe("the structured_data_nodes CSV view", () => {
         [A, "jsonld", "Article|Blorpticle", "$.publisher", "", "unresolved-reference", `#org (${A}#org) is not defined on this page`],
         [A, "jsonld", "Person", "", "", "", ""],
         [A, "jsonld", "FAQPage", "", "", "", ""],
-      ].map((cells) => csvRecord(cells)),
+      // An extraction-4 page never counted what it dropped: two empty cells.
+      ].map((cells) => csvRecord([...cells, "", ""])),
     );
   });
 
@@ -700,7 +701,7 @@ describe("the listing and CSV after the final review", () => {
     expect(home?.types).toEqual(["WebPage", "FAQPage", "ItemList"]);
     const lines = await csvLines(multiId);
     const homeRows = lines.filter((l) => l.startsWith(`${SITE}/,`));
-    expect(homeRows[0]).toBe(csvRecord([`${SITE}/`, "jsonld", "WebPage|FAQPage", "", "", "", ""]));
+    expect(homeRows[0]).toBe(csvRecord([`${SITE}/`, "jsonld", "WebPage|FAQPage", "", "", "", "", "", ""]));
   });
 
   it("I1: a page whose block cut a list it counts says problemsCapped; the CSV holds the first MAX per list per block", async () => {
@@ -710,5 +711,94 @@ describe("the listing and CSV after the final review", () => {
     expect(home?.warningCount).toBe(MAX_PROBLEMS_PER_LIST);
     const empties = (await csvLines(multiId)).filter((l) => l.startsWith(`${SITE}/,`) && l.includes(",empty-value,"));
     expect(empties).toHaveLength(MAX_PROBLEMS_PER_LIST);
+  });
+});
+
+// Phase 29d, Task 3: what extraction 5 dropped, on the listing and the CSV.
+// Appended so no earlier line moves.
+describe("blocksDropped and nodesDropped (29d)", () => {
+  const dropId = `crawl_sd_listing_dropped_${runId}`;
+  const mixedId = `crawl_sd_listing_dropped_bad_${runId}`;
+  const FIVE = { microdataItemrefSkipped: 0, rdfaUnsupported: 0, valuesCapped: 0, blocksDropped: 0, nodesDropped: 0 };
+
+  async function atExtraction5(id: string, product: Record<string, number>): Promise<void> {
+    await db.execute(sql`update pages set extraction_version = 5, structured_data_skips = ${JSON.stringify(FIVE)}::jsonb
+                          where crawl_id = ${id}`);
+    await db.execute(sql`update pages set structured_data_skips = ${JSON.stringify({ ...FIVE, ...product })}::jsonb
+                          where crawl_id = ${id} and url = ${`${SITE}/product`}`);
+  }
+
+  beforeAll(async () => {
+    allCrawls.push(dropId, mixedId);
+    // 60 blocks on /product: the analyzer stored 50 and dropped 10.
+    const ids = await seedCrawl(dropId);
+    for (let i = BLOCKS.filter((b) => b.path === "/product").length; i < MAX_STRUCTURED_DATA_BLOCKS; i += 1) {
+      await db.insert(structuredData).values({
+        crawlId: dropId, pageId: ids.get("/product")!, schemaType: "Thing", format: "jsonld",
+        raw: { "@context": C, "@type": "Thing", name: `filler ${i}` },
+      });
+    }
+    await atExtraction5(dropId, { blocksDropped: 10 });
+    await service.runRulesForCrawl(LOCAL_TENANT, dropId);
+
+    // An extraction-5 page whose stored skips are the legacy three keys.
+    await seedCrawl(mixedId);
+    await service.runRulesForCrawl(LOCAL_TENANT, mixedId);
+    await db.execute(sql`update pages set extraction_version = 5 where crawl_id = ${mixedId} and url = ${`${SITE}/product`}`);
+  }, 120_000);
+
+  it("an extraction-5 page with 60 blocks lists blocksDropped 10 and nodesDropped 0; blocksAtCap follows blocksDropped", async () => {
+    const page = await service.listStructuredData(LOCAL_TENANT, dropId, {});
+    const product = page.items.find((r) => r.url === `${SITE}/product`);
+    expect(product).toMatchObject({ blocksDropped: 10, nodesDropped: 0, blocksAtCap: true });
+    expect(product?.skips).toEqual({ microdataItemrefSkipped: 0, rdfaUnsupported: 0, valuesCapped: 0 });
+    const article = page.items.find((r) => r.url === `${SITE}/article`);
+    expect(article).toMatchObject({ blocksDropped: 0, nodesDropped: 0, blocksAtCap: false });
+  });
+
+  it("on an extraction-5 page, blocksAtCap is blocksDropped > 0 even when the stored count is at the cap", async () => {
+    await db.execute(sql`update pages set structured_data_skips = structured_data_skips || '{"blocksDropped": 0}'::jsonb
+                          where crawl_id = ${dropId} and url = ${`${SITE}/product`}`);
+    const product = (await service.listStructuredData(LOCAL_TENANT, dropId, {})).items.find((r) => r.url === `${SITE}/product`);
+    // 50 blocks are stored, yet nothing was dropped: the cap was reached, not exceeded.
+    expect(product).toMatchObject({ blocksDropped: 0, blocksAtCap: false });
+    await db.execute(sql`update pages set structured_data_skips = structured_data_skips || '{"blocksDropped": 10}'::jsonb
+                          where crawl_id = ${dropId} and url = ${`${SITE}/product`}`);
+  });
+
+  it("an extraction-4 page lists both as null and keeps blocksAtCap as the stored count gives it", async () => {
+    const capped = await service.listStructuredData(LOCAL_TENANT, capId, {});
+    expect(capped.items.find((r) => r.url === `${SITE}/product`)).toMatchObject({ blocksDropped: null, nodesDropped: null, blocksAtCap: true });
+    const plain = await service.listStructuredData(LOCAL_TENANT, crawlId, {});
+    expect(plain.items.find((r) => r.url === `${SITE}/product`)).toMatchObject({ blocksDropped: null, nodesDropped: null, blocksAtCap: false });
+  });
+
+  it("an extraction-5 page whose skips lack the drop keys is a loud error naming the page, never null or 0", async () => {
+    const error = await service.listStructuredData(LOCAL_TENANT, mixedId, {}).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(Error);
+    const message = String((error as Error).message);
+    expect(message).toContain(mixedId);
+    expect(message).toContain(`${SITE}/product`);
+    expect(message).toContain("blocksDropped");
+  });
+
+  it("an extraction-4 page that holds the drop keys is a loud error too", async () => {
+    await db.execute(sql`update pages set extraction_version = 4 where crawl_id = ${mixedId}`);
+    await db.execute(sql`update pages set structured_data_skips = ${JSON.stringify(FIVE)}::jsonb
+                          where crawl_id = ${mixedId} and url = ${`${SITE}/product`}`);
+    const error = await service.listStructuredData(LOCAL_TENANT, mixedId, {}).catch((e: unknown) => e);
+    expect(String((error as Error).message)).toContain(`${SITE}/product`);
+    expect(String((error as Error).message)).toContain("blocksDropped");
+  });
+
+  it("the CSV carries both columns, filled on an extraction-5 page and empty for null", async () => {
+    const five = await csvLines(dropId);
+    const productRows = five.filter((l) => l.startsWith(`${SITE}/product,`));
+    expect(productRows.length).toBeGreaterThan(0);
+    for (const row of productRows) expect(row.endsWith(",10,0\r\n")).toBe(true);
+    const articleRows = five.filter((l) => l.startsWith(`${SITE}/article,`));
+    for (const row of articleRows) expect(row.endsWith(",0,0\r\n")).toBe(true);
+    const four = await csvLines(crawlId);
+    for (const row of four.slice(1)) expect(row.endsWith(",,\r\n")).toBe(true);
   });
 });

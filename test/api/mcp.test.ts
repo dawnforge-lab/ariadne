@@ -3429,3 +3429,13 @@ describe("structured_data's description names the node shape (29a final review)"
     expect(text).toContain("problemsCapped");
   });
 });
+
+describe("structured_data's description names the drop counts (29d)", () => {
+  it("names blocksDropped and nodesDropped, and says null is below extraction 5", async () => {
+    const listed = await client.listTools();
+    const text = listed.tools.find((t) => t.name === "structured_data")?.description ?? "";
+    expect(text).toContain("blocksDropped");
+    expect(text).toContain("nodesDropped");
+    expect(text).toContain("extraction below version 5");
+  });
+});

@@ -73,6 +73,7 @@ import {
   blockProblems,
   blockTypesCell,
   problemCells,
+  projectSkipFacts,
   validationReadable,
 } from "./structured-data.js";
 
@@ -1090,8 +1091,10 @@ export const CSV_VIEW_DEFS: Record<CsvQueryViewName, CsvView> = {
     validated: boolean;
     readable: boolean | null;
     problem: unknown;
+    extraction_version: number | null;
+    skips: unknown;
   }>({
-    header: ["URL", "Format", "Schema Type", "Path", "Node Type", "Problem", "Detail"],
+    header: ["URL", "Format", "Schema Type", "Path", "Node Type", "Problem", "Detail", "Blocks Dropped", "Nodes Dropped"],
     keyset: ["id", "ord"],
     // Ids are positive and `ord` is never negative, so (-1, -1) precedes every row.
     start: ["-1", "-1"],
@@ -1103,7 +1106,7 @@ export const CSV_VIEW_DEFS: Record<CsvQueryViewName, CsvView> = {
                   then ${blockTypesCell(sql`sd.validation_jsonb`)} else '' end as schema_type,
              sd.validation_jsonb is not null as validated,
              ${validationReadable(sql`sd.validation_jsonb`)} as readable,
-             x.problem
+             x.problem, p.extraction_version, p.structured_data_skips as skips
       from structured_data sd
       join pages p on p.crawl_id = ${crawlId} and p.id = sd.page_id
       cross join lateral (
@@ -1141,9 +1144,13 @@ export const CSV_VIEW_DEFS: Record<CsvQueryViewName, CsvView> = {
       if (!(STRUCTURED_DATA_FORMATS as readonly string[]).includes(row.format)) {
         throw new Error(`structured_data_nodes: ${where} has format '${row.format}', which no writer produces`);
       }
-      if (row.ord === "0") return [row.url, row.format, row.schema_type, "", "", "", ""];
+      // The page's counts, repeated on each of its rows; empty where the page's
+      // extraction (below 5) never counted them.
+      const { blocksDropped, nodesDropped } = projectSkipFacts(row.skips, row.extraction_version, where);
+      const dropped = [blocksDropped === null ? "" : String(blocksDropped), nodesDropped === null ? "" : String(nodesDropped)];
+      if (row.ord === "0") return [row.url, row.format, row.schema_type, "", "", "", "", ...dropped];
       const cells = problemCells(row.problem, where);
-      return [row.url, row.format, row.schema_type, cells.path, cells.nodeType, cells.problem, cells.detail];
+      return [row.url, row.format, row.schema_type, cells.path, cells.nodeType, cells.problem, cells.detail, ...dropped];
     },
   }),
 };

@@ -280,7 +280,7 @@ import {
   referencesMeasured,
   UNRESOLVED_NOT_MEASURED,
   projectNodes,
-  projectSkips,
+  projectSkipFacts,
   type ProjectedSkips,
   storedFormat,
   validationReadable,
@@ -2458,8 +2458,9 @@ export interface StructuredDataPageRow {
   /**
    * Each block's top-level node, in block order:
    * `{format, path, type, types, typesCapped, properties, propertiesCapped}` —
-   * `type` the primary type, `types` every type the node states (one for a
-   * microdata or RDFa node at extraction 4), both lists capped per node.
+   * `type` the primary type, `types` every type the node states (a microdata
+   * or RDFa node states one at extraction 4, and from extraction 5 every
+   * itemtype / typeof token), both lists capped per node.
    */
   nodes: StructuredDataNode[];
   warningCount: number;
@@ -2470,9 +2471,14 @@ export interface StructuredDataPageRow {
   /**
    * The page's stored blocks reached the analyzer's cap
    * (`MAX_STRUCTURED_DATA_BLOCKS`): blocks past it were not stored, so an id a
-   * reference names may be defined there (review I3).
+   * reference names may be defined there (review I3). From extraction 5 it is
+   * `blocksDropped > 0`; below it, the stored block count reaching the cap.
    */
   blocksAtCap: boolean;
+  /** Blocks past the per-page cap that were not stored. Null below extraction 5: not counted. */
+  blocksDropped: number | null;
+  /** Nodes past the per-block cap that were not stored. Null below extraction 5: not counted. */
+  nodesDropped: number | null;
   /**
    * A block on the page cut one of the lists the counts read at
    * `MAX_PROBLEMS_PER_LIST`: `warningCount` / `infoCount` may be short (final
@@ -7155,6 +7161,7 @@ export class ApiService {
           parse_errors: number;
           microdata_errors: number | null;
           skips: unknown;
+          extraction_version: number | null;
           formats: string[];
           types: string[];
           nodes: unknown;
@@ -7168,6 +7175,7 @@ export class ApiService {
                  p.structured_data_parse_errors as parse_errors,
                  p.structured_data_microdata_errors as microdata_errors,
                  p.structured_data_skips as skips,
+                 p.extraction_version,
                  coalesce(b.formats, '{}'::text[]) as formats,
                  -- Every type the page's top-level nodes state, in authored
                  -- order (block, then the node's own order), each once (final
@@ -7232,6 +7240,7 @@ export class ApiService {
                 "(one written before the 29a rework is not): re-run the rules (crawl_rules)",
             );
           }
+          const facts = projectSkipFacts(row.skips, row.extraction_version, `crawl ${crawlId}, page ${row.url}`);
           return {
             url: row.url,
             pageType: row.page_type,
@@ -7243,8 +7252,12 @@ export class ApiService {
             infoCount: row.info_count,
             jsonLdParseErrors: row.parse_errors,
             microdataErrors: row.microdata_errors,
-            skips: projectSkips(row.skips, crawlId, row.url),
-            blocksAtCap: row.blocks_at_cap,
+            skips: facts.skips,
+            // From extraction 5 the writer says how many blocks it dropped, which is
+            // exact; below it the stored count reaching the cap is the only signal.
+            blocksAtCap: facts.blocksDropped === null ? row.blocks_at_cap : facts.blocksDropped > 0,
+            blocksDropped: facts.blocksDropped,
+            nodesDropped: facts.nodesDropped,
             problemsCapped: row.problems_capped,
           };
         });

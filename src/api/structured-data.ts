@@ -36,52 +36,74 @@ import { ServiceError, clip } from "./errors.js";
 
 /** The keys of `StructuredDataSkips`, which a stored `structured_data_skips` must hold exactly. */
 const SKIP_KEYS = ["microdataItemrefSkipped", "rdfaUnsupported", "valuesCapped"] as const satisfies readonly (keyof StructuredDataSkips)[];
-/**
- * The two counters extraction 5 adds (Phase 29d). A row stored at version 4
- * holds `SKIP_KEYS` only; a version 5 row holds both sets. They are validated
- * here and not yet on the wire (Task 3 of 29d surfaces them).
- */
+/** The two counters extraction 5 adds (Phase 29d); a row stored at version 4 holds `SKIP_KEYS` only. */
 const DROP_KEYS = ["blocksDropped", "nodesDropped"] as const satisfies readonly (keyof StructuredDataSkips)[];
-/** The skips this projection answers: the three counters every stored row has. */
+/** The first extraction whose stored skips hold `DROP_KEYS`. */
+const DROP_COUNTERS_FROM_EXTRACTION = 5;
+/** The skips this projection answers on `skips`: the three counters every stored row has. */
 export type ProjectedSkips = Pick<StructuredDataSkips, (typeof SKIP_KEYS)[number]>;
 type MissingSkipKey = Exclude<keyof StructuredDataSkips, (typeof SKIP_KEYS)[number] | (typeof DROP_KEYS)[number]>;
 const _everySkipKey: MissingSkipKey extends never ? true : never = true;
 void _everySkipKey;
 
 /**
+ * A page's stored `structured_data_skips`, read against the extraction that
+ * wrote it: the three legacy counters as `skips`, and the two extraction 5
+ * drop counters beside it.
+ */
+export interface ProjectedSkipFacts {
+  skips: ProjectedSkips | null;
+  /** Blocks past the per-page cap that were not stored; null below extraction 5 (not counted). */
+  blocksDropped: number | null;
+  /** Nodes past the per-block cap that were not stored; null below extraction 5. */
+  nodesDropped: number | null;
+}
+
+/**
  * A page's stored `structured_data_skips`, projected key by key onto the wire
  * (Talos obligation 6: named fields, never a stored blob passed through).
  *
- * Null stays null — a page extracted below version 4, which never counted.
- * Anything but an object of exactly the three non-negative integer counters is
- * a row this engine did not write, and throws naming the crawl and page rather
- * than dropping a key or answering a partial object.
+ * The shape is tied to the row's `extraction_version`: a row at extraction 5 or
+ * later holds all five counters and anything else throws; a row below it holds
+ * exactly the three legacy counters and answers `blocksDropped` and
+ * `nodesDropped` as null (never counted, never zero). Null skips stay null — a
+ * page extracted below version 4, which never counted — and are refused at
+ * extraction 5, whose writer always counts. Every counter must be a
+ * non-negative integer; a row this engine did not write throws naming the
+ * label (crawl and page) rather than dropping a key or answering a partial object.
  */
-export function projectSkips(value: unknown, crawlId: string, url: string): ProjectedSkips | null {
-  if (value === null) return null;
+export function projectSkipFacts(value: unknown, extractionVersion: number | null, label: string): ProjectedSkipFacts {
   const bad = (why: string): never => {
-    throw new Error(`crawl ${crawlId}, page ${url}: structured_data_skips ${why}`);
+    throw new Error(`${label}: structured_data_skips ${why}`);
   };
+  const counted = extractionVersion !== null && extractionVersion >= DROP_COUNTERS_FROM_EXTRACTION;
+  if (value === null) {
+    if (counted) return bad(`is null on a page at extraction ${extractionVersion}, which counts all five`);
+    return { skips: null, blocksDropped: null, nodesDropped: null };
+  }
   if (typeof value !== "object" || Array.isArray(value)) return bad("is not an object");
   const stored = value as Record<string, unknown>;
-  const keys = Object.keys(stored).sort();
-  const legacy = [...SKIP_KEYS].sort().join(",");
-  const current = [...SKIP_KEYS, ...DROP_KEYS].sort().join(",");
-  if (keys.join(",") !== legacy && keys.join(",") !== current) {
-    return bad(`holds keys [${keys.join(", ")}], not exactly [${SKIP_KEYS.join(", ")}] or [${[...SKIP_KEYS, ...DROP_KEYS].join(", ")}]`);
+  const keys = Object.keys(stored).sort().join(",");
+  const expected = counted ? [...SKIP_KEYS, ...DROP_KEYS] : [...SKIP_KEYS];
+  if (keys !== [...expected].sort().join(",")) {
+    return bad(
+      `holds keys [${Object.keys(stored).join(", ")}], not exactly [${expected.join(", ")}] ` +
+        `as a page at extraction ${extractionVersion ?? "null"} must`,
+    );
   }
   const count = (key: (typeof SKIP_KEYS)[number] | (typeof DROP_KEYS)[number]): number => {
     const n = stored[key];
     return typeof n === "number" && Number.isInteger(n) && n >= 0 ? n : bad(`has a ${key} that is not a non-negative integer`);
   };
-  const projected = {
-    microdataItemrefSkipped: count("microdataItemrefSkipped"),
-    rdfaUnsupported: count("rdfaUnsupported"),
-    valuesCapped: count("valuesCapped"),
+  return {
+    skips: {
+      microdataItemrefSkipped: count("microdataItemrefSkipped"),
+      rdfaUnsupported: count("rdfaUnsupported"),
+      valuesCapped: count("valuesCapped"),
+    },
+    blocksDropped: counted ? count("blocksDropped") : null,
+    nodesDropped: counted ? count("nodesDropped") : null,
   };
-  // A version 5 row's two drop counters must be sound too, though not yet answered.
-  if (keys.length > SKIP_KEYS.length) for (const key of DROP_KEYS) count(key);
-  return projected;
 }
 
 /** The syntaxes a block is stored from — the `format` filter's closed vocabulary. */

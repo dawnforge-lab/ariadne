@@ -740,7 +740,7 @@ describe("the structured_data_nodes CSV view (29a)", () => {
       headers: { authorization: `Bearer ${TOKEN}`, "x-ariadne-tenant": ACME },
     });
     expect(own.status).toBe(200);
-    expect((await own.text()).split("\r\n")[0]).toBe("URL,Format,Schema Type,Path,Node Type,Problem,Detail");
+    expect((await own.text()).split("\r\n")[0]).toBe("URL,Format,Schema Type,Path,Node Type,Problem,Detail,Blocks Dropped,Nodes Dropped");
   });
 });
 

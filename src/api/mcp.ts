@@ -1838,7 +1838,7 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "One row per page that carries structured data — a JSON-LD, microdata or " +
         "RDFa block — or a JSON-LD parse error or microdata error: {url, pageType, " +
         "indexable, formats, types, nodes, warningCount, infoCount, " +
-        "jsonLdParseErrors, microdataErrors, skips, blocksAtCap, problemsCapped}. A page with " +
+        "jsonLdParseErrors, microdataErrors, skips, blocksAtCap, blocksDropped, nodesDropped, problemsCapped}. A page with " +
         "neither is not listed. Use it to see which templates publish which markup, and where " +
         "the problems are, before reading the schema.* findings.\n\n" +
         "formats are the syntaxes found, distinct and sorted. types are every type the " +
@@ -1847,7 +1847,7 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "reference, not a node), in block order: {format, path, type, types, typesCapped, " +
         "properties, propertiesCapped} — type the primary type as the markup states it " +
         "(null when untyped), types every type the node states (a microdata or RDFa node " +
-        "lists one: extraction 4 keeps only the first itemtype / typeof token), properties " +
+        "lists every itemtype / typeof token from extraction 5; a page at extraction 4 kept only the first), properties " +
         "the node's property names; both lists are capped per node, with typesCapped and " +
         "propertiesCapped true when cut short. Structured data is judged by the " +
         "schema.org vocabulary and the JSON-LD, Microdata and RDFa specs; which " +
@@ -1859,9 +1859,12 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "same page defines — linking to an entity defined elsewhere is legal, so " +
         "read those as facts to check. Ids are resolved against the page URL (or " +
         "a declared @base). On a crawl not wholly at extraction 4 references are " +
-        "not counted, and notMeasured says so. blocksAtCap: the page's stored " +
-        "blocks reached the per-page limit, so an id may be defined in a block " +
-        "that was not stored. problemsCapped: a block cut one of the lists these counts " +
+        "not counted, and notMeasured says so. blocksAtCap: the page had " +
+        "blocks past the per-page limit, so an id may be defined in a block " +
+        "that was not stored (from extraction 5 it is blocksDropped > 0). blocksDropped: " +
+        "how many blocks past the per-page limit were not stored. nodesDropped: how many " +
+        "nodes past the per-block limit were not stored. Both are null on a page crawled at " +
+        "an extraction below version 5, which did not count them. problemsCapped: a block cut one of the lists these counts " +
         "read at its per-block limit, so the counts may be short. The " +
         "problem-by-problem detail is the structured_data_nodes CSV view " +
         "(export_crawl format=csv), one row per block and problem.\n\n" +
@@ -1880,7 +1883,8 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "one block of that syntax\n\n" +
         "Ordered by URL. Paginated: {items, nextCursor, notMeasured}; limit defaults to " +
         `${PAGE_SIZE_DEFAULT}, maximum ${PAGE_SIZE_MAX}. The CSV view's Problem ` +
-        `column is one of: ${STRUCTURED_DATA_PROBLEMS.join(", ")}.`,
+        `column is one of: ${STRUCTURED_DATA_PROBLEMS.join(", ")}. The CSV also ends with the ` +
+        "page's Blocks Dropped and Nodes Dropped, repeated on each of its rows, empty where null.",
       inputSchema: strictInput({
         crawlId: crawlIdField(),
         pageType: z
