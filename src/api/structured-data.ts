@@ -256,17 +256,18 @@ function unresolved(ref: SQL, crawlId: string, pageId: SQL, isEntry = true): SQL
 /**
  * Whether one block cut a list the counts read (`cappedLists`, final review
  * I1): the page's counts are then short, and the row says so
- * (`problemsCapped`). The unresolved count no longer reads `references` (29d):
- * it is exact up to a block that counted more than 50 unresolved ids, where
- * unlisted ones are counted as unresolved and the count may be high, so the
- * row says so there, where references are measured.
+ * (`problemsCapped`). The unresolved count reads no capped list (29d) and is
+ * exact, so it is not here; the row is also capped when the page's unresolved
+ * count is over `MAX_PROBLEMS_PER_LIST` (`UNRESOLVED_CAPPED_AT`, as the rule).
  */
-export function blockProblemsCapped(blob: SQL, crawlId: string): SQL {
-  return sql`(exists (
+export function blockProblemsCapped(blob: SQL): SQL {
+  return sql`exists (
     select 1 from jsonb_array_elements_text(${list(blob, "cappedLists")}) as c(name)
-     where c.name in ('unknownTypes', 'unknownProperties', 'propertyStatus', 'typeMismatches', 'emptyValues'))
-    or (${referencesMeasured(crawlId)} and (${blob} ->> 'unresolvedCount')::int > ${MAX_PROBLEMS_PER_LIST}))`;
+     where c.name in ('unknownTypes', 'unknownProperties', 'propertyStatus', 'typeMismatches', 'emptyValues'))`;
 }
+
+/** The page's unresolved count past which the rule's `problemsCapped` is true. */
+export const UNRESOLVED_CAPPED_AT = MAX_PROBLEMS_PER_LIST;
 
 /**
  * Every type a block's top-level node states (`nodes[].types`), joined with
@@ -291,16 +292,43 @@ export function blockWarnings(blob: SQL): SQL {
  * references no block of the page defines. Null when the blob is unreadable.
  */
 export function blockInfos(blob: SQL, crawlId: string, pageId: SQL): SQL {
-  // From the block's `unresolved` ids and exact `unresolvedCount` (29d), not
-  // the first 50 `references`. A block that counted more than it listed has
-  // unlisted references the page cannot be checked against: they are counted,
-  // as the rule counts them, and `blockProblemsCapped` says the count may be high.
-  return sql`(jsonb_array_length(${list(blob, "propertyStatus")})
-    + (select count(*) from jsonb_array_elements_text(${list(blob, "unresolved")}) as u(id)
-        where ${unresolved(sql`to_jsonb(u.id)`, crawlId, pageId, false)})
-    + case when ${referencesMeasured(crawlId)}
-           then (${blob} ->> 'unresolvedCount')::int - jsonb_array_length(${list(blob, "unresolved")})
-           else 0 end)`;
+  return sql`(jsonb_array_length(${list(blob, "propertyStatus")}) + ${blockUnresolved(blob, crawlId, pageId)})`;
+}
+
+/**
+ * One block's references no block of the page defines, counted from the
+ * block's complete `unresolved` ids (29d), so the page's sum is exact and agrees
+ * with `schema.unresolved-reference`. 0 where references are not measured.
+ */
+export function blockUnresolved(blob: SQL, crawlId: string, pageId: SQL): SQL {
+  return sql`(select count(*) from jsonb_array_elements_text(${list(blob, "unresolved")}) as u(id)
+        where ${unresolved(sql`to_jsonb(u.id)`, crawlId, pageId, false)})`;
+}
+
+/** What the `unresolved-reference` row's Path says for an id past the block's first 50 references. */
+export const PATH_NOT_RECORDED = "(path not recorded)";
+
+/**
+ * A block's `unresolved-reference` entries, one per unresolved id the page
+ * does not define (29d), uncapped: the `references` list stops at 50, so the
+ * path and written form come from it by id and occurrence where it holds the
+ * reference, and an id past it gets `PATH_NOT_RECORDED` and its resolved id
+ * as `written`. Walk order.
+ */
+function unresolvedRows(blob: SQL, crawlId: string, pageId: SQL): SQL {
+  return sql`coalesce((
+      select jsonb_agg(jsonb_build_object(
+               'path', coalesce(r.entry -> 'path', to_jsonb(${PATH_NOT_RECORDED}::text)),
+               'id', u.id,
+               'written', coalesce(r.entry -> 'written', to_jsonb(u.id)),
+               'problem', 'unresolved-reference'::text) order by u.n)
+        from (select x.id, x.n, row_number() over (partition by x.id order by x.n) as k
+                from jsonb_array_elements_text(${list(blob, "unresolved")}) with ordinality as x(id, n)) u
+        left join (select y.entry, row_number() over (partition by y.entry ->> 'id' order by y.n) as k
+                     from jsonb_array_elements(${list(blob, "references")}) with ordinality as y(entry, n)) r
+               on r.entry ->> 'id' = u.id and r.k = u.k
+       where ${unresolved(sql`to_jsonb(u.id)`, crawlId, pageId, false)}
+    ), '[]'::jsonb)`;
 }
 
 /**
@@ -330,7 +358,7 @@ export function blockProblems(blob: SQL, crawlId: string, pageId: SQL): SQL {
       tagged("propertyStatus", "property-status"),
       tagged("typeMismatches", "type-mismatch"),
       tagged("emptyValues", "empty-value"),
-      tagged("references", "unresolved-reference", unresolved(sql`e.entry`, crawlId, pageId)),
+      unresolvedRows(blob, crawlId, pageId),
     ],
     sql` || `,
   )})`;

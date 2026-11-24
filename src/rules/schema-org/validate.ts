@@ -55,10 +55,11 @@
  *    a question about the PAGE — another block may define the id — so it is
  *    answered at rules time, not here;
  *  - `unresolved` / `unresolvedCount` (29d): the references no node of this
- *    block defines (the page's other blocks may) as resolved ids in walk
- *    order, up to `MAX_PROBLEMS_PER_LIST`, with the exact count. Taken from
- *    every reference walked, so one past the 50th that `references` had no
- *    room for is still found.
+ *    block defines (the page's other blocks may) as resolved ids, one per
+ *    reference, in walk order, and their count. NEVER capped, like
+ *    `definedIds`: taken from every reference walked, so one past the 50th
+ *    that `references` had no room for is found, and the page-level answer
+ *    (which of them another block defines) is exact.
  *
  * **Ids are IRIs, resolved against the document base** (JSON-LD 1.1 §IRIs, as
  * microdata `itemid` and RDFa `resource` already are at extraction): the page
@@ -121,8 +122,8 @@ const LIST_NAMES = [
 export type ListName = (typeof LIST_NAMES)[number];
 const list = <T extends z.ZodType>(entry: T) => z.array(entry).max(MAX_PROBLEMS_PER_LIST);
 
-/** What readers parse a stored `validation_jsonb` blob with. */
-export const blockValidationSchema = z.strictObject({
+/** The block verdict's shape, before the count invariant (`blockValidationSchema`); readers parse with that. */
+export const blockValidationObject = z.strictObject({
   topType: z.string().nullable(),
   unknownTypes: list(z.strictObject({ path, type: z.string() })),
   unknownProperties: list(z.strictObject({ path, type: z.string(), property: z.string() })),
@@ -143,12 +144,13 @@ export const blockValidationSchema = z.strictObject({
   // `id` resolved against the document base (the compared value); `written` as authored.
   references: list(z.strictObject({ path, id: z.string().min(1), written: z.string().min(1) })),
   /**
-   * The resolved ids of the references no node of THIS block defines, in walk
-   * order, whether or not `references` had room for them (29d). The page may
-   * define one in another block: the rule subtracts those. Capped at
-   * `MAX_PROBLEMS_PER_LIST`; `unresolvedCount` is exact.
+   * The resolved id of every reference no node of THIS block defines, one per
+   * reference, in walk order (29d). NEVER capped, like `definedIds` (the block's
+   * stored size bounds it): the page may define an id in another block, and the
+   * rule can only subtract those from a complete list. `unresolvedCount` is its
+   * length (`blockValidationSchema` enforces it).
    */
-  unresolved: z.array(z.string().min(1)).max(MAX_PROBLEMS_PER_LIST),
+  unresolved: z.array(z.string().min(1)),
   unresolvedCount: z.number().int().nonnegative(),
   nodes: list(
     z.strictObject({
@@ -177,7 +179,15 @@ export const blockValidationSchema = z.strictObject({
   judged: z.boolean(),
 });
 
-export type BlockValidation = z.infer<typeof blockValidationSchema>;
+/** `unresolvedCount` is the length of `unresolved`: the one invariant between the two. */
+export const unresolvedCountMatches = (v: { unresolved: readonly string[]; unresolvedCount: number }): boolean =>
+  v.unresolvedCount === v.unresolved.length;
+export const UNRESOLVED_COUNT_ISSUE = { message: "unresolvedCount must equal the length of unresolved", path: ["unresolvedCount"] };
+
+/** What readers parse a stored `validation_jsonb` blob with. */
+export const blockValidationSchema = blockValidationObject.refine(unresolvedCountMatches, UNRESOLVED_COUNT_ISSUE);
+
+export type BlockValidation = z.infer<typeof blockValidationObject>;
 
 type Lists = Pick<BlockValidation, ListName>;
 
@@ -576,7 +586,7 @@ export function validateBlock(raw: unknown, documentUrl: string): BlockValidatio
     emptyValues: walker.lists.emptyValues,
     definedIds: [...walker.definedIds],
     references: walker.lists.references,
-    unresolved: unresolvedAll.slice(0, MAX_PROBLEMS_PER_LIST),
+    unresolved: unresolvedAll,
     unresolvedCount: unresolvedAll.length,
     nodes: walker.lists.nodes,
     outsideVocabulary: walker.outside,

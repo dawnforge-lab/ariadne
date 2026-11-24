@@ -229,12 +229,14 @@ validated before it is refused (409, "re-run the rules"), never read.
     in a block that was not read. The rule is gated: silent on a crawl not wholly at
     extraction 4. A `@graph` member that is only `{"@id": …}` is a reference at `$`,
     checked as one, and not a node. From Phase 29d every reference is checked, wherever it
-    sits: the block verdict holds `unresolved` (the resolved ids no node of the block
-    defines, up to 50, in walk order) and `unresolvedCount` (exact), and the evidence
-    carries `unresolved` (the page's unresolved ids, up to 50, columns `Unresolved Ids`),
-    `unresolvedCount` (`Unresolved Count`, exact) and `problemsCapped` (true when
-    `unresolvedCount` is over 50). `problems` (the path of each) comes from each block's
-    first 50 references, so it may hold fewer entries than the count, and `problemCount`
+    sits: the block verdict holds `unresolved` (the resolved id of every reference no
+    node of the block defines, in walk order, never capped, as `definedIds` is) and
+    `unresolvedCount` (its length). The rule subtracts the ids the page's other blocks
+    define, so the evidence is exact: `unresolved` (the page's unresolved ids, up to 50,
+    column `Unresolved Ids`), `unresolvedCount` (`Unresolved Count`) and `problemsCapped`
+    (true exactly when `unresolvedCount` is over 50). `problems` has one entry per
+    unresolved id (the first 20 are in the evidence); `path` and `written` are recorded
+    for each block's first 50 references and are null for an id past them. `problemCount`
     equals `unresolvedCount`.
   - **`problemsCapped`** (column `Problems Capped`) is on the evidence of every per-node
     rule (`unknown-type`, `unknown-property`, `property-pending-or-superseded`,
@@ -3097,13 +3099,12 @@ blocksDropped, nodesDropped, problemsCapped
   counts read at its per-block limit (50): `warningCount` / `infoCount` may be short
   (an empty-value list cut at 50 holds more problems than it shows). The unresolved
   part of `infoCount` is not cut by the references list (Phase 29d): it is exact, a
-  reference past the 50th included, unless one block holds more than 50 references
-  that no node of that block defines. Such a block lists 50 ids and counts the rest,
-  which another block of the page may define, so the count may be high there and
-  `problemsCapped` is true.
-  The `structured_data_nodes` CSV holds the first 50 of each list, so its rows for one
-  problem stop at 50 per block; a reference past the 50th is counted by the listing and
-  the rule but has no CSV row.
+  reference past the 50th included, and `problemsCapped` is also true when the page has
+  more than 50 unresolved references, as in the rule's evidence.
+  The `structured_data_nodes` CSV holds the first 50 of each other list, so its rows for
+  one such problem stop at 50 per block; its `unresolved-reference` rows are not cut, one
+  for every unresolved id, with Path `(path not recorded)` for a reference past the
+  block's first 50.
 - **`notMeasured`** is `{id, reason}[]`. On a crawl not wholly at extraction 4 the
   unresolved-reference count is not measured and `notMeasured` names
   `schema.unresolved-reference`; `infoCount` then holds no references. It is `[]`
@@ -4473,10 +4474,12 @@ node's `types` lists them all, and the stored skips gain `blocksDropped` and
 `blocksDropped` / `nodesDropped` (null below extraction 5), and the `structured_data_nodes`
 CSV (§12) ends with `Blocks Dropped` and `Nodes Dropped` columns. The two columns are appended at the end: consumers reading by header name are unaffected, and positional consumers see 9 columns where they saw 7. A crawl at extraction 4
 keeps answering null for both until it is re-crawled. `schema.unresolved-reference` finds a
-reference wherever it sits, past the 50th too: the block verdict gains `unresolved` (up to
-50 ids) and `unresolvedCount` (exact), its evidence is `{unresolved, unresolvedCount,
-problemsCapped}`, and the `structured_data` listing's `infoCount` reads the same count. A
-verdict stored without them is stale and the next rules run rewrites it.
+reference wherever it sits, past the 50th too: the block verdict gains `unresolved` (every
+id no node of the block defines, uncapped) and `unresolvedCount` (its length), the rule's
+evidence is `{unresolved (up to 50), unresolvedCount, problemsCapped}` over the page, and
+the `structured_data` listing's `infoCount` and `problemsCapped` and the CSV's
+`unresolved-reference` rows read the same exact count. A verdict stored without them is
+stale and the next rules run rewrites it.
 
 **0.28.1 is a fix, not a phase.** A robots value's `none` is the directive (noindex,
 nofollow) only as a whole token: `max-image-preview: none` asks for no image preview and

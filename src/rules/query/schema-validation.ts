@@ -51,7 +51,10 @@ import type { RuleCaps } from "../registry/types.js";
 import { staleBlob } from "../schema-org/blob-sql.js";
 import {
   MAX_PROBLEMS_PER_LIST,
+  UNRESOLVED_COUNT_ISSUE,
+  blockValidationObject,
   blockValidationSchema,
+  unresolvedCountMatches,
   type BlockValidation,
   type ListName,
 } from "../schema-org/validate.js";
@@ -92,7 +95,9 @@ interface BlockRow {
 type BlockView = Omit<BlockValidation, "definedIds"> & { definedIds?: string[] };
 
 /** The strict schema for a verdict selected without `definedIds` (final review M7). */
-const blockValidationWithoutIdsSchema = blockValidationSchema.omit({ definedIds: true });
+const blockValidationWithoutIdsSchema = blockValidationObject
+  .omit({ definedIds: true })
+  .refine(unresolvedCountMatches, UNRESOLVED_COUNT_ISSUE);
 
 /**
  * `parse-error`: counts straight off `pages`. The microdata column is null on a
@@ -189,49 +194,57 @@ const listHas = (key: string) => (): SQL =>
 
 /**
  * A reference of block `sd` that no block of page `p` defines, read from the
- * block's `unresolved` ids (references no node of the block itself defines;
- * 29d), which cover every reference walked, not the first 50 recorded in
- * `references`. A block whose `unresolvedCount` exceeds the ids it lists has
- * references the page cannot be checked against here, so it is selected and
- * the reader counts them (`unresolvedSummary`). A sibling block whose verdict
- * is null defines nothing here; the page is then selected and the reader
- * throws on that block, so the null is never read as "undefined".
+ * block's `unresolved` ids (the references no node of the block itself
+ * defines; 29d). That list is complete (every reference walked, not the first
+ * 50 recorded in `references`), so the page-level answer is exact. A sibling
+ * block whose verdict is null defines nothing here; the page is then selected
+ * and the reader throws on that block, so the null is never read as "undefined".
  */
 const unresolvedHas = (crawlId: string): SQL =>
-  sql`((sd.validation_jsonb ->> 'unresolvedCount')::int > 0 and (
-    (sd.validation_jsonb ->> 'unresolvedCount')::int > jsonb_array_length(sd.validation_jsonb -> 'unresolved')
-    or exists (
-      select 1 from jsonb_array_elements(sd.validation_jsonb -> 'unresolved') r(id)
-      where not exists (
-        select 1 from structured_data d
-        where d.crawl_id = ${crawlId} and d.page_id = p.id
-          and d.validation_jsonb -> 'definedIds' @> jsonb_build_array(r.id)
-      )
-    )))`;
+  sql`exists (
+    select 1 from jsonb_array_elements(sd.validation_jsonb -> 'unresolved') r(id)
+    where not exists (
+      select 1 from structured_data d
+      where d.crawl_id = ${crawlId} and d.page_id = p.id
+        and d.validation_jsonb -> 'definedIds' @> jsonb_build_array(r.id)
+    )
+  )`;
+
+/** The ids of a block's `unresolved` that no block of the page defines, in walk order. */
+function pageUnresolved(b: BlockView, page: PageContext): string[] {
+  return b.unresolved.filter((id) => !page.definedIds.has(id));
+}
 
 /**
  * `unresolved-reference`'s evidence: the page's unresolved ids (up to
- * `MAX_PROBLEMS_PER_LIST`, in block then walk order) and their exact count. A
- * block that listed fewer ids than it counted (more than 50 references no node
- * of that block defines) cannot say which of the unlisted ones another block
- * of the page defines, so they are counted as unresolved and `problemsCapped`
- * says the count may be high.
+ * `MAX_PROBLEMS_PER_LIST`, in block then walk order), their exact count, and
+ * `problemsCapped`, true exactly when the count is over that limit.
  */
 function unresolvedSummary(
   blocks: readonly BlockView[],
   page: PageContext,
 ): { unresolved: string[]; unresolvedCount: number; problemsCapped: boolean } {
-  const ids: string[] = [];
-  let count = 0;
-  for (const b of blocks) {
-    for (const id of b.unresolved) {
-      if (page.definedIds.has(id)) continue;
-      count += 1;
-      if (ids.length < MAX_PROBLEMS_PER_LIST) ids.push(id);
-    }
-    count += b.unresolvedCount - b.unresolved.length;
-  }
-  return { unresolved: ids, unresolvedCount: count, problemsCapped: count > MAX_PROBLEMS_PER_LIST };
+  const all = blocks.flatMap((b) => pageUnresolved(b, page));
+  return {
+    unresolved: all.slice(0, MAX_PROBLEMS_PER_LIST),
+    unresolvedCount: all.length,
+    problemsCapped: all.length > MAX_PROBLEMS_PER_LIST,
+  };
+}
+
+/**
+ * One problem row per unresolved id of the block. The path and the id as
+ * written come from the block's `references` (its first 50, in walk order,
+ * matched by id and occurrence); an id past them has neither recorded, so
+ * both are null, never guessed.
+ */
+function unresolvedProblems(b: BlockView, format: string, page: PageContext): Problem[] {
+  const recorded = new Map<string, (typeof b.references)[number][]>();
+  for (const r of b.references) recorded.set(r.id, [...(recorded.get(r.id) ?? []), r]);
+  return pageUnresolved(b, page).map((id) => {
+    const ref = recorded.get(id)?.shift();
+    return { format, path: ref?.path ?? null, id, written: ref?.written ?? null };
+  });
 }
 
 /** Every id the page's blocks define, as one set (`PageContext`); empty for a rule that reads none. */
@@ -516,10 +529,7 @@ const SPECS = {
     lists: ["references"],
     readsDefinedIds: true,
     summary: unresolvedSummary,
-    problems: (b, format, page) =>
-      b.references
-        .filter((r) => !page.definedIds.has(r.id))
-        .map((r) => ({ format, path: r.path, id: r.id, written: r.written })),
+    problems: unresolvedProblems,
     needsV4: true,
     pageEvidence: {
       columns: [

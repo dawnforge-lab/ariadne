@@ -275,6 +275,8 @@ import {
 import {
   blockInfos,
   blockProblemsCapped,
+  blockUnresolved,
+  UNRESOLVED_CAPPED_AT,
   blockWarnings,
   parseStructuredDataFormat,
   referencesMeasured,
@@ -7210,12 +7212,14 @@ export class ApiService {
                  coalesce(b.infos, 0)::int as info_count,
                  coalesce(b.unreadable, 0)::int as unreadable,
                  coalesce(b.blocks >= ${MAX_STRUCTURED_DATA_BLOCKS}, false) as blocks_at_cap,
-                 coalesce(b.problems_capped, false) as problems_capped
+                 (coalesce(b.problems_capped, false) or coalesce(b.unresolved > ${UNRESOLVED_CAPPED_AT}, false)) as problems_capped
             from pages p
             left join lateral (
               select array_agg(distinct sd.format order by sd.format) as formats,
                      bool_or(case when ${readable}
-                                  then ${blockProblemsCapped(sql`sd.validation_jsonb`, crawlId)} end) as problems_capped,
+                                  then ${blockProblemsCapped(sql`sd.validation_jsonb`)} end) as problems_capped,
+                     sum(case when ${readable}
+                              then ${blockUnresolved(sql`sd.validation_jsonb`, crawlId, sql`sd.page_id`)} end) as unresolved,
                      sum(case when ${readable} then ${blockWarnings(sql`sd.validation_jsonb`)} end) as warnings,
                      sum(case when ${readable}
                               then ${blockInfos(sql`sd.validation_jsonb`, crawlId, sql`sd.page_id`)} end) as infos,

@@ -840,3 +840,49 @@ describe("unresolved references past the 50th (29d)", () => {
     expect(many.items.find((r) => r.url === `${SITE}/article`)!.problemsCapped).toBe(true);
   });
 });
+
+// Phase 29d, Task 4 fix round 1: the page-level count is exact across blocks, and rule, listing and CSV agree.
+describe("unresolved references across blocks of one page (29d)", () => {
+  const refsTo = (ids: string[]) => ({
+    "@context": C, "@type": "ItemList", itemListElement: ids.map((id) => ({ "@id": id })),
+  });
+  const defining = (ids: string[]) => ({
+    "@context": C, "@type": "ItemList", hasPart: ids.map((id) => ({ "@id": id, "@type": "WebPage" })),
+  });
+  const ids = (from: number, to: number): string[] => Array.from({ length: to - from }, (_, i) => `#e${from + i}`);
+
+  /** A crawl whose "/" holds exactly these blocks; answers its listing row, and its unresolved CSV rows. */
+  async function scenario(name: string, raws: Record<string, unknown>[]) {
+    const id = `crawl_sd_listing_xblock_${name}_${runId}`;
+    allCrawls.push(id);
+    const pageIds = await seedCrawl(id);
+    for (const raw of raws) {
+      await db.insert(structuredData).values({
+        crawlId: id, pageId: pageIds.get("/")!, schemaType: "ItemList", format: "jsonld", raw,
+      });
+    }
+    await service.runRulesForCrawl(LOCAL_TENANT, id);
+    const row = (await service.listStructuredData(LOCAL_TENANT, id, {})).items.find((r) => r.url === `${SITE}/`)!;
+    const csv = (await csvLines(id)).filter((l) => l.startsWith(`${SITE}/,`) && l.includes(",unresolved-reference,"));
+    return { row, csv };
+  }
+
+  it("51 references all defined by another block: infoCount 0, not capped, no rows", async () => {
+    const { row, csv } = await scenario("alldef", [refsTo(ids(0, 51)), defining(ids(0, 51))]);
+    expect(row).toMatchObject({ infoCount: 0, problemsCapped: false });
+    expect(csv).toEqual([]);
+  });
+
+  it("70 references with 30 defined elsewhere: exactly 40, not capped, 40 CSV rows", async () => {
+    const { row, csv } = await scenario("forty", [refsTo(ids(0, 70)), defining(ids(0, 30))]);
+    expect(row).toMatchObject({ infoCount: 40, problemsCapped: false });
+    expect(csv).toHaveLength(40);
+  });
+
+  it("120 unresolved: counted exactly, capped, a CSV row for each; the path is named missing past the first 50", async () => {
+    const { row, csv } = await scenario("many", [refsTo(ids(0, 120))]);
+    expect(row).toMatchObject({ infoCount: 120, problemsCapped: true });
+    expect(csv).toHaveLength(120);
+    expect(csv.filter((l) => l.includes("(path not recorded)"))).toHaveLength(70);
+  });
+});

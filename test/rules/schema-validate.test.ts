@@ -835,8 +835,16 @@ describe("validateBlock — unresolved references wherever they sit (29d)", () =
       "@type": "ItemList",
       itemListElement: Array.from({ length: 70 }, (_, i) => ({ "@id": `#gone${i}` })),
     });
-    expect(v.unresolved).toHaveLength(MAX_PROBLEMS_PER_LIST);
+    // Uncapped, like definedIds: the page may define some of them in another block.
+    expect(v.unresolved).toHaveLength(70);
     expect(v.unresolvedCount).toBe(70);
     expect(v.unresolved[0]).toBe(`${DOC}#gone0`);
+    expect(v.unresolved[69]).toBe(`${DOC}#gone69`);
+  });
+
+  it("the block schema refuses an unresolvedCount that is not the length of unresolved", () => {
+    const v = validate({ "@context": CTX, "@type": "ItemList", itemListElement: [{ "@id": "#a" }] });
+    expect(blockValidationSchema.parse(v)).toEqual(v);
+    expect(() => blockValidationSchema.parse({ ...v, unresolvedCount: 2 })).toThrow(/unresolvedCount/);
   });
 });
