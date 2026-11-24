@@ -129,9 +129,12 @@ export const MAX_RESOLVED_ID_CHARS = 2048;
 /**
  * The characters of resolved ids one block stores, `definedIds` and
  * `unresolved` together: 256 KiB, a little over twice the 100k-character input
- * a block can be stored from, so an ordinary block (ids the size of what they
- * were written as) never reaches it, and the worst a page can hold is 50
- * blocks x 256 KiB = 12.5 MiB. `definedIds` fills it first, in walk order, then
+ * a block can be stored from, and the worst a page can hold is 50 blocks x
+ * 256 KiB = 12.5 MiB. A block whose ids are about the size they were written
+ * as stays under it; a block of many fragment references does NOT, because
+ * each resolves to the whole page URL plus its fragment — a few thousand
+ * `#a1` references on a page URL of a few hundred characters fill it (29d
+ * final review). `definedIds` fills it first, in walk order, then
  * `unresolved`; what does not fit is left out and `idsTruncated` says so.
  */
 export const MAX_BLOCK_ID_CHARS = 256 * 1024;

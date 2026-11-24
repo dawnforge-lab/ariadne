@@ -12,10 +12,15 @@
  * under a newer ruleset must be re-validated without being re-fetched. The raw
  * block is stored once; the verdict is recomputed on every run.
  *
- * **Memory (hard rule 6).** Rows stream by an `id` cursor, `SCHEMA_VALIDATION_BATCH`
- * at a time (the `sd_crawl_id` index serves exactly that query), so RAM is
- * O(batch) however many blocks the crawl holds. Each block's page is joined in
- * for its URL, the base its ids resolve against (29a rework): one text per row.
+ * **Memory (hard rule 6).** Rows stream by an `id` cursor (the `sd_crawl_id`
+ * index serves exactly that query), so RAM is O(batch) however many blocks the
+ * crawl holds. A batch is bounded twice, because a row count alone does not
+ * bound bytes (29d final review): it is at most `SCHEMA_VALIDATION_BATCH` rows
+ * AND at most `SCHEMA_VALIDATION_READ_CHARS` of raw block text (one row always,
+ * whatever its size); and the verdicts are written back whenever their JSON
+ * reaches `SCHEMA_VALIDATION_WRITE_CHARS`, not once per batch. Each block's
+ * page is joined in for its URL, the base its ids resolve against (29a
+ * rework): one text per row.
  *
  * **Orphan blocks are skipped and counted, not refused.** The page writer
  * leaves `structured_data` rows whose `page_id` has no page row BY DESIGN:
@@ -40,11 +45,36 @@ import { crawls } from "../../db/schema.js";
 import { validateBlock } from "../schema-org/validate.js";
 
 /**
- * Rows validated and written back per round trip. Each row contributes two
- * parameters to the write-back (id, blob), so a batch stays far under
- * Postgres's 65,535-parameter limit.
+ * The most rows one select reads. Each row contributes two parameters to a
+ * write-back (id, blob), so even one write-back of a whole batch stays far
+ * under Postgres's 65,535-parameter limit.
  */
 export const SCHEMA_VALIDATION_BATCH = 500;
+
+/**
+ * The most raw block text (`raw_jsonb` as JSON, plus the page URL) one select
+ * reads: 8 MiB. Rows are taken in `id` order while the running total stays
+ * under it, the first row always (a block is at most about 100k characters,
+ * `MAX_LD_JSON_CHARS`, so one row never threatens the bound). Why a byte
+ * bound beside the row count: 500 rows of the largest storable block are
+ * about 50 MB of text, and JSON parsed into objects costs several times its
+ * text — a hostile batch of bare references measured at about 5x. 8 MiB keeps
+ * the parsed batch in the tens of megabytes while an ordinary crawl's 500
+ * blocks (a few KB each) still fit in one select.
+ */
+export const SCHEMA_VALIDATION_READ_CHARS = 8 * 1024 * 1024;
+
+/**
+ * The verdict JSON one write-back carries: 8 MiB of characters. A verdict is
+ * bounded per block (`MAX_BLOCK_ID_CHARS`, 256 KiB of ids, plus 50-entry
+ * lists) but not small: on a long page URL every block of bare references
+ * fills its id budget, about 340k characters of verdict. 500 of them held as
+ * strings, then copied into pg's Bind buffer, were about 340 MB of a 512 MB
+ * budget. Flushed at 8 MiB, the strings and their Bind copy stay near 16 MiB
+ * plus one verdict, and an ordinary batch (verdicts of a few KB) is still one
+ * statement.
+ */
+export const SCHEMA_VALIDATION_WRITE_CHARS = 8 * 1024 * 1024;
 
 export interface SchemaValidationDerivation extends Record<string, number> {
   /** `structured_data` rows whose validation blob was written: the blocks of existing pages. */
@@ -85,19 +115,57 @@ export async function deriveSchemaValidation(
     // `id` is a bigserial; the driver returns it as a string, and a string
     // cursor compared with `id > $cursor::bigint` stays exact past 2^53.
     let cursor = "0";
+
+    // Verdicts waiting to be written, and their JSON's length.
+    let pending: SQL[] = [];
+    let pendingChars = 0;
+    const flush = async (): Promise<void> => {
+      if (pending.length === 0) return;
+      const written = await tx.execute(sql`
+        update structured_data sd
+        set validation_jsonb = v.val
+        from (values ${sql.join(pending, sql`, `)}) as v(id, val)
+        where sd.crawl_id = ${crawlId} and sd.id = v.id`);
+      if (written.rowCount !== pending.length) {
+        throw new Error(
+          `deriveSchemaValidation: crawl '${crawlId}' — wrote ${String(written.rowCount)} ` +
+            `rows for ${pending.length} verdicts; a block was lost between select and update`,
+        );
+      }
+      blocks += written.rowCount;
+      pending = [];
+      pendingChars = 0;
+    };
+
     for (;;) {
-      // Qualified on purpose: a bare `order by id` binds to the text alias above
+      // The first `SCHEMA_VALIDATION_BATCH` rows past the cursor, then the
+      // prefix of them whose raw text stays under `SCHEMA_VALIDATION_READ_CHARS`
+      // (the first row always: its running total less its own size is 0). The
+      // inner limit bounds the server's work to one batch, so the size is never
+      // computed over the rest of the crawl. The size is the text the driver
+      // receives (`::text`), not `pg_column_size`, which is the compressed
+      // stored size and reads a repetitive hostile block as small.
+      // Qualified on purpose: a bare `order by id` binds to the text alias
       // and sorts lexically while the cursor advances numerically.
       const batch = await tx.execute<BlockRow>(sql`
-        select sd.id::text as id, sd.raw_jsonb, p.url
-        from structured_data sd
-        join pages p on p.crawl_id = sd.crawl_id and p.id = sd.page_id
-        where sd.crawl_id = ${crawlId} and sd.id > ${cursor}::bigint
-        order by sd.id
-        limit ${SCHEMA_VALIDATION_BATCH}`);
+        select w.id::text as id, w.raw_jsonb, w.url
+        from (
+          select b.*, sum(b.size) over (order by b.id) as running
+          from (
+            select sd.id, sd.raw_jsonb, p.url,
+                   octet_length(sd.raw_jsonb::text) + octet_length(p.url) as size
+            from structured_data sd
+            join pages p on p.crawl_id = sd.crawl_id and p.id = sd.page_id
+            where sd.crawl_id = ${crawlId} and sd.id > ${cursor}::bigint
+            order by sd.id
+            limit ${SCHEMA_VALIDATION_BATCH}
+          ) b
+        ) w
+        where w.running - w.size < ${SCHEMA_VALIDATION_READ_CHARS}
+        order by w.id`);
       if (batch.rows.length === 0) break;
 
-      const values: SQL[] = batch.rows.map((row) => {
+      for (const row of batch.rows) {
         let blob;
         try {
           blob = validateBlock(row.raw_jsonb, row.url);
@@ -108,21 +176,12 @@ export async function deriveSchemaValidation(
             { cause: err },
           );
         }
-        return sql`(${row.id}::bigint, ${JSON.stringify(blob)}::jsonb)`;
-      });
-
-      const written = await tx.execute(sql`
-        update structured_data sd
-        set validation_jsonb = v.val
-        from (values ${sql.join(values, sql`, `)}) as v(id, val)
-        where sd.crawl_id = ${crawlId} and sd.id = v.id`);
-      if (written.rowCount !== batch.rows.length) {
-        throw new Error(
-          `deriveSchemaValidation: crawl '${crawlId}' — wrote ${String(written.rowCount)} ` +
-            `rows for a batch of ${batch.rows.length}; a block was lost between select and update`,
-        );
+        const json = JSON.stringify(blob);
+        pending.push(sql`(${row.id}::bigint, ${json}::jsonb)`);
+        pendingChars += json.length;
+        if (pendingChars >= SCHEMA_VALIDATION_WRITE_CHARS) await flush();
       }
-      blocks += written.rowCount;
+      await flush();
 
       cursor = batch.rows[batch.rows.length - 1]!.id;
     }

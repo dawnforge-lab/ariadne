@@ -28,7 +28,9 @@
  *
  * **Memory (hard rules 3 and 6).** The SQL groups the blocks of each page and
  * returns the first `caps.listing` pages, so RAM is O(listing cap x blocks per
- * page), never O(blocks in the crawl).
+ * page), never O(blocks in the crawl). The id lists (`definedIds`,
+ * `unresolved`) are the large part of a verdict — up to `MAX_BLOCK_ID_CHARS` a
+ * block — so only the rule that reads them selects them (`readsIds`).
  *
  * **A block with no verdict is an error, not a clean block.** A null
  * `validation_jsonb` on a judged page means the derivation did not run. Reading
@@ -51,10 +53,8 @@ import type { RuleCaps } from "../registry/types.js";
 import { staleBlob } from "../schema-org/blob-sql.js";
 import {
   MAX_PROBLEMS_PER_LIST,
-  UNRESOLVED_COUNT_ISSUE,
   blockValidationObject,
   blockValidationSchema,
-  unresolvedCountMatches,
   type BlockValidation,
   type ListName,
 } from "../schema-org/validate.js";
@@ -85,19 +85,29 @@ type Problem = Record<string, unknown>;
 interface BlockRow {
   id: number;
   format: string;
-  /** The verdict, without `definedIds` unless the rule reads them (final review M7). */
+  /** The verdict, without `definedIds` and `unresolved` unless the rule reads them (final review M7; 29d). */
   validation: unknown;
   /** `staleBlob` over the WHOLE stored verdict, so the projection never hides an old blob. */
   stale: boolean;
 }
 
-/** A verdict as a per-page rule reads it: `definedIds` only when the rule needs them. */
-type BlockView = Omit<BlockValidation, "definedIds"> & { definedIds?: string[] };
+/**
+ * A verdict as a per-page rule reads it: the id lists (`definedIds`,
+ * `unresolved`) only when the rule needs them.
+ */
+type BlockView = Omit<BlockValidation, "definedIds" | "unresolved"> & {
+  definedIds?: string[];
+  unresolved?: string[];
+};
 
-/** The strict schema for a verdict selected without `definedIds` (final review M7). */
-const blockValidationWithoutIdsSchema = blockValidationObject
-  .omit({ definedIds: true })
-  .refine(unresolvedCountMatches, UNRESOLVED_COUNT_ISSUE);
+/**
+ * The strict schema for a verdict selected without its id lists (final review
+ * M7; 29d final review). Both are uncapped — up to `MAX_BLOCK_ID_CHARS` a block,
+ * 50 blocks a page — so a rule that reads neither does not load them.
+ * `unresolvedCount` stays, and is still checked as a count; its agreement with
+ * the list is checked by the rule that reads the list.
+ */
+const blockValidationWithoutIdsSchema = blockValidationObject.omit({ definedIds: true, unresolved: true });
 
 /**
  * `parse-error`: counts straight off `pages`. The microdata column is null on a
@@ -157,10 +167,11 @@ interface PerPageSpec {
    */
   lists: readonly ListName[];
   /**
-   * Whether the rule reads `definedIds`. They are uncapped, so a rule that does
-   * not read them selects the verdict without them (final review M7).
+   * Whether the rule reads the id lists, `definedIds` and `unresolved`. They are
+   * uncapped, so a rule that does not read them selects the verdict without
+   * them (final review M7; 29d final review).
    */
-  readsDefinedIds?: true;
+  readsIds?: true;
   /**
    * A rule whose count is not the length of `problems`: the page's exact count,
    * the ids behind it, and whether the count may be off. It replaces the
@@ -225,6 +236,9 @@ const unresolvedHas = (crawlId: string): SQL =>
  * order: none while another block of the page left ids out (see `unresolvedHas`).
  */
 function pageUnresolved(b: BlockView, page: PageContext): string[] {
+  if (b.unresolved === undefined) {
+    throw new Error("pageUnresolved: the verdict was selected without its unresolved ids (the rule must set readsIds)");
+  }
   if (page.truncatedBlocks - (b.idsTruncated ? 1 : 0) > 0) return [];
   return b.unresolved.filter((id) => !page.definedIds.has(id));
 }
@@ -288,7 +302,9 @@ async function perPageFindings(
   // selected page's blocks come back, in id order, so the problems order is
   // block id then list order.
   const verdict =
-    spec.readsDefinedIds === true ? sql`sd.validation_jsonb` : sql`(sd.validation_jsonb - 'definedIds')`;
+    spec.readsIds === true
+      ? sql`sd.validation_jsonb`
+      : sql`(sd.validation_jsonb - 'definedIds' - 'unresolved')`;
   const result = await db.execute<{
     page_id: string;
     url: string;
@@ -335,7 +351,7 @@ async function perPageFindings(
         );
       }
       const checked =
-        spec.readsDefinedIds === true
+        spec.readsIds === true
           ? blockValidationSchema.safeParse(block.validation)
           : blockValidationWithoutIdsSchema.safeParse(block.validation);
       if (!checked.success) {
@@ -547,7 +563,7 @@ const SPECS = {
     identity: UNRESOLVED,
     hasProblems: unresolvedHas,
     lists: ["references"],
-    readsDefinedIds: true,
+    readsIds: true,
     summary: unresolvedSummary,
     problems: unresolvedProblems,
     needsV4: true,
