@@ -22,13 +22,13 @@
  * https://developers.google.com/search/docs/crawling-indexing/google-common-crawlers:
  *  - Googlebot Smartphone: as published, with the Chrome version placeholder
  *    `W.X.Y.Z` filled by `PRESET_CHROME_VERSION`.
- *  - Googlebot Desktop: the page's main string is
- *    `Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko; compatible; Googlebot/2.1; +http://www.google.com/bot.html) Chrome/W.X.Y.Z Safari/537.36`;
- *    the short form below is one the page lists as "rarely" used, kept because
- *    the plan (R3) specified it.
+ *  - Googlebot Desktop: the page's primary string, with `W.X.Y.Z` filled by
+ *    `PRESET_CHROME_VERSION`. The page also lists a short form,
+ *    `Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)`,
+ *    as "rarely" used; the preset does not use it (owner ruling).
  *  - bingbot: bing.com/webmasters/help/which-crawlers-does-bing-use-8c184ec0
  *    could not be read on that date (the fetch returned only the page title);
- *    the string is the plan's R3 value, unverified today.
+ *    the string is the plan's R3 value and is UNVERIFIED.
  */
 
 export type UserAgentPreset = "ariadne" | "googlebot-smartphone" | "googlebot-desktop" | "bingbot";
@@ -55,7 +55,9 @@ export const USER_AGENT_PRESETS: Record<
     robotsUserAgent: "Googlebot",
   },
   "googlebot-desktop": {
-    userAgent: "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)",
+    userAgent:
+      "Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko; compatible; Googlebot/2.1; " +
+      `+http://www.google.com/bot.html) Chrome/${PRESET_CHROME_VERSION} Safari/537.36`,
     robotsUserAgent: "Googlebot",
   },
   bingbot: {
@@ -118,6 +120,14 @@ export function resolveCrawlIdentity(input: CrawlIdentityInput): CrawlIdentity {
     return { userAgentPreset: preset, ...USER_AGENT_PRESETS[preset] };
   }
 
+  // The branded identity always obeys the AriadneBot group: a token alone
+  // would let AriadneBot follow another bot's group (hard rule 9).
+  if (userAgent === undefined && robotsUserAgent !== undefined) {
+    throw new CrawlIdentityError(
+      "robotsUserAgent",
+      "robotsUserAgent needs a custom userAgent; the default AriadneBot identity always matches the AriadneBot robots group",
+    );
+  }
   const header = userAgent ?? ARIADNE_USER_AGENT;
   if (header.trim() === "") {
     throw new CrawlIdentityError("userAgent", "userAgent must not be empty");

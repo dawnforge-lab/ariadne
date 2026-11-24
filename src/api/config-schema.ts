@@ -360,8 +360,9 @@ export const CRAWL_FIELDS = {
     description:
       "The one product token robots.txt groups and Crawl-delay are matched against " +
       "(letters, digits, - and _). Derived from the first product of userAgent when " +
-      "omitted; required when userAgent starts with 'Mozilla/'. Cannot be combined with " +
-      "userAgentPreset.",
+      "omitted; required when userAgent starts with 'Mozilla/'. Needs a custom userAgent " +
+      "(the default AriadneBot identity always matches the AriadneBot robots group) and " +
+      "cannot be combined with userAgentPreset.",
   },
   perHostDelayMs: {
     schema: finiteNumber("perHostDelayMs").min(MIN_PER_HOST_DELAY_MS, {

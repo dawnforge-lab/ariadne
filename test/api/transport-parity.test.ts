@@ -203,7 +203,7 @@ function validValue(field: string, spec: JsonSchema): unknown {
 }
 
 /** The fields a valid value of one field needs beside it: a list is a list crawl's. */
-const COMPANIONS: Record<string, Record<string, unknown>> = { urls: { mode: "list" } };
+const COMPANIONS: Record<string, Record<string, unknown>> = { urls: { mode: "list" }, robotsUserAgent: { userAgent: "ParityBot/1.0" } };
 
 /**
  * The table, built by walking the published schema. A field gets one valid

@@ -95,6 +95,9 @@ describe("config_validate: the resolved identity", () => {
     const started = await call("POST", "/crawls", { siteUrl: `${SITE}/`, userAgent: "Mozilla/5.0 (compatible; Acme/1.0)" });
     expect(started.status).toBe(400);
     expect(String(started.body["error"])).toContain("Set robotsUserAgent.");
+    const alone = await call("POST", "/crawls", { siteUrl: `${SITE}/`, robotsUserAgent: "Googlebot" });
+    expect(alone.status).toBe(400);
+    expect(String(alone.body["error"])).toContain("robotsUserAgent needs a custom userAgent");
   });
 });
 

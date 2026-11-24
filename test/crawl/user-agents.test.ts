@@ -1,4 +1,5 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { resolveStartUrlRedirects } from "../../src/crawl/url-policy.js";
 import { CRAWL_DEFAULTS } from "../../src/crawl/loop.js";
 import {
   CrawlIdentityError,
@@ -38,7 +39,7 @@ describe("resolveCrawlIdentity", () => {
         },
         "googlebot-desktop": {
           "robotsUserAgent": "Googlebot",
-          "userAgent": "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)",
+          "userAgent": "Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko; compatible; Googlebot/2.1; +http://www.google.com/bot.html) Chrome/142.0.0.0 Safari/537.36",
         },
         "googlebot-smartphone": {
           "robotsUserAgent": "Googlebot",
@@ -91,5 +92,36 @@ describe("resolveCrawlIdentity", () => {
     expect(refusal({ userAgentPreset: "chrome" })).toBe(
       "unknown userAgentPreset; expected one of ariadne, googlebot-smartphone, googlebot-desktop, bingbot",
     );
+  });
+
+  it("refuses robotsUserAgent without a custom userAgent: the branded identity keeps its own group", () => {
+    const message =
+      "robotsUserAgent needs a custom userAgent; the default AriadneBot identity always matches the AriadneBot robots group";
+    expect(refusal({ robotsUserAgent: "Googlebot" })).toBe(message);
+  });
+});
+
+describe("the start-URL redirect probe", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("a preset crawl's probe request carries the preset's header", async () => {
+    const seen: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: unknown, init?: { headers?: Record<string, string> }) => {
+        const url = String(input);
+        if (url.includes("dns-query")) {
+          return new Response(JSON.stringify({ Status: 0, Answer: [] }), {
+            status: 200,
+            headers: { "content-type": "application/dns-json" },
+          });
+        }
+        seen.push(init?.headers?.["User-Agent"] ?? "");
+        return new Response(null, { status: 200 });
+      }),
+    );
+    const { userAgent } = resolveCrawlIdentity({ userAgentPreset: "googlebot-smartphone" });
+    await resolveStartUrlRedirects("https://example.com/", { userAgent });
+    expect(seen).toEqual([userAgent]);
   });
 });

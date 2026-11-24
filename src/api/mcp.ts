@@ -332,7 +332,8 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "IDENTITY. userAgentPreset (ariadne, googlebot-smartphone, googlebot-desktop, " +
         "bingbot) sets both the User-Agent header and the robots.txt token the site's " +
         "groups are matched with; a custom userAgent derives its token (set " +
-        "robotsUserAgent when it starts with 'Mozilla/'). The default stays AriadneBot. " +
+        "robotsUserAgent when it starts with 'Mozilla/'; robotsUserAgent alone, without " +
+        "a custom userAgent, is refused). The default stays AriadneBot. " +
         "A spoofed bot identity fails any site that verifies bots by IP address or " +
         "reverse DNS (Cloudflare, most CDNs): a preset only helps on a site that " +
         "filters by user-agent alone, and it never bypasses a challenge.",
