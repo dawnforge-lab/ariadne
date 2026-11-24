@@ -2175,26 +2175,36 @@ describe("an image header past 64 KiB costs at most two continuation reads (29d,
   });
 
   it("a host parked before the continuation keeps the first answer and sends nothing more", async () => {
-    // Deterministic, with the gate the pass is handed: the fifth acquire (a-wide's
-    // continuation, after the four first requests) waits until the gate has been told
-    // of the third transport error. The pass sets `parked` straight after `report`
-    // returns, before any waiter resumes, so the post-gate check finds the host parked.
+    // Deterministic, with the gate the pass is handed, in three steps. (1) The three dead
+    // rows' acquires (2 to 4) wait until the gate has been told of a-wide's first answer,
+    // so that answer lands, and resets the error streak, before any dead request is sent.
+    // (2) The three errors are then consecutive and the pass parks the host. (3) The fifth
+    // acquire (a-wide's continuation) waits until the gate has been told of the third
+    // error. The pass sets `parked` straight after `report` returns, before any waiter
+    // resumes, so the post-gate check finds the host parked.
     class ParkingGate extends HostGate {
       acquires = 0;
       errors = 0;
+      private firstAnswerSeen!: () => void;
+      private readonly firstAnswer = new Promise<void>((resolve) => {
+        this.firstAnswerSeen = resolve;
+      });
       private release!: () => void;
       private readonly thirdError = new Promise<void>((resolve) => {
         this.release = resolve;
       });
       override report(host: string, outcome: Parameters<HostGate["report"]>[1]): void {
         super.report(host, outcome);
+        if (outcome.statusCode === 206 && outcome.url.endsWith("/a-wide.png")) this.firstAnswerSeen();
         if (outcome.statusCode === null && ++this.errors === 3) this.release();
       }
       override acquire(host: string): Promise<void>;
       override acquire(host: string, signal: AbortSignal | undefined): Promise<boolean>;
       override async acquire(host: string, signal?: AbortSignal): Promise<boolean | void> {
-        this.acquires += 1;
-        if (this.acquires === 5) await this.thirdError;
+        const n = ++this.acquires;
+        // Acquire 1 is a-wide (url order); 2 to 4 are the dead rows; 5 is a-wide's continuation.
+        if (n >= 2 && n <= 4) await this.firstAnswer;
+        if (n === 5) await this.thirdError;
         return signal === undefined ? super.acquire(host) : super.acquire(host, signal);
       }
     }
