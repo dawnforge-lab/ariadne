@@ -318,9 +318,9 @@ describe("parseImageHead: nothing is guessed", () => {
     expect(parseImageHead(new Uint8Array(2048).fill(0x41), "image/png")).toEqual({ kind: "reason", reason: "unknown-format" });
   });
 
-  it("a JPEG window ending on junk where a marker belonged is header-beyond-limit, not a need", () => {
+  it("a JPEG window ending on junk where a marker belonged is malformed, not a need", () => {
     const head = bytes([0xff, 0xd8], new Array<number>(IMAGE_HEADER_BYTES - 2).fill(0));
-    expect(parseImageHead(head, "image/jpeg")).toEqual({ kind: "reason", reason: "header-beyond-limit" });
+    expect(parseImageHead(head, "image/jpeg")).toEqual({ kind: "reason", reason: "malformed" });
   });
 
   it("a JPEG window whose last segment ends exactly at its end, or that ends on fill bytes, asks to go on", () => {

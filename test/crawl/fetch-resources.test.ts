@@ -2175,13 +2175,33 @@ describe("an image header past 64 KiB costs at most two continuation reads (29d,
   });
 
   it("a host parked before the continuation keeps the first answer and sends nothing more", async () => {
-    // One worker per row, a 150 ms gate spacing and url order: the wide row's first
-    // request takes the first slot, three dead rows take the next three and park the
-    // host, and the wide row's continuation waits behind them and finds it parked.
+    // Deterministic, with the gate the pass is handed: the fifth acquire (a-wide's
+    // continuation, after the four first requests) waits until the gate has been told
+    // of the third transport error. The pass sets `parked` straight after `report`
+    // returns, before any waiter resumes, so the post-gate check finds the host parked.
+    class ParkingGate extends HostGate {
+      acquires = 0;
+      errors = 0;
+      private release!: () => void;
+      private readonly thirdError = new Promise<void>((resolve) => {
+        this.release = resolve;
+      });
+      override report(host: string, outcome: Parameters<HostGate["report"]>[1]): void {
+        super.report(host, outcome);
+        if (outcome.statusCode === null && ++this.errors === 3) this.release();
+      }
+      override acquire(host: string): Promise<void>;
+      override acquire(host: string, signal: AbortSignal | undefined): Promise<boolean>;
+      override async acquire(host: string, signal?: AbortSignal): Promise<boolean | void> {
+        this.acquires += 1;
+        if (this.acquires === 5) await this.thirdError;
+        return signal === undefined ? super.acquire(host) : super.acquire(host, signal);
+      }
+    }
     const crawlId = await seedCrawl(images.base);
     const urls = ["/a-wide.png", "/b-dead1.png", "/b-dead2.png", "/b-dead3.png"].map((p) => `${images.base}${p}`);
     await seedResources(crawlId, urls.map((url) => ({ url, kind: "image" })));
-    const gate = new HostGate({ perHostDelayMs: 150, robotsCrawlDelaySec: null });
+    const gate = new ParkingGate({ perHostDelayMs: 0, robotsCrawlDelaySec: null });
     const summary = await runPass(crawlId, images.base, { gate, maxConcurrency: 4 });
     const row = await rowFor(crawlId, urls[0]!);
     expect(row).toMatchObject({
@@ -2192,9 +2212,9 @@ describe("an image header past 64 KiB costs at most two continuation reads (29d,
       width: null,
       dimensionsReason: "header-beyond-limit",
     });
-    expect(row.fetchReason).toContain("not sent");
-    expect(row.fetchReason).toContain("parked");
+    expect(row.fetchReason).toContain("not sent: host parked");
     expect(hitsOf("/a-wide.png")).toHaveLength(1);
+    expect(gate.acquires).toBe(5);
     expect(summary.failed).toBe(3);
   });
 

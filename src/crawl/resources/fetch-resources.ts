@@ -307,11 +307,13 @@ const MAX_RESOURCE_REDIRECTS = 5;
 
 /**
  * Requests one row may cost in total: its redirect chain, plus the first
- * request (a HEAD, or for an image the Range GET) and the one counted GET that
- * can follow it. A hard bound, so no chain of 405s, 416s and redirects can turn
- * one image into an unbounded conversation. An image row costs at most 4
- * requests plus its redirect hops: the first Range GET and, past the 64 KiB
- * window, up to MAX_IMAGE_CONTINUATIONS more (Phase 29d).
+ * request (a HEAD, or for an image the Range GET) and what can follow it. A
+ * hard bound, so no chain of 405s, 416s and redirects can turn one image into
+ * an unbounded conversation. An image row is stated as at most 4 requests plus
+ * its redirect hops (Phase 29d); the worst case reachable is 3 of them (the
+ * first Range GET, then one plain GET or up to MAX_IMAGE_CONTINUATIONS
+ * continuations, never both) and the fourth is headroom, as the module header
+ * says.
  */
 const MAX_ROW_REQUESTS = MAX_RESOURCE_REDIRECTS + 4;
 

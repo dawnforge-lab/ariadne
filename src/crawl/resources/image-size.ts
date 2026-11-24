@@ -85,8 +85,9 @@
  *                           a big `meta`), or before the rotation is known (an
  *                           AVIF `ipco` cut off after its `ispe`). The parser
  *                           itself never says this for a PNG or JPEG: it
- *                           answers `need`, and the caller ends the walk with
- *                           this reason when it cannot read on;
+ *                           answers `need` (or `malformed` for junk where a
+ *                           JPEG marker belonged), and the caller ends the
+ *                           walk with this reason when it cannot read on;
  *   - `malformed`           the structure is wrong or a dimension is 0.
  *
  * A PNG or JPEG walk that runs out of window answers
@@ -322,8 +323,9 @@ function readJpeg(head: Uint8Array, resume?: Extract<ImageWalkState, { format: "
     while (pos < head.length && head[pos] === 0xff) pos++;
     if (pos >= head.length) {
       // Non-0xFF bytes where a marker belonged are not a segment boundary
-      // running out: reading on would scan junk for a spurious marker.
-      if (junk) return none("header-beyond-limit");
+      // running out: the structure is wrong, and reading on would scan junk
+      // for a spurious marker.
+      if (junk) return none("malformed");
       // Otherwise the segment ended at the window's end, or only fill bytes
       // were left: a trailing 0xFF may start a marker, so the next window
       // begins on it.
