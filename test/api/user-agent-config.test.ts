@@ -79,9 +79,9 @@ describe("config_validate: the resolved identity", () => {
   });
 
   it("a preset resolves to its header and token", async () => {
-    const res = await call("POST", "/config/validate", { siteUrl: `${SITE}/`, userAgentPreset: "bingbot" });
+    const res = await call("POST", "/config/validate", { siteUrl: `${SITE}/`, userAgentPreset: "bingbot-desktop" });
     expect(res.body["valid"], res.text).toBe(true);
-    expect(res.body["effective"]).toMatchObject({ ...USER_AGENT_PRESETS.bingbot, userAgentPreset: "bingbot" });
+    expect(res.body["effective"]).toMatchObject({ ...USER_AGENT_PRESETS["bingbot-desktop"], userAgentPreset: "bingbot-desktop" });
   });
 
   it("a custom agent derives its token, and stores no preset", async () => {
@@ -90,7 +90,7 @@ describe("config_validate: the resolved identity", () => {
   });
 
   it("refuses a preset with a userAgent, and a Mozilla/ agent with no token, as a 400-class refusal", async () => {
-    const both = await call("POST", "/config/validate", { siteUrl: `${SITE}/`, userAgentPreset: "bingbot", userAgent: "x" });
+    const both = await call("POST", "/config/validate", { siteUrl: `${SITE}/`, userAgentPreset: "bingbot-desktop", userAgent: "x" });
     expect(both.body["valid"]).toBe(false);
     expect(JSON.stringify(both.body["errors"])).toContain("userAgentPreset and userAgent cannot both be set");
     const started = await call("POST", "/crawls", { siteUrl: `${SITE}/`, userAgent: "Mozilla/5.0 (compatible; Acme/1.0)" });
@@ -143,7 +143,7 @@ describe("a stored crawl's identity", () => {
       robotsUserAgent: "never",
       userAgentPreset: "never",
     });
-    for (const change of [{ userAgentPreset: "bingbot" }, { robotsUserAgent: "Other" }]) {
+    for (const change of [{ userAgentPreset: "bingbot-desktop" }, { robotsUserAgent: "Other" }]) {
       const set = await call("PATCH", `/crawls/${id}/config`, { crawl: change });
       expect(set.status, set.text).toBe(409);
     }
@@ -163,7 +163,7 @@ describe("the operator's identity defaults are checked at startup", () => {
   });
 
   it("refuses a default preset beside a default userAgent", () => {
-    const bad: ServiceConfig = { ...base, crawlDefaults: { userAgentPreset: "bingbot", userAgent: "Acme/1.0" } };
+    const bad: ServiceConfig = { ...base, crawlDefaults: { userAgentPreset: "bingbot-desktop", userAgent: "Acme/1.0" } };
     expect(() => new ApiService(db, bad)).toThrow(/ServiceConfig\.crawlDefaults: userAgent: userAgentPreset and userAgent cannot both be set/);
   });
 

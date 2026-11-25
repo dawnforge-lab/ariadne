@@ -345,7 +345,7 @@ export const CRAWL_FIELDS = {
     mutable: "never",
     description:
       "Identify as a named crawler instead of AriadneBot: one of ariadne (the default), " +
-      "googlebot-smartphone, googlebot-desktop, bingbot. A preset sets BOTH the User-Agent " +
+      "googlebot-smartphone, googlebot-desktop, bingbot-desktop, bingbot-mobile. A preset sets BOTH the User-Agent " +
       "header and the robots.txt token (Googlebot, bingbot), so the site's rules for that " +
       "crawler apply; it cannot be combined with userAgent or robotsUserAgent. A spoofed " +
       "bot identity fails any site that verifies bots by IP address or reverse DNS " +

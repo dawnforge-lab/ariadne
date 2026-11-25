@@ -26,12 +26,21 @@
  *    `PRESET_CHROME_VERSION`. The page also lists a short form,
  *    `Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)`,
  *    as "rarely" used; the preset does not use it (owner ruling).
- *  - bingbot: bing.com/webmasters/help/which-crawlers-does-bing-use-8c184ec0
- *    could not be read on that date (the fetch returned only the page title);
- *    the string is the plan's R3 value and is UNVERIFIED.
+ *
+ * Bingbot strings: the text of bing.com/webmasters/help/which-crawlers-does-bing-use-8c184ec0
+ * ("Overview of Bing crawlers (user agents)"), supplied by the owner on 2026-11-25:
+ *  - bingbot Desktop: the page's first string, with Bing's Chrome placeholder
+ *    `W.X.Y.Z` filled by `PRESET_CHROME_VERSION`.
+ *  - bingbot Mobile: the page's third string, `W.X.Y.Z` filled the same way. As
+ *    pasted it had TWO spaces before `(compatible;`; that is read as a paste
+ *    artifact, so the preset uses ONE space, the shape of Google's smartphone string.
+ *  - The page's second string, the short legacy form
+ *    `Mozilla/5.0 (compatible; bingbot/2.0; +http://www.bing.com/bingbot.htm)`,
+ *    is not used (owner ruling, as with Google's short form).
+ *  Both presets match the `bingbot` robots group.
  */
 
-export type UserAgentPreset = "ariadne" | "googlebot-smartphone" | "googlebot-desktop" | "bingbot";
+export type UserAgentPreset = "ariadne" | "googlebot-smartphone" | "googlebot-desktop" | "bingbot-desktop" | "bingbot-mobile";
 
 /**
  * The Chrome version the Googlebot Smartphone preset reports. Google writes it
@@ -60,8 +69,17 @@ export const USER_AGENT_PRESETS: Record<
       `+http://www.google.com/bot.html) Chrome/${PRESET_CHROME_VERSION} Safari/537.36`,
     robotsUserAgent: "Googlebot",
   },
-  bingbot: {
-    userAgent: "Mozilla/5.0 (compatible; bingbot/2.0; +http://www.bing.com/bingbot.htm)",
+  "bingbot-desktop": {
+    userAgent:
+      "Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko; compatible; bingbot/2.0; " +
+      `+http://www.bing.com/bingbot.htm) Chrome/${PRESET_CHROME_VERSION} Safari/537.36`,
+    robotsUserAgent: "bingbot",
+  },
+  "bingbot-mobile": {
+    userAgent:
+      "Mozilla/5.0 (Linux; Android 6.0.1; Nexus 5X Build/MMB29P) AppleWebKit/537.36 " +
+      `(KHTML, like Gecko) Chrome/${PRESET_CHROME_VERSION} Mobile Safari/537.36 ` +
+      "(compatible; bingbot/2.0; +http://www.bing.com/bingbot.htm)",
     robotsUserAgent: "bingbot",
   },
 };

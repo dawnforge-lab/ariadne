@@ -518,8 +518,8 @@ describe("the 27c fields (list mode, scope, credentials, limits)", () => {
 
   // Phase 29d, Task 6.
   it("accepts userAgentPreset and robotsUserAgent on a start body, and refuses a non-string", () => {
-    const ok = parseStartBody({ siteUrl: SITE, userAgentPreset: "bingbot" }, registry);
-    expect(ok.ok && ok.value.userAgentPreset).toBe("bingbot");
+    const ok = parseStartBody({ siteUrl: SITE, userAgentPreset: "bingbot-desktop" }, registry);
+    expect(ok.ok && ok.value.userAgentPreset).toBe("bingbot-desktop");
     const token = parseStartBody({ siteUrl: SITE, userAgent: "Acme/1.0", robotsUserAgent: "Acme" }, registry);
     expect(token.ok && token.value.robotsUserAgent).toBe("Acme");
     expect(first({ siteUrl: SITE, userAgentPreset: 3 }).path).toBe("userAgentPreset");

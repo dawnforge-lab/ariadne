@@ -330,7 +330,7 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "CREDENTIALS_REQUIRED until they are sent again there. They cannot change the " +
         "user agent, the pacing floor or robots.txt.\n\n" +
         "IDENTITY. userAgentPreset (ariadne, googlebot-smartphone, googlebot-desktop, " +
-        "bingbot) sets both the User-Agent header and the robots.txt token the site's " +
+        "bingbot-desktop, bingbot-mobile) sets both the User-Agent header and the robots.txt token the site's " +
         "groups are matched with; a custom userAgent derives its token (set " +
         "robotsUserAgent when its derived token is 'mozilla', any case; robotsUserAgent alone, without " +
         "a custom userAgent, is refused). The default stays AriadneBot. " +

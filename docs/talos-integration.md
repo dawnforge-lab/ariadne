@@ -56,7 +56,7 @@ crawler inside Talos. The intended shape:
    (Talos crawls as TalosBot; Ariadne default `AriadneBot`, configurable so a
    Talos-driven crawl can present Talos's identity), back-off on 403/429.
    Since 29d a crawl may instead take a `userAgentPreset` (Googlebot smartphone or
-   desktop, bingbot): it sets the header and the robots token together, so the
+   desktop, bingbot desktop or mobile): it sets the header and the robots token together, so the
    site's rules for that crawler apply. The seam's limit is plain: a spoofed bot
    identity fails any site that verifies bots by IP address or reverse DNS
    (Cloudflare, most CDNs), a preset only helps on a site that filters by

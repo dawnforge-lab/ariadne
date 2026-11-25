@@ -3,6 +3,7 @@ import { resolveStartUrlRedirects } from "../../src/crawl/url-policy.js";
 import { CRAWL_DEFAULTS } from "../../src/crawl/loop.js";
 import {
   CrawlIdentityError,
+  PRESET_CHROME_VERSION,
   USER_AGENT_PRESETS,
   resolveCrawlIdentity,
 } from "../../src/crawl/user-agents.js";
@@ -33,9 +34,13 @@ describe("resolveCrawlIdentity", () => {
           "robotsUserAgent": "AriadneBot",
           "userAgent": "AriadneBot/0.1 (+https://github.com/dawnforge-lab/ariadne)",
         },
-        "bingbot": {
+        "bingbot-desktop": {
           "robotsUserAgent": "bingbot",
-          "userAgent": "Mozilla/5.0 (compatible; bingbot/2.0; +http://www.bing.com/bingbot.htm)",
+          "userAgent": "Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko; compatible; bingbot/2.0; +http://www.bing.com/bingbot.htm) Chrome/142.0.0.0 Safari/537.36",
+        },
+        "bingbot-mobile": {
+          "robotsUserAgent": "bingbot",
+          "userAgent": "Mozilla/5.0 (Linux; Android 6.0.1; Nexus 5X Build/MMB29P) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Mobile Safari/537.36 (compatible; bingbot/2.0; +http://www.bing.com/bingbot.htm)",
         },
         "googlebot-desktop": {
           "robotsUserAgent": "Googlebot",
@@ -56,10 +61,10 @@ describe("resolveCrawlIdentity", () => {
   });
 
   it("refuses a preset with a userAgent or a robotsUserAgent", () => {
-    expect(refusal({ userAgentPreset: "bingbot", userAgent: "x" })).toBe(
+    expect(refusal({ userAgentPreset: "bingbot-desktop", userAgent: "x" })).toBe(
       "userAgentPreset and userAgent cannot both be set",
     );
-    expect(refusal({ userAgentPreset: "bingbot", robotsUserAgent: "x" })).toBe(
+    expect(refusal({ userAgentPreset: "bingbot-desktop", robotsUserAgent: "x" })).toBe(
       "userAgentPreset and robotsUserAgent cannot both be set",
     );
   });
@@ -99,7 +104,7 @@ describe("resolveCrawlIdentity", () => {
 
   it("refuses an unknown preset", () => {
     expect(refusal({ userAgentPreset: "chrome" })).toBe(
-      "unknown userAgentPreset; expected one of ariadne, googlebot-smartphone, googlebot-desktop, bingbot",
+      "unknown userAgentPreset; expected one of ariadne, googlebot-smartphone, googlebot-desktop, bingbot-desktop, bingbot-mobile",
     );
   });
 
@@ -132,5 +137,26 @@ describe("the start-URL redirect probe", () => {
     const { userAgent } = resolveCrawlIdentity({ userAgentPreset: "googlebot-smartphone" });
     await resolveStartUrlRedirects("https://example.com/", { userAgent });
     expect(seen).toEqual([userAgent]);
+  });
+});
+
+// Phase 29d, Task 15: the verified bingbot presets.
+describe("the bingbot presets", () => {
+  it.each(["bingbot-desktop", "bingbot-mobile"] as const)(
+    "%s presents bingbot/2.0 with the filled Chrome version, and matches the bingbot group",
+    (name) => {
+      const preset = USER_AGENT_PRESETS[name];
+      expect(preset.userAgent).toContain("bingbot/2.0");
+      expect(preset.userAgent).toContain(`Chrome/${PRESET_CHROME_VERSION}`);
+      expect(preset.userAgent).not.toContain("W.X.Y.Z");
+      expect(preset.userAgent).not.toContain("  ");
+      expect(preset.robotsUserAgent).toBe("bingbot");
+    },
+  );
+
+  it("the bare name bingbot is refused as an unknown preset", () => {
+    expect(refusal({ userAgentPreset: "bingbot" })).toBe(
+      "unknown userAgentPreset; expected one of ariadne, googlebot-smartphone, googlebot-desktop, bingbot-desktop, bingbot-mobile",
+    );
   });
 });
