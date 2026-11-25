@@ -145,6 +145,11 @@ New:
       the health counts and the diff.
     - **Readers that mean an indexable HTML page** gain an explicit `FETCHED_OK` guard: content
       and duplicate checks, render selection, the page-level indexability and canonical rules.
+    - Owner ruling 2026-11-25: `site.health`, `links.orphan` and `structure.deep-page` are
+      document readers too ("Let's include pdfs in health checks, orphan, deep"). This
+      replaces an earlier decision that kept the three HTML-only. `site.health` gains
+      `urlsPdf` ("Of Which PDFs"); `links.only-from-non-indexable` and
+      `links.anchors-generic-only` stay HTML-only.
   - Other non-HTML types (Word, Excel, images) stay non-indexable.
 - The cluster rules (`hreflang-integrity`, completeness) use the same declarer predicate. There
   is one definition, in `src/rules/helpers.ts`, beside `FETCHED_OK`.

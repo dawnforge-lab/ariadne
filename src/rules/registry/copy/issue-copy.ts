@@ -296,7 +296,7 @@ export const COPY_TEMPLATES: Record<string, IssueCopy> = {
   "site.health": {
     title: "Site: Pages by worst finding severity",
     explanation:
-      "Of the pages the audit judges (200, HTML, indexable, self-canonical), how many carry a critical finding, how many a warning and no critical, how many only informational findings, and how many none, each page counted once at its worst severity, with the clean ratio; beside them, the 200 pages set aside as noindex or as canonicalised to another URL, and the other recorded URLs (redirects, errors, blocked by bot protection or by robots.txt, failed, non-HTML). The four buckets plus the two set-aside counts plus the other URLs add up to every URL the crawl recorded; the paginated count is not part of that sum, because those pages (pages 2 onwards of a series) are judged pages left out of the duplicate title, meta description and H1 checks only. Site-wide findings appear in none of the counts, on a capped run pages past the cap count as clean, and this table is the evidence for the engine-coverage check, not a finding about the site.",
+      "Of the pages and PDFs the audit judges (200, HTML page or PDF, indexable, self-canonical), how many carry a critical finding, how many a warning and no critical, how many only informational findings, and how many none, each page counted once at its worst severity, with the clean ratio; beside them, the 200 pages set aside as noindex or as canonicalised to another URL, and the other recorded URLs (redirects, errors, blocked by bot protection or by robots.txt, failed, non-HTML other than PDF). The four buckets plus the two set-aside counts plus the other URLs add up to every URL the crawl recorded; the paginated count and the PDF count are not part of that sum: the paginated pages (pages 2 onwards of a series) are judged pages left out of the duplicate title, meta description and H1 checks only, and the PDF count says how many of the judged URLs are PDFs, which almost no page check reads, so they mostly count as clean. Site-wide findings appear in none of the counts, on a capped run pages past the cap count as clean, and this table is the evidence for the engine-coverage check, not a finding about the site.",
     howToFix:
       "Read the counts as the shape of the work, not as a score: the critical count says how much of the site is affected, and the issue list says what is wrong. Read the set-aside counts to know how much of the site the audit judged; work percentages out from the counts, and check whether the run was capped before quoting the ratio.",
   },
@@ -616,7 +616,7 @@ export const COPY_TEMPLATES: Record<string, IssueCopy> = {
   "links.orphan": {
     title: "Links: Orphan pages",
     explanation:
-      "Indexable, self-canonical pages that were crawled and that no other page links to; self-links do not count, the start URL is excluded, and a page in the sitemap but linked from nowhere is still an orphan. Orphans are crawled rarely and receive no internal link value. Where the crawl could not fetch some URLs, the row says how many, since one of them could link here.",
+      "Indexable, self-canonical pages and PDFs that were crawled and that no other page links to; self-links do not count, the start URL is excluded, and a page in the sitemap but linked from nowhere is still an orphan. Orphans are crawled rarely and receive no internal link value. Where the crawl could not fetch some URLs, the row says how many, since one of them could link here.",
     howToFix:
       "Link to the page from a hub, category, navigation or related content. If nothing on the site has a reason to link to it, consolidate or remove it.",
   },
@@ -1210,7 +1210,7 @@ export const COPY_TEMPLATES: Record<string, IssueCopy> = {
   "structure.deep-page": {
     title: "Links: Crawl depth over {DEEP_DEPTH}",
     explanation:
-      "Indexable, self-canonical pages whose shortest internal link path from the home page is more than {DEEP_DEPTH} links. Deep pages are crawled less often, receive less internal link value and are harder to reach. Pages with no link path from the home page have no depth and are not in this report.",
+      "Indexable, self-canonical pages and PDFs whose shortest internal link path from the home page is more than {DEEP_DEPTH} links. Deep pages are crawled less often, receive less internal link value and are harder to reach. Pages with no link path from the home page have no depth and are not in this report.",
     howToFix:
       "Link to the page from a category, landing page or navigation entry closer to the home page. If it is not worth linking from higher up, consolidate or remove it.",
   },

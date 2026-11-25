@@ -1,7 +1,7 @@
 import { sql } from "drizzle-orm";
 
 import type { Db } from "../../db/client.js";
-import { JUDGED, queryFinding, type RuleIdentity } from "../helpers.js";
+import { JUDGED_DOCUMENT, queryFinding, type RuleIdentity } from "../helpers.js";
 import { copyFor } from "../registry/copy/index.js";
 import {
   defineRule,
@@ -25,8 +25,12 @@ const DEEP: RuleIdentity = { id: "structure.deep-page", severity: "info" };
 export { DEEP_DEPTH } from "../thresholds.js";
 
 /**
- * The pages these rules count as the site: the JUDGED cohort (fetched OK, 200,
- * indexable, not canonicalised elsewhere — `JUDGED`, src/rules/helpers.ts).
+ * The URLs these rules count as the site: the JUDGED_DOCUMENT cohort, "a URL the
+ * site wants indexed" — an HTML page fetched OK or a 200 PDF, indexable, not
+ * canonicalised elsewhere (`JUDGED_DOCUMENT`, src/rules/helpers.ts). PDFs joined
+ * in Phase 29d (owner ruling 2026-11-25): a PDF is a link target like a page, so
+ * it can be an orphan and it can be buried. Its inlinks are all that matter; a
+ * PDF has no extracted outlinks, so it is never an inlink source.
  *
  * One fragment rather than three lines repeated per rule, so "the same cohort
  * `links.orphan` reports over" is a structural fact about the file instead of a
@@ -38,7 +42,7 @@ export { DEEP_DEPTH } from "../thresholds.js";
  * tracking variant and nothing should; reporting it as an orphan asks a client
  * to build links to a URL they have already told search engines to ignore.
  */
-const INDEXABLE = JUDGED("p");
+const INDEXABLE = JUDGED_DOCUMENT("p");
 
 /** What the crawl row and the frontier say about whether the crawl finished. */
 interface Completeness {

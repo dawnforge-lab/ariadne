@@ -77,6 +77,10 @@ WHAT CHANGED AFTER IMPORT (the living authority's own change log):
   - CHECK-05: a crawl run under a `userAgentPreset` presented a spoofed bot
     identity, which a site verifying bots by IP or reverse DNS refuses; a preset
     never bypasses a challenge.
+  - CHECK-83 / 32 / 31 (owner ruling 2026-11-25): indexable PDFs join `site.health`
+    (`urlsTotal` counts them; `urlsPdf`, "Of Which PDFs", says how many),
+    `links.orphan` and `structure.deep-page`. The cohort of those three is
+    "HTML pages and PDFs". Evaluate and Record unchanged.
 
 WHAT DID NOT CHANGE, and must not: every CHECK id, every check's title, priority,
 `**Evaluate**` criteria and `**Record**` list. The rule registry's `checkIds`
@@ -449,11 +453,12 @@ answered from, and its verdict is the confidence interval around all of them.
   died before its first close, has no answer at all, and a report that prints "0 pages
   truncated" for it is stating a measurement nobody took.
 - **`site.health` is filed here** (`metrics_get` with `metricId: "site.health"`):
-  the partition of the crawl's auditable pages by the worst severity each carries,
-  plus the pages the census leaves out. It is a rollup of the audit's own findings —
+  the partition of the crawl's auditable pages and PDFs by the worst severity each
+  carries, plus the URLs the census leaves out. It is a rollup of the audit's own findings —
   a statement about how far the judgement reached, which is this check's subject
   (it also carries `urlsPaginated`: judged rel=prev pages left out of the three
-  duplicate rules only, which is NOT part of the partition) —
+  duplicate rules only, and `urlsPdf`: how many of `urlsTotal` are PDFs, which almost
+  no page rule reads, so they sit mostly in Clean; neither is part of the partition) —
   and Evaluation Principle 2 still applies: it is context for the coverage answer
   and never the verdict on any check below.
 
@@ -1928,7 +1933,7 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
      individual pages past the depth threshold. **It reads CLICK depth** (since
      ruleset 0.7.0 it is a query rule, running after the click-depth search), so its
      evidence is `{clickDepth, threshold}` and its list is the buried indexable pages
-     rather than a lower bound. Pages with no click path at all are NOT in it — they
+     rather than a lower bound. It covers indexable HTML pages and PDFs. Pages with no click path at all are NOT in it — they
      have no depth to be past a threshold; they are the `nullCount` bucket in the
      distribution above, and where nothing links to them at all they are
      `links.orphan`'s finding (CHECK-32). A page in `nullCount` but not in
@@ -1992,8 +1997,8 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
 ### CHECK-32: Orphan pages (no internal links)
 - **Priority**: High | **Requires**: Engine + GSC
 - **Engine**: `issues_list` with `checkId: "CHECK-32"` — three rules:
-  - `links.orphan` (warning) — a page the crawl fetched that no other crawled page
-    links to. `issue_urls` gives the list, and each row's evidence says how the page
+  - `links.orphan` (warning) — an indexable page or PDF the crawl fetched that no
+    other crawled page links to. `issue_urls` gives the list, and each row's evidence says how the page
     was discovered and whether the sitemap lists it, which is the SITEMAP breakdown
     the Analysis asks for.
   - `links.orphan-skipped` (info) — the crawl did not run to completion (URLs left

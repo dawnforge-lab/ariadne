@@ -3657,6 +3657,8 @@ describe("the fixture site end to end", () => {
       // Inside `urlsTotal`, not a partition member: judged pages declaring
       // rel=prev, left out of the three field-duplicate rules only (P23 T7).
       urlsPaginated: paginatedJudged,
+      // Judged PDFs (P29d): this fixture site serves none, so zero is measured.
+      urlsPdf: 0,
     });
     // THE PARTITION, end to end (Phase 22 §3): every URL this crawl has a row
     // for is in exactly one of the four columns. The rule asserts it over its

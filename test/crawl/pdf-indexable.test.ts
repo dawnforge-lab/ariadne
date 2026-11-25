@@ -403,15 +403,17 @@ describe("the reader audit: a crawl with an indexable PDF beside indexable HTML"
     expect(status.get(url("/page"))).toBe("");
   });
 
-  it("site.health keeps its census to HTML pages: both PDFs sit outside it", async () => {
+  it("site.health judges the indexable PDF and sets the noindexed one aside (owner ruling 2026-11-25)", async () => {
     const health = healthMetrics.find((r) => r.id === "site.health")!;
     const [row] = await health.run(db, crawlId);
-    // Judged: /page only (the two /to-* pages canonicalise elsewhere).
+    // Judged: /page and /doc.pdf (the two /to-* pages canonicalise elsewhere);
+    // /hidden.pdf is noindexed by its header; only the Word file is not judged.
     expect(row!.value).toMatchObject({
-      urlsTotal: 1,
+      urlsTotal: 2,
       urlsCanonicalised: 2,
-      urlsNoindex: 0,
-      pagesNotAuditable: 3,
+      urlsNoindex: 1,
+      pagesNotAuditable: 1,
+      urlsPdf: 1,
     });
   });
 });

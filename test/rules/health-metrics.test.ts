@@ -215,6 +215,7 @@ describe("site.health against the database", () => {
       urlsCanonicalised: 0,
       urlsNoindex: 0,
       urlsPaginated: 0,
+      urlsPdf: 0,
     });
   });
 
@@ -249,6 +250,7 @@ describe("site.health against the database", () => {
       urlsCanonicalised: 0,
       urlsNoindex: 0,
       urlsPaginated: 0,
+      urlsPdf: 0,
     });
   });
 
@@ -273,6 +275,7 @@ describe("site.health against the database", () => {
       urlsCanonicalised: 0,
       urlsNoindex: 0,
       urlsPaginated: 0,
+      urlsPdf: 0,
     });
   });
 
@@ -298,6 +301,7 @@ describe("site.health against the database", () => {
       urlsCanonicalised: 0,
       urlsNoindex: 0,
       urlsPaginated: 0,
+      urlsPdf: 0,
     });
   });
 
@@ -334,6 +338,7 @@ describe("site.health against the database", () => {
       urlsCanonicalised: 0,
       urlsNoindex: 0,
       urlsPaginated: 0,
+      urlsPdf: 0,
     });
   });
 
@@ -378,6 +383,7 @@ describe("site.health against the database", () => {
       urlsCanonicalised: 0,
       urlsNoindex: 1,
       urlsPaginated: 0,
+      urlsPdf: 0,
     });
   });
 
@@ -401,6 +407,7 @@ describe("site.health against the database", () => {
       urlsCanonicalised: 0,
       urlsNoindex: 1,
       urlsPaginated: 0,
+      urlsPdf: 0,
     });
   });
 
@@ -432,6 +439,7 @@ describe("site.health against the database", () => {
       urlsCanonicalised: 1,
       urlsNoindex: 2,
       urlsPaginated: 0,
+      urlsPdf: 0,
       pagesNotAuditable: 2,
     });
     expect(
@@ -457,6 +465,7 @@ describe("site.health against the database", () => {
     expect(v).toMatchObject({
       urlsTotal: 3,
       urlsPaginated: 2,
+      urlsPdf: 0,
       urlsCanonicalised: 1,
       urlsNoindex: 1,
       pagesNotAuditable: 0,
@@ -593,6 +602,7 @@ describe("site.health over a capped run", () => {
       urlsCanonicalised: 0,
       urlsNoindex: 0,
       urlsPaginated: 0,
+      urlsPdf: 0,
     });
     expect(await siteRow(uncapped)).toEqual({
       urlsTotal: 10,
@@ -605,6 +615,7 @@ describe("site.health over a capped run", () => {
       urlsCanonicalised: 0,
       urlsNoindex: 0,
       urlsPaginated: 0,
+      urlsPdf: 0,
     });
   });
 

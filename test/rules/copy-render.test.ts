@@ -139,6 +139,31 @@ const CHANGED_SINCE_0_22: Record<string, Partial<Entry>> = {
       .replace("200 pages that were crawled", "200 pages and PDFs that were crawled")
       .replace("a canonicalised page belongs", "a canonicalised URL belongs"),
   },
+  // 0.29.0, Phase 29d Task 14 (owner ruling 2026-11-25): PDFs join the three.
+  "links.orphan": {
+    explanation: FIXTURE["links.orphan"]!.explanation.replace(
+      "Indexable, self-canonical pages that were crawled",
+      "Indexable, self-canonical pages and PDFs that were crawled",
+    ),
+  },
+  "structure.deep-page": {
+    explanation: FIXTURE["structure.deep-page"]!.explanation.replace(
+      "Indexable, self-canonical pages whose shortest",
+      "Indexable, self-canonical pages and PDFs whose shortest",
+    ),
+  },
+  "site.health": {
+    explanation: FIXTURE["site.health"]!.explanation
+      .replace(
+        "Of the pages the audit judges (200, HTML, indexable, self-canonical)",
+        "Of the pages and PDFs the audit judges (200, HTML page or PDF, indexable, self-canonical)",
+      )
+      .replace("failed, non-HTML)", "failed, non-HTML other than PDF)")
+      .replace(
+        "the paginated count is not part of that sum, because those pages (pages 2 onwards of a series) are judged pages left out of the duplicate title, meta description and H1 checks only.",
+        "the paginated count and the PDF count are not part of that sum: the paginated pages (pages 2 onwards of a series) are judged pages left out of the duplicate title, meta description and H1 checks only, and the PDF count says how many of the judged URLs are PDFs, which almost no page check reads, so they mostly count as clean.",
+      ),
+  },
 };
 const expected = (id: string): Entry => ({ ...FIXTURE[id]!, ...CHANGED_SINCE_0_22[id] });
 

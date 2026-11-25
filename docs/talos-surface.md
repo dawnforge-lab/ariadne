@@ -404,7 +404,7 @@ index that keeps `renderDocuments` from scanning a crawl's pages. Gate evidence:
   transaction).
 - **A slot fires or is skipped, and the skip is recorded.** `schedule_history` answers
   the schedule's own events: `schedule_fired` `{crawlId}`, `schedule_skipped` `{reason,
-  crawlId?}` and `schedule_chain_failed` `{link, reason}`. A fire or skip carries
+  crawlId?, field?}` (`field` names the offending field on an `identity_refused` skip) and `schedule_chain_failed` `{link, reason}`. A fire or skip carries
   `crawlId` null at the top level and names the crawl in `detail`, so its record
   outlives a deleted crawl. `schedule_history` answers these three kinds only: a fired
   crawl's lifecycle events carry the schedule's `scheduleId` too, and they are read with
@@ -3942,6 +3942,9 @@ One row per crawl, `scope: "site"`:
  "urlsCanonicalised":2,"urlsNoindex":0}
 ```
 
+(0.29.0 adds `"urlsPdf"` after `urlsPaginated`; omitted from the printing below, which
+predates it.)
+
 (The row ruleset 0.17.0's own statement produces on `crawl_02ff6f7a`,
 re-measured 2026-09-23 over that crawl's 551 pages and its stored findings. The
 pre-0.17.0 printing of the same crawl read `urlsTotal` 443 with no trailing
@@ -3950,8 +3953,10 @@ are set aside now, which is the whole of the difference — 441 + 2 + 0 + 108.
 A crawl judged before 0.17.0 carries no such keys at all, and the table prints
 an empty cell rather than a nought nobody counted.)
 
-- **The census is THE JUDGED PAGE: `fetch_class = 'ok' AND status_code = 200 AND
-  is_indexable AND NOT canonicalised elsewhere`** — the cohort the ruleset
+- **The census is THE JUDGED DOCUMENT (Phase 29d, owner ruling 2026-11-25): an HTML
+  page (`fetch_class = 'ok'`) or a PDF (`non_html`, `application/pdf`), `status_code =
+  200 AND is_indexable AND NOT canonicalised elsewhere`** (`JUDGED_DOCUMENT`; the
+  HTML-only `JUDGED` is what this section's older text and the page rules mean) — the cohort the ruleset
   reports defects on as a page's own (§5.x, `isJudged`/`JUDGED` in
   src/rules/helpers.ts). It is the same cohort every other metric measures and
   it is not the crawl's page count. Before 0.17.0 it was fetched-OK 200s
@@ -3991,8 +3996,13 @@ an empty cell rather than a nought nobody counted.)
   108 = 551), asserted by the rule itself, by its unit test and end to end in
   the fixture harness. Which kinds those are is a
   `pages_query` question; a non-HTML 200 is counted by no other table at all.
-  An indexable PDF (Phase 29d) is a document, not an HTML page, and stays here:
-  this census is the HTML pages the on-page rules judge.
+  An indexable PDF (Phase 29d, owner ruling 2026-11-25) is NOT here any more: it
+  is in `urlsTotal`, a noindexed one in `urlsNoindex`. A Word file or image still
+  is.
+- **`urlsPdf` ("Of Which PDFs") is the count of `urlsTotal` that are PDFs**, the
+  row's last column. It overlaps the buckets, like `urlsPaginated`, and is not a
+  partition member. Almost no page rule reads a PDF (no title, meta or headings),
+  so a PDF usually lands in `urlsClean`; the column shows how much of Clean it is.
 - **The four counts are the authority; `cleanRatio` is a convenience.** Four
   decimal places collapse at scale: 1 clean page in 50,000 rounds to `0.0000`
   and 49,999 in 50,000 to `1.0000`. Work percentages out from the counts.
@@ -4039,16 +4049,16 @@ is ingredients; the judgement is the consumer's.
 
 Pinned: `test/rules/health-metrics.test.ts` (16 tests) —
 `test/rules/health-metrics.test.ts:47` "carrying the engine-coverage check it is
-evidence for", `test/rules/health-metrics.test.ts:221` "partitions the census
-exactly", `test/rules/health-metrics.test.ts:255` "answers an empty census with a
-null ratio", `test/rules/health-metrics.test.ts:279` "lets no site-level finding
-poison a page bucket", `test/rules/health-metrics.test.ts:304` "keeps the pages
-it cannot judge out of the buckets", `test/rules/health-metrics.test.ts:353`
+evidence for", `test/rules/health-metrics.test.ts:222` "partitions the census
+exactly", `test/rules/health-metrics.test.ts:257` "answers an empty census with a
+null ratio", `test/rules/health-metrics.test.ts:282` "lets no site-level finding
+poison a page bucket", `test/rules/health-metrics.test.ts:308` "keeps the pages
+it cannot judge out of the buckets", `test/rules/health-metrics.test.ts:358`
 "sets a noindex 200 aside in its own column rather than in a bucket",
-`test/rules/health-metrics.test.ts:392` "counts a page that both noindexes and
-canonicalises under noindex", `test/rules/health-metrics.test.ts:414`
+`test/rules/health-metrics.test.ts:398` "counts a page that both noindexes and
+canonicalises under noindex", `test/rules/health-metrics.test.ts:421`
 "partitions every fetched URL over the four columns",
-`test/rules/health-metrics.test.ts:567`
+`test/rules/health-metrics.test.ts:576`
 "buckets the findings the capped run wrote, and no others"; the copy contracts —
 `test/rules/copy.test.ts:1515` "names every column and the population they
 are over", `test/rules/copy.test.ts:1540` "says the counts are the authority, not the
@@ -4551,7 +4561,7 @@ CSV (§12) ends with `Blocks Dropped` and `Nodes Dropped` columns. The two colum
 keeps answering null for both until it is re-crawled. `schema.unresolved-reference` finds a
 reference wherever it sits, past the 50th too: the block verdict gains `unresolved` (every
 id no node of the block defines, uncapped) and `unresolvedCount` (its length, or at least
-it when `idsTruncated`: the exact count of the block's references, of which the list
+it when `idsTruncated`: the exact count of its unresolved references, of which the list
 holds those that fitted), the rule's
 evidence is `{unresolved (up to 50), unresolvedCount, problemsCapped}` over the page, and
 the `structured_data` listing's `infoCount` and `problemsCapped` and the CSV's
@@ -4574,9 +4584,22 @@ reports an indexable, self-canonical PDF the sitemap does not list (its copy now
 noindexed PDF, the Crawl Overview's `indexability` counts a plain PDF as `Indexable`,
 and `pages_query`'s `indexable` filter and `crawl_diff`'s `indexable` field read the new
 stamp. The readers that mean an indexable HTML PAGE do not: every on-page, content and
-duplicate rule, the page-level canonical and indexability rules, render selection and
-`site.health`'s census (a PDF stays in `pagesNotAuditable`). Other non-HTML types stay
-non-indexable.
+duplicate rule, the page-level canonical and indexability rules and render selection.
+Other non-HTML types stay non-indexable.
+**Owner ruling 2026-11-25: PDFs join `site.health`, `links.orphan` and
+`structure.deep-page`** (the cohort is "HTML pages and PDFs": an indexable, self-canonical
+HTML page or 200 PDF). `site.health`'s census counts an indexable PDF in `urlsTotal`, a
+noindexed one in `urlsNoindex`, a PDF canonicalised elsewhere in `urlsCanonicalised`
+(a Word file or image stays in `pagesNotAuditable`), and the row gains `urlsPdf`
+("Of Which PDFs"): the count of `urlsTotal` that are PDFs. It overlaps the judged buckets
+like `urlsPaginated` and is not a partition member; almost no page rule reads a PDF (no
+title, meta or headings), so a PDF usually lands in Clean, and the column shows how much
+of Clean it is. A crawl stored before 29d has `urlsPdf` null. `links.orphan` reports an
+indexable PDF nothing links to, and `structure.deep-page` one whose click depth is past
+the threshold (a linked PDF gets a click depth like any link target; a PDF has no
+extracted outlinks, so it is never an inlink source). `links.only-from-non-indexable`,
+`links.anchors-generic-only` and `hreflang.unlinked-target` stay HTML-only. Tested in
+test/rules/pdf-link-graph.test.ts.
 Hreflang: any 200 non-HTML response whose `Link` header carries alternates is a
 declarer (`HREFLANG_DECLARER`; a PDF is the common case), so its own set is judged by
 every hreflang rule (see "Hreflang is read from all three sources"), and a PDF target

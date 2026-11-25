@@ -1132,8 +1132,8 @@ const KINDS = ["page", "query", "metric"] as const satisfies readonly AnyRule["k
 //        `pages.not-in-sitemap` (`JUDGED_DOCUMENT`) an indexable PDF the sitemap does
 //        not list (its copy says "pages and PDFs"). HTML-page readers
 //        (on-page, content, duplicates, page canonical/indexability rules, render
-//        selection, `site.health`) were already gated on `FETCHED_OK` / `isAuditable`
-//        / `JUDGED` and are unchanged. Other non-HTML types stay non-indexable.
+//        selection) were already gated on `FETCHED_OK` / `isAuditable` / `JUDGED` and
+//        are unchanged. Other non-HTML types stay non-indexable.
 //        Hreflang: a 200 non-HTML response (a PDF) whose `Link` header carries
 //        alternates is a declarer (`HREFLANG_DECLARER`, R1): its own set is judged by
 //        `missing-return-link`, `non-indexable-target`, `missing-x-default`,
@@ -1146,6 +1146,12 @@ const KINDS = ["page", "query", "metric"] as const satisfies readonly AnyRule["k
 //        beside `userAgent` (the header). `robots.blocks-sitemap-urls` matches the
 //        stored token and its evidence carries `robotsUserAgent`; a crawl stored
 //        before 29d has none and is read with its full `userAgent`, as it was crawled.
+//        PDFs join `site.health`, `links.orphan` and `structure.deep-page` (owner ruling
+//        2026-11-25, `JUDGED_DOCUMENT` / `DOCUMENT_OK`): an indexable PDF is judged and
+//        counted in `urlsTotal`, can be an orphan or buried past `DEEP_DEPTH`, and
+//        `site.health` gains `urlsPdf` ("Of Which PDFs", overlaps the buckets, not a
+//        partition member). `links.only-from-non-indexable` and
+//        `links.anchors-generic-only` stay HTML-only.
 //        Rule count unchanged: 229 (72 page / 140 query / 17 metric).
 export const RULESET_VERSION = "0.29.0";
 

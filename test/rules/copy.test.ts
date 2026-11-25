@@ -1514,7 +1514,7 @@ describe("copy: metric tables", () => {
   // metric's does.
   it("site.health names every column and the population they are over", () => {
     const text = copy("site.health").explanation;
-    expect(text, "urlsTotal").toMatch(/pages the audit (?:could judge|judges)/i);
+    expect(text, "urlsTotal").toMatch(/pages(?: and PDFs)? the audit (?:could judge|judges)/i);
     expect(text, "the census definition").toMatch(/200, HTML|200 with HTML/i);
     expect(text, "urlsWithCritical").toMatch(/critical/i);
     expect(text, "urlsWithWarningOnly").toMatch(/warning and no critical/i);

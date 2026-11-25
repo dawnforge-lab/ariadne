@@ -439,6 +439,10 @@ Task 11 runs first, so later suite runs leave no strays. After that the order is
       descriptions, content rules, page-level indexability and canonical rules.
     - Each document reader counts it: the health metric's indexable count, sitemap
       non-indexable (a PDF in the sitemap is no longer flagged), the link-target rules.
+    - Owner ruling 2026-11-25: `site.health`, `links.orphan` and `structure.deep-page` also
+      take PDFs (Task 14), replacing the HTML-only reading of them; `site.health` gains
+      `urlsPdf`. `links.only-from-non-indexable` and `links.anchors-generic-only` stay
+      HTML-only.
   - **`isPdf` / `IS_PDF` parity** over `application/pdf`, `Application/PDF;x=1`, `text/html`,
     null.
 - [ ] **Step 2:** Run the new files. Expect a FAIL.
