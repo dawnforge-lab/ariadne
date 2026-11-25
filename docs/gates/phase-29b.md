@@ -237,14 +237,14 @@ A lossless fix would be a chunk-hop Range GET, left for a later phase.
 
 ## 8. Open items
 
-- **Square PNG past 64 KiB.** Its IHDR size is right whichever way it is rotated, so it could be
+- **Done in 29d (Task 7).** **Square PNG past 64 KiB.** Its IHDR size is right whichever way it is rotated, so it could be
   reported losslessly instead of `header-beyond-limit`. Cheap.
-- **Chunk-hop Range GET** for PNGs with more than 64 KiB before IDAT (§6).
+- **Done in 29d (Task 7).** **Chunk-hop Range GET** for PNGs with more than 64 KiB before IDAT (§6).
 - **Pre-existing, not 29b:**
-  - **Measurement script in the main world.** The render pass's older `MEASURE_SCRIPT` runs in
+  - **Done in 29d (Task 8).** **Measurement script in the main world.** The render pass's older `MEASURE_SCRIPT` runs in
     the page's main world, so a page that overrides `Array.prototype.push` can stop the pass.
-  - **No cross-phase deadline.** A page that hangs has none.
-- **Allocation churn.** `simhash64`, through `analyzeHtml`, allocates about 11.5 MB of garbage
+  - **Done in 29d (Task 8).** **No cross-phase deadline.** A page that hangs has none.
+- **Done in 29d (Task 9; about 127× less, `docs/gates/phase-29d.md` §5.1).** **Allocation churn.** `simhash64`, through `analyzeHtml`, allocates about 11.5 MB of garbage
   per analysed page. That shows in the render path and probably in the crawl. Nothing is
   retained, but it is the largest churn the profile showed.
 - **`ariadne_gate29b` is kept** until the owner's OK to drop it.
