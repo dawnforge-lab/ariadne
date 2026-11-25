@@ -43,8 +43,8 @@
 export type UserAgentPreset = "ariadne" | "googlebot-smartphone" | "googlebot-desktop" | "bingbot-desktop" | "bingbot-mobile";
 
 /**
- * The Chrome version the Googlebot Smartphone preset reports. Google writes it
- * `W.X.Y.Z` and raises it over time; this value was set on 2026-11-24 and is
+ * The Chrome version the four Googlebot and bingbot presets report. Google and
+ * Bing write it `W.X.Y.Z` and raise it over time; this value was set on 2026-11-24 and is
  * not read from any live source. Update it with the preset strings' next check.
  */
 export const PRESET_CHROME_VERSION = "142.0.0.0";
