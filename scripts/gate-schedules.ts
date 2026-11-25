@@ -2,7 +2,7 @@
  * The Phase 28c gate, clauses 1 and 2: schedules fired by a leader-elected
  * scheduler in worker PROCESSES, one leader killed mid-run.
  *
- *   DATABASE_URL=postgresql://…/ariadne_gate28c node --import tsx scripts/gate-schedules.ts [--log-dir=<dir>]
+ *   ARIADNE_HEAP_MB=384 DATABASE_URL=postgresql://…/ariadne_gate28c node --import tsx scripts/gate-schedules.ts [--log-dir=<dir>]
  *
  * It runs the API service in this process (`crawlRunner: "workers"`, and NOT a
  * scheduler candidate) beside two `scripts/run-worker-trusted.ts --scheduler`
@@ -68,6 +68,7 @@ import { closeDb, createDb, type Db } from "../src/db/client.js";
 import { createApiServer, type ApiServer } from "../src/api/http.js";
 import type { CredentialKeys } from "../src/crawl/credential-vault.js";
 import { closeFetchAgents } from "../src/crawl/http.js";
+import { HEAP_CAP_ENV, parseHeapCapMb } from "../src/runtime/heap-cap.js";
 import { SCHEDULER_LOCK } from "../src/schedule/scheduler.js";
 
 /** The database prefix every gate database starts with. */
@@ -212,14 +213,18 @@ async function writePeers(): Promise<void> {
 }
 
 async function spawnWorker(label: string): Promise<Worker> {
+  // The trusted worker asserts the cap it is told (29d): this harness hands on
+  // its own, and fails loudly when there is none.
+  const heapCapMb = parseHeapCapMb(process.env[HEAP_CAP_ENV]);
   const proc = spawn(
     process.execPath,
-    ["--import", "tsx", "scripts/run-worker-trusted.ts", "--scheduler", `--schedule-every-ms=${SCHEDULE_EVERY_MS}`],
+    [`--max-old-space-size=${heapCapMb}`, "--import", "tsx", "scripts/run-worker-trusted.ts", "--scheduler", `--schedule-every-ms=${SCHEDULE_EVERY_MS}`],
     {
       cwd: ROOT,
       env: {
         PATH: process.env["PATH"],
         DATABASE_URL: databaseUrl(),
+        [HEAP_CAP_ENV]: String(heapCapMb),
         ARIADNE_CREDENTIALS_KEY: KEY_ENV,
         TRUSTED_WORKER_PEERS_FILE: peersFile,
       },

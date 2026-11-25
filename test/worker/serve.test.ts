@@ -44,6 +44,7 @@ import { timingWith } from "../../src/worker/timing.js";
 import { startWorker } from "../../src/worker/main.js";
 import { TEST_CREDENTIAL_KEYS, TEST_CREDENTIAL_KEY_ENV } from "../helpers/credential-keys.js";
 import { acquirePoolLock, type PoolLock } from "../helpers/pool-lock.js";
+import { HEAP_CAP_NODE_FLAG, HEAP_CAP_TEST_ENV } from "../helpers/heap-cap.js";
 
 const ROOT = join(import.meta.dirname, "..", "..");
 
@@ -163,11 +164,11 @@ function track(proc: ChildProcess): { stdout: string[]; stderr: string[]; exited
   return { stdout, stderr, exited };
 }
 
-/** `node --import tsx <script>`: the signal reaches node itself, no wrapper in between. */
+/** `node --max-old-space-size=… --import tsx <script>` (the serving processes assert their cap): the signal reaches node itself, no wrapper in between. */
 function launch(script: string, env: Record<string, string | undefined>): ChildProcess {
-  const proc = spawn(process.execPath, ["--import", "tsx", script], {
+  const proc = spawn(process.execPath, [HEAP_CAP_NODE_FLAG, "--import", "tsx", script], {
     cwd: ROOT,
-    env: { PATH: process.env.PATH, ...env },
+    env: { PATH: process.env.PATH, ...HEAP_CAP_TEST_ENV, ...env },
     stdio: ["ignore", "pipe", "pipe"],
   });
   registerTestChild(proc);
@@ -472,6 +473,27 @@ function workerEnv(): Record<string, string> {
 }
 
 describe("api:serve boot", () => {
+  it("refuses to boot when node was not started with the configured cap", async () => {
+    const proc = spawn(process.execPath, ["--import", "tsx", "src/api/serve.ts"], {
+      cwd: ROOT,
+      env: {
+        PATH: process.env.PATH,
+        ...HEAP_CAP_TEST_ENV,
+        DATABASE_URL: databaseUrl(),
+        ARIADNE_CREDENTIALS_KEY: TEST_CREDENTIAL_KEY_ENV,
+        ARIADNE_API_TOKEN: `api-token-${short()}-${short()}`,
+        ARIADNE_API_PORT: "0",
+        ARIADNE_ALLOWED_DOMAINS: "127.0.0.1",
+      },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    registerTestChild(proc);
+    launched.push(proc);
+    const { stderr, exited } = track(proc);
+    expect(await exited).not.toBe(0);
+    expect(stderr.join("")).toContain("--max-old-space-size=384");
+  });
+
   it("registers its `api` instance row at boot (before any render or rules job), and stops it on SIGTERM", async () => {
     const proc = launch("src/api/serve.ts", {
       DATABASE_URL: databaseUrl(),
@@ -516,6 +538,29 @@ describe("worker:serve boot", () => {
     const ran = await runToExit("src/worker/serve.ts", { ...workerEnv(), [name]: value });
     expect(ran.code).not.toBe(0);
     expect(ran.stderr).toContain(name);
+  });
+
+  it.each([
+    ["unset", undefined, "must be set"],
+    ["not a number", "lots", "positive whole number"],
+  ])("refuses to boot with ARIADNE_HEAP_MB %s, naming it", async (_label, value, said) => {
+    const ran = await runToExit("src/worker/serve.ts", { ...workerEnv(), ARIADNE_HEAP_MB: value });
+    expect(ran.code).toBe(1);
+    expect(ran.stderr).toContain("ARIADNE_HEAP_MB");
+    expect(ran.stderr).toContain(said);
+  });
+
+  it("refuses to boot when node was not started with the configured cap", async () => {
+    const proc = spawn(process.execPath, ["--import", "tsx", "src/worker/serve.ts"], {
+      cwd: ROOT,
+      env: { PATH: process.env.PATH, ...workerEnv(), ...HEAP_CAP_TEST_ENV },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    registerTestChild(proc);
+    launched.push(proc);
+    const { stderr, exited } = track(proc);
+    expect(await exited).toBe(1);
+    expect(stderr.join("")).toContain("--max-old-space-size=384");
   });
 
   it("boots with an EMPTY ARIADNE_ALLOWED_DOMAINS (refuse every crawl), and exits 0 on SIGTERM", async () => {

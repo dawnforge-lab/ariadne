@@ -2,14 +2,15 @@
  * The Phase 28b gate, clause 6: the 50,000-page crawl as a `crawl` JOB in a
  * worker process, with the worker's RSS sampled from outside.
  *
- *   DATABASE_URL=postgresql://…/ariadne_gate28b node --import tsx scripts/gate-worker.ts
+ *   ARIADNE_HEAP_MB=384 DATABASE_URL=postgresql://…/ariadne_gate28b node --import tsx scripts/gate-worker.ts
  *
  * This process is the harness: it serves the 50k fixture site
  * (`test/gate/site-server.ts`), enqueues the crawl through the API service in
  * `workers` mode (the same `startCrawl` a Talos call reaches, so the stored
  * config and the job are the production shape), and spawns ONE
  * `scripts/run-worker-trusted.ts` child under
- * `--max-old-space-size=512`. It then reads the CHILD's `VmRSS` from
+ * `--max-old-space-size=$ARIADNE_HEAP_MB` (the cap the deployed worker runs
+ * under; the child asserts it). It then reads the CHILD's `VmRSS` from
  * `/proc/<pid>/status` every 2 s until the crawl is `finished`, and fails if
  * the peak is above 290.2 MB: the crawl phase of `gate-rules.ts`'s peak, which
  * this worker must not exceed (hard limit 512 MB, build plan rule 6).
@@ -28,6 +29,7 @@ import { join } from "node:path";
 import { sql } from "drizzle-orm";
 
 import { closeDb, createDb } from "../src/db/client.js";
+import { HEAP_CAP_ENV, parseHeapCapMb } from "../src/runtime/heap-cap.js";
 import { ApiService } from "../src/api/service.js";
 import { CRAWL_DEFAULTS } from "../src/crawl/loop.js";
 import { closeFetchAgents } from "../src/crawl/http.js";
@@ -71,6 +73,7 @@ async function procKb(pid: number, field: "VmRSS" | "VmHWM"): Promise<number> {
 }
 
 async function main(): Promise<number> {
+  const heapCapMb = parseHeapCapMb(process.env[HEAP_CAP_ENV]);
   const url = databaseUrl();
   const dbName = new URL(url).pathname.replace(/^\//, "");
   if (dbName === "ariadne") throw new Error("refusing to run against the dev database 'ariadne': use a database of its own (ariadne_gate28b)");
@@ -120,11 +123,12 @@ async function main(): Promise<number> {
     console.log(`fixture site    ${pages.toLocaleString()} URLs at ${site.base}, crawl budget ${budget.toLocaleString()}`);
     console.log(`crawl id        ${crawlId} (queued, job enqueued, no worker yet)`);
 
-    child = spawn(process.execPath, ["--max-old-space-size=512", "--import", "tsx", "scripts/run-worker-trusted.ts"], {
+    child = spawn(process.execPath, [`--max-old-space-size=${heapCapMb}`, "--import", "tsx", "scripts/run-worker-trusted.ts"], {
       cwd: ROOT,
       env: {
         PATH: process.env["PATH"],
         DATABASE_URL: url,
+        [HEAP_CAP_ENV]: String(heapCapMb),
         ARIADNE_CREDENTIALS_KEY: `${keyId}:${keyBytes.toString("base64")}`,
         TRUSTED_WORKER_CONCURRENCY: "1",
       },
@@ -137,7 +141,7 @@ async function main(): Promise<number> {
     const exited = new Promise<number | null>((resolve) => child?.once("exit", (code) => resolve(code)));
     let childExit: number | null | undefined;
     void exited.then((code) => { childExit = code; });
-    console.log(`worker child    pid ${pid}, node --max-old-space-size=512`);
+    console.log(`worker child    pid ${pid}, node --max-old-space-size=${heapCapMb} (${HEAP_CAP_ENV})`);
 
     const startedAt = Date.now();
     let peak = 0;

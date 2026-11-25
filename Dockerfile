@@ -41,6 +41,13 @@ RUN useradd --create-home --uid 10001 ariadne \
     && chown -R ariadne:ariadne /app/exports /app/renders
 USER ariadne
 
+# The V8 old-space cap (MB) every process is started with (docker-entrypoint.sh
+# applies it as --max-old-space-size and the process verifies it at boot). 384
+# leaves headroom under the 512 MB RSS contract (hard rule 6) for the young
+# generation, code, external memory and stacks. This is the one place the default
+# lives; raising it is a deploy decision (docs/deploy.md, "Heap cap").
+ENV ARIADNE_HEAP_MB=384
+
 ARG ARIADNE_GIT_SHA=unknown
 ENV ARIADNE_GIT_SHA=${ARIADNE_GIT_SHA}
 

@@ -59,6 +59,7 @@ import { DEFAULT_THRESHOLDS } from "../../src/rules/judgement.js";
 import { RULESET_VERSION } from "../../src/rules/registry/registry.js";
 import { LOCAL_TENANT } from "../../src/tenant.js";
 import { TEST_CREDENTIAL_KEY_ENV, TEST_CREDENTIAL_KEYS } from "../helpers/credential-keys.js";
+import { HEAP_CAP_NODE_FLAG, HEAP_CAP_TEST_ENV } from "../helpers/heap-cap.js";
 import { hostKeyOf } from "../../src/crawl/host-key.js";
 import { normalizeUrl } from "../../src/crawl/parse/url-utils.js";
 
@@ -2946,7 +2947,7 @@ describe("the stdio entrypoint", () => {
     // would hold the pool, and could still be fetching a real site for a client
     // that is gone (rule 9). This is the wiring, not the protocol: the spawn is
     // real, the crawl is not.
-    const child = spawn(process.execPath, ["node_modules/.bin/tsx", "src/api/mcp-serve.ts"], {
+    const child = spawn(process.execPath, ["node_modules/.bin/tsx", HEAP_CAP_NODE_FLAG, "src/api/mcp-serve.ts"], {
       cwd: new URL("../../", import.meta.url).pathname,
       env: {
         ...process.env,
@@ -2954,6 +2955,7 @@ describe("the stdio entrypoint", () => {
         ARIADNE_TENANT: "local",
         ARIADNE_ALLOWED_DOMAINS: "127.0.0.1",
         ARIADNE_CREDENTIALS_KEY: TEST_CREDENTIAL_KEY_ENV,
+        ...HEAP_CAP_TEST_ENV,
       },
       stdio: ["pipe", "pipe", "pipe"],
     });
@@ -2993,10 +2995,11 @@ describe("the stdio entrypoint without a credential key", () => {
         DATABASE_URL: databaseUrl(),
         ARIADNE_TENANT: "local",
         ARIADNE_ALLOWED_DOMAINS: "127.0.0.1",
+        ...HEAP_CAP_TEST_ENV,
       };
       delete env["ARIADNE_CREDENTIALS_KEY"];
       if (key !== undefined) env["ARIADNE_CREDENTIALS_KEY"] = key;
-      const child = spawn(process.execPath, ["node_modules/.bin/tsx", "src/api/mcp-serve.ts"], {
+      const child = spawn(process.execPath, ["node_modules/.bin/tsx", HEAP_CAP_NODE_FLAG, "src/api/mcp-serve.ts"], {
         cwd: new URL("../../", import.meta.url).pathname,
         env,
         stdio: ["pipe", "pipe", "pipe"],
@@ -3027,6 +3030,40 @@ describe("the stdio entrypoint without a credential key", () => {
     expect(malformed.stderr).toContain("ARIADNE_CREDENTIALS_KEY");
     expect(malformed.stderr).not.toContain(short.slice(3));
   }, 90_000);
+});
+
+describe("the stdio entrypoint without its heap cap", () => {
+  it("refuses to boot on stderr, naming the flag, when node was not started with ARIADNE_HEAP_MB (29d)", async () => {
+    const child = spawn(process.execPath, ["node_modules/.bin/tsx", "src/api/mcp-serve.ts"], {
+      cwd: new URL("../../", import.meta.url).pathname,
+      env: {
+        ...process.env,
+        DATABASE_URL: databaseUrl(),
+        ARIADNE_TENANT: "local",
+        ARIADNE_ALLOWED_DOMAINS: "127.0.0.1",
+        ARIADNE_CREDENTIALS_KEY: TEST_CREDENTIAL_KEY_ENV,
+        ...HEAP_CAP_TEST_ENV,
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (chunk: Buffer) => (stdout += chunk.toString("utf8")));
+    child.stderr.on("data", (chunk: Buffer) => (stderr += chunk.toString("utf8")));
+    const code = await new Promise<number | null>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        child.kill("SIGKILL");
+        reject(new Error(`mcp:serve did not exit — ${stderr}`));
+      }, 30_000);
+      child.once("exit", (c) => {
+        clearTimeout(timer);
+        resolve(c);
+      });
+    });
+    expect(code).not.toBe(0);
+    expect(stderr).toContain("--max-old-space-size=384");
+    expect(stdout).toBe("");
+  }, 60_000);
 });
 
 describe("boot configuration", () => {

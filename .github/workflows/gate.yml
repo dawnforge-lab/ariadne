@@ -54,7 +54,10 @@ jobs:
       - name: Run the 50k gate
         env:
           GATE_PAGES: "50000"
-        run: node --max-old-space-size=512 --import tsx scripts/gate-rules.ts --json-out gate.json
+          # The cap the deployed processes run under (Dockerfile default); the
+          # script asserts node really started with it.
+          ARIADNE_HEAP_MB: "384"
+        run: node --max-old-space-size="$ARIADNE_HEAP_MB" --import tsx scripts/gate-rules.ts --json-out gate.json
       # Early warning, not a failure: the crawl phase's peak against 290.2 MB
       # (the level that leaves the 512 MB contract little headroom).
       - name: Warn when the crawl phase peak is high
