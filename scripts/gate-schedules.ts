@@ -212,10 +212,11 @@ async function writePeers(): Promise<void> {
   await writeFile(peersFile, JSON.stringify([apiInstance, ...workers.map((w) => w.instanceId)]));
 }
 
+let heapCapMb = 0;
+
 async function spawnWorker(label: string): Promise<Worker> {
   // The trusted worker asserts the cap it is told (29d): this harness hands on
   // its own, and fails loudly when there is none.
-  const heapCapMb = parseHeapCapMb(process.env[HEAP_CAP_ENV]);
   const proc = spawn(
     process.execPath,
     [`--max-old-space-size=${heapCapMb}`, "--import", "tsx", "scripts/run-worker-trusted.ts", "--scheduler", `--schedule-every-ms=${SCHEDULE_EVERY_MS}`],
@@ -494,6 +495,8 @@ async function disableAll(): Promise<void> {
 }
 
 async function main(): Promise<number> {
+  // First, before the API server and fixtures exist: no cap is a boot error (29d).
+  heapCapMb = parseHeapCapMb(process.env[HEAP_CAP_ENV]);
   logDir = parseArgs(process.argv.slice(2)).logDir;
   const url = databaseUrl();
   const dbName = new URL(url).pathname.replace(/^\//, "");

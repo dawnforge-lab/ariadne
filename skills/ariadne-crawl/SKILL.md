@@ -34,7 +34,9 @@ of them is worked around.
    - `npm run api:serve` — HTTP on `127.0.0.1:8787` by default, bearer token
      required (`ARIADNE_API_TOKEN`, 16 characters minimum), plus an
      `X-Ariadne-Tenant` header on every request.
-   Both need `DATABASE_URL`. Neither invents one.
+   Both need `DATABASE_URL`. Neither invents one. Both also need `ARIADNE_HEAP_MB`
+   (for example `384`): the npm scripts start node with that heap cap and the process
+   refuses to boot if it does not match (see the Heap cap section of the deploy doc).
 2. **The target host is on the allowlist.** `ARIADNE_ALLOWED_DOMAINS` is a
    comma-separated list of bare hosts (`example.com`) or subdomain wildcards
    (`*.example.com`). An empty list refuses every crawl and answers every query.

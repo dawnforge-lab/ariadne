@@ -1,6 +1,8 @@
 import { spawnSync } from "node:child_process";
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { afterAll, describe, expect, it } from "vitest";
 
 const ROOT = join(import.meta.dirname, "../..");
 
@@ -28,5 +30,27 @@ describe("docker-entrypoint.sh heap cap", () => {
     const ran = entrypoint("bogus", "384");
     expect(ran.status).toBe(64);
     expect(ran.stderr).toContain("ariadne: unknown command 'bogus'");
+  });
+});
+
+describe("docker-entrypoint.sh success path", () => {
+  const bin = mkdtempSync(join(tmpdir(), "ariadne-fake-node-"));
+  writeFileSync(join(bin, "node"), '#!/bin/sh\necho "node $*"\n');
+  chmodSync(join(bin, "node"), 0o755);
+  afterAll(() => rmSync(bin, { recursive: true, force: true }));
+
+  it.each([
+    ["api", "src/api/serve.ts"],
+    ["worker", "src/worker/serve.ts"],
+    ["migrate", "src/db/migrate.ts"],
+  ])("%s execs node with the cap, tsx and %s", (command, file) => {
+    const ran = spawnSync("sh", ["docker-entrypoint.sh", command], {
+      cwd: ROOT,
+      env: { PATH: `${bin}:${process.env["PATH"]}`, ARIADNE_HEAP_MB: "384" },
+      encoding: "utf8",
+      timeout: 20_000,
+    });
+    expect(ran.status).toBe(0);
+    expect(ran.stdout.trim()).toBe(`node --max-old-space-size=384 --import tsx ${file}`);
   });
 });

@@ -263,7 +263,8 @@ crawler inside Talos. The intended shape:
   `renderAccessibility: false` on `crawl_start` turns it off.
 - **Workers (Phase 28b).** `api:serve` accepts and answers and runs no crawl;
   `npm run worker:serve` claims and runs them, and at least one must be running for a
-  crawl to start. Both processes need `DATABASE_URL` and `ARIADNE_CREDENTIALS_KEY`
+  crawl to start. Both processes need `DATABASE_URL`, `ARIADNE_HEAP_MB` (the V8 heap cap node is
+  started with; see the Heap cap section of `docs/deploy.md`) and `ARIADNE_CREDENTIALS_KEY`
   (`<id>:<base64 of 32 bytes>`; the key is required, and a missing or malformed one is a
   boot error). A worker also needs `ARIADNE_WORKER_HTTP_PORT` (health and metrics) and
   `ARIADNE_ALLOWED_DOMAINS`: **a worker re-checks every crawl it claims against its own

@@ -561,7 +561,9 @@ contract moves in these ways, none of them a new call:
   metrics add their own (`le`, `quantile`, `version`, `major`, `minor`, `patch`,
   `space`, `type`). A worker serves the same three on
   `ARIADNE_WORKER_HTTP_PORT`.
-- **Environment.** API: `ARIADNE_API_TOKEN`, `ARIADNE_API_PORT`, `ARIADNE_API_HOST`,
+- **Environment.** Every serving process (API, worker, stdio MCP) also requires
+  `ARIADNE_HEAP_MB`, the `--max-old-space-size` node was started with and which it verifies
+  at boot (`docs/deploy.md`, Heap cap). API: `ARIADNE_API_TOKEN`, `ARIADNE_API_PORT`, `ARIADNE_API_HOST`,
   `ARIADNE_ALLOWED_DOMAINS`, `ARIADNE_CREDENTIALS_KEY` (required),
   `ARIADNE_CREDENTIALS_KEY_PREVIOUS`, `ARIADNE_CREDENTIALS_RETENTION_DAYS`,
   `ARIADNE_METRICS_TOKEN`, `ARIADNE_EXPORT_DIR`, `ARIADNE_RENDER_DIR`,

@@ -213,10 +213,11 @@ async function writePeers(extra: readonly string[]): Promise<void> {
   await writeFile(peersFile, JSON.stringify([...workers.map((w) => w.instanceId), ...extra]));
 }
 
+let heapCapMb = 0;
+
 async function spawnWorker(apiInstance: string): Promise<Worker> {
   // The trusted worker asserts the cap it is told (29d): this harness hands on
   // its own, and fails loudly when there is none.
-  const heapCapMb = parseHeapCapMb(process.env[HEAP_CAP_ENV]);
   const proc = spawn(process.execPath, [`--max-old-space-size=${heapCapMb}`, "--import", "tsx", "scripts/run-worker-trusted.ts"], {
     cwd: ROOT,
     env: {
@@ -808,6 +809,8 @@ async function clause5(metricsTexts: string[], apiInstanceId: string): Promise<R
 // ------------------------------------------------------------------ main
 
 async function main(): Promise<number> {
+  // First, before the API server and fixtures exist: no cap is a boot error (29d).
+  heapCapMb = parseHeapCapMb(process.env[HEAP_CAP_ENV]);
   const url = databaseUrl();
   const dbName = new URL(url).pathname.replace(/^\//, "");
   if (dbName === "ariadne") throw new Error("refusing to run against the dev database 'ariadne': use a database of its own (ariadne_gate28b)");

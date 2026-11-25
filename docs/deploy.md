@@ -4,11 +4,11 @@ One image, three commands. `docker-entrypoint.sh` (installed as `ariadne`) picks
 
 | Command | Runs | Port |
 |---|---|---|
-| `api` (default) | `node --import tsx src/api/serve.ts` | `ARIADNE_API_PORT` (8787) |
-| `worker` | `node --import tsx src/worker/serve.ts` | `ARIADNE_WORKER_HTTP_PORT` (required) |
-| `migrate` | `node --import tsx src/db/migrate.ts` (one-shot) | none |
+| `api` (default) | `node --max-old-space-size="$ARIADNE_HEAP_MB" --import tsx src/api/serve.ts` | `ARIADNE_API_PORT` (8787) |
+| `worker` | `node --max-old-space-size="$ARIADNE_HEAP_MB" --import tsx src/worker/serve.ts` | `ARIADNE_WORKER_HTTP_PORT` (required) |
+| `migrate` | `node --max-old-space-size="$ARIADNE_HEAP_MB" --import tsx src/db/migrate.ts` (one-shot) | none |
 
-Any other command exits 64. There is no build step: the image runs the TypeScript with tsx.
+Every command needs `ARIADNE_HEAP_MB` (see Heap cap below); an unset or malformed value exits 64 before node starts. Any other command exits 64. There is no build step: the image runs the TypeScript with tsx.
 
 ## The image
 

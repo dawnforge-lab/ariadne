@@ -491,7 +491,7 @@ describe("api:serve boot", () => {
     launched.push(proc);
     const { stderr, exited } = track(proc);
     expect(await exited).not.toBe(0);
-    expect(stderr.join("")).toContain("--max-old-space-size=384");
+    expect(stderr.join("")).toContain(HEAP_CAP_NODE_FLAG);
   });
 
   it("registers its `api` instance row at boot (before any render or rules job), and stops it on SIGTERM", async () => {
@@ -560,7 +560,7 @@ describe("worker:serve boot", () => {
     launched.push(proc);
     const { stderr, exited } = track(proc);
     expect(await exited).toBe(1);
-    expect(stderr.join("")).toContain("--max-old-space-size=384");
+    expect(stderr.join("")).toContain(HEAP_CAP_NODE_FLAG);
   });
 
   it("boots with an EMPTY ARIADNE_ALLOWED_DOMAINS (refuse every crawl), and exits 0 on SIGTERM", async () => {

@@ -3447,8 +3447,10 @@ describe("the stdio entrypoint without its heap cap", () => {
   it("refuses to boot on stderr, naming the flag, when node was not started with ARIADNE_HEAP_MB (29d)", async () => {
     const child = spawn(process.execPath, ["node_modules/.bin/tsx", "src/api/mcp-serve.ts"], {
       cwd: new URL("../../", import.meta.url).pathname,
+      // A minimal env, not `...process.env`: a NODE_OPTIONS cap in the developer's
+      // shell would otherwise let this child boot.
       env: {
-        ...process.env,
+        PATH: process.env["PATH"],
         DATABASE_URL: databaseUrl(),
         ARIADNE_TENANT: "local",
         ARIADNE_ALLOWED_DOMAINS: "127.0.0.1",
@@ -3472,7 +3474,7 @@ describe("the stdio entrypoint without its heap cap", () => {
       });
     });
     expect(code).not.toBe(0);
-    expect(stderr).toContain("--max-old-space-size=384");
+    expect(stderr).toContain(HEAP_CAP_NODE_FLAG);
     expect(stdout).toBe("");
   }, 60_000);
 });
