@@ -211,6 +211,8 @@ describe("PDFs in the link-graph rules and site.health", () => {
       await deriveClickDepth(db, crawlId);
 
       expect(await clickDepthOf(crawlId, "/hidden.pdf")).toBe(DEEP_DEPTH + 1);
+      // The Word file is buried too, so its absence below is the cohort's work.
+      expect(await clickDepthOf(crawlId, "/doc.doc")).toBeGreaterThan(DEEP_DEPTH);
       expect(await run("structure.deep-page", crawlId)).toHaveLength(0);
     });
   });

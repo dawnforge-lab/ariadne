@@ -53,11 +53,12 @@
  *
  * `urlsTotal` is the JUDGED DOCUMENTS: HTML pages fetched OK with a 200, or 200
  * PDFs (Phase 29d, owner ruling 2026-11-25), indexable, and not canonicalised
- * elsewhere — `JUDGED_DOCUMENT` in src/rules/helpers.ts (`JUDGED` over HTML
- * only, which it extends), and
- * since Phase 22 §1 the population nearly every page rule guards itself with.
- * It is now the SAME cohort `cohortFilter` gives every other metric, which it
- * deliberately was not before: until Phase 22 a noindex or canonicalised 200
+ * elsewhere — `JUDGED_DOCUMENT` in src/rules/helpers.ts, which extends `JUDGED`
+ * (HTML only) by indexable PDFs. The HTML part is, since Phase 22 §1, the
+ * population nearly every page rule guards itself with, and `urlsTotal -
+ * urlsPdf` is exactly the cohort `cohortFilter` gives every other metric
+ * (`structure.click-depth-distribution` included), which Phase 22 made equal
+ * where it deliberately was not before: until Phase 22 a noindex or canonicalised 200
  * was still judged by every on-page rule, so excluding it here would have left
  * findings attached to pages the denominator had never heard of. The rules
  * moved; this moved with them, and the two columns below are what keep the
@@ -180,7 +181,7 @@ type HealthRow = {
   urls_paginated: number;
   urls_pdf: number;
   pages_not_auditable: number;
-  /** Fetched OK with a 200: the three cohort counts above must sum to it. */
+  /** HTML pages fetched OK with a 200, or 200 PDFs: the three cohort counts above must sum to it. */
   fetched_ok: number;
   /** Every `pages` row of the crawl: all four counts must sum to it. */
   crawled: number;
@@ -408,8 +409,8 @@ async function siteHealth(
 
   // THE SECOND PARTITION, checked for the first one's reason (Phase 22 §3).
   // Every URL the crawl fetched is in exactly one of four places: judged, set
-  // aside as canonicalised, set aside as noindex, or outside the fetched-OK
-  // 200 census entirely. The statement above makes that structurally true —
+  // aside as canonicalised, set aside as noindex, or outside the document
+  // census (an HTML page fetched OK with a 200, or a 200 PDF) entirely. The statement above makes that structurally true —
   // the three cohort counts are `filter`s over one pass whose conditions are
   // mutually exclusive and cover `fetched_ok` — and this is what catches the
   // edit that stops it being so, before a dashboard renders pages that
@@ -418,13 +419,13 @@ async function siteHealth(
     throw new Error(
       `${self.id}: crawl '${crawlId}' counts ${urlsTotal} judged + ` +
         `${urlsCanonicalised} canonicalised + ${urlsNoindex} noindex over ` +
-        `${fetchedOk} URLs fetched OK with a 200 — the three cohorts must ` +
+        `${fetchedOk} documents (HTML pages fetched OK with a 200, or 200 PDFs) — the three cohorts must ` +
         `partition that census exactly`,
     );
   }
   if (fetchedOk + pagesNotAuditable !== crawled) {
     throw new Error(
-      `${self.id}: crawl '${crawlId}' counts ${fetchedOk} fetched OK plus ` +
+      `${self.id}: crawl '${crawlId}' counts ${fetchedOk} documents (HTML fetched OK with a 200, or 200 PDFs) plus ` +
         `${pagesNotAuditable} not judged over ${crawled} pages — every URL the ` +
         `crawl fetched must be in exactly one of the two`,
     );

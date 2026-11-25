@@ -159,6 +159,7 @@ const CHANGED_SINCE_0_22: Record<string, Partial<Entry>> = {
         "Of the pages and PDFs the audit judges (200, HTML page or PDF, indexable, self-canonical)",
       )
       .replace("failed, non-HTML)", "failed, non-HTML other than PDF)")
+      .replace("the 200 pages set aside", "the 200 pages and PDFs set aside")
       .replace(
         "the paginated count is not part of that sum, because those pages (pages 2 onwards of a series) are judged pages left out of the duplicate title, meta description and H1 checks only.",
         "the paginated count and the PDF count are not part of that sum: the paginated pages (pages 2 onwards of a series) are judged pages left out of the duplicate title, meta description and H1 checks only, and the PDF count says how many of the judged URLs are PDFs, which almost no page check reads, so they mostly count as clean.",

@@ -80,7 +80,9 @@ WHAT CHANGED AFTER IMPORT (the living authority's own change log):
   - CHECK-83 / 32 / 31 (owner ruling 2026-11-25): indexable PDFs join `site.health`
     (`urlsTotal` counts them; `urlsPdf`, "Of Which PDFs", says how many),
     `links.orphan` and `structure.deep-page`. The cohort of those three is
-    "HTML pages and PDFs". Evaluate and Record unchanged.
+    "HTML pages and PDFs"; every other metric, `structure.click-depth-distribution`
+    included, stays HTML-only, so `urlsTotal - urlsPdf` is their cohort. Evaluate and
+    Record unchanged.
 
 WHAT DID NOT CHANGE, and must not: every CHECK id, every check's title, priority,
 `**Evaluate**` criteria and `**Record**` list. The rule registry's `checkIds`
@@ -1957,7 +1959,10 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
      answer different questions and should broadly agree: an orphan has no inbound
      internal link at all, while an unreachable page may be linked only from other
      unreachable pages (an island). A page in `nullCount` but not in `links.orphan` is
-     exactly that island, and it is worth naming as one.
+     exactly that island, and it is worth naming as one. The distribution counts HTML
+     pages only: an orphan PDF (`links.orphan` covers indexable PDFs, as of 0.29.0) is
+     in no `nullCount`, and a buried PDF is in `structure.deep-page` but in no depth
+     bucket. Do not expect those findings to reconcile with the distribution.
 - **Analysis**: the distribution is per indexable page — non-indexable pages
   (noindexed, canonicalised, blocked) are excluded, because their crawl depth is
   irrelevant. Present the buckets the table below asks for, with the percentiles from

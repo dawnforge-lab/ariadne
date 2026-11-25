@@ -404,7 +404,8 @@ index that keeps `renderDocuments` from scanning a crawl's pages. Gate evidence:
   transaction).
 - **A slot fires or is skipped, and the skip is recorded.** `schedule_history` answers
   the schedule's own events: `schedule_fired` `{crawlId}`, `schedule_skipped` `{reason,
-  crawlId?, field?}` (`field` names the offending field on an `identity_refused` skip) and `schedule_chain_failed` `{link, reason}`. A fire or skip carries
+  crawlId?, field?}` (`field` names the offending field on an `identity_refused`
+  skip) and `schedule_chain_failed` `{link, reason}`. A fire or skip carries
   `crawlId` null at the top level and names the crawl in `detail`, so its record
   outlives a deleted crawl. `schedule_history` answers these three kinds only: a fired
   crawl's lifecycle events carry the schedule's `scheduleId` too, and they are read with
@@ -2644,8 +2645,8 @@ Its eleven sections, in this order: `urls`, `fetch-class`, `status-class`,
   **It counts EVERY `pages` row**, like the other partitions, so `Unreachable`
   (a null `click_depth`) includes redirects, error pages and robots-blocked rows,
   not only orphaned HTML. That is a different population from the metric
-  `structure.click-depth-distribution`, which counts the judged cohort (fetched OK,
-  200, indexable, not canonicalised elsewhere; §6), so the two do not agree
+  `structure.click-depth-distribution`, which counts the judged HTML cohort (fetched OK,
+  200, indexable, not canonicalised elsewhere; `site.health`'s `urlsTotal - urlsPdf`, §6), so the two do not agree
   bucket for bucket; read the metric when the question is
   how deep the judged pages sit.
   `discovery` is one entry per `discovered_via`, then `In a sitemap` /
@@ -3958,8 +3959,11 @@ an empty cell rather than a nought nobody counted.)
   200 AND is_indexable AND NOT canonicalised elsewhere`** (`JUDGED_DOCUMENT`; the
   HTML-only `JUDGED` is what this section's older text and the page rules mean) — the cohort the ruleset
   reports defects on as a page's own (§5.x, `isJudged`/`JUDGED` in
-  src/rules/helpers.ts). It is the same cohort every other metric measures and
-  it is not the crawl's page count. Before 0.17.0 it was fetched-OK 200s
+  src/rules/helpers.ts). It extends the HTML-only cohort every other metric
+  measures by indexable PDFs, so **`urlsTotal - urlsPdf` is the cohort every other
+  metric measures**, `structure.click-depth-distribution` included; a PDF orphan or
+  deep page is in `links.orphan` / `structure.deep-page` but not in that
+  distribution's buckets. It is not the crawl's page count. Before 0.17.0 it was fetched-OK 200s
   including noindexed and canonicalised pages, because the rules judged those
   too; the rules stopped, and this moved with them.
 - **`urlsCanonicalised` and `urlsNoindex` are the fetched, 200-answering URLs
