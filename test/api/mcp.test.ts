@@ -3032,40 +3032,6 @@ describe("the stdio entrypoint without a credential key", () => {
   }, 90_000);
 });
 
-describe("the stdio entrypoint without its heap cap", () => {
-  it("refuses to boot on stderr, naming the flag, when node was not started with ARIADNE_HEAP_MB (29d)", async () => {
-    const child = spawn(process.execPath, ["node_modules/.bin/tsx", "src/api/mcp-serve.ts"], {
-      cwd: new URL("../../", import.meta.url).pathname,
-      env: {
-        ...process.env,
-        DATABASE_URL: databaseUrl(),
-        ARIADNE_TENANT: "local",
-        ARIADNE_ALLOWED_DOMAINS: "127.0.0.1",
-        ARIADNE_CREDENTIALS_KEY: TEST_CREDENTIAL_KEY_ENV,
-        ...HEAP_CAP_TEST_ENV,
-      },
-      stdio: ["pipe", "pipe", "pipe"],
-    });
-    let stdout = "";
-    let stderr = "";
-    child.stdout.on("data", (chunk: Buffer) => (stdout += chunk.toString("utf8")));
-    child.stderr.on("data", (chunk: Buffer) => (stderr += chunk.toString("utf8")));
-    const code = await new Promise<number | null>((resolve, reject) => {
-      const timer = setTimeout(() => {
-        child.kill("SIGKILL");
-        reject(new Error(`mcp:serve did not exit — ${stderr}`));
-      }, 30_000);
-      child.once("exit", (c) => {
-        clearTimeout(timer);
-        resolve(c);
-      });
-    });
-    expect(code).not.toBe(0);
-    expect(stderr).toContain("--max-old-space-size=384");
-    expect(stdout).toBe("");
-  }, 60_000);
-});
-
 describe("boot configuration", () => {
   it("refuses to start without a database", () => {
     expect(() => loadMcpConfig({})).toThrow(/DATABASE_URL must be set/);
@@ -3475,4 +3441,38 @@ describe("structured_data's description names the drop counts (29d)", () => {
     expect(text).toContain("nodesDropped");
     expect(text).toContain("extraction below version 5");
   });
+});
+
+describe("the stdio entrypoint without its heap cap", () => {
+  it("refuses to boot on stderr, naming the flag, when node was not started with ARIADNE_HEAP_MB (29d)", async () => {
+    const child = spawn(process.execPath, ["node_modules/.bin/tsx", "src/api/mcp-serve.ts"], {
+      cwd: new URL("../../", import.meta.url).pathname,
+      env: {
+        ...process.env,
+        DATABASE_URL: databaseUrl(),
+        ARIADNE_TENANT: "local",
+        ARIADNE_ALLOWED_DOMAINS: "127.0.0.1",
+        ARIADNE_CREDENTIALS_KEY: TEST_CREDENTIAL_KEY_ENV,
+        ...HEAP_CAP_TEST_ENV,
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (chunk: Buffer) => (stdout += chunk.toString("utf8")));
+    child.stderr.on("data", (chunk: Buffer) => (stderr += chunk.toString("utf8")));
+    const code = await new Promise<number | null>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        child.kill("SIGKILL");
+        reject(new Error(`mcp:serve did not exit — ${stderr}`));
+      }, 30_000);
+      child.once("exit", (c) => {
+        clearTimeout(timer);
+        resolve(c);
+      });
+    });
+    expect(code).not.toBe(0);
+    expect(stderr).toContain("--max-old-space-size=384");
+    expect(stdout).toBe("");
+  }, 60_000);
 });

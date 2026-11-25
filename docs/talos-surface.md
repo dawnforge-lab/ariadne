@@ -1488,13 +1488,13 @@ Two properties make the double-transport claim below cheap to trust:
 - **One service, two transports.** `src/api/service.ts` holds every query,
   refusal and vocabulary; `http.ts` and `mcp.ts` do routing and serialisation
   and nothing else.
-- **The equality is tested, not argued.** `test/api/mcp.test.ts:2778`
+- **The equality is tested, not argued.** `test/api/mcp.test.ts:2779`
   ("answers the same JSON for the same question, route by tool") calls thirteen
   (tool, route) pairs over the wire against one database and asserts the two
-  answers are `toEqual`. `test/api/mcp.test.ts:2799` ("refuses in the same
+  answers are `toEqual`. `test/api/mcp.test.ts:2800` ("refuses in the same
   words, whichever transport asked") does the same for five refusals — the same
-  sentence and the mapped status. `test/api/mcp.test.ts:2857` ("streams the
-  bytes the other transport writes to a file") and `test/api/mcp.test.ts:2883`
+  sentence and the mapped status. `test/api/mcp.test.ts:2858` ("streams the
+  bytes the other transport writes to a file") and `test/api/mcp.test.ts:2884`
   ("streams the resources view byte for byte") assert the CSV a route streams is
   byte-identical to the file the tool writes, for the `issues` and `resources`
   views.
@@ -1540,7 +1540,7 @@ Two properties make the double-transport claim below cheap to trust:
   names *which* thing was wrong — missing header, wrong scheme, wrong token.
 - **MCP asks for no credential** and that is a posture, not an omission: an
   stdio client either started this process or was handed its pipes
-  (`test/api/mcp.test.ts:3037` "asks for no bearer token: an stdio client is the
+  (`test/api/mcp.test.ts:3040` "asks for no bearer token: an stdio client is the
   process that started this one"). If Ariadne's MCP server is ever mounted on a
   network transport, that argument dies with the change and a credential has to
   arrive with it.
@@ -1557,7 +1557,7 @@ Two properties make the double-transport claim below cheap to trust:
   exact host or `*.example.com`). An empty allowlist refuses every crawl
   trigger and still answers every query — the read-only posture a Talos
   deployment can run for reporting-only tenants
-  (`test/api/mcp.test.ts:968` "refuses every crawl when the allowlist is empty",
+  (`test/api/mcp.test.ts:969` "refuses every crawl when the allowlist is empty",
   `test/api/http.test.ts:823` "refuses every crawl when the allowlist is empty,
   but still answers queries").
 - **`ServiceConfig.allowAnyPublicHost` is a second code-only process-trust seam**
@@ -1610,7 +1610,7 @@ schema refusal (the SDK's plain-text "Input validation error", §4.1). Pinned:
 CREDENTIALS_REQUIRED and writes nothing".
 
 `correlationId` is a UUID; the stack goes to the server log under that id and
-nowhere else (`test/api/mcp.test.ts:2910` "turns an unexpected throw into a tool
+nowhere else (`test/api/mcp.test.ts:2911` "turns an unexpected throw into a tool
 error with a correlation id", `test/api/http.test.ts:2115` "turns an unexpected
 throw into a 500 with a correlation id").
 
@@ -1625,7 +1625,7 @@ field more, `columns`, the header their rows are printed under (§4.4). It is
 served with every page rather than only the first, so a paging client keeps no
 state. `limit` defaults to 50 and is capped at 200 — a limit outside the
 contract is refused, never clamped (`PAGE_SIZE_DEFAULT` / `PAGE_SIZE_MAX`,
-`test/api/mcp.test.ts:1238` "refuses a limit outside the contract rather than
+`test/api/mcp.test.ts:1239` "refuses a limit outside the contract rather than
 clamping it").
 
 **Closed vocabularies.** Every query parameter, body field and tool argument is
@@ -1633,7 +1633,7 @@ on a closed list. `?serverity=critical` is a 400 naming both the typo and the
 accepted set, never an unfiltered listing with a 200 on it
 (`test/api/query.test.ts:4238` "refuses a typo'd filter instead of answering the
 question nobody asked"). MCP argument typos are refused by the SDK's schema
-validator before the handler runs (`test/api/mcp.test.ts:850` "refuses an
+validator before the handler runs (`test/api/mcp.test.ts:851` "refuses an
 argument nobody allowed, naming it").
 
 **Not paginated, on purpose:** `rules_catalog`, `crawl_compare` and (Phase 27a)
@@ -1789,10 +1789,10 @@ webhooks**: polling `crawl_status` is the contract until Talos asks otherwise.
 | `crawl_diff_urls` | `GET /diff/urls` | `baseCrawlId`, `headCrawlId`, `field` (all required), `state`, the four diff thresholds, `limit`, `cursor` (§7.6) |
 | `export_crawl` | `GET /crawls/:id/export` | `format` (`jsonl.gz` \| `csv`), `dataset` (jsonl.gz only), `view` + `ruleId` \| `metricId` (csv only) |
 
-Pinned: the tool list and every schema — `test/api/mcp.test.ts:692`
+Pinned: the tool list and every schema — `test/api/mcp.test.ts:693`
 ("advertises exactly the thirty-eight tools of the agent surface"),
-`test/api/mcp.test.ts:719` ("closes every input schema and describes every
-field"), `test/api/mcp.test.ts:751` ("names every member of the closed
+`test/api/mcp.test.ts:720` ("closes every input schema and describes every
+field"), `test/api/mcp.test.ts:752` ("names every member of the closed
 vocabulary each field enumerates"). `crawl_start`'s field set is not a second
 declaration to keep in step: its input schema IS the crawl-start body schema
 (`src/api/config-schema.ts`), and a test walks that schema's published form and
@@ -2057,7 +2057,7 @@ different server, reaches the totals of a control crawl that was never killed �
 3 pages, 24 resources seen and weighed, 0 unasked, 23 findings, on both
 (`test/api/http.test.ts:1198` "a killed crawl resumed over the wire reaches the
 totals of a control that was never killed"; the MCP half is
-`test/api/mcp.test.ts:1633` "finishes a crawl a server was killed in the middle
+`test/api/mcp.test.ts:1634` "finishes a crawl a server was killed in the middle
 of, and keeps its earned spacing").
 
 ### 4.1c `crawl_pause` / `crawl_cancel` / `crawl_delete` → stopping a crawl
@@ -2414,8 +2414,8 @@ page count a crawl stamped, and null when none did",
 `test/api/query.test.ts:2481` "echoes whether the crawl
 asked about its files", `test/api/query.test.ts:2499` "409s a stored
 fetchResources that is not a boolean"; over the agent transport,
-`test/api/mcp.test.ts:1051` "answers the resource census and whether the crawl
-asked for it" and `test/api/mcp.test.ts:1140` "tells an agent what the resource
+`test/api/mcp.test.ts:1052` "answers the resource census and whether the crawl
+asked for it" and `test/api/mcp.test.ts:1141` "tells an agent what the resource
 numbers mean, and what they do not". The recheck block:
 `test/api/query.test.ts:2273` "partitions the crawl's server errors by what the
 second look found" (the arithmetic, over a fixture holding one row of every
@@ -2424,7 +2424,7 @@ http.server-error-transient fires on" (the surface and the rule read ONE set,
 imported, never two lists), `test/api/query.test.ts:2398` "tells a crawl with no
 server errors apart from a crawl nobody rechecked",
 `test/api/query.test.ts:2434` "keeps the recheck block off the crawl listing";
-over the agent transport, `test/api/mcp.test.ts:1081` "answers the recheck
+over the agent transport, `test/api/mcp.test.ts:1082` "answers the recheck
 coverage, and keeps its two zeroes apart" (which also reads the block off a
 crawl the suite really ran). The robots split itself is
 `test/crawl/fetch-resources.test.ts:887` "classes an unreachable third-party
@@ -2523,8 +2523,8 @@ skipped rule in notMeasured, on HTTP and MCP, and never read it as clean".
 
 Pinned: `test/api/query.test.ts:1105` "groups by rule, orders by severity then
 rule id", `test/api/query.test.ts:1248` "says so when a rule's listing was capped"
-(the capped shape); `test/api/mcp.test.ts:1782` "groups findings by rule, orders
-them by severity" and `test/api/mcp.test.ts:1796` "carries a capped rule's real
+(the capped shape); `test/api/mcp.test.ts:1783` "groups findings by rule, orders
+them by severity" and `test/api/mcp.test.ts:1797` "carries a capped rule's real
 magnitude".
 
 ### 4.3a `issues_overview` → one row per rule, with the judgement applied
@@ -2967,7 +2967,7 @@ one table, with the site-only cells empty",
 `test/api/query.test.ts:1756` "says which kind of empty a rowless table is, and
 refuses the two that are not", `test/api/query.test.ts:1792` "serves the same
 header on the catalog, and only on metric rules",
-`test/api/mcp.test.ts:2215` "answers one metric's table: the copy, the header,
+`test/api/mcp.test.ts:2216` "answers one metric's table: the copy, the header,
 and one row per scope",
 `test/rules/metric-table.test.ts:377` "gives every metric rule a table whose
 columns are the catalog's",
@@ -3000,7 +3000,7 @@ copy travels with it. Scopes: `site | page_type | sitemap_doc | schema_type` (`r
 one — corrected in P21-T1, beside §4.4b). See §6 for
 `site.health` and for the absent-family trap.
 Pinned: `test/api/query.test.ts:1533` "returns the stored value with the
-registry's copy joined", `test/api/mcp.test.ts:2186` "answers the measured
+registry's copy joined", `test/api/mcp.test.ts:2187` "answers the measured
 numbers with their copy joined".
 
 **One field inside one metric's value that this contract does pin, because it
@@ -3025,7 +3025,7 @@ NOT MEASURED applies only to what no pass rendered, and to the whole check only
 when both counts are 0. `"failed"` is neither "rendered" nor "no render
 needed". `"failed"` takes precedence over `"ran"`; the closed vocabulary is
 `ran`, `none`, `failed`. Read it before quoting any JavaScript finding. Pinned:
-`test/api/mcp.test.ts:1491` "says over the wire whether a render pass ran, not
+`test/api/mcp.test.ts:1492` "says over the wire whether a render pass ran, not
 just how many pages it left", `test/api/http.test.ts:1775` "serves
 renderPassEvidence none beside the selection a pass would make",
 `test/rules/render-metrics.test.ts:539` "answers none on a crawl nobody
@@ -3106,9 +3106,9 @@ view (§12), which carries `referencingPages`.
 Pinned: `test/api/query.test.ts:1812` "returns a slim projection and nothing
 else" (the widened projection, pinned as a whole set),
 `test/api/query.test.ts:1851` "carries both observations, and never lets the
-second rewrite the first", `test/api/mcp.test.ts:2339` "names every field of the
+second rewrite the first", `test/api/mcp.test.ts:2340` "names every field of the
 row it answers with, in its own description", `test/api/query.test.ts:1954` "carries both word counts, so the number a
-reader quotes is the one they can see", `test/api/mcp.test.ts:2272` "answers the
+reader quotes is the one they can see", `test/api/mcp.test.ts:2273` "answers the
 crawled pages, slim and ordered by URL".
 
 ### 4.6a `structured_data` → `{items: StructuredDataPageRow[], nextCursor, notMeasured}`
@@ -3273,7 +3273,7 @@ a re-fetch**: the file as the crawl read it, which is the only honest answer to
 "what did this crawl obey". `outcome ∈ read | absent | unreachable`, and
 `unreachable` is not "there are no rules" (RFC 9309 §2.3.1.4).
 Pinned: `test/api/query.test.ts:2002` "answers with the robots.txt the crawl
-read, and the metadata that makes it readable", `test/api/mcp.test.ts:2376`
+read, and the metadata that makes it readable", `test/api/mcp.test.ts:2377`
 "answers with the robots.txt the crawl read, verbatim".
 
 ### 4.8 `crawl_list` → `{items: CrawlListItem[], nextCursor}`
@@ -3291,7 +3291,7 @@ Pinned: `test/api/query.test.ts:3454` "narrows the listing to one site, and
 leaves the other site's crawls out", `test/api/query.test.ts:3460` "matches the
 apex and www spellings, both schemes", `test/api/query.test.ts:3474` "refuses a
 siteUrl that is not an http(s) URL rather than dropping the filter";
-`test/api/mcp.test.ts:2081` "narrows crawl_list to one site".
+`test/api/mcp.test.ts:2082` "narrows crawl_list to one site".
 
 **Pre-tenancy posture, stated plainly (see §9).** Without `siteUrl`, this
 listing returns every crawl the engine holds, including other tenants'
@@ -3630,9 +3630,9 @@ judged, however many rows it holds", `test/api/query.test.ts:2683` "marks a
 capped rule's count as a floor, agreeing with issues_list",
 `test/api/query.test.ts:2722` "reads the marker and the counts from one
 statement", `test/api/query.test.ts:2578` "carries the registry's marker on every
-NOT MEASURED marker, and on no other rule"; `test/api/mcp.test.ts:1902` "joins a
+NOT MEASURED marker, and on no other rule"; `test/api/mcp.test.ts:1903` "joins a
 judged crawl's fired state, zero included, summing to findingsCount" and
-`test/api/mcp.test.ts:1965` "names every field it actually answers with".
+`test/api/mcp.test.ts:1966` "names every field it actually answers with".
 
 ### 5.2 `metrics_get` — an absent family is not a zero gauge
 
@@ -3869,7 +3869,7 @@ robots.txt answers 502); `test/db/migration-0017.test.ts:259` "clears the
 sentence when the failed crawl is resumed" (the implication over a RESUME, which
 is the one move that changes the status without closing the crawl — the fixture
 holds the robots request so the row is read mid-run);
-`test/api/mcp.test.ts:3188` "clears the failure sentence of the crawl a resume
+`test/api/mcp.test.ts:3191` "clears the failure sentence of the crawl a resume
 accepts" (the same, over the queue's own writer and on the wire);
 `test/api/query.test.ts:4385` "tells a pre-0017 failed
 crawl apart from a crawl that did not fail" (the two nulls, on the wire).
@@ -4268,8 +4268,8 @@ every refusal — of which `test/api/query.test.ts:3523` "answers both sides,
 comparable, and the rules in issues_list's order" is the answer itself and
 `test/api/query.test.ts:3947` "makes the same refusals as the summary" is the
 drill-down inheriting the summary's refusals; over the agent transport,
-`test/api/mcp.test.ts:2028` "answers the counts and the caveat when the two
-rulesets differ" and `test/api/mcp.test.ts:2093` "names every field it answers
+`test/api/mcp.test.ts:2029` "answers the counts and the caveat when the two
+rulesets differ" and `test/api/mcp.test.ts:2094` "names every field it answers
 with, and both caveat codes it produced". The pairing by where each crawl landed
 (§7.1): `test/api/query.test.ts:4043` "pairs findings on path when the two crawls
 landed on different origins", `test/api/query.test.ts:4057` "lists each finding
@@ -5134,8 +5134,8 @@ referencing counts summing to the edge table), `test/api/query.test.ts:3293`
 answer", `test/api/query.test.ts:3403` "refuses a crawl holding a retired rule's
 findings BEFORE the header", `test/api/http.test.ts:1991` "tears the response
 when a CSV export fails mid-stream, rather than truncating the file";
-`test/api/mcp.test.ts:821` "describes the shape of the CSV it writes, not just
-that it writes one" and `test/api/mcp.test.ts:2883` "streams the resources view
+`test/api/mcp.test.ts:822` "describes the shape of the CSV it writes, not just
+that it writes one" and `test/api/mcp.test.ts:2884` "streams the resources view
 byte for byte, as it writes it".
 
 ---
