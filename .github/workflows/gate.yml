@@ -58,8 +58,8 @@ jobs:
           # script asserts node really started with it.
           ARIADNE_HEAP_MB: "384"
         run: node --max-old-space-size="$ARIADNE_HEAP_MB" --import tsx scripts/gate-rules.ts --json-out gate.json
-      # Early warning, not a failure: the crawl phase's peak against 290.2 MB
-      # (the level that leaves the 512 MB contract little headroom).
+      # Early warning, not a failure: the crawl phase's peak against 306.4 MB
+      # (the local bound the owner set in 29b; above it the 512 MB contract has little headroom).
       - name: Warn when the crawl phase peak is high
         if: always()
         run: |
@@ -67,11 +67,11 @@ jobs:
             const fs = require("node:fs");
             if (!fs.existsSync("gate.json")) { console.log("::warning::gate.json was not written; no crawl peak to check"); process.exit(0); }
             const { peaks } = JSON.parse(fs.readFileSync("gate.json", "utf8"));
-            const limit = 290.2 * 1024 * 1024;
+            const limit = 306.4 * 1024 * 1024;
             if (peaks.crawlBytes === null) {
               console.log("::warning::crawl phase not reached; no crawl peak to check");
             } else if (peaks.crawlBytes > limit) {
-              console.log(`::warning::crawl phase peak ${(peaks.crawlBytes / 1048576).toFixed(1)} MB exceeds 290.2 MB`);
+              console.log(`::warning::crawl phase peak ${(peaks.crawlBytes / 1048576).toFixed(1)} MB exceeds 306.4 MB`);
             }
           '
       - uses: actions/upload-artifact@v4

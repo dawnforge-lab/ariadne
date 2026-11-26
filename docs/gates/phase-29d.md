@@ -24,8 +24,8 @@ path (§8).
 
 All gate runs used a database made for them, `ariadne_gate29d`, on the dev container
 (`create database ariadne_gate29d`, then `npm run db:migrate`: 62 migrations, 0000–0061). The
-gate never connected to the dev database `ariadne`. `ariadne_gate29d` is kept until the
-owner's OK to drop it.
+gate never connected to the dev database `ariadne`. `ariadne_gate29d` is dropped after the
+merge (owner OK, §7).
 
 ## 1. Clause 1: suite and types
 
@@ -220,20 +220,24 @@ worker, on the gate database:
 - PDFs in the link rules: "Let's include pdfs in health checks, orphan, deep".
 - Real site: simpleerb.com instead of lavishalice.com, "Yes".
 - Heap cap: "Let's do option A".
+- Gate close-out, 2026-11-26: "Yes to all points". That is: push the branch and open the PR
+  for review; accept 60 s as the 29d link-derive bar, with the link work moved to a
+  post-process step as the next phase; move the CI crawl-phase warning to 306.4 MB in this PR;
+  drop `ariadne_gate29d` after the merge.
 
 ## 8. Open items
 
-- **Link derive target (40 s) unmet.** It took 54.9–59.3 s on a first judgement at 50k; the
-  limit is 60 s. The recommended next phase is a post-process step for the link work (the
-  owner's question). On a re-judged crawl it took 27–28 s, so the first-run cost is mostly
+- **Link derive target (40 s) unmet; the owner accepted 60 s as the 29d bar (§7).** It took
+  54.9–59.3 s on a first judgement at 50k; the limit is 60 s. The next phase moves the link
+  work to a post-process step. On a re-judged crawl it took 27–28 s, so the first-run cost is mostly
   writing `pages`.
 - **Click-depth time depends on table state.** It took 18.4–18.8 s on a first judgement and
   30.0 s on a third judgement of the same crawl. The `cd_frontier` temp tables are never
   `ANALYZE`d (Task 10 minor).
-- **CI's crawl-phase warning bound is stale.** `gate.yml` warns above 290.2 MB (27d's bound).
-  The owner re-baselined the local bound to 306.4 MB in 29b, and run 6's crawl phase peaks at
-  292.8 MB, so the weekly gate would annotate a warning. This needs one number changed with
-  the owner's OK.
+- **Done in this PR: CI's crawl-phase warning bound moved from 290.2 to 306.4 MB** (§7).
+  `gate.yml` had warned above 27d's 290.2 MB; the owner re-baselined the local bound to
+  306.4 MB in 29b, and run 6's crawl phase peaked at 292.8 MB. `scripts/gate-worker.ts`
+  (the 28b worker gate, not run in CI) still fails above its own 290.2 MB.
 - **`schema.unresolved-reference` loads each selected page's full id lists** in one result
   (up to 50 × 256 KiB per page). Keyset paging in `perPageFindings` is the follow-up.
 - **Render discard path:** bound `context.close()` and relaunch on a timeout.
@@ -251,4 +255,4 @@ worker, on the gate database:
   - `entrypoint.test.ts` repeats the literal `384`.
 - **Still open from 29a:** the greenpeople.co.uk re-crawl with a Shopify crawler signature, and
   validator.schema.org on the last three sample pages.
-- **`ariadne_gate29d` is kept** until the owner's OK to drop it.
+- **`ariadne_gate29d` is dropped after the merge** (owner OK, §7).
