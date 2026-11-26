@@ -10,10 +10,12 @@
  *
  * Run it the way the gate is defined:
  *
- *   DATABASE_URL=… node --max-old-space-size=512 --import tsx scripts/gate-crawl.ts
+ *   ARIADNE_HEAP_MB=384 DATABASE_URL=… node --max-old-space-size=384 --import tsx scripts/gate-crawl.ts
  *
- * `--max-old-space-size=512` is load-bearing. Without it an unbounded structure
- * merely makes the machine swap and the run slow; with it, the process dies at
+ * The cap is load-bearing: `ARIADNE_HEAP_MB` is the cap the deployed processes
+ * run under, asserted first thing here, so the gate measures what ships. Without
+ * it an unbounded structure merely makes the machine swap and the run slow, and
+ * short-lived garbage piles up before a major GC; with it, the process dies at
  * the boundary and says so.
  *
  * `allowPrivate: true` is the one sanctioned non-test use of that flag: the
@@ -25,6 +27,7 @@ import { closeDb, createDb, type Db } from "../src/db/client.js";
 import { CRAWL_DEFAULTS, runCrawl } from "../src/crawl/loop.js";
 import { startSiteServer } from "../test/gate/site-server.js";
 import { LOCAL_TENANT } from "../src/tenant.js";
+import { assertHeapCap } from "../src/runtime/heap-cap.js";
 
 /** The gate's two numbers. Both are the build plan's, not this script's. */
 const GATE_PAGES = 50_000;
@@ -126,6 +129,7 @@ async function countRows(db: Db, table: string, crawlId: string): Promise<number
 }
 
 async function main(): Promise<number> {
+  const heapCapMb = assertHeapCap();
   const pages = pageTarget();
   const budget = pages + budgetHeadroom(pages);
   const isGate = pages === GATE_PAGES;
@@ -135,6 +139,7 @@ async function main(): Promise<number> {
       : `SMOKE RUN — ${pages.toLocaleString()} pages. NOT the gate (set GATE_PAGES=${GATE_PAGES} for that).`,
   );
   console.log(`node ${process.version}, flags ${process.execArgv.join(" ") || "(none)"}`);
+  console.log(`heap cap        ${heapCapMb} MB (ARIADNE_HEAP_MB, verified against V8)`);
   console.log(`fixture site    ${pages.toLocaleString()} URLs, crawl budget ${budget.toLocaleString()}`);
 
   const site = await startSiteServer(pages);
@@ -148,6 +153,8 @@ async function main(): Promise<number> {
       maxPages: budget,
       maxDepth: CRAWL_DEFAULTS.maxDepth,
       userAgent: CRAWL_DEFAULTS.userAgent,
+      robotsUserAgent: CRAWL_DEFAULTS.robotsUserAgent,
+      userAgentPreset: null,
       // The fixture is ours and its robots.txt says `Crawl-delay: 0`. Nothing
       // about this waiver applies to a real origin (rule 9).
       perHostDelayMs: 0,

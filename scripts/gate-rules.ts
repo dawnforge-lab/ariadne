@@ -24,11 +24,13 @@
  *
  * Run it the way the gate is defined:
  *
- *   DATABASE_URL=… node --max-old-space-size=512 --import tsx scripts/gate-rules.ts
+ *   ARIADNE_HEAP_MB=384 DATABASE_URL=… node --max-old-space-size=384 --import tsx scripts/gate-rules.ts
  *
- * `--max-old-space-size=512` is load-bearing, exactly as in `gate-crawl.ts`:
- * without it an unbounded structure merely makes the machine swap; with it, the
- * process dies at the boundary and says so.
+ * The cap is load-bearing, exactly as in `gate-crawl.ts`: it is the cap the
+ * deployed processes run under (`ARIADNE_HEAP_MB`, asserted first thing here),
+ * so the gate measures what ships. Without a cap an unbounded structure merely
+ * makes the machine swap, and short-lived garbage piles up before a major GC,
+ * inflating peak RSS; with it, the process dies at the boundary and says so.
  *
  * WHEN THE FIXTURE CLOSES, AND WHY IT MOVED. Phase 4 closed the fixture web
  * server the instant the crawl ended, so that a rule reaching for the network
@@ -76,6 +78,7 @@ import { readdirSync, readFileSync, writeFileSync } from "node:fs";
 
 import { desc, eq, sql, type SQL } from "drizzle-orm";
 import { closeDb, createDb, type Db } from "../src/db/client.js";
+import { assertHeapCap } from "../src/runtime/heap-cap.js";
 import { CRAWL_DEFAULTS, resumeCrawl, runCrawl, type CrawlSummary } from "../src/crawl/loop.js";
 import { setControlRequest } from "../src/crawl/control.js";
 import { crawls } from "../src/db/schema.js";
@@ -112,11 +115,19 @@ const GATE_PEAK_RSS_BYTES = 512 * 1024 * 1024;
 const GATE_RENDER_PCT = 5;
 
 /**
- * Phase 29c: both link derivations (`deriveLinkCounts` + `deriveLinkScore`) must
+ * Phase 29c: the link derivations (`deriveLinkCounts` + `deriveLinkScore`) must
  * finish within this many ms at 50k. Restated here, not imported, for the same
- * reason as `GATE_RENDER_PCT`.
+ * reason as `GATE_RENDER_PCT`. (Phase 29d's plan added a `deriveLinkTargets`
+ * step to this sum; measured at 50k it cost more than it saved and did not
+ * ship — Task 10's commit has the numbers.)
  */
 const GATE_LINK_DERIVE_MS = 60_000;
+
+/**
+ * Phase 29d: `deriveClickDepth` must finish within this many ms at 50k.
+ * Restated here, not imported, for the same reason as `GATE_RENDER_PCT`.
+ */
+const GATE_CLICK_DEPTH_MS = 30_000;
 
 /** How often RSS is sampled — the Phase 1 interval, so the two are comparable. */
 const SAMPLE_MS = 2_000;
@@ -744,6 +755,14 @@ async function countWhere(db: Db, query: SQL): Promise<number> {
  * render writer sets a status on every capture-3 page it finishes, so a
  * non-zero there is a defect the gate should show, and it is said rather than
  * folded into a status that does not exist.
+ *
+ * FROM PHASE 29d both queries also see FAILED pages of one kind: a render whose
+ * deadline ran out during the run is `rendered = false` with status `timeout`
+ * and its `ms` set (ruling R5). So `byStatus.timeout` counts axe timeouts on
+ * rendered pages and deadline-in-axe failed pages together, and the `ms`
+ * percentiles include those failed pages' run times. Neither query filters on
+ * `rendered`, deliberately: those runs started and were stopped by the page,
+ * which is what the gate records.
  */
 interface AxeReport {
   runs: number;
@@ -796,6 +815,7 @@ function line(label: string, value: string): string {
 }
 
 async function main(): Promise<number> {
+  const heapCapMb = assertHeapCap();
   const pages = pageTarget();
   const reuse = reusedCrawlId();
   const noAccessibility = accessibilityOff();
@@ -826,7 +846,16 @@ async function main(): Promise<number> {
     rules: number | null;
     /** `deriveLinkCounts` + `deriveLinkScore`, from the rules run's `derivedMs`. */
     linkDerive: number | null;
-  } = { crawl: null, inferPageTemplatesRescanMs: null, render: null, rules: null, linkDerive: null };
+    /** `deriveClickDepth`, from the rules run's `derivedMs`. */
+    clickDepth: number | null;
+  } = {
+    crawl: null,
+    inferPageTemplatesRescanMs: null,
+    render: null,
+    rules: null,
+    linkDerive: null,
+    clickDepth: null,
+  };
   if (exclude.length > 0 && reuse !== null) {
     throw new RangeError("gate: --exclude needs a crawl in this process; GATE_CRAWL_ID runs none");
   }
@@ -859,6 +888,7 @@ async function main(): Promise<number> {
     console.log("PLANTED SITE (GATE_PLANT=1) — titles, 410 statuses and removed pages differ from the baseline. NOT the gate.");
   }
   console.log(`node ${process.version}, flags ${process.execArgv.join(" ") || "(none)"}`);
+  console.log(line("heap cap", `${heapCapMb} MB (ARIADNE_HEAP_MB, verified against V8)`));
   console.log(line("accessibility", noAccessibility ? "OFF (--no-accessibility)" : "on (axe runs)"));
 
   const registry = timedRegistry();
@@ -959,6 +989,8 @@ async function main(): Promise<number> {
         maxPages: budget,
         maxDepth: CRAWL_DEFAULTS.maxDepth,
         userAgent: CRAWL_DEFAULTS.userAgent,
+        robotsUserAgent: CRAWL_DEFAULTS.robotsUserAgent,
+        userAgentPreset: CRAWL_DEFAULTS.userAgentPreset,
         // The fixture is ours and its robots.txt says `Crawl-delay: 0`. Nothing
         // about this waiver applies to a real origin (rule 9).
         perHostDelayMs: 0,
@@ -1399,17 +1431,28 @@ async function main(): Promise<number> {
       console.log(`  ${name.padEnd(24)}${seconds(ms)}`);
     }
     derivedMs = run.derivedMs;
-    const countsMs = run.derivedMs["deriveLinkCounts"];
-    const scoreMs = run.derivedMs["deriveLinkScore"];
-    if (countsMs === undefined || scoreMs === undefined) {
+    const timed = ["deriveLinkCounts", "deriveLinkScore", "deriveClickDepth"] as const;
+    const unreported = timed.filter((name) => run.derivedMs[name] === undefined);
+    if (unreported.length > 0) {
       return fail(
-        `the rules run reported no derivedMs for ${countsMs === undefined ? "deriveLinkCounts" : "deriveLinkScore"} ` +
+        `the rules run reported no derivedMs for ${unreported.join(", ")} ` +
           `(got ${Object.keys(run.derivedMs).join(", ") || "none"})`,
       );
     }
+    const countsMs = run.derivedMs["deriveLinkCounts"]!;
+    const scoreMs = run.derivedMs["deriveLinkScore"]!;
+    const clickDepthMs = run.derivedMs["deriveClickDepth"]!;
     durationsMs.linkDerive = Math.round(countsMs + scoreMs);
+    durationsMs.clickDepth = Math.round(clickDepthMs);
     console.log(
-      line("link derive", `${seconds(durationsMs.linkDerive)} (deriveLinkCounts ${seconds(countsMs)} + deriveLinkScore ${seconds(scoreMs)}), limit ${seconds(GATE_LINK_DERIVE_MS)}`),
+      line(
+        "link derive",
+        `${seconds(durationsMs.linkDerive)} (deriveLinkCounts ${seconds(countsMs)} + ` +
+          `deriveLinkScore ${seconds(scoreMs)}), limit ${seconds(GATE_LINK_DERIVE_MS)}`,
+      ),
+    );
+    console.log(
+      line("click depth", `${seconds(durationsMs.clickDepth)}, limit ${seconds(GATE_CLICK_DEPTH_MS)}`),
     );
     console.log(
       line("peak RSS", `${megabytes(rulesRss.peakBytes)} (at +${(rulesRss.peakAtMs / 1000).toFixed(0)}s)`),
@@ -1529,6 +1572,11 @@ async function main(): Promise<number> {
     if (isGate && durationsMs.linkDerive > GATE_LINK_DERIVE_MS) {
       failures.push(
         `link derivations took ${seconds(durationsMs.linkDerive)}, over the ${seconds(GATE_LINK_DERIVE_MS)} limit`,
+      );
+    }
+    if (isGate && durationsMs.clickDepth > GATE_CLICK_DEPTH_MS) {
+      failures.push(
+        `deriveClickDepth took ${seconds(durationsMs.clickDepth)}, over the ${seconds(GATE_CLICK_DEPTH_MS)} limit`,
       );
     }
 

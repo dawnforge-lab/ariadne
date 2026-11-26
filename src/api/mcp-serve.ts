@@ -23,9 +23,13 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 
 import { closeDb, createDb } from "../db/client.js";
 import { parseCredentialKeys, parseCredentialRetentionDays } from "../crawl/credential-vault.js";
+import { assertHeapCap } from "../runtime/heap-cap.js";
 import { loadMcpConfig } from "./config.js";
 import { createMcpServer } from "./mcp.js";
 
+// First (29d): a process not running under its configured V8 heap cap is a boot
+// error naming the flag. It throws to stderr; stdout stays the protocol's.
+const heapCapMb = assertHeapCap();
 const config = loadMcpConfig();
 // Before anything is constructed: a missing or malformed key is a boot error
 // naming the variable, never a server that cannot store credentials (28b).
@@ -49,7 +53,7 @@ const mcp = createMcpServer({
 await mcp.connect(new StdioServerTransport());
 console.error(
   `ariadne mcp: serving on stdio for tenant ${config.tenant} — ` +
-    `${config.allowedDomains.length} allowed domain(s)`,
+    `${config.allowedDomains.length} allowed domain(s), heap cap ${heapCapMb} MB`,
 );
 // Stderr, like everything else here: stdout belongs to the protocol. An
 // operator needs to know where `crawl_render` leaves its documents.

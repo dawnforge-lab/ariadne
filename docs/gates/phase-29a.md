@@ -305,17 +305,17 @@ R0.4's search-engine parts are void.
   store adds a CDN skip rule for AriadneBot. It would give live evidence on product markup,
   which simpleerb.com does not carry.
 - **validator.schema.org on the last three sample pages**, when its rate limit allows.
-- **Extraction 5:** microdata `itemtype` and RDFa `typeof` keep every token; count blocks
+- **Done in 29d (Tasks 2–3).** **Extraction 5:** microdata `itemtype` and RDFa `typeof` keep every token; count blocks
   dropped past the 50-block page cap and nodes dropped past the JSON-LD depth cap.
-- **A capped references list** (more than 50 bare references in one block) can hide a later
+- **Done in 29d (Task 4).** **A capped references list** (more than 50 bare references in one block) can hide a later
   unresolved reference; the listing shows `problemsCapped`. Lifting that cap is a follow-up.
-- **User-agent presets (owner request, backlog).** A preset needs its robots.txt token as its
+- **Done in 29d (Tasks 6 and 15).** **User-agent presets (owner request, backlog).** A preset needs its robots.txt token as its
   own config. Today `userAgent` feeds both the header and robots-parser, which keys on the text
   before the first "/", so a browser-style string matches as "mozilla" and falls to the `*`
   group. A spoofed crawler string does not pass a CDN's IP verification.
-- **Pagination inside a slug page type.** Page-type inference groups `/blog/10/` with
+- **Done in 29d (Task 1; `docs/gates/phase-29d.md` §5.2).** **Pagination inside a slug page type.** Page-type inference groups `/blog/10/` with
   `/blog/:slug`, so `schema.template-inconsistent` flags listing pages (§2.5).
-- **Leaked test workers.** Two `src/worker/serve.ts` processes started 2026-11-11 by the 28b
+- **Done in 29d (Task 11).** **Leaked test workers.** Two `src/worker/serve.ts` processes started 2026-11-11 by the 28b
   worker tests were still polling the dev database on 2026-11-16; find the test that leaks its
   child.
 - **`ariadne_gate29a` is kept until the owner's OK to drop it.**

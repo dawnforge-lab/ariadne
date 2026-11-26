@@ -688,9 +688,9 @@ describe("indexabilityOf", () => {
       expect(answer.indexability, `${fetchClass} was called indexable`).toBe("Non-Indexable");
       expect(answer.status, `${fetchClass} produced no reason`).not.toBe("");
     }
-    // `ok` is the only class that can be indexable, and it is the only one with
-    // an empty status — the two statements are one fact, and asserting it here
-    // is what makes the loop above exhaustive rather than merely long.
+    // `ok` is the only class an HTML page is indexable in (a PDF's `non_html`,
+    // Phase 29d R1, is pinned in test/crawl/pdf-indexable.test.ts), and asserting
+    // it here is what makes the loop above exhaustive rather than merely long.
     expect(indexabilityOf(mkPage())).toEqual({ indexability: "Indexable", status: "" });
   });
 

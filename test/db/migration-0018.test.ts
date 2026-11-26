@@ -148,7 +148,7 @@ function config(siteUrl: string): CrawlConfig {
     siteUrl,
     maxPages: 20,
     maxDepth: 3,
-    userAgent: "AriadneBot-0018",
+    userAgent: "AriadneBot-0018", robotsUserAgent: "AriadneBot-0018", userAgentPreset: null,
     perHostDelayMs: 0,
     maxConcurrency: 2,
     probeHosts: false,

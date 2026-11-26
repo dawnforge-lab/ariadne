@@ -2,7 +2,8 @@
  * A TRUSTED WORKER, for tests and gates: `startWorker` with the process trust a
  * production worker never has, held IN CODE.
  *
- *   DATABASE_URL=… ARIADNE_CREDENTIALS_KEY=… node --import tsx scripts/run-worker-trusted.ts
+ *   ARIADNE_HEAP_MB=384 DATABASE_URL=… ARIADNE_CREDENTIALS_KEY=… \
+ *     node --max-old-space-size=384 --import tsx scripts/run-worker-trusted.ts
  *
  * It exists because the gate and the test suite crawl loopback fixture
  * servers, which the URL policy refuses unless `allowPrivate` is set — and
@@ -18,6 +19,8 @@
  * What the environment DOES carry here is plumbing, none of it trust:
  *
  *  - `DATABASE_URL`, `ARIADNE_CREDENTIALS_KEY`: as for the real worker;
+ *  - `ARIADNE_HEAP_MB`: as for the real worker, asserted against V8 first thing
+ *    (the gates measure this child under the cap that ships);
  *  - `TRUSTED_WORKER_CONCURRENCY`: crawls at once (default 1);
  *  - `TRUSTED_WORKER_TIMING`: JSON, a `Partial<Timing>` (a short clock);
  *  - `TRUSTED_WORKER_METRICS_TOKEN`: the bearer `/metrics` takes (unset: `/metrics`
@@ -52,6 +55,7 @@ import { readFileSync } from "node:fs";
 import { closeDb, createDb } from "../src/db/client.js";
 import { parseCredentialKeys } from "../src/crawl/credential-vault.js";
 import { startWorker } from "../src/worker/main.js";
+import { assertHeapCap } from "../src/runtime/heap-cap.js";
 import type { Timing } from "../src/worker/timing.js";
 
 function required(name: string): string {
@@ -89,6 +93,7 @@ function parseArgs(argv: readonly string[]): SchedulerArgs {
   return out;
 }
 
+assertHeapCap();
 const args = parseArgs(process.argv.slice(2));
 const db = createDb(required("DATABASE_URL"));
 const timing = JSON.parse(process.env["TRUSTED_WORKER_TIMING"] ?? "{}") as Partial<Timing>;

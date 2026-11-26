@@ -95,7 +95,7 @@ beforeAll(async () => {
     siteUrl: `${base}/`,
     maxPages: 10,
     maxDepth: 3,
-    userAgent: "AriadneBot-0012",
+    userAgent: "AriadneBot-0012", robotsUserAgent: "AriadneBot-0012", userAgentPreset: null,
     perHostDelayMs: 0,
     maxConcurrency: 2,
     // The sanctioned test-only use: the fixture site is on 127.0.0.1.

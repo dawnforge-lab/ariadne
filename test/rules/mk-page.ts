@@ -1,5 +1,6 @@
 import { expect } from "vitest";
 import { normalizeUrl } from "../../src/crawl/parse/url-utils.js";
+import { isDocumentOk } from "../../src/crawl/robots-directives.js";
 import type { PageRecord, PageRule } from "../../src/rules/registry/types.js";
 
 /**
@@ -260,14 +261,17 @@ export interface IndexabilitySpec {
   fetchClass?: string;
   /** Null for a fetch that got no HTTP answer at all (timeout, network error). */
   statusCode?: number | null;
+  /** Read only on a `non_html` row: a PDF is a document (Phase 29d R1). */
+  contentType?: string;
   robotsMeta?: string;
   xRobotsTag?: string;
 }
 
 /**
  * `is_indexable` exactly as `PageWriter` computes it (see `isIndexable` in
- * src/crawl/persist.ts): a plain boolean, true only for a 200 OK with no
- * noindex directive. Derived rather than passed in, so no test can insert a
+ * src/crawl/persist.ts): a plain boolean, true only for a 200 OK — or a 200
+ * PDF, through the writer's own `isDocumentOk` — with no noindex directive.
+ * Derived rather than passed in, so no test can insert a
  * combination the crawler could never write and then assert a rule's behaviour
  * on it.
  *
@@ -277,8 +281,11 @@ export interface IndexabilitySpec {
 export function writerIndexable(s: IndexabilitySpec): boolean {
   const noindex = (v: string | undefined): boolean => /\bnoindex\b|\bnone\b/i.test(v ?? "");
   return (
-    (s.statusCode ?? 200) === 200 &&
-    (s.fetchClass ?? "ok") === "ok" &&
+    isDocumentOk({
+      fetchClass: s.fetchClass ?? "ok",
+      statusCode: s.statusCode === undefined ? 200 : s.statusCode,
+      contentType: s.contentType ?? null,
+    }) &&
     !noindex(s.robotsMeta) &&
     !noindex(s.xRobotsTag)
   );

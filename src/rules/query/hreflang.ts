@@ -8,8 +8,9 @@ import { SITEMAP_MAX_BYTES } from "../../crawl/sitemap-stream.js";
 import { fencedOffSql } from "../../crawl/url-scope.js";
 import {
   CANONICALISED_ELSEWHERE,
-  FETCHED_OK,
-  isAuditable,
+  HREFLANG_DECLARER,
+  isDocumentOk,
+  isHreflangDeclarer,
   isCanonicalisedElsewhere,
   queryFinding,
   NEVER_REQUESTED,
@@ -88,7 +89,8 @@ export const ALTERNATE_HOST_CAP = 50;
 // canonical's own remedy as a fault.
 //
 // This file therefore reached Phase 22 §1's cohort under its own steam, and
-// keeps `FETCHED_OK` plus that exclusion rather than adopting `JUDGED`: an
+// keeps its declarer gate (`HREFLANG_DECLARER`: FETCHED_OK, or a 200 non-HTML
+// response, Phase 29d R1) plus that exclusion rather than adopting `JUDGED`: an
 // hreflang annotation is worth reading on a page that carries a noindex — the
 // cluster it belongs to is still real, and `hreflang.non-indexable-target` is
 // the rule whose whole subject is an alternate in exactly that state.
@@ -155,8 +157,8 @@ interface DeclarationSet {
   /** Per target key, the distinct sources that name it, sorted. */
   sourcesByTarget: ReadonlyMap<string, string[]>;
   hasXDefault: boolean;
-  /** `isAuditable` for the DECLARING page: fetched OK as HTML with a 200. */
-  auditable: boolean;
+  /** `isHreflangDeclarer` for the DECLARING page: fetched OK as HTML with a 200, or any 200 non-HTML response. */
+  declarer: boolean;
   /**
    * One of the page's sources may have filled the `MAX_HREFLANG_PAIRS` cap
    * (`POSSIBLY_CAPPED_PAGES`, src/rules/query/hreflang-completeness.ts), so the
@@ -176,6 +178,7 @@ interface TargetPage {
   url: string;
   fetchClass: string;
   statusCode: number | null;
+  contentType: string | null;
   isIndexable: boolean | null;
 }
 
@@ -302,7 +305,7 @@ async function eachDeclarationSet(
           sourcesByTarget: new Map(),
           hasXDefault: false,
           capped: false,
-          auditable: isAuditable({
+          declarer: isHreflangDeclarer({
             fetchClass: String(row.fetch_class),
             statusCode: row.status_code === null ? null : Number(row.status_code),
           }),
@@ -355,12 +358,13 @@ async function targetContext(
     url: string;
     fetch_class: string;
     status_code: number | null;
+    content_type: string | null;
     is_indexable: boolean | null;
     canonical_html: string | null;
     canonical_header: string | null;
     possibly_capped: boolean;
   }>(sql`
-    select p.id, p.url, p.fetch_class, p.status_code, p.is_indexable,
+    select p.id, p.url, p.fetch_class, p.status_code, p.content_type, p.is_indexable,
            p.canonical_html, p.canonical_header,
            -- Read here rather than from the target's declarations: a target
            -- whose every slot went to an over-long href stored no row to read.
@@ -393,6 +397,7 @@ async function targetContext(
       url: String(row.url),
       fetchClass: String(row.fetch_class),
       statusCode: row.status_code === null ? null : Number(row.status_code),
+      contentType: row.content_type,
       isIndexable: row.is_indexable,
     });
     if (row.possibly_capped === true) atCap.add(String(row.url));
@@ -457,13 +462,13 @@ async function declarationFindings(
   const findings: Finding[] = [];
   let total = 0;
   await eachDeclarationSet(db, crawlId, { withTargets: true }, (set, context) => {
-    // The declaring page must serve content (`isAuditable`), as for
+    // The declaring page must serve content (`isHreflangDeclarer`), as for
     // `missing-self-reference`. Since Phase 26c a declaration also arrives from
     // a `Link` header on any classified response (a 301, a 404) and from a
     // sitemap entry tied to whatever page row its loc matched (a redirect, a
     // robots-blocked row): none of those is a version anyone can rank, and its
     // own row already says why.
-    if (!set.auditable) return;
+    if (!set.declarer) return;
     for (const member of set.targets) {
       const target = context.page(member);
       if (target === undefined) continue;
@@ -539,7 +544,7 @@ async function missingXDefaultFindings(
     // Only a declaring page that serves content states a cluster (see
     // `declarationFindings`): a redirect's header or a robots-blocked row's
     // sitemap entry is not one.
-    if (!set.auditable) return;
+    if (!set.declarer) return;
     // A set cut at the pair cap may have lost its x-default (PR #24 review).
     if (set.capped) return;
     // A page naming one URL is not a cluster: there is no other version to
@@ -593,7 +598,7 @@ async function missingXDefaultFindings(
  * the OTHER page is at fault, here the page in front of you is — and the same
  * check answers both, so it carries the same `checkIds`.
  *
- * Gated on `isAuditable` because the claim is about a page that serves content:
+ * Gated on `isHreflangDeclarer` because the claim is about a page that serves content:
  * a redirect or a 404 that happens to carry an inherited alternates block is
  * not a version anyone can rank, and its own row already says why. Pages
  * canonicalised elsewhere are gone before this sees them (the note above).
@@ -617,7 +622,7 @@ async function missingSelfReferenceFindings(
   const findings: Finding[] = [];
   let total = 0;
   await eachDeclarationSet(db, crawlId, { withTargets: false }, (set) => {
-    if (!set.auditable) return;
+    if (!set.declarer) return;
     if (set.capped) return;
     if (set.targets.includes(set.pageKey)) return;
     total += 1;
@@ -664,9 +669,10 @@ async function missingSelfReferenceFindings(
  * hreflang table, and the alternative — streaming the declarations and counting
  * hosts in a Map — would hold one entry per distinct target URL in memory.
  *
- *  - the declaring page must be auditable (fetched OK with a 200) and not
- *    canonicalised elsewhere, so the marker counts alternates that a rule would
- *    otherwise have had to judge;
+ *  - the declaring page must be a declarer (`HREFLANG_DECLARER`: a 200 HTML
+ *    page, or a 200 non-HTML response such as a PDF declaring through its
+ *    `Link` header, 29d) and not canonicalised elsewhere, so the marker counts
+ *    alternates that a rule would otherwise have had to judge;
  *  - `alternates` is the DISTINCT alternate URLs on that host with no `pages`
  *    row — what crawling the host would cost;
  *  - `pages` is how many pages OF THIS CRAWL name at least one of them — how
@@ -694,7 +700,7 @@ async function alternatesNotCrawledFindings(db: Db, crawlId: string): Promise<Fi
       from hreflang h
       join pages p on p.id = h.page_id
       where h.crawl_id = ${crawlId}
-        and ${FETCHED_OK("p")}
+        and ${HREFLANG_DECLARER("p")}
         and not ${CANONICALISED_ELSEWHERE("p")}
         -- An alternate the crawl's CURRENT scope fences off is our decision,
         -- not the site's gap (27c). hreflang.target_url is NOT NULL.
@@ -921,8 +927,8 @@ export const hreflangRules: QueryRule[] = [
     // unbounded read is O(declarations). A page's rows all land in one batch,
     // so its (page, code) groups are whole there; RAM is O(batch + findings).
     //
-    // Only a declaring page that serves content is judged (`FETCHED_OK`,
-    // ruling R14), as in every other rule in this file: a 301's `Link` header,
+    // Only a declaring page that serves content is judged (`HREFLANG_DECLARER`,
+    // rulings R14 and 29d R1), as in every other rule in this file: a 301's `Link` header,
     // a 404's inherited block and a robots-blocked row's sitemap entry are not
     // a version anyone ranks, and their own rows already say why.
     run: async (db, crawlId): Promise<Finding[]> => {
@@ -1010,7 +1016,7 @@ export const hreflangRules: QueryRule[] = [
           from hreflang h
           join pages p on p.id = h.page_id
           where h.crawl_id = ${crawlId} and h.page_id > ${cursor}
-            and ${FETCHED_OK("p")}
+            and ${HREFLANG_DECLARER("p")}
           order by h.page_id
           limit ${HREFLANG_PAGE_BATCH}`);
         if (ids.rows.length === 0) break;
@@ -1120,8 +1126,9 @@ export const hreflangRules: QueryRule[] = [
   // that language — is the same whether the target moved or opted out.
   // `targetFetchClass` says which it was.
   //
-  // The `is_indexable` half is gated on `isAuditable` — the same guard
-  // `canonical.non-indexable-target` uses, and for the same reason. The writer
+  // The `is_indexable` half is gated on `isDocumentOk` (an HTML 200, or a 200
+  // PDF, whose indexability Phase 29d R1 made the header's to decide) — the
+  // same guard `canonical.non-indexable-target` uses, and for the same reason. The writer
   // sets `is_indexable` false for every 404, 5xx, blocked response and network
   // failure as well as for a noindex, so testing it alone would report a dead
   // alternate under copy about "the exclusion" — a robots directive that page
@@ -1152,7 +1159,7 @@ export const hreflangRules: QueryRule[] = [
         crawlId,
         (_set, target) =>
           target.fetchClass === "redirect" ||
-          (isAuditable(target) && target.isIndexable === false)
+          (isDocumentOk(target) && target.isIndexable === false)
             ? {
                 target: target.url,
                 targetFetchClass: target.fetchClass,

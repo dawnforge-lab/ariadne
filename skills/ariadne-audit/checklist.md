@@ -67,6 +67,23 @@ WHAT CHANGED AFTER IMPORT (the living authority's own change log):
     `render.console-error`, `render.failed-request`).
   - CHECK-49 / 51 / 89 and CHECK-83: the marker `render.not-recorded`.
 
+  Phase 29d (ruleset 0.29.0, 2026-11-24) — engine paragraphs only; no check's id,
+  title, priority, Evaluate criteria or Record list moved.
+  - CHECK-09: an indexable PDF joins the cohort `pages.not-in-sitemap` reports (a
+    PDF the sitemap omits is reported as a page is). Evaluate and Record unchanged.
+  - CHECK-03: the robots guidance reads the file's groups against `robots_get`'s
+    `robotsUserAgent` (the product token they were matched with), and against the
+    full `userAgent` only on a crawl from before 0.29.0, whose token is null.
+  - CHECK-05: a crawl run under a `userAgentPreset` presented a spoofed bot
+    identity, which a site verifying bots by IP or reverse DNS refuses; a preset
+    never bypasses a challenge.
+  - CHECK-83 / 32 / 31 (owner ruling 2026-11-25): indexable PDFs join `site.health`
+    (`urlsTotal` counts them; `urlsPdf`, "Of Which PDFs", says how many),
+    `links.orphan` and `structure.deep-page`. The cohort of those three is
+    "HTML pages and PDFs"; every other metric, `structure.click-depth-distribution`
+    included, stays HTML-only, so `urlsTotal - urlsPdf` is their cohort. Evaluate and
+    Record unchanged.
+
 WHAT DID NOT CHANGE, and must not: every CHECK id, every check's title, priority,
 `**Evaluate**` criteria and `**Record**` list. The rule registry's `checkIds`
 trace to the ids in this file and CI asserts the coverage.
@@ -438,11 +455,12 @@ answered from, and its verdict is the confidence interval around all of them.
   died before its first close, has no answer at all, and a report that prints "0 pages
   truncated" for it is stating a measurement nobody took.
 - **`site.health` is filed here** (`metrics_get` with `metricId: "site.health"`):
-  the partition of the crawl's auditable pages by the worst severity each carries,
-  plus the pages the census leaves out. It is a rollup of the audit's own findings —
+  the partition of the crawl's auditable pages and PDFs by the worst severity each
+  carries, plus the URLs the census leaves out. It is a rollup of the audit's own findings —
   a statement about how far the judgement reached, which is this check's subject
   (it also carries `urlsPaginated`: judged rel=prev pages left out of the three
-  duplicate rules only, which is NOT part of the partition) —
+  duplicate rules only, and `urlsPdf`: how many of `urlsTotal` are PDFs, which almost
+  no page rule reads, so they sit mostly in Clean; neither is part of the partition) —
   and Evaluation Principle 2 still applies: it is context for the coverage answer
   and never the verdict on any check below.
 
@@ -760,15 +778,19 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
      was refused — a robots-shaped block that shows up as a fetch outcome.
   3. **`robots_get` — the file itself, as this crawl read it.** It answers
      `{crawlId, robotsUrl, outcome, raw, truncated, crawlDelaySec, note,
-     sitemapSources, suppliedSitemaps, userAgent}`: `raw` is the text the crawl
+     sitemapSources, suppliedSitemaps, userAgent, robotsUserAgent}`: `raw` is the text the crawl
      obeyed, `outcome` is `read` / `absent` / `unreachable` (and `unreachable` is NOT
      `absent` — a site that could not tell us its rules is a finding, not an
      allow-all), `truncated` means `raw` is only the first 500KB so anything
      concluded about a rule past that point is unsound, `sitemapSources` is the `Sitemap:` lines in declaration order
      (CHECK-06 reads it), `suppliedSitemaps` is the documents the crawl was HANDED at
      start rather than told about by the file — a sitemap listed only there is one the
-     site publishes and does not declare, and CHECK-06 still fires — and `userAgent`
-     is the UA whose groups actually governed the crawl. **Stored evidence, never
+     site publishes and does not declare, and CHECK-06 still fires — `userAgent` is
+     the header the crawl sent, and `robotsUserAgent` is the one product token the
+     file's groups were matched against (RFC 9309): the groups that actually governed
+     the crawl are the ones that name it. On a crawl from before 0.29.0
+     `robotsUserAgent` is null, and its groups were matched against the full
+     `userAgent`. **Stored evidence, never
      re-fetched**: quote it rather than the live file, and if you also read the live
      file, report the difference as the fact about the site that it is.
 - **The file's contents** (steps 1-4 read `robots_get`'s `raw`; a browser only if the
@@ -776,8 +798,9 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
   1. Read `raw` in full. Note `truncated` in the finding if it is set.
   2. Parse: User-agent blocks, Disallow rules, Sitemap lines, Crawl-delay. `robots_get`
      already extracts the last two as `sitemapSources` and `crawlDelaySec` — quote
-     those rather than re-deriving them, and read the rest against `userAgent`, since
-     a rule in a group the crawler never matched did not apply to it.
+     those rather than re-deriving them, and read the rest against `robotsUserAgent`
+     (against the full `userAgent` only when the token is null: a crawl from before
+     0.29.0), since a rule in a group the crawler never matched did not apply to it.
   3. Check for AI bot rules: GPTBot, ChatGPT-User, Google-Extended, ClaudeBot, Anthropic-AI, PerplexityBot, CCBot
   4. Flag any Disallow rules blocking important content paths (/collections/, /products/, /blogs/)
 - **DevTools** (the part no stored text answers — testing URLs against the rules):
@@ -881,7 +904,11 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
   the same wall is this check's manual question; `issue_urls` gives the URLs.
   Report it against the user agent the crawl actually used (`robots_get`'s
   `userAgent`) — the claim is "this UA was blocked on these URLs", never "all bots are
-  blocked".
+  blocked". A crawl started with a `userAgentPreset` (a Googlebot or bingbot
+  identity) presented a SPOOFED bot identity: a site that verifies bots by IP address
+  or reverse DNS (Cloudflare, most CDNs) refuses it, and a preset never bypasses a
+  challenge. A block on such a crawl says the site checks bot identity, not that the
+  real bot is blocked.
 
   `crawl.unreadable-encoding` (info) is the same kind of NOT MEASURED marker under
   this check: the server answered in a content-encoding the crawler did not request
@@ -1026,7 +1053,8 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
 - **Priority**: High | **Requires**: Engine
 - **Engine**:
   1. `issues_list` with `checkId: "CHECK-09"` — `pages.not-in-sitemap` (info) is
-     every indexable page the crawl found that the sitemap does not list.
+     every indexable page — and, since 0.29.0, every indexable PDF — the crawl
+     found that the sitemap does not list.
      `issue_urls` for the list.
   2. `issues_list` with `checkId: "CHECK-32"` for the orphan count (`links.orphan`)
      — the other half of the same picture, and a different question: not in the
@@ -1907,7 +1935,7 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
      individual pages past the depth threshold. **It reads CLICK depth** (since
      ruleset 0.7.0 it is a query rule, running after the click-depth search), so its
      evidence is `{clickDepth, threshold}` and its list is the buried indexable pages
-     rather than a lower bound. Pages with no click path at all are NOT in it — they
+     rather than a lower bound. It covers indexable HTML pages and PDFs. Pages with no click path at all are NOT in it — they
      have no depth to be past a threshold; they are the `nullCount` bucket in the
      distribution above, and where nothing links to them at all they are
      `links.orphan`'s finding (CHECK-32). A page in `nullCount` but not in
@@ -1931,7 +1959,10 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
      answer different questions and should broadly agree: an orphan has no inbound
      internal link at all, while an unreachable page may be linked only from other
      unreachable pages (an island). A page in `nullCount` but not in `links.orphan` is
-     exactly that island, and it is worth naming as one.
+     exactly that island, and it is worth naming as one. The distribution counts HTML
+     pages only: an orphan PDF (`links.orphan` covers indexable PDFs, as of 0.29.0) is
+     in no `nullCount`, and a buried PDF is in `structure.deep-page` but in no depth
+     bucket. Do not expect those findings to reconcile with the distribution.
 - **Analysis**: the distribution is per indexable page — non-indexable pages
   (noindexed, canonicalised, blocked) are excluded, because their crawl depth is
   irrelevant. Present the buckets the table below asks for, with the percentiles from
@@ -1971,8 +2002,8 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
 ### CHECK-32: Orphan pages (no internal links)
 - **Priority**: High | **Requires**: Engine + GSC
 - **Engine**: `issues_list` with `checkId: "CHECK-32"` — three rules:
-  - `links.orphan` (warning) — a page the crawl fetched that no other crawled page
-    links to. `issue_urls` gives the list, and each row's evidence says how the page
+  - `links.orphan` (warning) — an indexable page or PDF the crawl fetched that no
+    other crawled page links to. `issue_urls` gives the list, and each row's evidence says how the page
     was discovered and whether the sitemap lists it, which is the SITEMAP breakdown
     the Analysis asks for.
   - `links.orphan-skipped` (info) — the crawl did not run to completion (URLs left
@@ -3664,7 +3695,7 @@ through an empty listing rests on that timestamp.
 | `issues_list` | one row per rule that found something: `{ruleId, checkIds, severity, type, priority, typeOverridden, priorityOverridden, category, title, count, sampleUrls}` (the `…Overridden` flags only where the crawl's judgement sets the value; a disabled rule is left out and named in `disabledRules`) | the verdict on a check, and its size |
 | `issue_urls` | one row per finding: `{url, address, statusCode, indexability, indexabilityStatus, evidence}`, with the response's own `columns` saying how to print them | the report a developer gets: the URL, whether it is indexable and why not, and the rule's own evidence |
 | `metrics_get` | `{metricId, scope, scopeValue, value, title, explanation, checkIds, category}` | every number a report quotes |
-| `robots_get` | `{crawlId, robotsUrl, outcome, raw, truncated, crawlDelaySec, note, sitemapSources, suppliedSitemaps, userAgent}` | the robots.txt this crawl obeyed, as stored (CHECK-03, CHECK-06) |
+| `robots_get` | `{crawlId, robotsUrl, outcome, raw, truncated, crawlDelaySec, note, sitemapSources, suppliedSitemaps, userAgent, robotsUserAgent}` | the robots.txt this crawl obeyed, as stored (CHECK-03, CHECK-06) |
 
 **Filters that matter for a checklist walk:**
 

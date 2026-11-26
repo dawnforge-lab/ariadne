@@ -26,9 +26,10 @@
  * the home page and nothing else.
  *
  * **The whole search is in SQL.** Each level of the breadth-first search is one
- * `UPDATE` — the frontier is "the crawl's pages whose `click_depth` is the level
- * above", which lives in Postgres and is never a list in JavaScript (hard rule
- * 6). What crosses into JS per level is a row count.
+ * `UPDATE` — the frontier is "the crawl's pages written at the level above",
+ * held in a session-private temp table (Phase 29d), which lives in Postgres and
+ * is never a list in JavaScript (hard rule 6). What crosses into JS per level is
+ * a row count.
  */
 import { eq, sql } from "drizzle-orm";
 
@@ -205,24 +206,45 @@ export async function deriveClickDepth(db: Db, crawlId: string): Promise<ClickDe
       sql`update pages set click_depth = 0 where crawl_id = ${crawlId} and id = ${rootId}`,
     );
 
+    // THE FRONTIER, as a table (Phase 29d, ruling R6): the ids of the pages
+    // written at the level just finished, and nothing else. Selecting
+    // `click_depth = $d` over `pages` instead scanned every page of the crawl
+    // at every level. Two tables whose roles swap each level, as
+    // `deriveLinkScore` swaps its rank tables: a level reads one and fills the
+    // other, truncated first, so no level scans the dead rows of an earlier one
+    // (temp tables are never vacuumed). `on commit drop`, so a failure leaves
+    // nothing behind. The names are the two literals below, never input.
+    await tx.execute(sql`
+      create temporary table cd_frontier (page_id text primary key) on commit drop`);
+    await tx.execute(sql`
+      create temporary table cd_frontier_next (page_id text primary key) on commit drop`);
+    let frontier = sql.raw("cd_frontier");
+    let next = sql.raw("cd_frontier_next");
+    await tx.execute(sql`insert into ${frontier} (page_id) values (${rootId})`);
+
     let reachable = 1;
     let maxDepth = 0;
     let depth = 0;
     for (; depth < MAX_CLICK_DEPTH; depth += 1) {
       // ONE LEVEL OF THE SEARCH, as one statement.
       //
-      // The frontier is `src` — the pages already sitting at `depth` — and the
-      // pages it reaches are written at `depth + 1`. The two filters are what
-      // make this a breadth-first search rather than a walk:
+      // The frontier is the pages written at `depth`; the pages their links
+      // reach are written at `depth + 1` and become the next frontier. The two
+      // filters are what make this a breadth-first search rather than a walk:
       //
-      //  - `target.click_depth is null` means a page is written ONCE, at the
-      //    first level that reaches it, which is by definition its minimum
-      //    number of hops. It is also what makes cycles harmless (a page
-      //    already assigned is never a target again) and a self-link a no-op,
-      //    the same reading `links.orphan` takes of one.
+      //  - `t.click_depth is null` means a page is written ONCE, at the first
+      //    level that reaches it, which is by definition its minimum number of
+      //    hops. It is also what makes cycles harmless (a page already
+      //    assigned is never a target again) and a self-link a no-op, the same
+      //    reading `links.orphan` takes of one.
       //  - the join is `pages.url = links.target_url`, the established
       //    link-to-page spelling: `links.target_page_id` is written null by the
-      //    crawler, so the URL is the only thing the two tables share.
+      //    crawler, so the URL is the only thing the two tables share. (Phase
+      //    29d measured resolving the ids once, into the column or into a temp
+      //    table, against this join at 50k: the resolution cost more than every
+      //    join it replaced; Task 10's commit has the numbers.) Only the
+      //    frontier's links are joined, through `links_crawl_source`, and each
+      //    target is one probe of the unique `(crawl_id, url)` index.
       //
       // `is_internal` only: an off-site link is not a click path through this
       // site. `is_nofollow` is deliberately NOT filtered — a nofollow link is
@@ -234,21 +256,24 @@ export async function deriveClickDepth(db: Db, crawlId: string): Promise<ClickDe
       //
       // NO PER-ROW PARAMETERS, so the 65,535-parameter ceiling the batched
       // inserts elsewhere respect is not in play here: the statement carries the
-      // crawl id and two integers however large the crawl is.
+      // crawl id and one integer however large the crawl is. What crosses into
+      // JS is the row count.
+      await tx.execute(sql`truncate ${next}`);
       const level = await tx.execute(sql`
-        update pages t set click_depth = ${depth + 1}
-        from (
-          select distinct target.id as id
-          from pages src
-          join links l
-            on l.crawl_id = ${crawlId} and l.source_page_id = src.id and l.is_internal
-          join pages target
-            on target.crawl_id = ${crawlId} and target.url = l.target_url
-          where src.crawl_id = ${crawlId}
-            and src.click_depth = ${depth}
-            and target.click_depth is null
-        ) f
-        where t.crawl_id = ${crawlId} and t.id = f.id`);
+        with reached as (
+          update pages t set click_depth = ${depth + 1}
+          from (
+            select distinct target.id as id
+            from ${frontier} f
+            join links l
+              on l.crawl_id = ${crawlId} and l.source_page_id = f.page_id and l.is_internal
+            join pages target
+              on target.crawl_id = ${crawlId} and target.url = l.target_url
+          ) x
+          where t.crawl_id = ${crawlId} and t.id = x.id and t.click_depth is null
+          returning t.id
+        )
+        insert into ${next} (page_id) select id from reached`);
       const written = level.rowCount;
       if (written === null) {
         throw new Error(
@@ -259,6 +284,8 @@ export async function deriveClickDepth(db: Db, crawlId: string): Promise<ClickDe
       if (written === 0) break;
       reachable += written;
       maxDepth = depth + 1;
+      // The level just written is the one the next level reads.
+      [frontier, next] = [next, frontier];
     }
 
     return {

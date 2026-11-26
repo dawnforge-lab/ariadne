@@ -36,3 +36,47 @@ export function saysNoindex(value: string | null): boolean {
   if (value === null) return false;
   return /noindex/i.test(value) || NONE_DIRECTIVE.test(value.replace(VALUE_DIRECTIVE_SPAN, ""));
 }
+
+/**
+ * Whether a `Content-Type` value names a PDF: the media type `application/pdf`,
+ * case-insensitive, parameters ignored (`application/PDF; charset=binary` is
+ * one). Its SQL spelling is `IS_PDF` (src/rules/helpers.ts), pinned against
+ * this in test/crawl/pdf-indexable.test.ts.
+ *
+ * A PDF is the one non-HTML answer whose indexability is a reading of its
+ * headers rather than false by construction (owner ruling 2026-11-24, Phase 29d
+ * R1): see `isDocumentOk`.
+ */
+const PDF_MEDIA_TYPE = /^\s*application\/pdf\s*(?:;|$)/i;
+
+export function isPdf(contentType: string | null): boolean {
+  return contentType !== null && PDF_MEDIA_TYPE.test(contentType);
+}
+
+/** The three columns `isDocumentOk` reads, as the crawl and the rule layer both hold them. */
+export interface DocumentAnswer {
+  fetchClass: string;
+  statusCode: number | null;
+  contentType: string | null;
+}
+
+/**
+ * A 200 whose indexability its robots directives decide: an HTML page fetched
+ * `ok`, or a PDF (`non_html` with a PDF content type). ONE DEFINITION, read by
+ * the crawl writer when it stamps `pages.is_indexable` (src/crawl/persist.ts)
+ * and by the rule layer wherever "an indexable document" is the question
+ * (`indexabilityOf`, `canonical.non-indexable-target`); its SQL spelling is
+ * `DOCUMENT_OK` (src/rules/helpers.ts).
+ *
+ * Every other answer — a redirect, an error, a Word file, an image — is not
+ * indexable whatever its headers say, so its `is_indexable` is false by
+ * construction rather than read. A PDF's robots channel is its `X-Robots-Tag`
+ * header only; it has no HTML to carry a meta, and its `Link` canonical does
+ * not change the stamp, exactly as an HTML canonical does not.
+ */
+export function isDocumentOk(answer: DocumentAnswer): boolean {
+  return (
+    answer.statusCode === 200 &&
+    (answer.fetchClass === "ok" || (answer.fetchClass === "non_html" && isPdf(answer.contentType)))
+  );
+}

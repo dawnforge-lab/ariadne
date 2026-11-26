@@ -116,15 +116,16 @@ scheduler gate. Clause 1c now also diffs the first and the tenth fired crawl of 
 
 ## 7. Open items
 
-- **Link-derive margin.** 51.7 s and 58.1 s against 60 s. `deriveClickDepth` (46.0 s) is the
+- **Partly done in 29d (Task 10): click depth 46.0 → 18.4 s; link derive still 54.9–58.0 s,
+  carried to `docs/gates/phase-29d.md` §8.** **Link-derive margin.** 51.7 s and 58.1 s against 60 s. `deriveClickDepth` (46.0 s) is the
   other large derivation. If the derive step grows, the first candidates are the per-iteration
   join of the 1.15M-row edge table and the inlink aggregate.
 - **A crawl judged before ruleset 0.7.0** has no click depth; a diff against it would read every
   null depth as "unreachable" and count a change. No such crawl is kept.
-- **Pre-existing, not 29c:** `SAYS_NOINDEX` / `NONE_DIRECTIVE` read `max-image-preview: none`
+- **Done in the 29c follow-ups (PR #35).** **Pre-existing, not 29c:** `SAYS_NOINDEX` / `NONE_DIRECTIVE` read `max-image-preview: none`
   (with a space) as `none`, so such a page is reported noindex. The same strip the nofollow test
   now does would fix it.
-- **Diff across origins.** `crawl_diff` accepts two crawls of one site served from different
+- **Done in the 29c follow-ups (PR #35).** **Diff across origins.** `crawl_diff` accepts two crawls of one site served from different
   origins (apex and www, http and https) and then joins on the exact URL, so every page would
   read as removed and added. A caveat for that case is not built.
 - **`ariadne_gate29c` is kept** until the owner's OK to drop it.

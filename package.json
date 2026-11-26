@@ -11,9 +11,9 @@
     "typecheck": "tsc --noEmit",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "tsx src/db/migrate.ts",
-    "api:serve": "tsx src/api/serve.ts",
-    "mcp:serve": "tsx src/api/mcp-serve.ts",
-    "worker:serve": "tsx src/worker/serve.ts",
+    "api:serve": "tsx --max-old-space-size=${ARIADNE_HEAP_MB:?set ARIADNE_HEAP_MB} src/api/serve.ts",
+    "mcp:serve": "tsx --max-old-space-size=${ARIADNE_HEAP_MB:?set ARIADNE_HEAP_MB} src/api/mcp-serve.ts",
+    "worker:serve": "tsx --max-old-space-size=${ARIADNE_HEAP_MB:?set ARIADNE_HEAP_MB} src/worker/serve.ts",
     "demo": "tsx src/demo/serve.ts"
   },
   "dependencies": {

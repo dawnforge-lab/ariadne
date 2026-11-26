@@ -248,6 +248,7 @@ async function main(): Promise<number> {
     try {
       discovery = await discover(`${probe.base}/`, {
         userAgent: CRAWL_DEFAULTS.userAgent,
+        robotsUserAgent: CRAWL_DEFAULTS.robotsUserAgent,
         allowPrivate: true,
         perHostDelayMs: 0,
         sink: new SitemapRowSink(db, crawlId),

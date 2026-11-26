@@ -1,6 +1,6 @@
 # The Ariadne surface Talos codes against
 
-**Status:** the contract as of Phase 29c (ruleset 0.28.1, migrations 0000–0060,
+**Status:** the contract as of Phase 29d (ruleset 0.29.0, migrations 0000–0061,
 38 MCP tools / 38 HTTP routes; every column label in this document is served
 under the ruleset version the engine reports — `rules_catalog`'s
 `rulesetVersion`, which the metric-table pass moves).
@@ -67,8 +67,15 @@ re-judged, to gain the new facts (see "Which crawls have them", below).
   can now be **206**; a 206 counts as success, exactly as a 200 does. A server that
   ignores the range answers 200, the body is counted as a plain GET always was, and
   only its first 64 KiB is read for the size. Per image row
-  the pass makes at most two requests plus redirect hops, and usually one; only a 206
-  of unknown total length or a 416 earns the second, plain GET. CSS and JS rows are
+  the pass makes at most four requests plus redirect hops, and usually one; a 206
+  of unknown total length or a 416 earns a second, plain GET. A PNG or JPEG whose
+  header runs past the first 64 KiB (more than 64 KiB of chunks before the PNG's image
+  data, or of metadata before the JPEG's frame header) earns up to two continuation
+  Range reads, each through the same per-host gate, and only when the first answer was a
+  206 that carried a total; a continuation that is not a 206 starting at the offset
+  asked for, that fails in transport (timeout, reset, refused), or that cannot be sent (host parked), ends the row
+  `header-beyond-limit`: the row keeps the first answer's `status_code` and `bytes`,
+  and `fetch_reason` names the continuation and why. CSS and JS rows are
   unchanged. Politeness is unchanged: the pass still waits for the per-host gate, and
   the body is bounded, not downloaded.
 - **Three new `resources` columns:** `width` and `height` (integer pixels, the image's
@@ -76,7 +83,7 @@ re-judged, to gain the new facts (see "Which crawls have them", below).
   **not measured**, never zero and never a guess, and `dimensions_reason` says why on an
   `ok` image row: `svg` (a vector format has no pixel size), `encoded` (a
   content-encoded body is compressed bytes and is not parsed), `unknown-format`,
-  `header-beyond-limit` (the size lies past the 64 KiB read), `malformed`, `empty`, or
+  `header-beyond-limit` (the size lies past the 64 KiB read and the two continuation reads could not reach it), `malformed`, `empty`, or
   `not-image` (a 2xx whose content type is not `image/*`). All three are null on CSS
   and JS rows and on every row that is not `ok`. They are stored columns: the
   `resources` CSV view does not export them, and `pages_query` does not carry them.
@@ -228,12 +235,31 @@ validated before it is refused (409, "re-run the rules"), never read.
     Has Parse Errors`): a block on the page could not be parsed, so the id may be defined
     in a block that was not read. The rule is gated: silent on a crawl not wholly at
     extraction 4. A `@graph` member that is only `{"@id": …}` is a reference at `$`,
-    checked as one, and not a node.
+    checked as one, and not a node. From Phase 29d every reference is checked, wherever it
+    sits: the block verdict holds `unresolved` (the resolved id of every reference no
+    node of the block defines, in walk order, not cut at 50) and `unresolvedCount` (the
+    exact count for the block). The rule subtracts the ids the page's other blocks
+    define, so the evidence is exact: `unresolved` (the page's unresolved ids, up to 50,
+    column `Unresolved Ids`), `unresolvedCount` (`Unresolved Count`) and `problemsCapped`
+    (true exactly when `unresolvedCount` is over 50). `problems` has one entry per
+    unresolved id (the first 20 are in the evidence); `path` and `written` are recorded
+    for each block's first 50 references and are null for an id past them. `problemCount`
+    equals `unresolvedCount`. **Stored ids are bounded**, because they are stored
+    resolved and the analyzer's input limit does not bound that: an id over 2048
+    characters is not stored, and a block stores at most 256 KiB of ids (`definedIds`
+    first, then `unresolved`). A block that left an id out sets `idsTruncated` in its
+    verdict, and then the page's answer is a lower bound: the evidence carries
+    `unresolvedAtLeast: true` (column `Unresolved At Least`) and `unresolvedCount` means
+    "at least". While a block of the page is truncated, the other blocks' ids are not
+    counted, because the missing ids could have defined them; a page whose only
+    candidates are such ids files no finding. A verdict whose `unresolvedCount` does not
+    match the length of `unresolved` (equal, or at least that with `idsTruncated`), as
+    one written before this change can, is stale: re-run the rules.
   - **`problemsCapped`** (column `Problems Capped`) is on the evidence of every per-node
     rule (`unknown-type`, `unknown-property`, `property-pending-or-superseded`,
     `embedded-type-mismatch`, `empty-value`, `unresolved-reference`): each block's list
     of a kind stops at 50 entries, and when one the rule reads did, `problemCount` is
-    short.
+    short. For `unresolved-reference` it is true when `unresolvedCount` is over 50.
   - **`schema.property-coverage`** (metric, CHECK-44) writes one row per top-level type,
     under the new public metric scope **`schema_type`** (the scopes are now `site |
     page_type | sitemap_doc | schema_type`): the type as the markup states it, an
@@ -244,7 +270,7 @@ validated before it is refused (409, "re-run the rules"), never read.
     against schema.org are counted; nodes of blocks in another vocabulary are counted
     apart, as `otherVocabularyNodes` on the site row (a misspelt type in a schema.org
     block is still counted, under its stated name), and `typesCappedNodes` counts the
-    nodes whose type list was cut. JSON-LD lists every type a node states, up to 50 per node (`typesCapped` when cut; the coverage metric counts only the listed types); a microdata `itemtype` or RDFa `typeof` keeps only its first type at extraction 4 — an extraction limit — so a node from those formats lists one. It is bounded: types (100) and properties per type (100)
+    nodes whose type list was cut. JSON-LD lists every type a node states, up to 50 per node (`typesCapped` when cut; the coverage metric counts only the listed types); a microdata `itemtype` or RDFa `typeof` lists every token from extraction 5 (a page crawled at extraction 4 kept only the first, so its node lists one). It is bounded: types (100) and properties per type (100)
     are capped, and `typesNotListed`, `propertiesNotListed` and `propertyListsCapped` are
     counted, never dropped. The engine names no required set of properties; which a type
     needs is the agent's judgement. Like `content.metrics-by-type`, it counts the judged
@@ -378,7 +404,8 @@ index that keeps `renderDocuments` from scanning a crawl's pages. Gate evidence:
   transaction).
 - **A slot fires or is skipped, and the skip is recorded.** `schedule_history` answers
   the schedule's own events: `schedule_fired` `{crawlId}`, `schedule_skipped` `{reason,
-  crawlId?}` and `schedule_chain_failed` `{link, reason}`. A fire or skip carries
+  crawlId?, field?}` (`field` names the offending field on an `identity_refused`
+  skip) and `schedule_chain_failed` `{link, reason}`. A fire or skip carries
   `crawlId` null at the top level and names the crawl in `detail`, so its record
   outlives a deleted crawl. `schedule_history` answers these three kinds only: a fired
   crawl's lifecycle events carry the schedule's `scheduleId` too, and they are read with
@@ -399,6 +426,17 @@ index that keeps `renderDocuments` from scanning a crawl's pages. Gate evidence:
   - `credentials_unreadable`: the schedule's stored copy cannot be decrypted with the
     leading process's keys. Nothing fires without its credentials;
     `schedule_update` with the credentials again stores a copy the deployment can read.
+  - `identity_refused` (Phase 29d): a schedule stored before 29d holds no
+    `robotsUserAgent`. At fire time its token is resolved from the `userAgent` and
+    `userAgentPreset` it does hold, as `crawl_start` resolves them, and the fired crawl
+    stores the resolved trio (a branded `AriadneBot/…` header fires with
+    `robotsUserAgent: "AriadneBot"`); the schedule row is not rewritten. An identity
+    `crawl_start` would refuse (a `userAgent` whose derived token is `mozilla`) fires
+    nothing: the skip carries `detail.field` (the config field to set), the leading
+    process logs the refusal, and `schedule_update` with a `robotsUserAgent` lets it
+    fire. Pinned by `test/schedule/scheduler.test.ts:996` ("fires with the token
+    resolved from its branded userAgent") and `test/schedule/scheduler.test.ts:1013` ("a
+    Mozilla/ userAgent with no token is refused").
   Either way `nextRunAt` moves to the first slot after now.
 - **Every event carries `scheduleId`** when its crawl was fired by a schedule (the
   crawl's `schedule_id`). **`schedule_delete`** removes the schedule's own fire and skip
@@ -523,7 +561,9 @@ contract moves in these ways, none of them a new call:
   metrics add their own (`le`, `quantile`, `version`, `major`, `minor`, `patch`,
   `space`, `type`). A worker serves the same three on
   `ARIADNE_WORKER_HTTP_PORT`.
-- **Environment.** API: `ARIADNE_API_TOKEN`, `ARIADNE_API_PORT`, `ARIADNE_API_HOST`,
+- **Environment.** Every serving process (API, worker, stdio MCP) also requires
+  `ARIADNE_HEAP_MB`, the `--max-old-space-size` node was started with and which it verifies
+  at boot (`docs/deploy.md`, Heap cap). API: `ARIADNE_API_TOKEN`, `ARIADNE_API_PORT`, `ARIADNE_API_HOST`,
   `ARIADNE_ALLOWED_DOMAINS`, `ARIADNE_CREDENTIALS_KEY` (required),
   `ARIADNE_CREDENTIALS_KEY_PREVIOUS`, `ARIADNE_CREDENTIALS_RETENTION_DAYS`,
   `ARIADNE_METRICS_TOKEN`, `ARIADNE_EXPORT_DIR`, `ARIADNE_RENDER_DIR`,
@@ -883,11 +923,14 @@ What changed under existing ids. **Hreflang is read from all three sources**: th
 page's HTML, its HTTP `Link` header (read whole at fetch, on every classified
 response) and the `xhtml:link` alternates of its sitemap entry. Every hreflang
 rule judges the union of a declaring page's sources, and judges a declaring page
-only when it was fetched OK as HTML with a 200. A `Link` header on a non-HTML
-response (a PDF) is recorded, `source = 'header'`, and counts as that file's
-return link when an HTML page names it; the file's own declaration set is not
-judged, so a PDF's missing self-reference, invalid code or source conflict is no
-finding (a known limit, not a pass). The eight that list a declaration carry
+only when it was fetched OK as HTML with a 200, or answered 200 as non-HTML
+(Phase 29d: a declarer can be a PDF). A `Link` header on a 200 non-HTML response
+(a PDF) is recorded, `source = 'header'`, and the file's own declaration set is
+judged like a page's (missing return link, missing x-default, invalid code,
+self-only, source conflict) as well as counting as its return link when an HTML
+page names it. A redirect's, a 404's or a robots-blocked row's declarations are
+still not judged. As a target, an indexable PDF is a cluster member and a
+noindexed one (`X-Robots-Tag`) is reported by `hreflang.non-indexable-target`. The eight that list a declaration carry
 `sources` in their evidence (`html`, `header`, `sitemap`); `hreflang.multiple-entries` counts targets within
 ONE source, so a disagreement between sources is `source-conflict`'s finding and
 never both. **Sitemaps are streamed** to the 50 MB limit (a 10–50 MB sitemap was
@@ -1182,8 +1225,10 @@ a profile's own budget (Shopify 60 s) still applies when it is larger, and the c
 never lowers a caller's own larger setting. The render lease is derived from it as
 (2 × renderConcurrency + 1) × 30 s + navigation budget + settle + 30 s, plus 35 s for
 the accessibility run from Phase 29b (its 30 s budget and a 5 s grace after
-terminating it): 383 s at the defaults (four workers, 45 s), 458 s at the cap, 218 s
-under the Shopify profile at 1 s, replacing a fixed 120 s.
+terminating it), plus, from Phase 29d, the same 5 s grace once more for a page whose
+render deadline runs out (its thread is terminated after the deadline): 388 s at the
+defaults (four workers, 45 s), 463 s at the cap, 223 s under the Shopify profile at
+1 s, replacing a fixed 120 s (383 s, 458 s and 218 s before 29d).
 
 **What Phase 23 changed here: proven behaviour.** Ruleset 0.18.0, migrations
 0020–0022, and no tool or route added: 14 rules joined (114 rows in
@@ -1445,13 +1490,13 @@ Two properties make the double-transport claim below cheap to trust:
 - **One service, two transports.** `src/api/service.ts` holds every query,
   refusal and vocabulary; `http.ts` and `mcp.ts` do routing and serialisation
   and nothing else.
-- **The equality is tested, not argued.** `test/api/mcp.test.ts:2778`
+- **The equality is tested, not argued.** `test/api/mcp.test.ts:2779`
   ("answers the same JSON for the same question, route by tool") calls thirteen
   (tool, route) pairs over the wire against one database and asserts the two
-  answers are `toEqual`. `test/api/mcp.test.ts:2799` ("refuses in the same
+  answers are `toEqual`. `test/api/mcp.test.ts:2800` ("refuses in the same
   words, whichever transport asked") does the same for five refusals — the same
-  sentence and the mapped status. `test/api/mcp.test.ts:2857` ("streams the
-  bytes the other transport writes to a file") and `test/api/mcp.test.ts:2883`
+  sentence and the mapped status. `test/api/mcp.test.ts:2858` ("streams the
+  bytes the other transport writes to a file") and `test/api/mcp.test.ts:2884`
   ("streams the resources view byte for byte") assert the CSV a route streams is
   byte-identical to the file the tool writes, for the `issues` and `resources`
   views.
@@ -1497,7 +1542,7 @@ Two properties make the double-transport claim below cheap to trust:
   names *which* thing was wrong — missing header, wrong scheme, wrong token.
 - **MCP asks for no credential** and that is a posture, not an omission: an
   stdio client either started this process or was handed its pipes
-  (`test/api/mcp.test.ts:3037` "asks for no bearer token: an stdio client is the
+  (`test/api/mcp.test.ts:3040` "asks for no bearer token: an stdio client is the
   process that started this one"). If Ariadne's MCP server is ever mounted on a
   network transport, that argument dies with the change and a credential has to
   arrive with it.
@@ -1514,7 +1559,7 @@ Two properties make the double-transport claim below cheap to trust:
   exact host or `*.example.com`). An empty allowlist refuses every crawl
   trigger and still answers every query — the read-only posture a Talos
   deployment can run for reporting-only tenants
-  (`test/api/mcp.test.ts:968` "refuses every crawl when the allowlist is empty",
+  (`test/api/mcp.test.ts:969` "refuses every crawl when the allowlist is empty",
   `test/api/http.test.ts:823` "refuses every crawl when the allowlist is empty,
   but still answers queries").
 - **`ServiceConfig.allowAnyPublicHost` is a second code-only process-trust seam**
@@ -1567,7 +1612,7 @@ schema refusal (the SDK's plain-text "Input validation error", §4.1). Pinned:
 CREDENTIALS_REQUIRED and writes nothing".
 
 `correlationId` is a UUID; the stack goes to the server log under that id and
-nowhere else (`test/api/mcp.test.ts:2910` "turns an unexpected throw into a tool
+nowhere else (`test/api/mcp.test.ts:2911` "turns an unexpected throw into a tool
 error with a correlation id", `test/api/http.test.ts:2115` "turns an unexpected
 throw into a 500 with a correlation id").
 
@@ -1582,7 +1627,7 @@ field more, `columns`, the header their rows are printed under (§4.4). It is
 served with every page rather than only the first, so a paging client keeps no
 state. `limit` defaults to 50 and is capped at 200 — a limit outside the
 contract is refused, never clamped (`PAGE_SIZE_DEFAULT` / `PAGE_SIZE_MAX`,
-`test/api/mcp.test.ts:1238` "refuses a limit outside the contract rather than
+`test/api/mcp.test.ts:1239` "refuses a limit outside the contract rather than
 clamping it").
 
 **Closed vocabularies.** Every query parameter, body field and tool argument is
@@ -1590,7 +1635,7 @@ on a closed list. `?serverity=critical` is a 400 naming both the typo and the
 accepted set, never an unfiltered listing with a 200 on it
 (`test/api/query.test.ts:4238` "refuses a typo'd filter instead of answering the
 question nobody asked"). MCP argument typos are refused by the SDK's schema
-validator before the handler runs (`test/api/mcp.test.ts:850` "refuses an
+validator before the handler runs (`test/api/mcp.test.ts:851` "refuses an
 argument nobody allowed, naming it").
 
 **Not paginated, on purpose:** `rules_catalog`, `crawl_compare` and (Phase 27a)
@@ -1708,7 +1753,7 @@ webhooks**: polling `crawl_status` is the contract until Talos asks otherwise.
 
 | MCP tool | HTTP | Arguments |
 |---|---|---|
-| `crawl_start` | `POST /crawls` | `siteUrl` (required), `maxPages`, `maxDepth`, `userAgent`, `perHostDelayMs`, `maxConcurrency`, `probeHosts`, `legacyHosts[]`, `sitemapUrls[]`, `renderBudgetPct`, `renderMaxPages`, `renderSamplePerType`, `findingCap`, `fetchResources`, `judgement` (the block `crawl_config_set` changes later, §4.9); since 27c `mode`, `urls[]`, `exclude[]`, `include[]`, `requestHeaders`, `httpAuth`, `cookies`, `maxRedirectHops`, `maxUrlLength` (§4.1) |
+| `crawl_start` | `POST /crawls` | `siteUrl` (required), `maxPages`, `maxDepth`, `userAgent`, `userAgentPreset`, `robotsUserAgent`, `perHostDelayMs`, `maxConcurrency`, `probeHosts`, `legacyHosts[]`, `sitemapUrls[]`, `renderBudgetPct`, `renderMaxPages`, `renderSamplePerType`, `findingCap`, `fetchResources`, `judgement` (the block `crawl_config_set` changes later, §4.9); since 27c `mode`, `urls[]`, `exclude[]`, `include[]`, `requestHeaders`, `httpAuth`, `cookies`, `maxRedirectHops`, `maxUrlLength` (§4.1) |
 | `crawl_status` | `GET /crawls/:id` | — |
 | `crawl_list` | `GET /crawls` | `siteUrl`, `limit`, `cursor` |
 | `crawl_resume` | `POST /crawls/:id/resume` | `requestHeaders`, `httpAuth`, `cookies` (optional: the crawl's credentials, re-supplied after a restart, §4.1a). A paused crawl resumes; a cancelled one is final and refused |
@@ -1746,10 +1791,10 @@ webhooks**: polling `crawl_status` is the contract until Talos asks otherwise.
 | `crawl_diff_urls` | `GET /diff/urls` | `baseCrawlId`, `headCrawlId`, `field` (all required), `state`, the four diff thresholds, `limit`, `cursor` (§7.6) |
 | `export_crawl` | `GET /crawls/:id/export` | `format` (`jsonl.gz` \| `csv`), `dataset` (jsonl.gz only), `view` + `ruleId` \| `metricId` (csv only) |
 
-Pinned: the tool list and every schema — `test/api/mcp.test.ts:692`
+Pinned: the tool list and every schema — `test/api/mcp.test.ts:693`
 ("advertises exactly the thirty-eight tools of the agent surface"),
-`test/api/mcp.test.ts:719` ("closes every input schema and describes every
-field"), `test/api/mcp.test.ts:751` ("names every member of the closed
+`test/api/mcp.test.ts:720` ("closes every input schema and describes every
+field"), `test/api/mcp.test.ts:752` ("names every member of the closed
 vocabulary each field enumerates"). `crawl_start`'s field set is not a second
 declaration to keep in step: its input schema IS the crawl-start body schema
 (`src/api/config-schema.ts`), and a test walks that schema's published form and
@@ -2014,7 +2059,7 @@ different server, reaches the totals of a control crawl that was never killed �
 3 pages, 24 resources seen and weighed, 0 unasked, 23 findings, on both
 (`test/api/http.test.ts:1198` "a killed crawl resumed over the wire reaches the
 totals of a control that was never killed"; the MCP half is
-`test/api/mcp.test.ts:1633` "finishes a crawl a server was killed in the middle
+`test/api/mcp.test.ts:1634` "finishes a crawl a server was killed in the middle
 of, and keeps its earned spacing").
 
 ### 4.1c `crawl_pause` / `crawl_cancel` / `crawl_delete` → stopping a crawl
@@ -2097,7 +2142,7 @@ swallowed.
 JSON Schema **draft 2020-12**, generated from the one zod schema both transports
 parse with. Every field carries its `description`, its `default` where the
 engine has one, and `x-ariadne-mutable` — `never` (`siteUrl`, `userAgent`,
-`probeHosts`, `legacyHosts`, `sitemapUrls`, `fetchResources`), `whenPaused`
+`userAgentPreset`, `robotsUserAgent`, `probeHosts`, `legacyHosts`, `sitemapUrls`, `fetchResources`), `whenPaused`
 (`maxPages`, `maxDepth`, `perHostDelayMs`, `maxConcurrency`, the three render
 budgets, `renderAccessibility`) or `always` (`findingCap` and `judgement`). `judgement.rules` lists
 every page and query rule id as `propertyNames.enum` (zod's spelling of a
@@ -2371,8 +2416,8 @@ page count a crawl stamped, and null when none did",
 `test/api/query.test.ts:2481` "echoes whether the crawl
 asked about its files", `test/api/query.test.ts:2499` "409s a stored
 fetchResources that is not a boolean"; over the agent transport,
-`test/api/mcp.test.ts:1051` "answers the resource census and whether the crawl
-asked for it" and `test/api/mcp.test.ts:1140` "tells an agent what the resource
+`test/api/mcp.test.ts:1052` "answers the resource census and whether the crawl
+asked for it" and `test/api/mcp.test.ts:1141` "tells an agent what the resource
 numbers mean, and what they do not". The recheck block:
 `test/api/query.test.ts:2273` "partitions the crawl's server errors by what the
 second look found" (the arithmetic, over a fixture holding one row of every
@@ -2381,7 +2426,7 @@ http.server-error-transient fires on" (the surface and the rule read ONE set,
 imported, never two lists), `test/api/query.test.ts:2398` "tells a crawl with no
 server errors apart from a crawl nobody rechecked",
 `test/api/query.test.ts:2434` "keeps the recheck block off the crawl listing";
-over the agent transport, `test/api/mcp.test.ts:1081` "answers the recheck
+over the agent transport, `test/api/mcp.test.ts:1082` "answers the recheck
 coverage, and keeps its two zeroes apart" (which also reads the block off a
 crawl the suite really ran). The robots split itself is
 `test/crawl/fetch-resources.test.ts:887` "classes an unreachable third-party
@@ -2480,8 +2525,8 @@ skipped rule in notMeasured, on HTTP and MCP, and never read it as clean".
 
 Pinned: `test/api/query.test.ts:1105` "groups by rule, orders by severity then
 rule id", `test/api/query.test.ts:1248` "says so when a rule's listing was capped"
-(the capped shape); `test/api/mcp.test.ts:1782` "groups findings by rule, orders
-them by severity" and `test/api/mcp.test.ts:1796` "carries a capped rule's real
+(the capped shape); `test/api/mcp.test.ts:1783` "groups findings by rule, orders
+them by severity" and `test/api/mcp.test.ts:1797` "carries a capped rule's real
 magnitude".
 
 ### 4.3a `issues_overview` → one row per rule, with the judgement applied
@@ -2602,8 +2647,8 @@ Its eleven sections, in this order: `urls`, `fetch-class`, `status-class`,
   **It counts EVERY `pages` row**, like the other partitions, so `Unreachable`
   (a null `click_depth`) includes redirects, error pages and robots-blocked rows,
   not only orphaned HTML. That is a different population from the metric
-  `structure.click-depth-distribution`, which counts the judged cohort (fetched OK,
-  200, indexable, not canonicalised elsewhere; §6), so the two do not agree
+  `structure.click-depth-distribution`, which counts the judged HTML cohort (fetched OK,
+  200, indexable, not canonicalised elsewhere; `site.health`'s `urlsTotal - urlsPdf`, §6), so the two do not agree
   bucket for bucket; read the metric when the question is
   how deep the judged pages sit.
   `discovery` is one entry per `discovered_via`, then `In a sitemap` /
@@ -2700,11 +2745,23 @@ read:
 | `disallowed` | Non-Indexable | `Blocked by robots.txt` |
 | `excluded` (Phase 27c: the crawl's own scope refused it, never requested) | Non-Indexable | `Excluded by crawl settings` |
 | `timeout`, `network_error` | Non-Indexable | `No Response` |
-| `non_html`, `too_large`, `unsupported_encoding` | Non-Indexable | `Not HTML` |
-| `ok`, status ≠ 200 | Non-Indexable | `Not HTML` |
-| `ok` 200 + noindex on either robots channel | Non-Indexable | `Noindex` |
-| `ok` 200 + a canonical naming another URL | Non-Indexable | `Canonicalised` |
-| `ok` 200, otherwise | Indexable | `""` |
+| `non_html` (a PDF excepted), `too_large`, `unsupported_encoding` | Non-Indexable | `Not HTML` |
+| `ok` or a PDF, status ≠ 200 | Non-Indexable | `Not HTML` |
+| `ok` or PDF 200 + noindex on either robots channel | Non-Indexable | `Noindex` |
+| `ok` or PDF 200 + a canonical naming another URL | Non-Indexable | `Canonicalised` |
+| `ok` or PDF 200, otherwise | Indexable | `""` |
+
+**A PDF is a document, not "no HTML"** (Phase 29d). A `non_html` row whose
+`Content-Type` is `application/pdf` (case-insensitive, parameters ignored) is read
+as an `ok` row is: a 200 PDF is `Indexable` unless its `X-Robots-Tag` says
+`noindex` (or `none`), `Noindex` when it does, and `Canonicalised` when its `Link`
+canonical names another URL. The stored `indexable` (`pages_query`, the
+`internal_urls` CSV, `crawl_diff`) is true for a 200 PDF on the same terms, the
+canonical not read, as for HTML (`isDocumentOk` in src/crawl/robots-directives.ts is
+the one definition both read). Every other non-HTML answer — a Word file, a
+spreadsheet, an image — stays `Not HTML` and `indexable: false`. Crawls stored
+before 29d were rewritten by migration 0061 from their stored status, content type
+and `X-Robots-Tag`.
 
 The order is the order in the table, most decisive first: a redirect is never
 indexed whatever its HTML says, and a 200's own directives only matter once
@@ -2912,7 +2969,7 @@ one table, with the site-only cells empty",
 `test/api/query.test.ts:1756` "says which kind of empty a rowless table is, and
 refuses the two that are not", `test/api/query.test.ts:1792` "serves the same
 header on the catalog, and only on metric rules",
-`test/api/mcp.test.ts:2215` "answers one metric's table: the copy, the header,
+`test/api/mcp.test.ts:2216` "answers one metric's table: the copy, the header,
 and one row per scope",
 `test/rules/metric-table.test.ts:377` "gives every metric rule a table whose
 columns are the catalog's",
@@ -2945,7 +3002,7 @@ copy travels with it. Scopes: `site | page_type | sitemap_doc | schema_type` (`r
 one — corrected in P21-T1, beside §4.4b). See §6 for
 `site.health` and for the absent-family trap.
 Pinned: `test/api/query.test.ts:1533` "returns the stored value with the
-registry's copy joined", `test/api/mcp.test.ts:2186` "answers the measured
+registry's copy joined", `test/api/mcp.test.ts:2187` "answers the measured
 numbers with their copy joined".
 
 **One field inside one metric's value that this contract does pin, because it
@@ -2970,7 +3027,7 @@ NOT MEASURED applies only to what no pass rendered, and to the whole check only
 when both counts are 0. `"failed"` is neither "rendered" nor "no render
 needed". `"failed"` takes precedence over `"ran"`; the closed vocabulary is
 `ran`, `none`, `failed`. Read it before quoting any JavaScript finding. Pinned:
-`test/api/mcp.test.ts:1491` "says over the wire whether a render pass ran, not
+`test/api/mcp.test.ts:1492` "says over the wire whether a render pass ran, not
 just how many pages it left", `test/api/http.test.ts:1775` "serves
 renderPassEvidence none beside the selection a pass would make",
 `test/rules/render-metrics.test.ts:539` "answers none on a crawl nobody
@@ -2998,7 +3055,20 @@ when max and min agree within 1e-9 relative), null outside the link graph; a pag
 robots meta or X-Robots-Tag says nofollow or none passes none (its edges are dropped;
 counts above are unchanged). All four are null on a crawl judged before 29c: not
 measured, never zero. The raw score is not published. `renderError` is why an **attempted** render produced
-nothing; null there is not "it worked".
+nothing; null there is not "it worked". **Two new forms from Phase 29d, each costing that
+page and never the pass.** `"render over <n> s in total (during <phase>)"`: every render
+has one deadline from the end of its gate wait, the navigation budget plus 30 s plus
+35 s (110 s at the default 1 s spacing, the render lease's own sum without the gate wait
+and the settle), and `<phase>` is where the page was when it ran out: `navigation`,
+`settle`, `measure`, `images`, `content` or `axe`. The page was stopped (its script
+terminated, its browser context discarded) and counts as not rendered; when the phase is
+`axe` its `render_a11y_status` is `timeout`, the one not-rendered page with a status.
+`"measurement returned an invalid shape: <value>"`: the in-page word and link counts
+came back as something other than five non-negative integers. The counts are read in an
+isolated world of the page since 29d, so a page that overrides `Array.from`,
+`Array.prototype.filter` or the like is measured as it is, rather than failing as
+`navigation error: …`; `RENDER_CAPTURE_VERSION` stays 3, because a page that broke
+nothing measures exactly as before.
 
 **The last five are the two observations, and they were added to a projection
 this document calls deliberately slim — so the argument, rather than the fact.**
@@ -3038,9 +3108,9 @@ view (§12), which carries `referencingPages`.
 Pinned: `test/api/query.test.ts:1812` "returns a slim projection and nothing
 else" (the widened projection, pinned as a whole set),
 `test/api/query.test.ts:1851` "carries both observations, and never lets the
-second rewrite the first", `test/api/mcp.test.ts:2339` "names every field of the
+second rewrite the first", `test/api/mcp.test.ts:2340` "names every field of the
 row it answers with, in its own description", `test/api/query.test.ts:1954` "carries both word counts, so the number a
-reader quotes is the one they can see", `test/api/mcp.test.ts:2272` "answers the
+reader quotes is the one they can see", `test/api/mcp.test.ts:2273` "answers the
 crawled pages, slim and ordered by URL".
 
 ### 4.6a `structured_data` → `{items: StructuredDataPageRow[], nextCursor, notMeasured}`
@@ -3052,7 +3122,7 @@ with none of them is not listed.
 ```
 url, pageType, indexable, formats, types, nodes,
 warningCount, infoCount, jsonLdParseErrors, microdataErrors, skips, blocksAtCap,
-problemsCapped
+blocksDropped, nodesDropped, problemsCapped
 ```
 
 - **`formats`** are the syntaxes found (`jsonld`, `microdata`, `rdfa`), distinct and
@@ -3064,7 +3134,7 @@ problemsCapped
   one, unless it holds only an `@id`, which makes it a reference, not a node): `{format, path, type, types, typesCapped, properties, propertiesCapped}`. `type` is the
   primary type as the markup states it, a name outside schema.org included, and null
   when the node is untyped; `types` is every type the node states, in authored order
-  (`[]` when untyped). JSON-LD lists every type a node states, up to 50 per node (`typesCapped` when cut; the coverage metric counts only the listed types); a microdata `itemtype` or RDFa `typeof` keeps only its first type at extraction 4 — an extraction limit — so a node from those formats lists one. A blob whose nodes lack `types` was written
+  (`[]` when untyped). JSON-LD lists every type a node states, up to 50 per node (`typesCapped` when cut; the coverage metric counts only the listed types); a microdata `itemtype` or RDFa `typeof` lists every token from extraction 5 (a page crawled at extraction 4 kept only the first, so its node lists one). A blob whose nodes lack `types` was written
   before they listed every type and is refused like any old one (409, re-run the rules);
   `properties` are the node's property names, capped per node at 50, with
   `propertiesCapped` true when the list was cut short. Structured data is judged by the
@@ -3076,20 +3146,39 @@ problemsCapped
   `microdataErrors`. `infoCount` is pending or superseded properties and references (a
   bare `@id`) that no block of the same page defines. Linking to an entity defined
   elsewhere is legal, so read those as facts to check.
-- **`blocksAtCap`** is true when the page's stored blocks reached the analyzer's
-  per-page limit (50): blocks past it were not stored, so an id may be defined in a
-  block that was not stored.
+- **`blocksAtCap`** is true when the page had blocks past the analyzer's per-page limit
+  (50): blocks past it were not stored, so an id may be defined in a block that was not
+  stored. From extraction 5 it is exactly `blocksDropped > 0`; on a page crawled below
+  extraction 5 it is true when the stored block count reached 50, as it always was.
+- **`blocksDropped`** and **`nodesDropped`** (Phase 29d) are how many blocks past the
+  per-page limit, and how many nodes past the per-block limit, the analyzer did not
+  store. Both are **null on a page crawled below extraction 5**, which did not count
+  them: not measured, never zero. From extraction 5 the page's stored skips hold all
+  five counters (the three below and these two); a page at extraction 5 without them,
+  or a page below it that holds them, throws naming the crawl and the page.
 - **`problemsCapped`** is true when a block on the page cut one of the lists the two
   counts read at its per-block limit (50): `warningCount` / `infoCount` may be short
-  (an empty-value list cut at 50 holds more problems than it shows; a references list
-  cut at 50 may or may not hold more unresolved ones).
-  The `structured_data_nodes` CSV holds the same lists, so its rows for one problem
-  stop at 50 per block too; the cap is per block.
+  (an empty-value list cut at 50 holds more problems than it shows). The unresolved
+  part of `infoCount` is not cut by the references list (Phase 29d): it is exact, a
+  reference past the 50th included, and `problemsCapped` is also true when the page has
+  more than 50 unresolved references, as in the rule's evidence. **`infoCountAtLeast`**
+  is true when a block of the page left ids out of its verdict (an id over 2048
+  characters once resolved, or more than 256 KiB of ids): `infoCount` is then a lower
+  bound, "at least that many", never a guess. It is false on a crawl that does not
+  measure references.
+  The `structured_data_nodes` CSV holds the first 50 of each other list, so its rows for
+  one such problem stop at 50 per block; its `unresolved-reference` rows are not cut, one
+  for every unresolved id, with Path `(path not recorded)` for a reference past the
+  block's first 50, and a Detail naming its resolved id followed by `(written form not
+  recorded)` (the resolved id is never shown as the form written; the rule's evidence
+  says `written: null`); when `infoCountAtLeast` is true each such row's Detail says the
+  list is incomplete.
 - **`notMeasured`** is `{id, reason}[]`. On a crawl not wholly at extraction 4 the
   unresolved-reference count is not measured and `notMeasured` names
   `schema.unresolved-reference`; `infoCount` then holds no references. It is `[]`
   otherwise.
-- **Null is not zero.** `microdataErrors` and `skips` are null on a page crawled below
+- **Null is not zero.** `blocksDropped` and `nodesDropped` are null below extraction 5
+  (above). `microdataErrors` and `skips` are null on a page crawled below
   extraction version 4: nobody looked for microdata, so `warningCount` there holds no
   microdata errors. `skips` is `{microdataItemrefSkipped, rdfaUnsupported,
   valuesCapped}` where the reader dropped something: `itemref` elements it does not
@@ -3108,8 +3197,8 @@ problemsCapped
   validated by an earlier ruleset (a validation in the shape written before the
   rework) are 409 (`CONFLICT`): run `crawl_rules` and ask again. An empty listing would
   read as a site whose markup has no problems. A stored value this engine could not
-  have written (a format outside the three, a skips blob that is not exactly the three
-  counters, a validation blob that is not readable) throws naming the crawl and the
+  have written (a format outside the three, a skips blob that does not hold exactly the
+  counters its page's extraction writes (three below extraction 5, five from it), a validation blob that is not readable) throws naming the crawl and the
   page; it is never coerced.
 - The problem-by-problem detail is the `structured_data_nodes` CSV view (§12), one row
   per block and problem. The findings are the `schema.*` rules (`issues_list`
@@ -3178,12 +3267,15 @@ and so is another tenant's").
 ### 4.7 `robots_get` → the robots.txt this crawl obeyed
 
 `{crawlId, robotsUrl, outcome, raw, truncated, crawlDelaySec, note,
-sitemapSources[], suppliedSitemaps[], userAgent}`. It is **stored evidence, never
+sitemapSources[], suppliedSitemaps[], userAgent, robotsUserAgent}`. `userAgent` is the
+header; `robotsUserAgent` is the one product token the groups and `Crawl-delay` were
+matched against (null on a crawl stored before 29d, which matched its full `userAgent`).
+It is **stored evidence, never
 a re-fetch**: the file as the crawl read it, which is the only honest answer to
 "what did this crawl obey". `outcome ∈ read | absent | unreachable`, and
 `unreachable` is not "there are no rules" (RFC 9309 §2.3.1.4).
 Pinned: `test/api/query.test.ts:2002` "answers with the robots.txt the crawl
-read, and the metadata that makes it readable", `test/api/mcp.test.ts:2376`
+read, and the metadata that makes it readable", `test/api/mcp.test.ts:2377`
 "answers with the robots.txt the crawl read, verbatim".
 
 ### 4.8 `crawl_list` → `{items: CrawlListItem[], nextCursor}`
@@ -3201,7 +3293,7 @@ Pinned: `test/api/query.test.ts:3454` "narrows the listing to one site, and
 leaves the other site's crawls out", `test/api/query.test.ts:3460` "matches the
 apex and www spellings, both schemes", `test/api/query.test.ts:3474` "refuses a
 siteUrl that is not an http(s) URL rather than dropping the filter";
-`test/api/mcp.test.ts:2081` "narrows crawl_list to one site".
+`test/api/mcp.test.ts:2082` "narrows crawl_list to one site".
 
 **Pre-tenancy posture, stated plainly (see §9).** Without `siteUrl`, this
 listing returns every crawl the engine holds, including other tenants'
@@ -3335,7 +3427,7 @@ it); and every crawl's `crawl` adds `scopeChangedAt` (ISO, or null until
 carries `listUrlCount` and `listDuplicates`, as `effective` did; the URLs are never
 shown. It diverges from `effective` after a `crawl_config_set`.
 `mutability` says, per `crawl` key, when it can change: **`never`** (`siteUrl`,
-`userAgent`, `probeHosts`, `legacyHosts`, `sitemapUrls`, `fetchResources`, since 27c
+`userAgent`, `userAgentPreset`, `robotsUserAgent`, `probeHosts`, `legacyHosts`, `sitemapUrls`, `fetchResources`, since 27c
 `mode`, `urls` and `maxUrlLength`, the reported facts `listUrlCount`,
 `listDuplicates` and `scopeChangedAt`, and the operator-only stored budgets
 `maxResources`, `maxResourceHosts`, `maxBlockedUrls` and `platformProfiles`, which are
@@ -3540,9 +3632,9 @@ judged, however many rows it holds", `test/api/query.test.ts:2683` "marks a
 capped rule's count as a floor, agreeing with issues_list",
 `test/api/query.test.ts:2722` "reads the marker and the counts from one
 statement", `test/api/query.test.ts:2578` "carries the registry's marker on every
-NOT MEASURED marker, and on no other rule"; `test/api/mcp.test.ts:1902` "joins a
+NOT MEASURED marker, and on no other rule"; `test/api/mcp.test.ts:1903` "joins a
 judged crawl's fired state, zero included, summing to findingsCount" and
-`test/api/mcp.test.ts:1965` "names every field it actually answers with".
+`test/api/mcp.test.ts:1966` "names every field it actually answers with".
 
 ### 5.2 `metrics_get` — an absent family is not a zero gauge
 
@@ -3779,7 +3871,7 @@ robots.txt answers 502); `test/db/migration-0017.test.ts:259` "clears the
 sentence when the failed crawl is resumed" (the implication over a RESUME, which
 is the one move that changes the status without closing the crawl — the fixture
 holds the robots request so the row is read mid-run);
-`test/api/mcp.test.ts:3188` "clears the failure sentence of the crawl a resume
+`test/api/mcp.test.ts:3191` "clears the failure sentence of the crawl a resume
 accepts" (the same, over the queue's own writer and on the wire);
 `test/api/query.test.ts:4385` "tells a pre-0017 failed
 crawl apart from a crawl that did not fail" (the two nulls, on the wire).
@@ -3853,6 +3945,9 @@ One row per crawl, `scope: "site"`:
  "urlsCanonicalised":2,"urlsNoindex":0}
 ```
 
+(0.29.0 adds `"urlsPdf"` after `urlsPaginated`; omitted from the printing below, which
+predates it.)
+
 (The row ruleset 0.17.0's own statement produces on `crawl_02ff6f7a`,
 re-measured 2026-09-23 over that crawl's 551 pages and its stored findings. The
 pre-0.17.0 printing of the same crawl read `urlsTotal` 443 with no trailing
@@ -3861,11 +3956,16 @@ are set aside now, which is the whole of the difference — 441 + 2 + 0 + 108.
 A crawl judged before 0.17.0 carries no such keys at all, and the table prints
 an empty cell rather than a nought nobody counted.)
 
-- **The census is THE JUDGED PAGE: `fetch_class = 'ok' AND status_code = 200 AND
-  is_indexable AND NOT canonicalised elsewhere`** — the cohort the ruleset
+- **The census is THE JUDGED DOCUMENT (Phase 29d, owner ruling 2026-11-25): an HTML
+  page (`fetch_class = 'ok'`) or a PDF (`non_html`, `application/pdf`), `status_code =
+  200 AND is_indexable AND NOT canonicalised elsewhere`** (`JUDGED_DOCUMENT`; the
+  HTML-only `JUDGED` is what this section's older text and the page rules mean) — the cohort the ruleset
   reports defects on as a page's own (§5.x, `isJudged`/`JUDGED` in
-  src/rules/helpers.ts). It is the same cohort every other metric measures and
-  it is not the crawl's page count. Before 0.17.0 it was fetched-OK 200s
+  src/rules/helpers.ts). It extends the HTML-only cohort every other metric
+  measures by indexable PDFs, so **`urlsTotal - urlsPdf` is the cohort every other
+  metric measures**, `structure.click-depth-distribution` included; a PDF orphan or
+  deep page is in `links.orphan` / `structure.deep-page` but not in that
+  distribution's buckets. It is not the crawl's page count. Before 0.17.0 it was fetched-OK 200s
   including noindexed and canonicalised pages, because the rules judged those
   too; the rules stopped, and this moved with them.
 - **`urlsCanonicalised` and `urlsNoindex` are the fetched, 200-answering URLs
@@ -3902,6 +4002,13 @@ an empty cell rather than a nought nobody counted.)
   108 = 551), asserted by the rule itself, by its unit test and end to end in
   the fixture harness. Which kinds those are is a
   `pages_query` question; a non-HTML 200 is counted by no other table at all.
+  An indexable PDF (Phase 29d, owner ruling 2026-11-25) is NOT here any more: it
+  is in `urlsTotal`, a noindexed one in `urlsNoindex`. A Word file or image still
+  is.
+- **`urlsPdf` ("Of Which PDFs") is the count of `urlsTotal` that are PDFs**, the
+  row's last column. It overlaps the buckets, like `urlsPaginated`, and is not a
+  partition member. Almost no page rule reads a PDF (no title, meta or headings),
+  so a PDF usually lands in `urlsClean`; the column shows how much of Clean it is.
 - **The four counts are the authority; `cleanRatio` is a convenience.** Four
   decimal places collapse at scale: 1 clean page in 50,000 rounds to `0.0000`
   and 49,999 in 50,000 to `1.0000`. Work percentages out from the counts.
@@ -3948,16 +4055,16 @@ is ingredients; the judgement is the consumer's.
 
 Pinned: `test/rules/health-metrics.test.ts` (16 tests) —
 `test/rules/health-metrics.test.ts:47` "carrying the engine-coverage check it is
-evidence for", `test/rules/health-metrics.test.ts:221` "partitions the census
-exactly", `test/rules/health-metrics.test.ts:255` "answers an empty census with a
-null ratio", `test/rules/health-metrics.test.ts:279` "lets no site-level finding
-poison a page bucket", `test/rules/health-metrics.test.ts:304` "keeps the pages
-it cannot judge out of the buckets", `test/rules/health-metrics.test.ts:353`
+evidence for", `test/rules/health-metrics.test.ts:222` "partitions the census
+exactly", `test/rules/health-metrics.test.ts:257` "answers an empty census with a
+null ratio", `test/rules/health-metrics.test.ts:282` "lets no site-level finding
+poison a page bucket", `test/rules/health-metrics.test.ts:308` "keeps the pages
+it cannot judge out of the buckets", `test/rules/health-metrics.test.ts:358`
 "sets a noindex 200 aside in its own column rather than in a bucket",
-`test/rules/health-metrics.test.ts:392` "counts a page that both noindexes and
-canonicalises under noindex", `test/rules/health-metrics.test.ts:414`
+`test/rules/health-metrics.test.ts:398` "counts a page that both noindexes and
+canonicalises under noindex", `test/rules/health-metrics.test.ts:421`
 "partitions every fetched URL over the four columns",
-`test/rules/health-metrics.test.ts:567`
+`test/rules/health-metrics.test.ts:576`
 "buckets the findings the capped run wrote, and no others"; the copy contracts —
 `test/rules/copy.test.ts:1515` "names every column and the population they
 are over", `test/rules/copy.test.ts:1540` "says the counts are the authority, not the
@@ -4163,8 +4270,8 @@ every refusal — of which `test/api/query.test.ts:3523` "answers both sides,
 comparable, and the rules in issues_list's order" is the answer itself and
 `test/api/query.test.ts:3947` "makes the same refusals as the summary" is the
 drill-down inheriting the summary's refusals; over the agent transport,
-`test/api/mcp.test.ts:2028` "answers the counts and the caveat when the two
-rulesets differ" and `test/api/mcp.test.ts:2093` "names every field it answers
+`test/api/mcp.test.ts:2029` "answers the counts and the caveat when the two
+rulesets differ" and `test/api/mcp.test.ts:2094` "names every field it answers
 with, and both caveat codes it produced". The pairing by where each crawl landed
 (§7.1): `test/api/query.test.ts:4043` "pairs findings on path when the two crawls
 landed on different origins", `test/api/query.test.ts:4057` "lists each finding
@@ -4281,7 +4388,9 @@ controls.
 
 | knob | default | notes |
 |---|---|---|
-| `userAgent` | `AriadneBot/0.1 (+https://github.com/dawnforge-lab/ariadne)` | **Set it.** A Talos-driven crawl should present Talos's identity, and the UA is what a client allowlists in their WAF. |
+| `userAgent` | `AriadneBot/0.1 (+https://github.com/dawnforge-lab/ariadne)` | **Set it.** A Talos-driven crawl should present Talos's identity, and the UA is what a client allowlists in their WAF. A custom value derives its robots token from the product it starts with; one whose derived token is `mozilla` (any case: `Mozilla/5.0 …`, `Mozilla (compatible; …)`) needs `robotsUserAgent` (refused otherwise). |
+| `userAgentPreset` | `ariadne` | `googlebot-smartphone`, `googlebot-desktop`, `bingbot-desktop` or `bingbot-mobile`: sets the header AND the robots token (`Googlebot`, `bingbot`); refused beside `userAgent` or `robotsUserAgent`. A spoofed bot identity fails any site that verifies bots by IP address or reverse DNS (Cloudflare, most CDNs); a preset only helps on a site that filters by user-agent alone and never bypasses a challenge. `never` mutable. |
+| `robotsUserAgent` | derived | One product token (letters, digits, `-`, `_`). Needs a custom `userAgent` (400 otherwise: the default AriadneBot identity always matches the AriadneBot robots group); refused beside `userAgentPreset`. A request's three identity fields replace the server's defaults as a set (so it is refused alone even when the server's default `userAgent` is custom). Resolved once at start and stored with the crawl; `crawl_get` / `crawl_config_get` echo `userAgent`, `robotsUserAgent` and `userAgentPreset`. |
 | `perHostDelayMs` | 1000 | Floor **250** for anything that arrives over the wire — refused below it, never clamped. Genuinely polite is 1000–2000; the crawl skill recommends 2000 on anything Cloudflare-fronted. |
 | `maxConcurrency` | 16 | The window, not the rate: the per-host delay and the governor bind first. |
 | `maxPages` | 500 (API default) | A first look at a site. Say so when you want more. |
@@ -4440,10 +4549,79 @@ Six postures a Talos integrator should know about rather than discover:
 
 ## 11. Versioning, and what a ruleset change does to a served crawl
 
-`RULESET_VERSION` (**0.28.1** after Phase 29c) stamps **judgement**: bump it when
+`RULESET_VERSION` (**0.29.0** after Phase 29d) stamps **judgement**: bump it when
 a rule's verdict or copy changes. Adding a rule or a metric family adds rows
 without changing a verdict — `metrics` rows carry no version column at all —
 which is the argument Phase 10 held 0.7.0 on.
+
+**Phase 29d bumps to 0.29.0, once** (Phase 29 backlog; this paragraph lists what it
+changed). The rule count is unchanged: 229 rules (72 page / 140 query / 17 metric; 33
+critical / 97 warning / 99 info), as at 0.28.0. Page types: a numeric last segment keeps `:id` beside a slug type.
+Page types are assigned at crawl end, so they change only on a re-crawl: a 0.29.0 rules
+re-run of an older crawl keeps its stored types.
+Extraction moves to 5: a microdata `itemtype` and an RDFa `typeof` keep every token, so a
+node's `types` lists them all, and the stored skips gain `blocksDropped` and
+`nodesDropped`. The `structured_data` listing (§4.6a) and its MCP tool answer both as
+`blocksDropped` / `nodesDropped` (null below extraction 5), and the `structured_data_nodes`
+CSV (§12) ends with `Blocks Dropped` and `Nodes Dropped` columns. The two columns are appended at the end: consumers reading by header name are unaffected, and positional consumers see 9 columns where they saw 7. A crawl at extraction 4
+keeps answering null for both until it is re-crawled. `schema.unresolved-reference` finds a
+reference wherever it sits, past the 50th too: the block verdict gains `unresolved` (every
+id no node of the block defines, uncapped) and `unresolvedCount` (its length, or at least
+it when `idsTruncated`: the exact count of its unresolved references, of which the list
+holds those that fitted), the rule's
+evidence is `{unresolved (up to 50), unresolvedCount, problemsCapped}` over the page, and
+the `structured_data` listing's `infoCount` and `problemsCapped` and the CSV's
+`unresolved-reference` rows read the same count. Stored resolved ids are bounded (2048
+characters each, 256 KiB per block); a block that left ids out makes the page's answer a
+lower bound, said as `unresolvedAtLeast` (rule), `infoCountAtLeast` (listing) and a note
+on each CSV row. A block's ids count only while no OTHER block of its page left ids out
+(that block's missing `definedIds` could define them), so a page with two or more
+truncated blocks has no `schema.unresolved-reference` finding at all; the listing's
+`infoCountAtLeast` is true for it, and that is where such a page shows. A verdict stored without them is
+stale and the next rules run rewrites it. PDFs are indexable unless X-Robots-Tag says
+noindex: a 200 PDF is stored `indexable: true` unless its `X-Robots-Tag` says `noindex`
+or `none` (migration 0061 rewrote stored crawls), and its `indexability` /
+`indexabilityStatus` read `Indexable`, `Noindex` or `Canonicalised` as an HTML page's
+do (§4.4 table). The readers that mean an indexable DOCUMENT take it:
+`sitemap.non-indexable` reports a listed PDF noindexed by its header or canonicalised by
+its `Link` header (a plain PDF in a sitemap is not reported), `pages.not-in-sitemap`
+reports an indexable, self-canonical PDF the sitemap does not list (its copy now says
+"pages and PDFs"), `canonical.non-indexable-target` reports a canonical at a
+noindexed PDF, the Crawl Overview's `indexability` counts a plain PDF as `Indexable`,
+and `pages_query`'s `indexable` filter and `crawl_diff`'s `indexable` field read the new
+stamp. The readers that mean an indexable HTML PAGE do not: every on-page, content and
+duplicate rule, the page-level canonical and indexability rules and render selection.
+Other non-HTML types stay non-indexable.
+**Owner ruling 2026-11-25: PDFs join `site.health`, `links.orphan` and
+`structure.deep-page`** (the cohort is "HTML pages and PDFs": an indexable, self-canonical
+HTML page or 200 PDF). `site.health`'s census counts an indexable PDF in `urlsTotal`, a
+noindexed one in `urlsNoindex`, a PDF canonicalised elsewhere in `urlsCanonicalised`
+(a Word file or image stays in `pagesNotAuditable`), and the row gains `urlsPdf`
+("Of Which PDFs"): the count of `urlsTotal` that are PDFs. It overlaps the judged buckets
+like `urlsPaginated` and is not a partition member; almost no page rule reads a PDF (no
+title, meta or headings), so a PDF usually lands in Clean, and the column shows how much
+of Clean it is. A crawl stored before 29d has `urlsPdf` null. `links.orphan` reports an
+indexable PDF nothing links to, and `structure.deep-page` one whose click depth is past
+the threshold (a linked PDF gets a click depth like any link target; a PDF has no
+extracted outlinks, so it is never an inlink source). `links.only-from-non-indexable`,
+`links.anchors-generic-only` and `hreflang.unlinked-target` stay HTML-only. Tested in
+test/rules/pdf-link-graph.test.ts.
+Hreflang: any 200 non-HTML response whose `Link` header carries alternates is a
+declarer (`HREFLANG_DECLARER`; a PDF is the common case), so its own set is judged by
+every hreflang rule (see "Hreflang is read from all three sources"), and a PDF target
+is read by its `indexable` stamp in `hreflang.non-indexable-target`.
+`hreflang.unlinked-target` keeps HTML targets (fetched OK with a 200): an unlinked PDF
+alternate is not reported.
+Robots: a crawl stores `robotsUserAgent`, the one product token its robots.txt groups
+and `Crawl-delay` are matched against, beside `userAgent` (the header) and
+`userAgentPreset`; `robots.blocks-sitemap-urls` matches the stored token, and its
+evidence gains the optional `robotsUserAgent` column ("Robots Token"). A crawl stored
+before 29d has no token and is read with its full `userAgent`, as it was crawled, and a
+schedule stored before 29d resolves one when it fires (the Phase 28c summary's skip reasons, `identity_refused`).
+Engine changes beside the ruleset: the render lease adds the 5 s termination grace an
+expired render deadline may wait (388 s at the defaults, was 383 s), and the
+`structured_data_nodes` CSV writes `(written form not recorded)` rather than the
+resolved id for a reference past a block's first 50.
 
 **0.28.1 is a fix, not a phase.** A robots value's `none` is the directive (noindex,
 nofollow) only as a whole token: `max-image-preview: none` asks for no image preview and
@@ -4786,7 +4964,7 @@ rest, except that `structured_data_nodes` answers `notMeasured` alone (below).
 | `issues_overview` (Phase 27a) | Issue Name, Issue Type, Issue Priority, Severity, URLs, % of Judged, Description, How To Fix, Rule Id, Check Ids | one rule, as `issues_overview` (§4.3a) answers it | 46 rows / 27,040 B on the gate crawl `crawl_4dd32709` |
 | `crawl_overview` (Phase 27a) | Section, Label, Value, Percent | one entry of one `crawl_overview` section (§4.3b), then one row per `notMeasured` item | 75 rows / 2,332 B on the gate crawl `crawl_4dd32709` |
 | `anchors_by_target` (Phase 29c) | url, pageType, inlinks, distinctAnchors, emptyAnchors, nonDescriptiveAnchors, genericShare, topAnchors | one page with internal inlinks, as `anchors_by_target` (§4.6b) answers it; `topAnchors` is `text (n); text (n)` | — (added P29c-T6) |
-| `structured_data_nodes` (Phase 29a) | URL, Format, Schema Type, Path, Node Type, Problem, Detail | one problem of one structured-data block; a block with none is one row with an empty Problem. Schema Type is every type the block's node states, `\|`-joined; each problem list stops at 50 per block | — (added P29a-T9) |
+| `structured_data_nodes` (Phase 29a) | URL, Format, Schema Type, Path, Node Type, Problem, Detail, Blocks Dropped, Nodes Dropped | one problem of one structured-data block; a block with none is one row with an empty Problem. Schema Type is every type the block's node states, `\|`-joined; each problem list stops at 50 per block | — (added P29a-T9) |
 
 Semantics a consumer must repeat to its own users:
 
@@ -4825,7 +5003,9 @@ Semantics a consumer must repeat to its own users:
   before structured data validation existed, or validated by an earlier ruleset
   (re-run the rules); a block met with no validation blob, or one in an older shape,
   mid-export throws and destroys the connection rather than writing the block as
-  clean. On a crawl not wholly at extraction 4 the view has no `unresolved-reference`
+  clean. The view ends with two page-level columns, `Blocks Dropped` and `Nodes Dropped`
+  (Phase 29d), the page's counts repeated on each of its rows and empty for a page below
+  extraction 5, as the listing's nulls. The two columns are appended at the end, so consumers reading by header name are unaffected; positional consumers see 9 columns, not 7. On a crawl not wholly at extraction 4 the view has no `unresolved-reference`
   rows: a plain `text/csv` download simply lacks them (an HTTP file has no metadata
   channel), and the MCP `export_crawl` answer names `schema.unresolved-reference` in
   `notMeasured`, as `{id, reason}` (`[]` on any other crawl), here without
@@ -4956,8 +5136,8 @@ referencing counts summing to the edge table), `test/api/query.test.ts:3293`
 answer", `test/api/query.test.ts:3403` "refuses a crawl holding a retired rule's
 findings BEFORE the header", `test/api/http.test.ts:1991` "tears the response
 when a CSV export fails mid-stream, rather than truncating the file";
-`test/api/mcp.test.ts:821` "describes the shape of the CSV it writes, not just
-that it writes one" and `test/api/mcp.test.ts:2883` "streams the resources view
+`test/api/mcp.test.ts:822` "describes the shape of the CSV it writes, not just
+that it writes one" and `test/api/mcp.test.ts:2884` "streams the resources view
 byte for byte, as it writes it".
 
 ---

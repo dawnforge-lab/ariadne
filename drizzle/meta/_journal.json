@@ -428,6 +428,13 @@
       "when": 1795021332877,
       "tag": "0060_generic_anchor_threshold",
       "breakpoints": true
+    },
+    {
+      "idx": 61,
+      "version": "7",
+      "when": 1795532563365,
+      "tag": "0061_pdf_indexable",
+      "breakpoints": true
     }
   ]
 }

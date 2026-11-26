@@ -43,7 +43,7 @@ describe("redactRequestHeaders with a crawl's own credential header names", () =
 });
 
 describe("EXTRACTION_VERSION", () => {
-  it("is 4 (Phase 29a: microdata, RDFa Lite, structured_data.format)", () => {
-    expect(EXTRACTION_VERSION).toBe(4);
+  it("is 5 (Phase 29d: every type token, dropped blocks and nodes counted)", () => {
+    expect(EXTRACTION_VERSION).toBe(5);
   });
 });

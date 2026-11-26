@@ -2,7 +2,9 @@ import { describe, expect, it } from "vitest";
 
 import { analyzePage } from "../../src/crawl/parse/page-analyzer.js";
 import {
+  MAX_BLOCK_ID_CHARS,
   MAX_PROBLEMS_PER_LIST,
+  MAX_RESOLVED_ID_CHARS,
   blockValidationSchema,
   validateBlock,
   type BlockValidation,
@@ -710,10 +712,9 @@ function withoutTypes(v: BlockValidation): unknown {
   return { ...v, nodes: v.nodes.map(({ types: _t, ...node }) => node) };
 }
 
-// 29a rework gate fix, ruling (b): extraction stays at 4, so the microdata and
-// RDFa extractors still store one type (their first itemtype / typeof token).
-// These raws are hand-built in their shape with a `@type` ARRAY, to pin that
-// the validator lists every type any stored block states, whatever its format.
+// 29a rework gate fix, ruling (b); extraction 5 (29d) now stores every itemtype /
+// typeof token as a `@type` array. These raws are hand-built in that shape, to pin
+// that the validator lists every type any stored block states, whatever its format.
 describe("validateBlock — every type of a microdata- or RDFa-shaped node with a @type array", () => {
   it("a microdata-shaped item with two itemtype tokens lists both", () => {
     const v = validate({
@@ -810,5 +811,93 @@ describe("validateBlock — whether the block was judged against schema.org (fin
     expect(validate({ "@context": CTX, "@type": "Prodcut", name: "x" }).judged).toBe(true);
     expect(validate({ "@type": "Thing", name: "x" }).judged).toBe(true);
     expect(validate({ "@context": "https://example.org/vocab/", "@type": "Product", name: "x" }).judged).toBe(false);
+  });
+});
+
+// Phase 29d, Task 4. Appended so no earlier line moves.
+describe("validateBlock — unresolved references wherever they sit (29d)", () => {
+  it("finds an unresolved reference past the 50th", () => {
+    const v = validate({
+      "@context": CTX,
+      "@type": "ItemList",
+      hasPart: Array.from({ length: 59 }, (_, i) => ({ "@id": `#part${i}`, "@type": "WebPage" })),
+      itemListElement: [
+        ...Array.from({ length: 59 }, (_, i) => ({ "@id": `#part${i}` })),
+        { "@id": "#nowhere" },
+      ],
+    });
+    expect(v.references).toHaveLength(MAX_PROBLEMS_PER_LIST);
+    expect(v.unresolvedCount).toBe(1);
+    expect(v.unresolved).toEqual([`${DOC}#nowhere`]);
+  });
+
+  it("counts every unresolved reference", () => {
+    const v = validate({
+      "@context": CTX,
+      "@type": "ItemList",
+      itemListElement: Array.from({ length: 70 }, (_, i) => ({ "@id": `#gone${i}` })),
+    });
+    // Uncapped, like definedIds: the page may define some of them in another block.
+    expect(v.unresolved).toHaveLength(70);
+    expect(v.unresolvedCount).toBe(70);
+    expect(v.unresolved[0]).toBe(`${DOC}#gone0`);
+    expect(v.unresolved[69]).toBe(`${DOC}#gone69`);
+  });
+
+  it("the block schema refuses an unresolvedCount that is not the length of unresolved", () => {
+    const v = validate({ "@context": CTX, "@type": "ItemList", itemListElement: [{ "@id": "#a" }] });
+    expect(blockValidationSchema.parse(v)).toEqual(v);
+    expect(() => blockValidationSchema.parse({ ...v, unresolvedCount: 2 })).toThrow(/unresolvedCount/);
+  });
+});
+
+describe("validateBlock — the ids it stores are bounded (29d)", () => {
+  const withBase = (base: string, refs: string[]): Record<string, unknown> => ({
+    "@context": [CTX, { "@base": base }],
+    "@type": "ItemList",
+    itemListElement: refs.map((id) => ({ "@id": id })),
+  });
+
+  it("a normal block is not truncated", () => {
+    const v = validate({ "@context": CTX, "@type": "ItemList", itemListElement: [{ "@id": "#a" }] });
+    expect(v.idsTruncated).toBe(false);
+    expect(v.unresolved).toEqual([`${DOC}#a`]);
+  });
+
+  it("5,000 short references under a long @base stay within the id budget; the count stays exact and the flag is set", () => {
+    const base = `https://example.com/${"x".repeat(1500)}/`;
+    const v = validate(withBase(base, Array.from({ length: 5000 }, (_, i) => `#a${i}`)));
+    const stored = v.definedIds.concat(v.unresolved).reduce((n, id) => n + id.length, 0);
+    expect(stored).toBeLessThanOrEqual(MAX_BLOCK_ID_CHARS);
+    expect(v.unresolvedCount).toBe(5000);
+    expect(v.unresolved.length).toBeLessThan(5000);
+    expect(v.unresolved.length).toBeGreaterThan(0);
+    expect(v.unresolved[0]).toBe(`${base}#a0`);
+    expect(v.idsTruncated).toBe(true);
+    expect(blockValidationSchema.parse(v)).toEqual(v);
+  });
+
+  it("an id over MAX_RESOLVED_ID_CHARS is not stored, is still counted, and sets the flag", () => {
+    const base = `https://example.com/${"y".repeat(MAX_RESOLVED_ID_CHARS)}/`;
+    const v = validate(withBase(base, ["#huge", "#ok"]));
+    expect(v.unresolvedCount).toBe(2);
+    expect(v.unresolved.every((id) => id.length <= MAX_RESOLVED_ID_CHARS)).toBe(true);
+    expect(v.idsTruncated).toBe(true);
+    // A huge id a node defines still resolves the reference to it, in this block.
+    const defined = validate({
+      "@context": [CTX, { "@base": base }],
+      "@type": "ItemList",
+      hasPart: [{ "@id": "#huge", "@type": "WebPage" }],
+      itemListElement: [{ "@id": "#huge" }],
+    });
+    expect(defined.unresolvedCount).toBe(0);
+    expect(defined.idsTruncated).toBe(true);
+  });
+
+  it("the block schema refuses a count below the list, and a count above it unless ids were left out", () => {
+    const v = validate({ "@context": CTX, "@type": "ItemList", itemListElement: [{ "@id": "#a" }] });
+    expect(() => blockValidationSchema.parse({ ...v, unresolvedCount: 5 })).toThrow(/unresolvedCount/);
+    expect(blockValidationSchema.parse({ ...v, unresolvedCount: 5, idsTruncated: true }).unresolvedCount).toBe(5);
+    expect(() => blockValidationSchema.parse({ ...v, unresolvedCount: 0, idsTruncated: true })).toThrow(/unresolvedCount/);
   });
 });

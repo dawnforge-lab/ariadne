@@ -31,43 +31,79 @@ import { sql, type SQL } from "drizzle-orm";
 import type { StructuredDataFormat, StructuredDataSkips } from "../crawl/parse/page-analyzer.js";
 import { V4 } from "../rules/query/page-facts.js";
 import { staleBlob } from "../rules/schema-org/blob-sql.js";
+import { MAX_PROBLEMS_PER_LIST } from "../rules/schema-org/validate.js";
 import type { NotMeasured } from "./overview.js";
 import { ServiceError, clip } from "./errors.js";
 
 /** The keys of `StructuredDataSkips`, which a stored `structured_data_skips` must hold exactly. */
 const SKIP_KEYS = ["microdataItemrefSkipped", "rdfaUnsupported", "valuesCapped"] as const satisfies readonly (keyof StructuredDataSkips)[];
-type MissingSkipKey = Exclude<keyof StructuredDataSkips, (typeof SKIP_KEYS)[number]>;
+/** The two counters extraction 5 adds (Phase 29d); a row stored at version 4 holds `SKIP_KEYS` only. */
+const DROP_KEYS = ["blocksDropped", "nodesDropped"] as const satisfies readonly (keyof StructuredDataSkips)[];
+/** The first extraction whose stored skips hold `DROP_KEYS`. */
+const DROP_COUNTERS_FROM_EXTRACTION = 5;
+/** The skips this projection answers on `skips`: the three counters every stored row has. */
+export type ProjectedSkips = Pick<StructuredDataSkips, (typeof SKIP_KEYS)[number]>;
+type MissingSkipKey = Exclude<keyof StructuredDataSkips, (typeof SKIP_KEYS)[number] | (typeof DROP_KEYS)[number]>;
 const _everySkipKey: MissingSkipKey extends never ? true : never = true;
 void _everySkipKey;
+
+/**
+ * A page's stored `structured_data_skips`, read against the extraction that
+ * wrote it: the three legacy counters as `skips`, and the two extraction 5
+ * drop counters beside it.
+ */
+export interface ProjectedSkipFacts {
+  skips: ProjectedSkips | null;
+  /** Blocks past the per-page cap that were not stored; null below extraction 5 (not counted). */
+  blocksDropped: number | null;
+  /** Nodes past the per-block cap that were not stored; null below extraction 5. */
+  nodesDropped: number | null;
+}
 
 /**
  * A page's stored `structured_data_skips`, projected key by key onto the wire
  * (Talos obligation 6: named fields, never a stored blob passed through).
  *
- * Null stays null — a page extracted below version 4, which never counted.
- * Anything but an object of exactly the three non-negative integer counters is
- * a row this engine did not write, and throws naming the crawl and page rather
- * than dropping a key or answering a partial object.
+ * The shape is tied to the row's `extraction_version`: a row at extraction 5 or
+ * later holds all five counters and anything else throws; a row below it holds
+ * exactly the three legacy counters and answers `blocksDropped` and
+ * `nodesDropped` as null (never counted, never zero). Null skips stay null — a
+ * page extracted below version 4, which never counted — and are refused at
+ * extraction 5, whose writer always counts. Every counter must be a
+ * non-negative integer; a row this engine did not write throws naming the
+ * label (crawl and page) rather than dropping a key or answering a partial object.
  */
-export function projectSkips(value: unknown, crawlId: string, url: string): StructuredDataSkips | null {
-  if (value === null) return null;
+export function projectSkipFacts(value: unknown, extractionVersion: number | null, label: string): ProjectedSkipFacts {
   const bad = (why: string): never => {
-    throw new Error(`crawl ${crawlId}, page ${url}: structured_data_skips ${why}`);
+    throw new Error(`${label}: structured_data_skips ${why}`);
   };
+  const counted = extractionVersion !== null && extractionVersion >= DROP_COUNTERS_FROM_EXTRACTION;
+  if (value === null) {
+    if (counted) return bad(`is null on a page at extraction ${extractionVersion}, which counts all five`);
+    return { skips: null, blocksDropped: null, nodesDropped: null };
+  }
   if (typeof value !== "object" || Array.isArray(value)) return bad("is not an object");
   const stored = value as Record<string, unknown>;
-  const keys = Object.keys(stored).sort();
-  if (keys.join(",") !== [...SKIP_KEYS].sort().join(",")) {
-    return bad(`holds keys [${keys.join(", ")}], not exactly [${SKIP_KEYS.join(", ")}]`);
+  const keys = Object.keys(stored).sort().join(",");
+  const expected = counted ? [...SKIP_KEYS, ...DROP_KEYS] : [...SKIP_KEYS];
+  if (keys !== [...expected].sort().join(",")) {
+    return bad(
+      `holds keys [${Object.keys(stored).join(", ")}], not exactly [${expected.join(", ")}] ` +
+        `as a page at extraction ${extractionVersion ?? "null"} must`,
+    );
   }
-  const count = (key: (typeof SKIP_KEYS)[number]): number => {
+  const count = (key: (typeof SKIP_KEYS)[number] | (typeof DROP_KEYS)[number]): number => {
     const n = stored[key];
     return typeof n === "number" && Number.isInteger(n) && n >= 0 ? n : bad(`has a ${key} that is not a non-negative integer`);
   };
   return {
-    microdataItemrefSkipped: count("microdataItemrefSkipped"),
-    rdfaUnsupported: count("rdfaUnsupported"),
-    valuesCapped: count("valuesCapped"),
+    skips: {
+      microdataItemrefSkipped: count("microdataItemrefSkipped"),
+      rdfaUnsupported: count("rdfaUnsupported"),
+      valuesCapped: count("valuesCapped"),
+    },
+    blocksDropped: counted ? count("blocksDropped") : null,
+    nodesDropped: counted ? count("nodesDropped") : null,
   };
 }
 
@@ -100,6 +136,7 @@ const VALIDATION_LISTS = [
   "emptyValues",
   "definedIds",
   "references",
+  "unresolved",
   "nodes",
 ] as const;
 
@@ -151,10 +188,11 @@ const MALFORMED_ENTRIES = [
   'lax $.references[*] ? (@.type() != "object" || !exists(@.id) || @.id.type() != "string"' +
     ' || !exists(@.written) || @.written.type() != "string")',
   'lax $.definedIds[*] ? (@.type() != "string")',
+  'lax $.unresolved[*] ? (@.type() != "string")',
 ];
 
 /**
- * True when `blob` is an object holding all eight lists as arrays, and the
+ * True when `blob` is an object holding every list in `VALIDATION_LISTS` as an array, and the
  * entries the surface reads by key are the shape the validator writes.
  *
  * Without it a blob missing a list would count as zero in `jsonb_array_length`'s
@@ -198,32 +236,53 @@ export function referencesMeasured(crawlId: string): SQL {
 }
 
 /**
- * True for a reference entry `ref` (jsonb) whose id no block of the page
+ * True for an id `id` (jsonb) of block `blockId` that no block of the page
  * `pageId` defines — what makes a reference an `unresolved-reference`. Per PAGE,
  * not per block: a graph split over two scripts is one graph, so a sibling
  * block's definition resolves it. The same test `schema.unresolved-reference`
  * applies, under the same gate: never true on a crawl not wholly at
  * extraction 4 (`referencesMeasured`). Ids are stored resolved against the
  * page (validate.ts), so the comparison is of strings.
+ *
+ * Never true while ANOTHER block of the page left ids out (`idsTruncated`):
+ * that block's missing `definedIds` could have defined this id, so counting it
+ * would be a guess. What is counted is then a lower bound
+ * (`blockIdsTruncated`), the rule's reading exactly (`pageUnresolved`).
  */
-function unresolved(ref: SQL, crawlId: string, pageId: SQL): SQL {
+function unresolved(id: SQL, crawlId: string, pageId: SQL, blockId: SQL): SQL {
   return sql`${referencesMeasured(crawlId)} and not exists (
     select 1 from structured_data d
      where d.crawl_id = ${crawlId} and d.page_id = ${pageId}
-       and d.validation_jsonb -> 'definedIds' @> jsonb_build_array(${ref} -> 'id'))`;
+       and d.validation_jsonb -> 'definedIds' @> jsonb_build_array(${id}))
+    and not exists (
+    select 1 from structured_data t
+     where t.crawl_id = ${crawlId} and t.page_id = ${pageId} and t.id <> ${blockId}
+       and t.validation_jsonb ->> 'idsTruncated' = 'true')`;
+}
+
+/**
+ * Whether one block left ids out of its verdict (`idsTruncated`, validate.ts):
+ * the page's unresolved count is then "at least", not exact.
+ */
+export function blockIdsTruncated(blob: SQL): SQL {
+  return sql`((${blob} ->> 'idsTruncated')::boolean)`;
 }
 
 /**
  * Whether one block cut a list the counts read (`cappedLists`, final review
  * I1): the page's counts are then short, and the row says so
- * (`problemsCapped`). `references` counts only where references are measured.
+ * (`problemsCapped`). The unresolved count reads no capped list (29d) and is
+ * exact, so it is not here; the row is also capped when the page's unresolved
+ * count is over `MAX_PROBLEMS_PER_LIST` (`UNRESOLVED_CAPPED_AT`, as the rule).
  */
-export function blockProblemsCapped(blob: SQL, crawlId: string): SQL {
+export function blockProblemsCapped(blob: SQL): SQL {
   return sql`exists (
     select 1 from jsonb_array_elements_text(${list(blob, "cappedLists")}) as c(name)
-     where c.name in ('unknownTypes', 'unknownProperties', 'propertyStatus', 'typeMismatches', 'emptyValues')
-        or (c.name = 'references' and ${referencesMeasured(crawlId)}))`;
+     where c.name in ('unknownTypes', 'unknownProperties', 'propertyStatus', 'typeMismatches', 'emptyValues'))`;
 }
+
+/** The page's unresolved count past which the rule's `problemsCapped` is true. */
+export const UNRESOLVED_CAPPED_AT = MAX_PROBLEMS_PER_LIST;
 
 /**
  * Every type a block's top-level node states (`nodes[].types`), joined with
@@ -247,10 +306,56 @@ export function blockWarnings(blob: SQL): SQL {
  * One block's infos (R0.8): its pending or superseded properties and its
  * references no block of the page defines. Null when the blob is unreadable.
  */
-export function blockInfos(blob: SQL, crawlId: string, pageId: SQL): SQL {
-  return sql`(jsonb_array_length(${list(blob, "propertyStatus")})
-    + (select count(*) from jsonb_array_elements(${list(blob, "references")}) as r(ref)
-        where ${unresolved(sql`r.ref`, crawlId, pageId)}))`;
+export function blockInfos(blob: SQL, crawlId: string, pageId: SQL, blockId: SQL): SQL {
+  return sql`(jsonb_array_length(${list(blob, "propertyStatus")}) + ${blockUnresolved(blob, crawlId, pageId, blockId)})`;
+}
+
+/**
+ * One block's references no block of the page defines, counted from the
+ * block's complete `unresolved` ids (29d), so the page's sum is exact and agrees
+ * with `schema.unresolved-reference`. 0 where references are not measured.
+ */
+export function blockUnresolved(blob: SQL, crawlId: string, pageId: SQL, blockId: SQL): SQL {
+  return sql`(select count(*) from jsonb_array_elements_text(${list(blob, "unresolved")}) as u(id)
+        where ${unresolved(sql`to_jsonb(u.id)`, crawlId, pageId, blockId)})`;
+}
+
+/** Appended to an `unresolved-reference` Detail when ids were left out of the page's verdicts: the list of rows is a lower bound. */
+export const INCOMPLETE_NOTE = " (the list is incomplete: ids were left out of this page's verdict, so there may be more)";
+
+/** What the `unresolved-reference` row's Path says for an id past the block's first 50 references. */
+export const PATH_NOT_RECORDED = "(path not recorded)";
+
+/**
+ * What the `unresolved-reference` row's Detail says in place of the form as
+ * written, for an id past the block's first 50 references: like the path, it
+ * was not recorded, and the resolved id is never shown as what was written.
+ */
+export const WRITTEN_NOT_RECORDED = "(written form not recorded)";
+
+/**
+ * A block's `unresolved-reference` entries, one per unresolved id the page
+ * does not define (29d), uncapped: the `references` list stops at 50, so the
+ * path and written form come from it by id and occurrence where it holds the
+ * reference, and an id past it gets `PATH_NOT_RECORDED` and a null `written`
+ * (the rule's evidence says null too; `problemCells` writes
+ * `WRITTEN_NOT_RECORDED`). Walk order.
+ */
+function unresolvedRows(blob: SQL, crawlId: string, pageId: SQL, blockId: SQL): SQL {
+  return sql`coalesce((
+      select jsonb_agg(jsonb_build_object(
+               'path', coalesce(r.entry -> 'path', to_jsonb(${PATH_NOT_RECORDED}::text)),
+               'id', u.id,
+               'written', coalesce(r.entry -> 'written', 'null'::jsonb),
+               'incomplete', coalesce(${blockIdsTruncated(blob)}, false),
+               'problem', 'unresolved-reference'::text) order by u.n)
+        from (select x.id, x.n, row_number() over (partition by x.id order by x.n) as k
+                from jsonb_array_elements_text(${list(blob, "unresolved")}) with ordinality as x(id, n)) u
+        left join (select y.entry, row_number() over (partition by y.entry ->> 'id' order by y.n) as k
+                     from jsonb_array_elements(${list(blob, "references")}) with ordinality as y(entry, n)) r
+               on r.entry ->> 'id' = u.id and r.k = u.k
+       where ${unresolved(sql`to_jsonb(u.id)`, crawlId, pageId, blockId)}
+    ), '[]'::jsonb)`;
 }
 
 /**
@@ -263,7 +368,7 @@ export function blockInfos(blob: SQL, crawlId: string, pageId: SQL): SQL {
  * (`unresolved`): the view's row is per block, and the page-level SQL check is
  * what lets it agree with the listing's count and with the rule.
  */
-export function blockProblems(blob: SQL, crawlId: string, pageId: SQL): SQL {
+export function blockProblems(blob: SQL, crawlId: string, pageId: SQL, blockId: SQL): SQL {
   const tagged = (
     name: (typeof VALIDATION_LISTS)[number],
     problem: StructuredDataProblem,
@@ -280,7 +385,7 @@ export function blockProblems(blob: SQL, crawlId: string, pageId: SQL): SQL {
       tagged("propertyStatus", "property-status"),
       tagged("typeMismatches", "type-mismatch"),
       tagged("emptyValues", "empty-value"),
-      tagged("references", "unresolved-reference", unresolved(sql`e.entry`, crawlId, pageId)),
+      unresolvedRows(blob, crawlId, pageId, blockId),
     ],
     sql` || `,
   )})`;
@@ -363,14 +468,17 @@ export function problemCells(entry: unknown, where: string): ProblemCells {
     }
     case "unresolved-reference": {
       // A bare reference has no type of its own; the id is the whole of it —
-      // as written, and as resolved against the page when that differs.
+      // as written, and as resolved against the page when that differs. Null
+      // `written`: past the block's first 50 references, not recorded.
       const id = text("id");
-      const written = text("written");
+      const written = e["written"] === null ? null : text("written");
+      const named =
+        written === null ? `${id} ${WRITTEN_NOT_RECORDED}` : written === id ? id : `${written} (${id})`;
       return {
         path,
         nodeType: "",
         problem: "unresolved-reference",
-        detail: `${written === id ? id : `${written} (${id})`} is not defined on this page`,
+        detail: `${named} is not defined on this page` + (e["incomplete"] === true ? INCOMPLETE_NOTE : ""),
       };
     }
   }

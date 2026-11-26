@@ -1,7 +1,7 @@
 /**
  * The Phase 28b gate, clauses 1 to 5: crawl jobs on worker PROCESSES.
  *
- *   DATABASE_URL=postgresql://…/ariadne_gate28b node --import tsx scripts/gate-workers.ts
+ *   ARIADNE_HEAP_MB=384 DATABASE_URL=postgresql://…/ariadne_gate28b node --import tsx scripts/gate-workers.ts
  *
  * It runs the API service in this process (`crawlRunner: "workers"`, so it
  * accepts crawls and runs none) beside two real `scripts/run-worker-trusted.ts`
@@ -58,6 +58,7 @@ import { closeDb, createDb, type Db } from "../src/db/client.js";
 import { createApiServer, type ApiServer } from "../src/api/http.js";
 import { CredentialVault, type CredentialKeys } from "../src/crawl/credential-vault.js";
 import { closeFetchAgents } from "../src/crawl/http.js";
+import { HEAP_CAP_ENV, parseHeapCapMb } from "../src/runtime/heap-cap.js";
 
 const ROOT = join(import.meta.dirname, "..");
 const RUN = randomBytes(3).toString("hex");
@@ -212,12 +213,17 @@ async function writePeers(extra: readonly string[]): Promise<void> {
   await writeFile(peersFile, JSON.stringify([...workers.map((w) => w.instanceId), ...extra]));
 }
 
+let heapCapMb = 0;
+
 async function spawnWorker(apiInstance: string): Promise<Worker> {
-  const proc = spawn(process.execPath, ["--import", "tsx", "scripts/run-worker-trusted.ts"], {
+  // The trusted worker asserts the cap it is told (29d): this harness hands on
+  // its own, and fails loudly when there is none.
+  const proc = spawn(process.execPath, [`--max-old-space-size=${heapCapMb}`, "--import", "tsx", "scripts/run-worker-trusted.ts"], {
     cwd: ROOT,
     env: {
       PATH: process.env["PATH"],
       DATABASE_URL: databaseUrl(),
+      [HEAP_CAP_ENV]: String(heapCapMb),
       ARIADNE_CREDENTIALS_KEY: KEY_ENV,
       TRUSTED_WORKER_METRICS_TOKEN: METRICS_TOKEN,
       TRUSTED_WORKER_PEERS_FILE: peersFile,
@@ -803,6 +809,8 @@ async function clause5(metricsTexts: string[], apiInstanceId: string): Promise<R
 // ------------------------------------------------------------------ main
 
 async function main(): Promise<number> {
+  // First, before the API server and fixtures exist: no cap is a boot error (29d).
+  heapCapMb = parseHeapCapMb(process.env[HEAP_CAP_ENV]);
   const url = databaseUrl();
   const dbName = new URL(url).pathname.replace(/^\//, "");
   if (dbName === "ariadne") throw new Error("refusing to run against the dev database 'ariadne': use a database of its own (ariadne_gate28b)");

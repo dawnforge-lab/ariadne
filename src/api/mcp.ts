@@ -328,7 +328,15 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "restarts) — never logged or answered — and are deleted on cancel and delete. If " +
         "the stored copy cannot be read, crawl_resume / crawl_render refuse with code " +
         "CREDENTIALS_REQUIRED until they are sent again there. They cannot change the " +
-        "user agent, the pacing floor or robots.txt.",
+        "user agent, the pacing floor or robots.txt.\n\n" +
+        "IDENTITY. userAgentPreset (ariadne, googlebot-smartphone, googlebot-desktop, " +
+        "bingbot-desktop, bingbot-mobile) sets both the User-Agent header and the robots.txt token the site's " +
+        "groups are matched with; a custom userAgent derives its token (set " +
+        "robotsUserAgent when its derived token is 'mozilla', any case; robotsUserAgent alone, without " +
+        "a custom userAgent, is refused). The default stays AriadneBot. " +
+        "A spoofed bot identity fails any site that verifies bots by IP address or " +
+        "reverse DNS (Cloudflare, most CDNs): a preset only helps on a site that " +
+        "filters by user-agent alone, and it never bypasses a challenge.",
       // The crawl-start body schema itself: one declaration for both
       // transports, so an argument this refuses is a body POST /crawls refuses.
       inputSchema: service.startBodySchema(),
@@ -828,7 +836,11 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "throttle record. The navigation budget grows with the spacing (15 s + 30 " +
         "spacings, at most 120 s; at least 60 s on Shopify); a page that cannot load " +
         "inside it fails with renderError 'timeout under pacing (N requests paced)', " +
-        "which means too heavy to render politely, not a broken site. So this is " +
+        "which means too heavy to render politely, not a broken site. Every page " +
+        "also has one deadline in total (the budget + 65 s); a page that runs it " +
+        "out — one that never yields, never loads or never lets the checks run — " +
+        "fails with renderError 'render over N s in total (during <phase>)' and " +
+        "the pass carries on. So this is " +
         "not a second, ruder visit — a named list is no faster per page, only " +
         "better spent.\n\n" +
         "requests counts the pass's requests to the site: paced waited their turn " +
@@ -1070,8 +1082,10 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
       description:
         "A schedule's own events, oldest first: {id, at, kind, scheduleId, crawlId, detail}. " +
         "kind is schedule_fired {crawlId} (a crawl was queued; look it up with crawl_status), " +
-        "schedule_skipped {reason: overlap | not-allowed | credentials_unreadable, crawlId on " +
-        "overlap: the crawl still holding the schedule}, or schedule_chain_failed {link, " +
+        "schedule_skipped {reason: overlap | not-allowed | credentials_unreadable | " +
+        "identity_refused, crawlId on overlap: the crawl still holding the schedule, field on " +
+        "identity_refused: a schedule stored before robots tokens whose userAgent names no " +
+        "token of its own, fixed by schedule_update with a robotsUserAgent}, or schedule_chain_failed {link, " +
         "reason} (a fired crawl's render or rules link failed, or the process running it " +
         "stopped). " +
         `Paginated: {items, nextCursor}; limit defaults to ${PAGE_SIZE_DEFAULT}, ` +
@@ -1137,7 +1151,7 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "renderMaxPages, renderSamplePerType, renderAccessibility, exclude, include, maxRedirectHops, " +
         "requestHeaders, httpAuth, cookies), and only while the crawl is queued " +
         "or paused: pause a running crawl with crawl_pause, set, then " +
-        "crawl_resume. A never field (siteUrl, userAgent, the host lists, " +
+        "crawl_resume. A never field (siteUrl, userAgent, userAgentPreset, robotsUserAgent, the host lists, " +
         "fetchResources, mode, urls, maxUrlLength) is refused 409 when its value " +
         "changes. ANY field sent with the value crawl_config_get shows is no " +
         "change, on any status — a credential sent back as '[redacted]' included — " +
@@ -1216,7 +1230,8 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "The crawl_start arguments as a JSON Schema (draft 2020-12): {schema, " +
         "rulesetVersion}. Every field carries its description, its default where " +
         "it has one, and x-ariadne-mutable — never (fixed for the crawl's life: " +
-        "siteUrl, userAgent, probeHosts, legacyHosts, sitemapUrls, fetchResources), " +
+        "siteUrl, userAgent, userAgentPreset, robotsUserAgent, probeHosts, legacyHosts, " +
+        "sitemapUrls, fetchResources), " +
         "whenPaused (maxPages, maxDepth, perHostDelayMs, maxConcurrency, the " +
         "render budgets and renderAccessibility) or always (findingCap and the judgement block). The " +
         "judgement block lists every rule id it may name and every overridable " +
@@ -1780,7 +1795,9 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "  pageType   — a template cohort as this crawl typed it; '(untyped)' for " +
         "the pages it could not type\n" +
         "  statusCode — an exact HTTP status, 100..599\n" +
-        "  indexable  — true or false. A page whose indexability the crawl never " +
+        "  indexable  — true or false. A 200 PDF is indexable unless its " +
+        "X-Robots-Tag says noindex; other non-HTML answers are false. A page " +
+        "whose indexability the crawl never " +
         "settled comes back with indexable null and matches NEITHER value; read " +
         "those off an unfiltered listing.\n" +
         "  rendered   — true or false: whether the render pass re-fetched it. " +
@@ -1837,8 +1854,8 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
       description:
         "One row per page that carries structured data — a JSON-LD, microdata or " +
         "RDFa block — or a JSON-LD parse error or microdata error: {url, pageType, " +
-        "indexable, formats, types, nodes, warningCount, infoCount, " +
-        "jsonLdParseErrors, microdataErrors, skips, blocksAtCap, problemsCapped}. A page with " +
+        "indexable, formats, types, nodes, warningCount, infoCount, infoCountAtLeast, " +
+        "jsonLdParseErrors, microdataErrors, skips, blocksAtCap, blocksDropped, nodesDropped, problemsCapped}. A page with " +
         "neither is not listed. Use it to see which templates publish which markup, and where " +
         "the problems are, before reading the schema.* findings.\n\n" +
         "formats are the syntaxes found, distinct and sorted. types are every type the " +
@@ -1847,7 +1864,7 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "reference, not a node), in block order: {format, path, type, types, typesCapped, " +
         "properties, propertiesCapped} — type the primary type as the markup states it " +
         "(null when untyped), types every type the node states (a microdata or RDFa node " +
-        "lists one: extraction 4 keeps only the first itemtype / typeof token), properties " +
+        "lists every itemtype / typeof token from extraction 5; a page at extraction 4 kept only the first), properties " +
         "the node's property names; both lists are capped per node, with typesCapped and " +
         "propertiesCapped true when cut short. Structured data is judged by the " +
         "schema.org vocabulary and the JSON-LD, Microdata and RDFa specs; which " +
@@ -1859,12 +1876,23 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "same page defines — linking to an entity defined elsewhere is legal, so " +
         "read those as facts to check. Ids are resolved against the page URL (or " +
         "a declared @base). On a crawl not wholly at extraction 4 references are " +
-        "not counted, and notMeasured says so. blocksAtCap: the page's stored " +
-        "blocks reached the per-page limit, so an id may be defined in a block " +
-        "that was not stored. problemsCapped: a block cut one of the lists these counts " +
-        "read at its per-block limit, so the counts may be short. The " +
+        "not counted, and notMeasured says so. blocksAtCap: the page had " +
+        "blocks past the per-page limit, so an id may be defined in a block " +
+        "that was not stored (from extraction 5 it is blocksDropped > 0). blocksDropped: " +
+        "how many blocks past the per-page limit were not stored. nodesDropped: how many " +
+        "nodes past the per-block limit were not stored. Both are null on a page crawled at " +
+        "an extraction below version 5, which did not count them. problemsCapped: a block cut one of the lists these counts " +
+        "read at its per-block limit, so the counts may be short; the unresolved-reference part of infoCount is " +
+        "exact, a reference past the 50th included, and problemsCapped is also true when the page has more than " +
+        "50 unresolved references (the finding lists 50 ids and gives the exact count, at least that many " +
+        "when infoCountAtLeast). infoCountAtLeast: " +
+        "a block left ids out of its verdict (an id over 2 KiB once resolved, or more than 256 KiB of ids), so " +
+        "infoCount is a lower bound, at least that many, never a guess; false otherwise. The " +
         "problem-by-problem detail is the structured_data_nodes CSV view " +
-        "(export_crawl format=csv), one row per block and problem.\n\n" +
+        "(export_crawl format=csv), one row per block and problem; its unresolved-reference rows " +
+        "are not cut at 50, say '(path not recorded)' and '(written form not recorded)' for a reference past " +
+        "a block's first 50, and say the list " +
+        "is incomplete when infoCountAtLeast is true.\n\n" +
         "NULL IS NOT ZERO. microdataErrors and skips are null on a page crawled " +
         "before microdata was read (extraction below version 4): nobody looked, " +
         "so warningCount there has no microdata errors in it. skips counts what " +
@@ -1880,7 +1908,8 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "one block of that syntax\n\n" +
         "Ordered by URL. Paginated: {items, nextCursor, notMeasured}; limit defaults to " +
         `${PAGE_SIZE_DEFAULT}, maximum ${PAGE_SIZE_MAX}. The CSV view's Problem ` +
-        `column is one of: ${STRUCTURED_DATA_PROBLEMS.join(", ")}.`,
+        `column is one of: ${STRUCTURED_DATA_PROBLEMS.join(", ")}. The CSV also ends with the ` +
+        "page's Blocks Dropped and Nodes Dropped, repeated on each of its rows, empty where null.",
       inputSchema: strictInput({
         crawlId: crawlIdField(),
         pageType: z
@@ -1961,7 +1990,7 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
       description:
         "The robots.txt this crawl actually obeyed, out of its stored evidence: " +
         "{crawlId, robotsUrl, outcome, raw, truncated, crawlDelaySec, note, " +
-        "sitemapSources, suppliedSitemaps, userAgent}. Nothing is re-fetched — this is the text the " +
+        "sitemapSources, suppliedSitemaps, userAgent, robotsUserAgent}. Nothing is re-fetched — this is the text the " +
         "crawler read at crawl time, which is what its findings were judged " +
         "against. A file that has changed since is a fact about the site, and " +
         "fetching the current one here would hide it.\n\n" +
@@ -1981,8 +2010,15 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "the finding: a sitemap that only appears in suppliedSitemaps is one the site " +
         "publishes and does not declare, and a document in both was declared and " +
         "re-supplied — the walk fetched it once. userAgent " +
-        "is the string the crawl identified as — the groups in the file that " +
-        "governed it, which matters when the file has per-agent sections.\n\n" +
+        "is the header string the crawl identified as; robotsUserAgent is the one " +
+        "product token its groups and crawl-delay were matched against (Googlebot, " +
+        "bingbot, AriadneBot or a custom one) — the groups in the file that " +
+        "governed it, which matters when the file has per-agent sections. " +
+        "robotsUserAgent is null for a crawl stored before it existed, which " +
+        "matched its full userAgent. A crawl started with a userAgentPreset " +
+        "presented a spoofed bot identity: a site that verifies bots by IP " +
+        "address or reverse DNS (Cloudflare, most CDNs) fails it, and a preset " +
+        "never bypasses a challenge.\n\n" +
         "Refused for a crawl that never completed discovery: there is no stored " +
         "copy, and 'we have no record' must not be served as 'the site has no " +
         "robots.txt'.",
@@ -2416,7 +2452,7 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "Destination, Anchor, Status Code, one row per internal link whose target " +
         "answered 4xx or 5xx, the same rows issue_inlinks paginates.\n" +
         "  structured_data_nodes is the structured_data listing's detail — URL, " +
-        "Format, Schema Type, Path, Node Type, Problem, Detail — one row per block " +
+        "Format, Schema Type, Path, Node Type, Problem, Detail, Blocks Dropped, Nodes Dropped — one row per block " +
         "and problem, and one row with an empty Problem for a block with none. " +
         "Refused, as the listing is, on a crawl the rules have not judged or judged " +
         "before structured data validation existed.\n" +

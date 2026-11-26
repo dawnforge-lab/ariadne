@@ -17,6 +17,7 @@ ARIADNE_METRICS_TOKEN=$(rand)
 ARIADNE_CREDENTIALS_KEY=smoke:$(openssl rand -base64 32)
 POSTGRES_PASSWORD=$(rand)
 ARIADNE_ALLOWED_DOMAINS=example.com
+ARIADNE_HEAP_MB=384
 ARIADNE_API_HOST_PORT=${HOST_PORT}
 ENV
 dc() { docker compose -p "$PROJECT" --env-file "$ENVFILE" "$@"; }

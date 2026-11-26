@@ -2,10 +2,11 @@
  * INDEXABILITY_STATUS_SQL against `indexabilityOf`, row for row.
  *
  * The rows go through `values`, as the CANONICALISED_ELSEWHERE pin in
- * helpers.test.ts does: the expression reads seven columns of an aliased
- * `pages` and needs no crawl. Every `IndexabilityStatus` member except the
- * empty one must occur, so the parity is not vacuous, and the edge rows sit on
- * the precedence boundaries where two conditions hold at once.
+ * helpers.test.ts does: the expression reads eight columns of an aliased
+ * `pages` (`content_type` since Phase 29d, which decides a PDF) and needs no
+ * crawl. Every `IndexabilityStatus` member except the empty one must occur, so
+ * the parity is not vacuous, and the edge rows sit on the precedence boundaries
+ * where two conditions hold at once.
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { sql } from "drizzle-orm";
@@ -15,6 +16,7 @@ import { FETCH_CLASSES } from "../../src/crawl/fetch-page.js";
 import {
   hasNoindex,
   indexabilityOf,
+  isDocumentOk,
   INDEXABILITY_STATUS_SQL,
   type IndexabilityStatus,
 } from "../../src/rules/helpers.js";
@@ -28,14 +30,20 @@ interface Row {
   over: Partial<PageRecord>;
 }
 
-/** The writer's stamp: a 200, fetched ok, no noindex on either channel. */
+/**
+ * The writer's stamp: a 200 fetched ok or a 200 PDF (`isDocumentOk`, Phase 29d
+ * R1), no noindex on either channel.
+ */
 function stamped(over: Partial<PageRecord>): PageRecord {
   const page = mkPage(over);
-  return {
-    ...page,
-    isIndexable: page.fetchClass === "ok" && page.statusCode === 200 && !hasNoindex(page),
-  };
+  return { ...page, isIndexable: isDocumentOk(page) && !hasNoindex(page) };
 }
+
+const PDF: Partial<PageRecord> = {
+  fetchClass: "non_html",
+  contentType: "application/pdf",
+  canonicalHtml: null,
+};
 
 const ROWS: Row[] = [
   { why: "indexable", over: {} },
@@ -78,6 +86,17 @@ const ROWS: Row[] = [
   { why: "ok 204 + noindex: Not HTML wins", over: { statusCode: 204, robotsMeta: "noindex" } },
   { why: "ok 206 + canonicalised: Not HTML wins", over: { statusCode: 206, canonicalHtml: ELSEWHERE } },
   { why: "disallowed + noindex: robots.txt wins", over: { fetchClass: "disallowed", statusCode: null, robotsMeta: "noindex" } },
+  // A PDF is a document (Phase 29d R1): read as an `ok` row is.
+  { why: "pdf 200: indexable", over: PDF },
+  { why: "pdf with parameters: indexable", over: { ...PDF, contentType: "Application/PDF; charset=binary" } },
+  { why: "pdf noindexed by header", over: { ...PDF, xRobotsTag: "noindex" } },
+  { why: "pdf header none", over: { ...PDF, xRobotsTag: "none" } },
+  { why: "pdf canonicalised by Link header", over: { ...PDF, canonicalHeader: ELSEWHERE } },
+  { why: "pdf noindex + canonicalised: noindex wins", over: { ...PDF, xRobotsTag: "noindex", canonicalHeader: ELSEWHERE } },
+  { why: "pdf 206: Not HTML", over: { ...PDF, statusCode: 206 } },
+  { why: "pdf without a content type: Not HTML", over: { ...PDF, contentType: null } },
+  { why: "word file: Not HTML", over: { ...PDF, contentType: "application/msword" } },
+  { why: "image + noindex header: Not HTML", over: { ...PDF, contentType: "image/png", xRobotsTag: "noindex" } },
 ];
 
 describe("INDEXABILITY_STATUS_SQL agrees with indexabilityOf", () => {
@@ -93,16 +112,16 @@ describe("INDEXABILITY_STATUS_SQL agrees with indexabilityOf", () => {
     await closeDb(db);
   });
 
-  /** The seven columns the expression reads, typed so a NULL has a type. */
+  /** The eight columns the expression reads, typed so a NULL has a type. */
   async function sqlStatuses(pages: PageRecord[]): Promise<string[]> {
     const values = pages.map(
       (p, i) =>
-        sql`(${String(i)}::int, ${p.url}::text, ${p.fetchClass}::text, ${p.statusCode}::int, ${p.robotsMeta}::text, ${p.xRobotsTag}::text, ${p.canonicalHtml}::text, ${p.canonicalHeader}::text)`,
+        sql`(${String(i)}::int, ${p.url}::text, ${p.fetchClass}::text, ${p.statusCode}::int, ${p.contentType}::text, ${p.robotsMeta}::text, ${p.xRobotsTag}::text, ${p.canonicalHtml}::text, ${p.canonicalHeader}::text)`,
     );
     const result = await db.execute<{ status: string }>(sql`
       select ${INDEXABILITY_STATUS_SQL("p")} as status
       from (values ${sql.join(values, sql`, `)})
-        as p(i, url, fetch_class, status_code, robots_meta, x_robots_tag, canonical_html, canonical_header)
+        as p(i, url, fetch_class, status_code, content_type, robots_meta, x_robots_tag, canonical_html, canonical_header)
       order by p.i`);
     return result.rows.map((r) => r.status);
   }

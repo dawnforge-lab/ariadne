@@ -90,7 +90,7 @@ function crawlConfig(siteUrl = `${site}/`, maxPages = 400): CrawlConfig {
     siteUrl,
     maxPages,
     maxDepth: 10,
-    userAgent: "AriadneBot-reaper-test",
+    userAgent: "AriadneBot-reaper-test", robotsUserAgent: "AriadneBot-reaper-test", userAgentPreset: null,
     perHostDelayMs: 0,
     maxConcurrency: 1,
     probeHosts: false,

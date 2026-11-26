@@ -71,7 +71,10 @@ export type AppEventKind = (typeof APP_EVENT_KINDS)[number];
  *  - `schedule_fired.crawlId`: the crawl it started (C9: the event's own
  *    `crawl_id` is null, so the record outlives a deleted crawl).
  *  - `schedule_skipped`: `reason` (`overlap | not-allowed |
- *    credentials_unreadable`), and on `overlap` the holding crawl's `crawlId`.
+ *    credentials_unreadable | identity_refused`), on `overlap` the holding
+ *    crawl's `crawlId`, and on `identity_refused` the refused config `field`
+ *    (`userAgentPreset | userAgent | robotsUserAgent`, a field name of ours,
+ *    never a value).
  *  - `schedule_chain_failed`: the chain `link` and the `reason`.
  */
 export const EVENT_DETAIL_KEYS: Record<EventKind, readonly string[]> = {
@@ -91,7 +94,7 @@ export const EVENT_DETAIL_KEYS: Record<EventKind, readonly string[]> = {
   rules_finished: ["outcome"],
   worker_lost: [],
   schedule_fired: ["crawlId"],
-  schedule_skipped: ["reason", "crawlId"],
+  schedule_skipped: ["reason", "crawlId", "field"],
   schedule_chain_failed: ["link", "reason"],
 };
 

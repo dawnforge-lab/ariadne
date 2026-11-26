@@ -191,7 +191,7 @@ function cfg(seedPath: string, overrides: Partial<CrawlConfig> = {}): CrawlConfi
     siteUrl: `${base}${seedPath}`,
     maxPages: 100,
     maxDepth: 10,
-    userAgent: "AriadneBot-scope-test",
+    userAgent: "AriadneBot-scope-test", robotsUserAgent: "AriadneBot-scope-test", userAgentPreset: null,
     perHostDelayMs: 0,
     maxConcurrency: 4,
     allowPrivate: true,
@@ -725,7 +725,7 @@ describe("scope config validation and storage", () => {
     siteUrl: "https://example.com/",
     maxPages: 10,
     maxDepth: 3,
-    userAgent: "AriadneBot-scope-test",
+    userAgent: "AriadneBot-scope-test", robotsUserAgent: "AriadneBot-scope-test", userAgentPreset: null,
     perHostDelayMs: 0,
     maxConcurrency: 1,
   });

@@ -48,9 +48,9 @@ import { isSameOrigin } from "../../crawl/parse/url-utils.js";
 import type { Db } from "../../db/client.js";
 import {
   CANONICALISED_ELSEWHERE,
-  FETCHED_OK,
+  DOCUMENT_OK,
   hasNoindex,
-  JUDGED,
+  JUDGED_DOCUMENT,
   queryFinding,
   NEVER_REQUESTED,
   type RuleIdentity,
@@ -330,27 +330,38 @@ export const sitemapRules: QueryRule[] = [
   // testing it alone would report a listed 404 under copy about a robots
   // directive that page never had.
   //
+  // THE SUBJECT IS A DOCUMENT, NOT ONLY AN HTML PAGE (Phase 29d R1): the 200 is
+  // `DOCUMENT_OK`, an HTML page fetched OK or a PDF. A PDF is indexable unless
+  // its `X-Robots-Tag` says noindex, so a listed PDF with that header is
+  // reported here and a plain one is not. Every other non-HTML 200 (a Word
+  // file, an image) is false by construction rather than by a directive, and
+  // stays out: this rule's copy is about a directive it never carried.
+  //
   // THE CANONICALISED CASE ARRIVED IN PHASE 22 §1, and it is the inverse of the
   // same phase's other move. Every other rule STOPPED judging canonicalised
   // pages, because the defect belongs to the URL they defer to — but a sitemap
   // is a list of URLs the site is asking to have indexed, and a URL that has
   // told search engines to index something else does not belong on it. The
-  // cohort this rule reports over is therefore the COMPLEMENT OF `JUDGED`
-  // WITHIN THE FETCHED-OK 200s: a 200 this crawl did not judge, because it
-  // noindexes itself or defers to another URL. Not "the opposite of JUDGED" —
-  // the 404s, redirects and 5xx are outside `JUDGED` too and belong to the two
-  // rules above.
+  // cohort this rule reports over is therefore the COMPLEMENT OF
+  // `JUDGED_DOCUMENT` WITHIN `DOCUMENT_OK` (the HTML 200s and the PDF 200s): a
+  // 200 document that noindexes itself or defers to another URL. Not "the
+  // opposite of JUDGED_DOCUMENT" — the 404s, redirects and 5xx are outside it
+  // too and belong to the two rules above, and a Word file or an image is
+  // outside `DOCUMENT_OK` altogether. `pages.not-in-sitemap` reports the other
+  // half: the `JUDGED_DOCUMENT` URLs the sitemap does not list.
   //
   // `is_indexable IS NOT TRUE` rather than `= false`, so that a NULL stamp
-  // lands here rather than in neither cohort. That is the predicate
-  // `site.health` counts its noindex set-aside with (src/rules/metric/
-  // health-metrics.ts), and the two must partition the same 200s: with `=
-  // false` a NULL-stamped 200 that canonicalises nowhere would be judged by
-  // nothing and set aside by nobody. No crawl this engine writes produces a
-  // NULL there — `PageWriter` computes a boolean for every row — and the row is
-  // covered rather than assumed away. Its `reason` reads `noindex`, because
-  // that is the word `site.health` files it under, and one vocabulary across
-  // the two is worth more than a second guess at a row nothing writes.
+  // lands here rather than in neither cohort: with `= false` a NULL-stamped 200
+  // that canonicalises nowhere would be reported by neither this rule nor
+  // `pages.not-in-sitemap`. It is also the predicate `site.health` counts its
+  // noindex set-aside with (src/rules/metric/health-metrics.ts), whose census
+  // is `DOCUMENT_OK` since Phase 29d, so a PDF this rule reports is in
+  // `site.health`'s `urlsNoindex`, exactly as an HTML page is. No crawl
+  // this engine writes produces a NULL stamp — `PageWriter` computes a boolean
+  // for every row — and the row is covered rather than assumed away. Its
+  // `reason` reads `noindex`, because that is the word `site.health` files
+  // such an HTML page under, and one vocabulary is worth more than a second
+  // guess at a row nothing writes.
   //
   // `reason` is what a reader needs beside the two robots columns, which are
   // both empty on a canonicalised entry: without it, half this rule's rows
@@ -386,7 +397,7 @@ export const sitemapRules: QueryRule[] = [
         NON_INDEXABLE,
         db,
         crawlId,
-        sql`${FETCHED_OK("p")}
+        sql`${DOCUMENT_OK("p")}
             and (p.is_indexable is not true or ${CANONICALISED_ELSEWHERE("p")})`,
         (row) => ({
           url: row.url,
@@ -515,6 +526,12 @@ export const sitemapRules: QueryRule[] = [
 
   // Indexable 200 pages the sitemap does not list.
   //
+  // A DOCUMENT, NOT ONLY AN HTML PAGE (Phase 29d R1, controller ruling on the
+  // Task 5a review): the cohort is `JUDGED_DOCUMENT`, so an indexable PDF the
+  // sitemap does not list is reported — the mirror of `sitemap.non-indexable`,
+  // which reports a noindexed PDF the sitemap does list. A noindexed PDF, a
+  // Word file and an image are not indexable and are never reported here.
+  //
   // DATA-GATED: it runs only when the crawl holds at least one sitemap entry.
   // With no sitemap at all every page on the site satisfies the condition, and
   // the honest report of that site is one finding — `sitemap.missing`, which
@@ -543,10 +560,12 @@ export const sitemapRules: QueryRule[] = [
         select p.id, p.url, count(*) over ()::int as total_matches
         from pages p
         where p.crawl_id = ${crawlId}
-          -- THE JUDGED COHORT (Phase 22 §1). A canonicalised page should NOT be
-          -- in the sitemap -- sitemap.non-indexable reports it when it is --
-          -- so reporting it as missing from one is the inverse of right.
-          and ${JUDGED("p")}
+          -- THE JUDGED COHORT OVER DOCUMENTS (Phase 22 §1, 29d R1): an HTML
+          -- page or a PDF, indexable, not canonicalised elsewhere. A
+          -- canonicalised URL should NOT be in the sitemap --
+          -- sitemap.non-indexable reports it when it is -- so reporting it as
+          -- missing from one is the inverse of right.
+          and ${JUDGED_DOCUMENT("p")}
           and not exists (
             select 1 from sitemap_urls s
             where s.crawl_id = ${crawlId} and s.url_normalised = p.url

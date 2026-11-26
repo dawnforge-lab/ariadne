@@ -1104,7 +1104,56 @@ const KINDS = ["page", "query", "metric"] as const satisfies readonly AnyRule["k
 //        writer's `is_indexable` stamp, and spelled in SQL as `SAYS_NOINDEX`.
 //        Verdicts change on such pages: `indexability.noindex` and every
 //        finding's indexability label. Rule count unchanged.
-export const RULESET_VERSION = "0.28.1";
+// 0.29.0: Phase 29d, Phase 29 backlog.
+//        Page types: a numeric last segment keeps `:id` beside a slug type. A
+//        pagination page (`/blog/10/`) is its own page type and is no longer absorbed
+//        into `/blog/:slug` at crawl end, so `schema.template-inconsistent` no longer
+//        files listing pages against a post template. Page types are assigned at
+//        crawl end: a 0.29.0 rules re-run of an older crawl keeps its stored types.
+//        Structured data: `schema.unresolved-reference` finds a reference wherever it
+//        sits, past the 50th too. The block verdict gains `unresolved` (every id
+//        no node of the block defines, uncapped like `definedIds`) and `unresolvedCount`
+//        (its length, or at least it when `idsTruncated`); a verdict without them is
+//        stale (re-run the rules). The rule
+//        subtracts ids the page's other blocks define, so the evidence is exact:
+//        {unresolved (up to 50), unresolvedCount, problemsCapped (count > 50)}, and the
+//        listing's infoCount, its problemsCapped and the CSV rows read the same count.
+//        Stored resolved ids are bounded (an id over 2 KiB, and 256 KiB of ids per
+//        block, `definedIds` and `unresolved` together); a block that left ids out
+//        sets `idsTruncated`, and the page's answer is then a lower bound, said as
+//        `unresolvedAtLeast` (rule), `infoCountAtLeast` (listing) and a note on each
+//        CSV row. A verdict whose count and list disagree is stale.
+//        PDFs are indexable unless X-Robots-Tag says noindex (owner ruling, R1): the
+//        crawl stamps a 200 PDF `is_indexable` true unless its header says noindex or
+//        none (`isDocumentOk`, src/crawl/robots-directives.ts), migration 0061 rewrites
+//        stored crawls, and `indexabilityOf` / `INDEXABILITY_STATUS_SQL` read a PDF as
+//        an `ok` row. Document readers take it: `sitemap.non-indexable` (`DOCUMENT_OK`)
+//        and `canonical.non-indexable-target` report a noindexed PDF, and
+//        `pages.not-in-sitemap` (`JUDGED_DOCUMENT`) an indexable PDF the sitemap does
+//        not list (its copy says "pages and PDFs"). HTML-page readers
+//        (on-page, content, duplicates, page canonical/indexability rules, render
+//        selection) were already gated on `FETCHED_OK` / `isAuditable` / `JUDGED` and
+//        are unchanged. Other non-HTML types stay non-indexable.
+//        Hreflang: a 200 non-HTML response (a PDF) whose `Link` header carries
+//        alternates is a declarer (`HREFLANG_DECLARER`, R1): its own set is judged by
+//        `missing-return-link`, `non-indexable-target`, `missing-x-default`,
+//        `invalid-code`, `alternates-not-crawled` and the integrity rules, not only
+//        counted as a return link. `hreflang.non-indexable-target` reads a PDF target
+//        by its `is_indexable` (a plain 200 PDF is indexable, a noindexed one is not).
+//        A redirect's, 404's or blocked row's declarations are still not judged.
+//        User-agent presets: a crawl stores `robotsUserAgent` (the one token its
+//        robots.txt groups and Crawl-delay are matched against) and `userAgentPreset`
+//        beside `userAgent` (the header). `robots.blocks-sitemap-urls` matches the
+//        stored token and its evidence carries `robotsUserAgent`; a crawl stored
+//        before 29d has none and is read with its full `userAgent`, as it was crawled.
+//        PDFs join `site.health`, `links.orphan` and `structure.deep-page` (owner ruling
+//        2026-11-25, `JUDGED_DOCUMENT` / `DOCUMENT_OK`): an indexable PDF is judged and
+//        counted in `urlsTotal`, can be an orphan or buried past `DEEP_DEPTH`, and
+//        `site.health` gains `urlsPdf` ("Of Which PDFs", overlaps the buckets, not a
+//        partition member). `links.only-from-non-indexable` and
+//        `links.anchors-generic-only` stay HTML-only.
+//        Rule count unchanged: 229 (72 page / 140 query / 17 metric).
+export const RULESET_VERSION = "0.29.0";
 
 /**
  * The 48 crawl-derived checks (sf-audit checklist, Pre-Crawl + sections 1–11,

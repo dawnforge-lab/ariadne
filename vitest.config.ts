@@ -2,6 +2,7 @@ import { defineConfig } from "vitest/config";
 
 export default defineConfig({
   test: {
+    globalSetup: ["test/setup/child-reaper.ts"],
     include: ["test/**/*.test.ts", "src/**/*.test.ts"],
     /**
      * A HANG DETECTOR, not a performance assertion — which is why it is 60s and

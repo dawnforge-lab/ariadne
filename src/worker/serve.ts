@@ -7,6 +7,9 @@
  *  - `DATABASE_URL`
  *  - `ARIADNE_CREDENTIALS_KEY` (`<id>:<base64 of 32 bytes>`), and optionally
  *    `ARIADNE_CREDENTIALS_KEY_PREVIOUS` for a rotation window
+ *  - `ARIADNE_HEAP_MB`: the `--max-old-space-size` (MB) node was started with. The
+ *    launcher applies it (`docker-entrypoint.sh`, `npm run worker:serve`) and this
+ *    process verifies it; a mismatch is a boot error.
  *  - `ARIADNE_WORKER_HTTP_PORT`: the liveness/readiness/metrics port
  *  - `ARIADNE_ALLOWED_DOMAINS`: the crawl allowlist THIS worker enforces when
  *    it claims a crawl (the API enforces its own when it accepts one). Unset is
@@ -34,11 +37,13 @@ import { parseCredentialKeys, parseCredentialRetentionDays } from "../crawl/cred
 import { parseAllowedDomains } from "../api/config.js";
 import { parseTenantMaxRunning } from "./runner.js";
 import { startWorker, type RunningWorker } from "./main.js";
+import { assertHeapCap } from "../runtime/heap-cap.js";
 
 /** `ARIADNE_WORKER_CONCURRENCY` when it is not set. */
 const DEFAULT_WORKER_CONCURRENCY = 1;
 
 interface WorkerEnv {
+  heapCapMb: number;
   databaseUrl: string;
   httpPort: number;
   concurrency: number;
@@ -60,6 +65,8 @@ function plainPositiveInt(name: string, raw: string | undefined, fallback: numbe
 }
 
 function loadWorkerEnv(env: NodeJS.ProcessEnv): WorkerEnv {
+  // First: nothing else is read under a heap cap that is not the configured one.
+  const heapCapMb = assertHeapCap(env);
   const databaseUrl = (env["DATABASE_URL"] ?? "").trim();
   if (databaseUrl === "") {
     throw new Error("DATABASE_URL must be set: a worker claims its crawls from the database");
@@ -83,6 +90,7 @@ function loadWorkerEnv(env: NodeJS.ProcessEnv): WorkerEnv {
   }
   const metrics = (env["ARIADNE_METRICS_TOKEN"] ?? "").trim();
   return {
+    heapCapMb,
     databaseUrl,
     httpPort,
     concurrency: plainPositiveInt("ARIADNE_WORKER_CONCURRENCY", env["ARIADNE_WORKER_CONCURRENCY"], DEFAULT_WORKER_CONCURRENCY),
@@ -128,7 +136,7 @@ try {
 console.error(
   `ariadne worker ${worker.instanceId} listening on :${worker.port} — ` +
     `${config.allowedDomains.length} allowed domain(s), concurrency ${config.concurrency}, ` +
-    `${config.maxRunningPerTenant} running per tenant`,
+    `${config.maxRunningPerTenant} running per tenant, heap cap ${config.heapCapMb} MB`,
 );
 if (config.allowedDomains.length === 0) {
   console.error(

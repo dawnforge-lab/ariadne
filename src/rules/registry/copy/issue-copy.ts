@@ -296,7 +296,7 @@ export const COPY_TEMPLATES: Record<string, IssueCopy> = {
   "site.health": {
     title: "Site: Pages by worst finding severity",
     explanation:
-      "Of the pages the audit judges (200, HTML, indexable, self-canonical), how many carry a critical finding, how many a warning and no critical, how many only informational findings, and how many none, each page counted once at its worst severity, with the clean ratio; beside them, the 200 pages set aside as noindex or as canonicalised to another URL, and the other recorded URLs (redirects, errors, blocked by bot protection or by robots.txt, failed, non-HTML). The four buckets plus the two set-aside counts plus the other URLs add up to every URL the crawl recorded; the paginated count is not part of that sum, because those pages (pages 2 onwards of a series) are judged pages left out of the duplicate title, meta description and H1 checks only. Site-wide findings appear in none of the counts, on a capped run pages past the cap count as clean, and this table is the evidence for the engine-coverage check, not a finding about the site.",
+      "Of the pages and PDFs the audit judges (200, HTML page or PDF, indexable, self-canonical), how many carry a critical finding, how many a warning and no critical, how many only informational findings, and how many none, each page counted once at its worst severity, with the clean ratio; beside them, the 200 pages and PDFs set aside as noindex or as canonicalised to another URL, and the other recorded URLs (redirects, errors, blocked by bot protection or by robots.txt, failed, non-HTML other than PDF). The four buckets plus the two set-aside counts plus the other URLs add up to every URL the crawl recorded; the paginated count and the PDF count are not part of that sum: the paginated pages (pages 2 onwards of a series) are judged pages left out of the duplicate title, meta description and H1 checks only, and the PDF count says how many of the judged URLs are PDFs, which almost no page check reads, so they mostly count as clean. Site-wide findings appear in none of the counts, on a capped run pages past the cap count as clean, and this table is the evidence for the engine-coverage check, not a finding about the site.",
     howToFix:
       "Read the counts as the shape of the work, not as a score: the critical count says how much of the site is affected, and the issue list says what is wrong. Read the set-aside counts to know how much of the site the audit judged; work percentages out from the counts, and check whether the run was capped before quoting the ratio.",
   },
@@ -616,7 +616,7 @@ export const COPY_TEMPLATES: Record<string, IssueCopy> = {
   "links.orphan": {
     title: "Links: Orphan pages",
     explanation:
-      "Indexable, self-canonical pages that were crawled and that no other page links to; self-links do not count, the start URL is excluded, and a page in the sitemap but linked from nowhere is still an orphan. Orphans are crawled rarely and receive no internal link value. Where the crawl could not fetch some URLs, the row says how many, since one of them could link here.",
+      "Indexable, self-canonical pages and PDFs that were crawled and that no other page links to; self-links do not count, the start URL is excluded, and a page in the sitemap but linked from nowhere is still an orphan. Orphans are crawled rarely and receive no internal link value. Where the crawl could not fetch some URLs, the row says how many, since one of them could link here.",
     howToFix:
       "Link to the page from a hub, category, navigation or related content. If nothing on the site has a reason to link to it, consolidate or remove it.",
   },
@@ -881,7 +881,7 @@ export const COPY_TEMPLATES: Record<string, IssueCopy> = {
   "pages.not-in-sitemap": {
     title: "Sitemaps: Indexable URLs not in sitemap",
     explanation:
-      "Indexable, self-canonical 200 pages that were crawled and are not listed in any sitemap; a canonicalised page belongs out of the sitemap and is not reported. They are discovered only through links and are missing from sitemap coverage reporting. Some omissions are deliberate.",
+      "Indexable, self-canonical 200 pages and PDFs that were crawled and are not listed in any sitemap; a canonicalised URL belongs out of the sitemap and is not reported. They are discovered only through links and are missing from sitemap coverage reporting. Some omissions are deliberate.",
     howToFix:
       "Add the pages to the sitemap, or fix the generator that should have included them. Confirm any deliberate exclusion is a decision rather than an oversight.",
   },
@@ -1045,7 +1045,7 @@ export const COPY_TEMPLATES: Record<string, IssueCopy> = {
   "schema.unresolved-reference": {
     title: "Structured data: Reference to an id no node on the page defines",
     explanation:
-      "Indexable, self-canonical pages with a node reference (a JSON-LD object holding only an @id) whose id no node in any of the page's blocks defines, every id resolved against the page URL or a declared @base as JSON-LD 1.1 resolves IRIs; each row gives the format, the path, and the id as written and as resolved. Referring to an entity defined elsewhere, such as an absolute IRI on another site, is legal JSON-LD, so this is a fact to check rather than an error: a reader of this page learns nothing about the referenced node but its id. Where a page's blocks reached the per-page storage limit (Blocks At Cap) or one of them could not be parsed (Page Has Parse Errors), the id may be defined there, in a block that was not stored or not read; each block's list stops at 50 entries, and Problems Capped says when one did.",
+      "Indexable, self-canonical pages with a node reference (a JSON-LD object holding only an @id) whose id no node in any of the page's blocks defines, every id resolved against the page URL or a declared @base as JSON-LD 1.1 resolves IRIs; each row gives the format, the path, and the id as resolved, and the path and the id as written for the first 50 references of each block; the evidence lists up to 50 unresolved ids with the count, and Problems Capped means the page has more than 50 (Unresolved At Least is true when ids too long or too many to store were left out, so the count is a minimum). Referring to an entity defined elsewhere, such as an absolute IRI on another site, is legal JSON-LD, so this is a fact to check rather than an error: a reader of this page learns nothing about the referenced node but its id. Where a page's blocks reached the per-page storage limit (Blocks At Cap) or one of them could not be parsed (Page Has Parse Errors), the id may be defined there, in a block that was not stored or not read.",
     howToFix:
       "Where the id was meant to name a node on this page (an Organization in a graph split over two scripts, say), give the reference and the definition the same id, written the same way. Where it deliberately names a node on another page or site, nothing needs to change.",
   },
@@ -1210,7 +1210,7 @@ export const COPY_TEMPLATES: Record<string, IssueCopy> = {
   "structure.deep-page": {
     title: "Links: Crawl depth over {DEEP_DEPTH}",
     explanation:
-      "Indexable, self-canonical pages whose shortest internal link path from the home page is more than {DEEP_DEPTH} links. Deep pages are crawled less often, receive less internal link value and are harder to reach. Pages with no link path from the home page have no depth and are not in this report.",
+      "Indexable, self-canonical pages and PDFs whose shortest internal link path from the home page is more than {DEEP_DEPTH} links. Deep pages are crawled less often, receive less internal link value and are harder to reach. Pages with no link path from the home page have no depth and are not in this report.",
     howToFix:
       "Link to the page from a category, landing page or navigation entry closer to the home page. If it is not worth linking from higher up, consolidate or remove it.",
   },

@@ -142,7 +142,7 @@ async function withServer<T>(
       siteUrl: `http://127.0.0.1:${addr.port}/`,
       maxPages: 10,
       maxDepth: 3,
-      userAgent: "AriadneBot-0014",
+      userAgent: "AriadneBot-0014", robotsUserAgent: "AriadneBot-0014", userAgentPreset: null,
       perHostDelayMs: 0,
       maxConcurrency: 2,
       // The references are the subject; asking a fixture server about four

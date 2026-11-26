@@ -73,6 +73,7 @@ import {
   blockProblems,
   blockTypesCell,
   problemCells,
+  projectSkipFacts,
   validationReadable,
 } from "./structured-data.js";
 
@@ -449,6 +450,7 @@ interface IndexabilityRow {
   page_url: string | null;
   status_code: number | null;
   fetch_class: string | null;
+  content_type: string | null;
   robots_meta: string | null;
   x_robots_tag: string | null;
   is_indexable: boolean | null;
@@ -461,7 +463,7 @@ interface IndexabilityRow {
  *
  * ONE DERIVATION, shared with the JSON listing through `indexabilityOf`: the
  * spreadsheet and the API answer the same three words about a page because they
- * run the same function over the same eight columns.
+ * run the same function over the same nine columns.
  *
  * `fetch_class` is `not null` on a `pages` row, so a null here is the left join
  * finding nothing — no page, and three EMPTY cells rather than invented ones.
@@ -477,6 +479,7 @@ function standardCells(row: IssueRow & IndexabilityRow): Record<string, string> 
           url: row.page_url ?? "",
           fetchClass: row.fetch_class,
           statusCode: row.status_code,
+          contentType: row.content_type,
           robotsMeta: row.robots_meta,
           xRobotsTag: row.x_robots_tag,
           isIndexable: row.is_indexable,
@@ -715,7 +718,7 @@ export const CSV_VIEW_DEFS: Record<CsvQueryViewName, CsvView> = {
              i.details_jsonb->>'pageUrl' as url,
              i.details_jsonb as evidence,
              i.dedupe_key,
-             p.url as page_url, p.status_code, p.fetch_class,
+             p.url as page_url, p.status_code, p.fetch_class, p.content_type,
              p.robots_meta, p.x_robots_tag, p.is_indexable,
              p.canonical_html, p.canonical_header
       from issues i
@@ -1080,6 +1083,11 @@ export const CSV_VIEW_DEFS: Record<CsvQueryViewName, CsvView> = {
    * block's problem lists holds at most `MAX_PROBLEMS_PER_LIST` entries, so a
    * block's rows for one problem stop there; the listing's `problemsCapped`
    * and the findings' Problems Capped say when they did (the cap is per block).
+   * The unresolved-reference rows are not cut at 50 (29d): there is one for
+   * every unresolved id, as the listing and the finding count them; Path says
+   * "(path not recorded)" for one past the block's first 50 references, and the
+   * Detail "(written form not recorded)" beside its resolved id, and
+   * the Detail says the list is incomplete when a block of the page left ids out.
    */
   structured_data_nodes: defineCsvView<{
     id: string;
@@ -1090,8 +1098,10 @@ export const CSV_VIEW_DEFS: Record<CsvQueryViewName, CsvView> = {
     validated: boolean;
     readable: boolean | null;
     problem: unknown;
+    extraction_version: number | null;
+    skips: unknown;
   }>({
-    header: ["URL", "Format", "Schema Type", "Path", "Node Type", "Problem", "Detail"],
+    header: ["URL", "Format", "Schema Type", "Path", "Node Type", "Problem", "Detail", "Blocks Dropped", "Nodes Dropped"],
     keyset: ["id", "ord"],
     // Ids are positive and `ord` is never negative, so (-1, -1) precedes every row.
     start: ["-1", "-1"],
@@ -1103,12 +1113,12 @@ export const CSV_VIEW_DEFS: Record<CsvQueryViewName, CsvView> = {
                   then ${blockTypesCell(sql`sd.validation_jsonb`)} else '' end as schema_type,
              sd.validation_jsonb is not null as validated,
              ${validationReadable(sql`sd.validation_jsonb`)} as readable,
-             x.problem
+             x.problem, p.extraction_version, p.structured_data_skips as skips
       from structured_data sd
       join pages p on p.crawl_id = ${crawlId} and p.id = sd.page_id
       cross join lateral (
         select case when ${validationReadable(sql`sd.validation_jsonb`)}
-                    then ${blockProblems(sql`sd.validation_jsonb`, crawlId, sql`sd.page_id`)}
+                    then ${blockProblems(sql`sd.validation_jsonb`, crawlId, sql`sd.page_id`, sql`sd.id`)}
                     else '[]'::jsonb end as problems
       ) b
       cross join lateral (
@@ -1141,9 +1151,13 @@ export const CSV_VIEW_DEFS: Record<CsvQueryViewName, CsvView> = {
       if (!(STRUCTURED_DATA_FORMATS as readonly string[]).includes(row.format)) {
         throw new Error(`structured_data_nodes: ${where} has format '${row.format}', which no writer produces`);
       }
-      if (row.ord === "0") return [row.url, row.format, row.schema_type, "", "", "", ""];
+      // The page's counts, repeated on each of its rows; empty where the page's
+      // extraction (below 5) never counted them.
+      const { blocksDropped, nodesDropped } = projectSkipFacts(row.skips, row.extraction_version, where);
+      const dropped = [blocksDropped === null ? "" : String(blocksDropped), nodesDropped === null ? "" : String(nodesDropped)];
+      if (row.ord === "0") return [row.url, row.format, row.schema_type, "", "", "", "", ...dropped];
       const cells = problemCells(row.problem, where);
-      return [row.url, row.format, row.schema_type, cells.path, cells.nodeType, cells.problem, cells.detail];
+      return [row.url, row.format, row.schema_type, cells.path, cells.nodeType, cells.problem, cells.detail, ...dropped];
     },
   }),
 };

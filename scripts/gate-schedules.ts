@@ -2,7 +2,7 @@
  * The Phase 28c gate, clauses 1 and 2: schedules fired by a leader-elected
  * scheduler in worker PROCESSES, one leader killed mid-run.
  *
- *   DATABASE_URL=postgresql://…/ariadne_gate28c node --import tsx scripts/gate-schedules.ts [--log-dir=<dir>]
+ *   ARIADNE_HEAP_MB=384 DATABASE_URL=postgresql://…/ariadne_gate28c node --import tsx scripts/gate-schedules.ts [--log-dir=<dir>]
  *
  * It runs the API service in this process (`crawlRunner: "workers"`, and NOT a
  * scheduler candidate) beside two `scripts/run-worker-trusted.ts --scheduler`
@@ -68,6 +68,7 @@ import { closeDb, createDb, type Db } from "../src/db/client.js";
 import { createApiServer, type ApiServer } from "../src/api/http.js";
 import type { CredentialKeys } from "../src/crawl/credential-vault.js";
 import { closeFetchAgents } from "../src/crawl/http.js";
+import { HEAP_CAP_ENV, parseHeapCapMb } from "../src/runtime/heap-cap.js";
 import { SCHEDULER_LOCK } from "../src/schedule/scheduler.js";
 
 /** The database prefix every gate database starts with. */
@@ -211,15 +212,20 @@ async function writePeers(): Promise<void> {
   await writeFile(peersFile, JSON.stringify([apiInstance, ...workers.map((w) => w.instanceId)]));
 }
 
+let heapCapMb = 0;
+
 async function spawnWorker(label: string): Promise<Worker> {
+  // The trusted worker asserts the cap it is told (29d): this harness hands on
+  // its own, and fails loudly when there is none.
   const proc = spawn(
     process.execPath,
-    ["--import", "tsx", "scripts/run-worker-trusted.ts", "--scheduler", `--schedule-every-ms=${SCHEDULE_EVERY_MS}`],
+    [`--max-old-space-size=${heapCapMb}`, "--import", "tsx", "scripts/run-worker-trusted.ts", "--scheduler", `--schedule-every-ms=${SCHEDULE_EVERY_MS}`],
     {
       cwd: ROOT,
       env: {
         PATH: process.env["PATH"],
         DATABASE_URL: databaseUrl(),
+        [HEAP_CAP_ENV]: String(heapCapMb),
         ARIADNE_CREDENTIALS_KEY: KEY_ENV,
         TRUSTED_WORKER_PEERS_FILE: peersFile,
       },
@@ -489,6 +495,8 @@ async function disableAll(): Promise<void> {
 }
 
 async function main(): Promise<number> {
+  // First, before the API server and fixtures exist: no cap is a boot error (29d).
+  heapCapMb = parseHeapCapMb(process.env[HEAP_CAP_ENV]);
   logDir = parseArgs(process.argv.slice(2)).logDir;
   const url = databaseUrl();
   const dbName = new URL(url).pathname.replace(/^\//, "");

@@ -443,7 +443,11 @@ of three ways:
   file — `raw` (the text as served, `truncated` when it is only the first 500KB),
   `outcome` (`read` / `absent` / `unreachable`), `crawlDelaySec`, `sitemapSources`,
   `suppliedSitemaps` (documents the crawl was handed at start rather than told about
-  by the file) and the `userAgent` the crawl matched under. It is EVIDENCE, not a re-fetch: a file that
+  by the file), the `userAgent` header the crawl sent and the `robotsUserAgent` token
+  the file's groups were matched against (null on a crawl from before 0.29.0, whose
+  groups were matched against the full `userAgent`). A crawl run under a
+  `userAgentPreset` presented a spoofed bot identity: a site that verifies bots by IP
+  or reverse DNS refuses it, and it never bypasses a challenge. It is EVIDENCE, not a re-fetch: a file that
   has changed since the crawl is a fact about the site, and reading today's copy over
   the crawl's would hide it.
 - **Large lists go to a file.** `export_crawl` writes `issues`, `pages` or `metrics`

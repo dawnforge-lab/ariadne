@@ -11,7 +11,7 @@ import type { RenderConsole } from "../crawl/render/console-capture.js";
 import type { A11yStatus } from "../crawl/render/a11y.js";
 import type { RenderImages } from "../crawl/render/image-stand-in.js";
 import type { StoredResponseHeaders } from "../crawl/response-headers.js";
-import type { StructuredDataFormat, StructuredDataSkips } from "../crawl/parse/page-analyzer.js";
+import type { StructuredDataFormat, StoredStructuredDataSkips } from "../crawl/parse/page-analyzer.js";
 import type { BlockValidation } from "../rules/schema-org/validate.js";
 import type {
   AnchorCounts, HtmlStructure, InsecureRefs, OverlongUrls, RefreshFact, RobotsMetaEntry, SocialFacts,
@@ -717,9 +717,9 @@ export const pages = pgTable("pages", {
   // a row written below extraction version 4 (never measured); zero means
   // measured and none found.
   structuredDataMicrodataErrors: integer("structured_data_microdata_errors"),
-  // What the microdata/RDFa machines left out (`StructuredDataSkips`), so a
+  // What the microdata/RDFa machines left out (`StructuredDataSkips`; rows below extraction 5 lack the two drop counters), so a
   // property missing for that reason is visible. Null on the same terms.
-  structuredDataSkips: jsonb("structured_data_skips").$type<StructuredDataSkips>(),
+  structuredDataSkips: jsonb("structured_data_skips").$type<StoredStructuredDataSkips>(),
   responseTimeMs: integer("response_time_ms"),
   htmlBytes: integer("html_bytes"),
   domSize: integer("dom_size"),
@@ -1101,7 +1101,11 @@ export const pages = pgTable("pages", {
   //
   // NULLABLE: null means the page was not rendered, its render failed (or was
   // refused before a browser page opened), or it was rendered before capture 3
-  // (`render_version` < 3).
+  // (`render_version` < 3). One failed render is not null (Phase 29d, ruling
+  // R5): a render whose deadline ran out during the run is `rendered = false`
+  // with `timeout` here — the run was started and the page stopped it. The
+  // `a11y.*` rules read `ran` rows only, and `render-a11y`'s counts rendered
+  // pages only, so neither reads it.
   renderA11yStatus: text("render_a11y_status").$type<A11yStatus>(),
   // Wall time of the axe run in ms (injection included), so the gate can report
   // its median and p95. Set for every status but `disabled`; null exactly when
@@ -1403,7 +1407,7 @@ export const resources = pgTable("resources", {
   shareImage: boolean("share_image").notNull().default(false),
   // Phase 29b (migration 0055): an image's INTRINSIC size in pixels, read from
   // the format's own header in the first 64 KiB of the body the resource pass's
-  // one Range GET returned (`readImageSize`, src/crawl/resources/image-size.ts),
+  // one Range GET returned (`parseImageHead`, src/crawl/resources/image-size.ts),
   // as DISPLAYED: a JPEG's or PNG's EXIF orientation 5-8 or an AVIF's `irot` 1/3 swaps
   // the stored pair, as the browser does.
   // Null means NOT MEASURED and `dimensions_reason` says why; a size is never
@@ -1413,7 +1417,7 @@ export const resources = pgTable("resources", {
   height: integer("height"),
   // Why `width`/`height` are null on an `ok` image row: `svg` (a vector format
   // has no intrinsic pixel size), `encoded` (a content-encoded body is compressed bytes, never parsed), `unknown-format`, `header-beyond-limit` (the
-  // size lies past the 64 KiB read), `malformed`, `empty`, or `not-image` (a 2xx
+  // size lies past the 64 KiB read and up to two continuation reads), `malformed`, `empty`, or `not-image` (a 2xx
   // whose content type is not `image/*`). Null when a size WAS read, and null on
   // css/js and non-ok rows, where no measurement was attempted.
   dimensionsReason: text("dimensions_reason"),

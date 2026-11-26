@@ -111,7 +111,7 @@ import { fitsIndex, isSameOrigin, normalizeUrl } from "./parse/url-utils.js";
 import { completeUrls } from "./frontier.js";
 import { derivePageType, type PageTypePattern } from "./page-type.js";
 import { EXTRACTION_VERSION } from "./versions.js";
-import { saysNoindex } from "./robots-directives.js";
+import { isDocumentOk, saysNoindex } from "./robots-directives.js";
 import { storableDeep } from "./storable-text.js";
 
 const DEFAULT_BATCH_SIZE = 100;
@@ -944,6 +944,8 @@ export class PageWriter {
         microdataItemrefSkipped: 0,
         rdfaUnsupported: 0,
         valuesCapped: 0,
+        blocksDropped: 0,
+        nodesDropped: 0,
       },
     };
   }
@@ -1053,6 +1055,14 @@ function normaliseRedirect(redirectUrl: string): string {
  * a redirect, a 404, a blocked page, a page with no HTML — is not indexable,
  * which is why the fetch class is part of the test and not just the status.
  *
+ * THE ONE NON-HTML EXCEPTION IS A PDF (Phase 29d R1, owner ruling 2026-11-24:
+ * "Pdf should be reported indexable unless http headers specify otherwise").
+ * `isDocumentOk` admits an `ok` 200 or a `non_html` 200 whose content type is
+ * a PDF; a PDF has no analysis, so its only robots channel is `X-Robots-Tag`.
+ * Its `Link` canonical is not read, as an HTML canonical is not. A Word file,
+ * an image or any other non-HTML answer stays false by construction. Crawls
+ * stored before this were rewritten by migration 0061 from the same columns.
+ *
  * The robots test is `saysNoindex` (src/crawl/robots-directives.ts), the ONE
  * definition the rule layer's `saysNoindex` (src/rules/helpers.ts) reads too
  * when it asks the same question of the stored columns. The two must agree — a
@@ -1061,8 +1071,7 @@ function normaliseRedirect(redirectUrl: string): string {
  */
 function isIndexable(fetch: FetchResult, analysis: PageAnalysis | null): boolean {
   return (
-    fetch.statusCode === 200 &&
-    fetch.fetchClass === "ok" &&
+    isDocumentOk(fetch) &&
     !saysNoindex(analysis?.robotsMeta ?? null) &&
     !saysNoindex(fetch.xRobotsTag)
   );

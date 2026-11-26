@@ -111,7 +111,7 @@ function makeAnalysis(overrides: Partial<PageAnalysis> = {}): PageAnalysis {
     structuredData: [{ type: "Article", format: "jsonld", raw: { "@type": "Article", name: "n" } }],
     structuredDataParseErrors: 0,
     structuredDataMicrodataErrors: 0,
-    structuredDataSkips: { microdataItemrefSkipped: 0, rdfaUnsupported: 0, valuesCapped: 0 },
+    structuredDataSkips: { microdataItemrefSkipped: 0, rdfaUnsupported: 0, valuesCapped: 0, blocksDropped: 0, nodesDropped: 0 },
     resourceRefsCapped: false,
     contentHash: "a".repeat(64),
     simhash: 1234567890123n,
@@ -427,9 +427,9 @@ describe("PageWriter", () => {
       })
       .from(pages)
       .where(eq(pages.crawlId, crawlId));
-    expect(row?.v).toBe(4);
+    expect(row?.v).toBe(5);
     expect(row?.errors).toBe(0);
-    expect(row?.skips).toEqual({ microdataItemrefSkipped: 0, rdfaUnsupported: 0, valuesCapped: 0 });
+    expect(row?.skips).toEqual({ microdataItemrefSkipped: 0, rdfaUnsupported: 0, valuesCapped: 0, blocksDropped: 0, nodesDropped: 0 });
   });
 
   it("persists the structured-data parse-error count", async () => {
@@ -603,8 +603,8 @@ describe("PageWriter", () => {
 
     const rows = await db.select().from(pages).where(eq(pages.crawlId, crawlId));
     expect(rows).toHaveLength(3);
-    expect(EXTRACTION_VERSION).toBe(4);
-    for (const row of rows) expect(row.extractionVersion, row.url).toBe(4);
+    expect(EXTRACTION_VERSION).toBe(5);
+    for (const row of rows) expect(row.extractionVersion, row.url).toBe(5);
     const blocked = rows.find((r) => r.url === `${SITE}/blocked`);
     expect(blocked?.fetchClass).toBe("disallowed");
     expect(blocked?.responseHeaders).toBeNull();

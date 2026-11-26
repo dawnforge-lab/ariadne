@@ -340,6 +340,32 @@ export const CRAWL_FIELDS = {
       "owner has asked you to use a specific string; it must stay identifiable.",
     default: CRAWL_DEFAULTS.userAgent,
   },
+  userAgentPreset: {
+    schema: z.string({ error: () => "field 'userAgentPreset' must be a string" }),
+    mutable: "never",
+    description:
+      "Identify as a named crawler instead of AriadneBot: one of ariadne (the default), " +
+      "googlebot-smartphone, googlebot-desktop, bingbot-desktop, bingbot-mobile. A preset sets BOTH the User-Agent " +
+      "header and the robots.txt token (Googlebot, bingbot), so the site's rules for that " +
+      "crawler apply; it cannot be combined with userAgent or robotsUserAgent. A spoofed " +
+      "bot identity fails any site that verifies bots by IP address or reverse DNS " +
+      "(Cloudflare, most CDNs): a preset only helps on a site that filters by user-agent " +
+      "alone, and it never bypasses a challenge. Use it only on a site you have permission " +
+      "to crawl as that crawler.",
+    default: "ariadne",
+  },
+  robotsUserAgent: {
+    schema: z.string({ error: () => "field 'robotsUserAgent' must be a string" }),
+    mutable: "never",
+    description:
+      "The one product token robots.txt groups and Crawl-delay are matched against " +
+      "(letters, digits, - and _). Derived from the first product of userAgent when " +
+      "omitted; required when the token derived from userAgent is 'mozilla' (any case, " +
+      "'Mozilla/5.0 ...' or 'Mozilla (compatible; ...)'). Needs a custom userAgent " +
+      "(the default AriadneBot identity always matches the AriadneBot robots group) and " +
+      "cannot be combined with userAgentPreset. A request's userAgentPreset, userAgent and " +
+      "robotsUserAgent replace the server's defaults for all three as a set.",
+  },
   perHostDelayMs: {
     schema: finiteNumber("perHostDelayMs").min(MIN_PER_HOST_DELAY_MS, {
       error: (issue) =>
@@ -861,6 +887,8 @@ function buildStartBodySchema(registry: Registry) {
       maxPages: onTheWire(f.maxPages).optional(),
       maxDepth: onTheWire(f.maxDepth).optional(),
       userAgent: onTheWire(f.userAgent).optional(),
+      userAgentPreset: onTheWire(f.userAgentPreset).optional(),
+      robotsUserAgent: onTheWire(f.robotsUserAgent).optional(),
       perHostDelayMs: onTheWire(f.perHostDelayMs).optional(),
       maxConcurrency: onTheWire(f.maxConcurrency).optional(),
       probeHosts: onTheWire(f.probeHosts).optional(),

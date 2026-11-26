@@ -348,7 +348,7 @@ describe("listStructuredData — the rows", () => {
       jsonLdParseErrors: 0,
       microdataErrors: 0,
       skips: SKIPS,
-      blocksAtCap: false, problemsCapped: false,
+      infoCountAtLeast: false, blocksAtCap: false, blocksDropped: null, nodesDropped: null, problemsCapped: false,
     });
     // The empty image is the one warning; the unresolved #brand the one info.
     expect(product?.warningCount).toBe(1);
@@ -359,7 +359,7 @@ describe("listStructuredData — the rows", () => {
     const page = await service.listStructuredData(LOCAL_TENANT, crawlId, {});
     expect(Object.keys(page.items[0]!)).toEqual([
       "url", "pageType", "indexable", "formats", "types", "nodes",
-      "warningCount", "infoCount", "jsonLdParseErrors", "microdataErrors", "skips", "blocksAtCap", "problemsCapped",
+      "warningCount", "infoCount", "infoCountAtLeast", "jsonLdParseErrors", "microdataErrors", "skips", "blocksAtCap", "blocksDropped", "nodesDropped", "problemsCapped",
     ]);
     expect(Object.keys(page.items[0]!.nodes[0]!)).toEqual(["format", "path", "type", "types", "typesCapped", "properties", "propertiesCapped"]);
   });
@@ -394,7 +394,7 @@ describe("listStructuredData — the rows", () => {
       jsonLdParseErrors: 2,
       microdataErrors: 1,
       skips: { microdataItemrefSkipped: 0, rdfaUnsupported: 0, valuesCapped: 0 },
-      blocksAtCap: false, problemsCapped: false,
+      infoCountAtLeast: false, blocksAtCap: false, blocksDropped: null, nodesDropped: null, problemsCapped: false,
     });
   });
 });
@@ -474,7 +474,7 @@ describe("listStructuredData — refusals", () => {
 describe("the structured_data_nodes CSV view", () => {
   it("writes the header and one row per (block, problem), a clean block as one row", async () => {
     const lines = await csvLines(crawlId);
-    expect(lines[0]).toBe("URL,Format,Schema Type,Path,Node Type,Problem,Detail\r\n");
+    expect(lines[0]).toBe("URL,Format,Schema Type,Path,Node Type,Problem,Detail,Blocks Dropped,Nodes Dropped\r\n");
     const P = `${SITE}/product`;
     const A = `${SITE}/article`;
     expect(lines.slice(1)).toEqual(
@@ -492,7 +492,8 @@ describe("the structured_data_nodes CSV view", () => {
         [A, "jsonld", "Article|Blorpticle", "$.publisher", "", "unresolved-reference", `#org (${A}#org) is not defined on this page`],
         [A, "jsonld", "Person", "", "", "", ""],
         [A, "jsonld", "FAQPage", "", "", "", ""],
-      ].map((cells) => csvRecord(cells)),
+      // An extraction-4 page never counted what it dropped: two empty cells.
+      ].map((cells) => csvRecord([...cells, "", ""])),
     );
   });
 
@@ -700,7 +701,7 @@ describe("the listing and CSV after the final review", () => {
     expect(home?.types).toEqual(["WebPage", "FAQPage", "ItemList"]);
     const lines = await csvLines(multiId);
     const homeRows = lines.filter((l) => l.startsWith(`${SITE}/,`));
-    expect(homeRows[0]).toBe(csvRecord([`${SITE}/`, "jsonld", "WebPage|FAQPage", "", "", "", ""]));
+    expect(homeRows[0]).toBe(csvRecord([`${SITE}/`, "jsonld", "WebPage|FAQPage", "", "", "", "", "", ""]));
   });
 
   it("I1: a page whose block cut a list it counts says problemsCapped; the CSV holds the first MAX per list per block", async () => {
@@ -712,3 +713,242 @@ describe("the listing and CSV after the final review", () => {
     expect(empties).toHaveLength(MAX_PROBLEMS_PER_LIST);
   });
 });
+
+// Phase 29d, Task 3: what extraction 5 dropped, on the listing and the CSV.
+// Appended so no earlier line moves.
+describe("blocksDropped and nodesDropped (29d)", () => {
+  const dropId = `crawl_sd_listing_dropped_${runId}`;
+  const mixedId = `crawl_sd_listing_dropped_bad_${runId}`;
+  const FIVE = { microdataItemrefSkipped: 0, rdfaUnsupported: 0, valuesCapped: 0, blocksDropped: 0, nodesDropped: 0 };
+
+  async function atExtraction5(id: string, product: Record<string, number>): Promise<void> {
+    await db.execute(sql`update pages set extraction_version = 5, structured_data_skips = ${JSON.stringify(FIVE)}::jsonb
+                          where crawl_id = ${id}`);
+    await db.execute(sql`update pages set structured_data_skips = ${JSON.stringify({ ...FIVE, ...product })}::jsonb
+                          where crawl_id = ${id} and url = ${`${SITE}/product`}`);
+  }
+
+  beforeAll(async () => {
+    allCrawls.push(dropId, mixedId);
+    // 60 blocks on /product: the analyzer stored 50 and dropped 10.
+    const ids = await seedCrawl(dropId);
+    for (let i = BLOCKS.filter((b) => b.path === "/product").length; i < MAX_STRUCTURED_DATA_BLOCKS; i += 1) {
+      await db.insert(structuredData).values({
+        crawlId: dropId, pageId: ids.get("/product")!, schemaType: "Thing", format: "jsonld",
+        raw: { "@context": C, "@type": "Thing", name: `filler ${i}` },
+      });
+    }
+    await atExtraction5(dropId, { blocksDropped: 10 });
+    await service.runRulesForCrawl(LOCAL_TENANT, dropId);
+
+    // An extraction-5 page whose stored skips are the legacy three keys.
+    await seedCrawl(mixedId);
+    await service.runRulesForCrawl(LOCAL_TENANT, mixedId);
+    await db.execute(sql`update pages set extraction_version = 5 where crawl_id = ${mixedId} and url = ${`${SITE}/product`}`);
+  }, 120_000);
+
+  it("an extraction-5 page with 60 blocks lists blocksDropped 10 and nodesDropped 0; blocksAtCap follows blocksDropped", async () => {
+    const page = await service.listStructuredData(LOCAL_TENANT, dropId, {});
+    const product = page.items.find((r) => r.url === `${SITE}/product`);
+    expect(product).toMatchObject({ blocksDropped: 10, nodesDropped: 0, blocksAtCap: true });
+    expect(product?.skips).toEqual({ microdataItemrefSkipped: 0, rdfaUnsupported: 0, valuesCapped: 0 });
+    const article = page.items.find((r) => r.url === `${SITE}/article`);
+    expect(article).toMatchObject({ blocksDropped: 0, nodesDropped: 0, blocksAtCap: false });
+  });
+
+  it("on an extraction-5 page, blocksAtCap is blocksDropped > 0 even when the stored count is at the cap", async () => {
+    await db.execute(sql`update pages set structured_data_skips = structured_data_skips || '{"blocksDropped": 0}'::jsonb
+                          where crawl_id = ${dropId} and url = ${`${SITE}/product`}`);
+    const product = (await service.listStructuredData(LOCAL_TENANT, dropId, {})).items.find((r) => r.url === `${SITE}/product`);
+    // 50 blocks are stored, yet nothing was dropped: the cap was reached, not exceeded.
+    expect(product).toMatchObject({ blocksDropped: 0, blocksAtCap: false });
+    await db.execute(sql`update pages set structured_data_skips = structured_data_skips || '{"blocksDropped": 10}'::jsonb
+                          where crawl_id = ${dropId} and url = ${`${SITE}/product`}`);
+  });
+
+  it("an extraction-4 page lists both as null and keeps blocksAtCap as the stored count gives it", async () => {
+    const capped = await service.listStructuredData(LOCAL_TENANT, capId, {});
+    expect(capped.items.find((r) => r.url === `${SITE}/product`)).toMatchObject({ blocksDropped: null, nodesDropped: null, blocksAtCap: true });
+    const plain = await service.listStructuredData(LOCAL_TENANT, crawlId, {});
+    expect(plain.items.find((r) => r.url === `${SITE}/product`)).toMatchObject({ blocksDropped: null, nodesDropped: null, blocksAtCap: false });
+  });
+
+  it("an extraction-5 page whose skips lack the drop keys is a loud error naming the page, never null or 0", async () => {
+    const error = await service.listStructuredData(LOCAL_TENANT, mixedId, {}).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(Error);
+    const message = String((error as Error).message);
+    expect(message).toContain(mixedId);
+    expect(message).toContain(`${SITE}/product`);
+    expect(message).toContain("blocksDropped");
+  });
+
+  it("an extraction-4 page that holds the drop keys is a loud error too", async () => {
+    await db.execute(sql`update pages set extraction_version = 4 where crawl_id = ${mixedId}`);
+    await db.execute(sql`update pages set structured_data_skips = ${JSON.stringify(FIVE)}::jsonb
+                          where crawl_id = ${mixedId} and url = ${`${SITE}/product`}`);
+    const error = await service.listStructuredData(LOCAL_TENANT, mixedId, {}).catch((e: unknown) => e);
+    expect(String((error as Error).message)).toContain(`${SITE}/product`);
+    expect(String((error as Error).message)).toContain("blocksDropped");
+  });
+
+  it("the CSV carries both columns, filled on an extraction-5 page and empty for null", async () => {
+    const five = await csvLines(dropId);
+    const productRows = five.filter((l) => l.startsWith(`${SITE}/product,`));
+    expect(productRows.length).toBeGreaterThan(0);
+    for (const row of productRows) expect(row.endsWith(",10,0\r\n")).toBe(true);
+    const articleRows = five.filter((l) => l.startsWith(`${SITE}/article,`));
+    for (const row of articleRows) expect(row.endsWith(",0,0\r\n")).toBe(true);
+    const four = await csvLines(crawlId);
+    for (const row of four.slice(1)) expect(row.endsWith(",,\r\n")).toBe(true);
+  });
+});
+
+// Phase 29d, Task 4: unresolved references past the 50th are counted. Appended so no earlier line moves.
+describe("unresolved references past the 50th (29d)", () => {
+  const manyId = `crawl_sd_listing_unresolved_${runId}`;
+
+  beforeAll(async () => {
+    allCrawls.push(manyId);
+    const ids = await seedCrawl(manyId);
+    // "/": 59 resolved references, then one that is not. "/article": 70 that are not.
+    await db.insert(structuredData).values([
+      {
+        crawlId: manyId, pageId: ids.get("/")!, schemaType: "ItemList", format: "jsonld",
+        raw: {
+          "@context": C, "@type": "ItemList",
+          hasPart: Array.from({ length: 59 }, (_, i) => ({ "@id": `#part${i}`, "@type": "WebPage" })),
+          itemListElement: [...Array.from({ length: 59 }, (_, i) => ({ "@id": `#part${i}` })), { "@id": "#nowhere" }],
+        },
+      },
+      {
+        crawlId: manyId, pageId: ids.get("/article")!, schemaType: "ItemList", format: "jsonld",
+        raw: { "@context": C, "@type": "ItemList", itemListElement: Array.from({ length: 70 }, (_, i) => ({ "@id": `#gone${i}` })) },
+      },
+    ]);
+    await service.runRulesForCrawl(LOCAL_TENANT, manyId);
+  }, 120_000);
+
+  it("counts the 60th reference and the 70 unresolved ones exactly; problemsCapped only past 50", async () => {
+    const many = await service.listStructuredData(LOCAL_TENANT, manyId, {});
+    const base = await service.listStructuredData(LOCAL_TENANT, crawlId, {});
+    // "/" holds only the first block; "/article" holds the shared seed's blocks too.
+    expect(many.items.find((r) => r.url === `${SITE}/`)!.infoCount).toBe(1);
+    expect(many.items.find((r) => r.url === `${SITE}/article`)!.infoCount).toBe(
+      base.items.find((r) => r.url === `${SITE}/article`)!.infoCount + 70,
+    );
+    expect(many.items.find((r) => r.url === `${SITE}/`)!.problemsCapped).toBe(false);
+    expect(many.items.find((r) => r.url === `${SITE}/article`)!.problemsCapped).toBe(true);
+  });
+});
+
+// Phase 29d, Task 4 fix round 1: the page-level count is exact across blocks, and rule, listing and CSV agree.
+describe("unresolved references across blocks of one page (29d)", () => {
+  const refsTo = (ids: string[]) => ({
+    "@context": C, "@type": "ItemList", itemListElement: ids.map((id) => ({ "@id": id })),
+  });
+  const defining = (ids: string[]) => ({
+    "@context": C, "@type": "ItemList", hasPart: ids.map((id) => ({ "@id": id, "@type": "WebPage" })),
+  });
+  const ids = (from: number, to: number): string[] => Array.from({ length: to - from }, (_, i) => `#e${from + i}`);
+
+  /** A crawl whose "/" holds exactly these blocks; answers its listing row, and its unresolved CSV rows. */
+  async function scenario(name: string, raws: Record<string, unknown>[]) {
+    const id = `crawl_sd_listing_xblock_${name}_${runId}`;
+    allCrawls.push(id);
+    const pageIds = await seedCrawl(id);
+    for (const raw of raws) {
+      await db.insert(structuredData).values({
+        crawlId: id, pageId: pageIds.get("/")!, schemaType: "ItemList", format: "jsonld", raw,
+      });
+    }
+    await service.runRulesForCrawl(LOCAL_TENANT, id);
+    const row = (await service.listStructuredData(LOCAL_TENANT, id, {})).items.find((r) => r.url === `${SITE}/`)!;
+    const csv = (await csvLines(id)).filter((l) => l.startsWith(`${SITE}/,`) && l.includes(",unresolved-reference,"));
+    return { row, csv };
+  }
+
+  it("51 references all defined by another block: infoCount 0, not capped, no rows", async () => {
+    const { row, csv } = await scenario("alldef", [refsTo(ids(0, 51)), defining(ids(0, 51))]);
+    expect(row).toMatchObject({ infoCount: 0, problemsCapped: false });
+    expect(csv).toEqual([]);
+  });
+
+  it("70 references with 30 defined elsewhere: exactly 40, not capped, 40 CSV rows", async () => {
+    const { row, csv } = await scenario("forty", [refsTo(ids(0, 70)), defining(ids(0, 30))]);
+    expect(row).toMatchObject({ infoCount: 40, problemsCapped: false });
+    expect(csv).toHaveLength(40);
+  });
+
+  it("120 unresolved: counted exactly, capped, a CSV row for each; the path is named missing past the first 50", async () => {
+    const { row, csv } = await scenario("many", [refsTo(ids(0, 120))]);
+    expect(row).toMatchObject({ infoCount: 120, problemsCapped: true });
+    expect(csv).toHaveLength(120);
+    expect(csv.filter((l) => l.includes("(path not recorded)"))).toHaveLength(70);
+  });
+
+  it("an amplification page: the listing says infoCountAtLeast, the CSV rows say the list is incomplete", async () => {
+    const base = `${SITE}/${"x".repeat(1500)}/`;
+    const { row, csv } = await scenario("amp", [
+      { "@context": [C, { "@base": base }], "@type": "ItemList", itemListElement: ids(0, 5000).map((id) => ({ "@id": id })) },
+    ]);
+    expect(row).toMatchObject({ infoCountAtLeast: true, problemsCapped: true });
+    expect(row.infoCount).toBeGreaterThan(MAX_PROBLEMS_PER_LIST);
+    expect(row.infoCount).toBeLessThan(5000);
+    expect(csv.length).toBe(row.infoCount);
+    expect(csv.every((l) => l.includes("the list is incomplete"))).toBe(true);
+  });
+
+  it("a normal page says infoCountAtLeast false and its rows carry no incomplete note", async () => {
+    const { row, csv } = await scenario("normal", [refsTo(ids(0, 3))]);
+    expect(row).toMatchObject({ infoCount: 3, infoCountAtLeast: false });
+    expect(csv.some((l) => l.includes("the list is incomplete"))).toBe(false);
+  });
+
+  it("a verdict written when unresolved was cut at 50 (count 70, 50 listed) is refused: 409 from the listing and the CSV", async () => {
+    const id = `crawl_sd_listing_cut50_${runId}`;
+    allCrawls.push(id);
+    const pageIds = await seedCrawl(id);
+    await db.insert(structuredData).values({
+      crawlId: id, pageId: pageIds.get("/")!, schemaType: "ItemList", format: "jsonld", raw: refsTo(ids(0, 70)),
+    });
+    await service.runRulesForCrawl(LOCAL_TENANT, id);
+    // As 48d70b6 wrote it: no idsTruncated, unresolved cut at 50 beside a count of 70.
+    await db.execute(sql`
+      update structured_data
+         set validation_jsonb = jsonb_set(validation_jsonb - 'idsTruncated', '{unresolved}',
+               (select jsonb_agg(x) from (select x from jsonb_array_elements(validation_jsonb -> 'unresolved') x limit 50) t))
+       where crawl_id = ${id}`);
+    const error = await service.listStructuredData(LOCAL_TENANT, id, {}).catch((e: unknown) => e);
+    expect(error).toMatchObject({ code: "CONFLICT" });
+    expect(String((error as Error).message)).toMatch(/re-run the rules/);
+    await expect(csvLines(id)).rejects.toMatchObject({ code: "CONFLICT" });
+    // The same cut with the flag present (count above the list, flag false) is refused too.
+    await db.execute(sql`update structured_data set validation_jsonb = validation_jsonb || '{"idsTruncated": false}'::jsonb where crawl_id = ${id}`);
+    await expect(service.listStructuredData(LOCAL_TENANT, id, {})).rejects.toMatchObject({ code: "CONFLICT" });
+  });
+});
+
+// Phase 29d final review (Important 8). Appended so no cited line moves.
+describe("an unresolved reference past a block's first 50 in the CSV (29d final review)", () => {
+  it("says its written form was not recorded, as its path does, and never passes the resolved id off as written", async () => {
+    const id = `crawl_sd_listing_written_${runId}`;
+    allCrawls.push(id);
+    const pageIds = await seedCrawl(id);
+    await db.insert(structuredData).values({
+      crawlId: id, pageId: pageIds.get("/")!, schemaType: "ItemList", format: "jsonld",
+      raw: { "@context": C, "@type": "ItemList", itemListElement: Array.from({ length: 60 }, (_, i) => ({ "@id": `#w${i}` })) },
+    });
+    await service.runRulesForCrawl(LOCAL_TENANT, id);
+    const rows = (await csvLines(id)).filter((l) => l.startsWith(`${SITE}/,`) && l.includes(",unresolved-reference,"));
+    expect(rows).toHaveLength(60);
+    // The first 50 were recorded: their path and their form as written ("#w0"), beside the resolved id.
+    expect(rows[0]).toContain(`#w0 (${SITE}/#w0) is not defined on this page`);
+    // Past them, neither was: both say so, and the detail never shows the resolved id as what was written.
+    const past = rows.slice(50);
+    expect(past.every((l) => l.includes(PATH_NOT_RECORDED_TEXT))).toBe(true);
+    expect(past.every((l) => l.includes(`${SITE}/#w`) && l.includes(WRITTEN_NOT_RECORDED_TEXT))).toBe(true);
+    expect(past[0]).toContain(`${SITE}/#w50 ${WRITTEN_NOT_RECORDED_TEXT} is not defined on this page`);
+  }, 120_000);
+});
+const PATH_NOT_RECORDED_TEXT = "(path not recorded)";
+const WRITTEN_NOT_RECORDED_TEXT = "(written form not recorded)";

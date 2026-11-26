@@ -55,6 +55,12 @@ crawler inside Talos. The intended shape:
    fixed per-host delay honoured alongside adaptive concurrency, branded UA
    (Talos crawls as TalosBot; Ariadne default `AriadneBot`, configurable so a
    Talos-driven crawl can present Talos's identity), back-off on 403/429.
+   Since 29d a crawl may instead take a `userAgentPreset` (Googlebot smartphone or
+   desktop, bingbot desktop or mobile): it sets the header and the robots token together, so the
+   site's rules for that crawler apply. The seam's limit is plain: a spoofed bot
+   identity fails any site that verifies bots by IP address or reverse DNS
+   (Cloudflare, most CDNs), a preset only helps on a site that filters by
+   user-agent alone, and it never bypasses a challenge. The branded default stays.
    Met as of Phase 6 Task 6b: a `blocked` answer halves the concurrency window,
    and a refusal that NAMES A RATE (a 429, or anything carrying `Retry-After`)
    also DOUBLES that host's spacing — capped at 30s (until Phase 24a, for the
@@ -147,7 +153,10 @@ crawler inside Talos. The intended shape:
    credentials no process can read (`credentials_unreadable`, which only new values
    continue); and a host a worker's allowlist refused (`not_allowed`). `schedule_history`
    names the crawl on every skip, and `crawl_history` its pause reason. A host the
-   allowlist no longer admits is skipped `not-allowed` at fire time. One process leads
+   allowlist no longer admits is skipped `not-allowed` at fire time, and a schedule stored
+   before Phase 29d whose `userAgent` names no robots token of its own (a `Mozilla/…`
+   header) is skipped `identity_refused` until `schedule_update` gives it a
+   `robotsUserAgent`. One process leads
    the firing (a Postgres advisory lock among every `api:serve` and `worker:serve`; not
    the stdio MCP server); another candidate leads within 30 s of the leader's process or
    database session ending, and a leader cut off by the network has its session ended by
@@ -254,7 +263,8 @@ crawler inside Talos. The intended shape:
   `renderAccessibility: false` on `crawl_start` turns it off.
 - **Workers (Phase 28b).** `api:serve` accepts and answers and runs no crawl;
   `npm run worker:serve` claims and runs them, and at least one must be running for a
-  crawl to start. Both processes need `DATABASE_URL` and `ARIADNE_CREDENTIALS_KEY`
+  crawl to start. Both processes need `DATABASE_URL`, `ARIADNE_HEAP_MB` (the V8 heap cap node is
+  started with; see the Heap cap section of `docs/deploy.md`) and `ARIADNE_CREDENTIALS_KEY`
   (`<id>:<base64 of 32 bytes>`; the key is required, and a missing or malformed one is a
   boot error). A worker also needs `ARIADNE_WORKER_HTTP_PORT` (health and metrics) and
   `ARIADNE_ALLOWED_DOMAINS`: **a worker re-checks every crawl it claims against its own

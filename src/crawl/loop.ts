@@ -150,6 +150,7 @@ import {
 import { storableCap, storableDeep } from "./storable-text.js";
 import type { TenantId } from "../tenant.js";
 import { hostKeyOf } from "./host-key.js";
+import { ARIADNE_USER_AGENT, USER_AGENT_PRESETS, type UserAgentPreset } from "./user-agents.js";
 
 /**
  * `RenderSelectionConfig` is extended rather than restated: the render pass's
@@ -162,7 +163,17 @@ export interface CrawlConfig extends RenderSelectionConfig {
   siteUrl: string;
   maxPages: number;
   maxDepth: number;
+  /** The `User-Agent` request header: pages, probe, discovery, resources, recheck, renderer. */
   userAgent: string;
+  /**
+   * The one product token robots.txt groups are matched against (Phase 29d,
+   * `resolveCrawlIdentity`, src/crawl/user-agents.ts): discovery, the
+   * resources pass, `getCrawlDelay`, the robots rule and the robots read-out.
+   * Resolved when the config is built and stored with it.
+   */
+  robotsUserAgent: string;
+  /** The preset this identity came from; null for a custom `userAgent`. */
+  userAgentPreset: UserAgentPreset | null;
   perHostDelayMs: number;
   maxConcurrency: number;
   /**
@@ -549,7 +560,9 @@ export type NotFoundProbeEvidence = NotFoundProbeSample | SkippedProbe;
  */
 export const CRAWL_DEFAULTS = {
   maxDepth: 10,
-  userAgent: "AriadneBot/0.1 (+https://github.com/dawnforge-lab/ariadne)",
+  userAgent: ARIADNE_USER_AGENT,
+  robotsUserAgent: USER_AGENT_PRESETS.ariadne.robotsUserAgent,
+  userAgentPreset: "ariadne" as UserAgentPreset | null,
   perHostDelayMs: 1000,
   maxConcurrency: 16,
   // Phase 27c. A chain longer than ten hops is a site defect worth a finding,
@@ -1217,6 +1230,11 @@ export function parseStoredConfig(value: unknown, crawlId: string): CrawlConfig 
     maxPages: raw["maxPages"],
     maxDepth: raw["maxDepth"],
     userAgent: raw["userAgent"],
+    // A crawl stored before 29d carries no token. It was crawled with its full
+    // `userAgent` matched against robots.txt, so that is what a resume keeps
+    // doing: the faithful record of what happened, not a guessed default.
+    robotsUserAgent: raw["robotsUserAgent"] === undefined ? raw["userAgent"] : raw["robotsUserAgent"],
+    userAgentPreset: raw["userAgentPreset"] === undefined ? null : raw["userAgentPreset"],
     perHostDelayMs: raw["perHostDelayMs"],
     maxConcurrency: raw["maxConcurrency"],
     probeHosts: raw["probeHosts"],
@@ -1248,6 +1266,7 @@ export function parseStoredConfig(value: unknown, crawlId: string): CrawlConfig 
     ["maxPages", "number"],
     ["maxDepth", "number"],
     ["userAgent", "string"],
+    ["robotsUserAgent", "string"],
     ["perHostDelayMs", "number"],
     ["maxConcurrency", "number"],
   ] as const) {
@@ -1256,6 +1275,13 @@ export function parseStoredConfig(value: unknown, crawlId: string): CrawlConfig 
         `crawl ${crawlId}: stored config.${field} is ${typeof config[field]}, expected ${expected}`,
       );
     }
+  }
+  if (
+    config.userAgentPreset !== null &&
+    (typeof config.userAgentPreset !== "string" ||
+      !Object.hasOwn(USER_AGENT_PRESETS, config.userAgentPreset))
+  ) {
+    throw new Error(`crawl ${crawlId}: stored config.userAgentPreset is not a known preset or null`);
   }
   // The optional fields: absent is fine, present-and-wrong is not. A stored
   // `probeHosts: "false"` must not resume as "probe on" (it is truthy) or as
@@ -1397,6 +1423,9 @@ export function validateCrawlConfig(config: CrawlConfig): void {
   }
   if (config.userAgent.trim() === "") {
     throw new Error("CrawlConfig.userAgent must not be empty (rule 9: branded UA)");
+  }
+  if (config.robotsUserAgent.trim() === "") {
+    throw new Error("CrawlConfig.robotsUserAgent must not be empty");
   }
   if (normalizeUrl(config.siteUrl) === null) {
     throw new Error(`CrawlConfig.siteUrl is not an http(s) URL: ${config.siteUrl}`);
@@ -1904,6 +1933,7 @@ async function runToCompletion(
   try {
     discovery = await discover(config.siteUrl, {
       userAgent: config.userAgent,
+      robotsUserAgent: config.robotsUserAgent,
       signal,
       allowPrivate,
       credentials,
@@ -3093,6 +3123,7 @@ async function runToCompletion(
     : await fetchCrawlResources(db, crawlId, {
         siteUrl: config.siteUrl,
         userAgent: config.userAgent,
+        robotsUserAgent: config.robotsUserAgent,
         // THE SAME GATE the pages were fetched through — not a new one. A host
         // that earned 8s of spacing by refusing the page crawl is still at 8s
         // when we ask it about its images (hard rule 9).

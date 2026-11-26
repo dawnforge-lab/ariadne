@@ -59,6 +59,7 @@ import { DEFAULT_THRESHOLDS } from "../../src/rules/judgement.js";
 import { RULESET_VERSION } from "../../src/rules/registry/registry.js";
 import { LOCAL_TENANT } from "../../src/tenant.js";
 import { TEST_CREDENTIAL_KEY_ENV, TEST_CREDENTIAL_KEYS } from "../helpers/credential-keys.js";
+import { HEAP_CAP_NODE_FLAG, HEAP_CAP_TEST_ENV } from "../helpers/heap-cap.js";
 import { hostKeyOf } from "../../src/crawl/host-key.js";
 import { normalizeUrl } from "../../src/crawl/parse/url-utils.js";
 
@@ -2218,12 +2219,12 @@ describe("metric_table", () => {
     expect(String(body["title"] ?? "")).not.toBe("");
     expect((body["columns"] as { label: string }[]).map((c) => c.label)).toEqual([
       "Scope", "Pages Judged", "With Critical", "With Warning Only", "With Info Only",
-      "Clean", "Clean Ratio", "URLs Not Judged", "Canonicalised (set aside)", "Noindex (set aside)", "Paginated (duplicate checks only)",
+      "Clean", "Clean Ratio", "URLs Not Judged", "Canonicalised (set aside)", "Noindex (set aside)", "Paginated (duplicate checks only)", "Of Which PDFs",
     ]);
     expect(body["rows"]).toEqual([
       {
         scope: "Site", urlsTotal: 2, urlsWithCritical: 1, urlsWithWarningOnly: 0,
-        urlsWithInfoOnly: 0, urlsClean: 1, cleanRatio: 50, pagesNotAuditable: 0, urlsCanonicalised: null, urlsNoindex: null, urlsPaginated: null,
+        urlsWithInfoOnly: 0, urlsClean: 1, cleanRatio: 50, pagesNotAuditable: 0, urlsCanonicalised: null, urlsNoindex: null, urlsPaginated: null, urlsPdf: null,
       },
     ]);
     expect(body["summary"]).toEqual([]);
@@ -2391,7 +2392,7 @@ describe("robots_get", () => {
     // The wrapper is closed: the sitemap walk's counters live in the same blob
     // and none of them are here.
     expect(Object.keys(body).sort()).toEqual([
-      "crawlDelaySec", "crawlId", "note", "outcome", "raw", "robotsUrl",
+      "crawlDelaySec", "crawlId", "note", "outcome", "raw", "robotsUrl", "robotsUserAgent",
       "sitemapSources", "suppliedSitemaps", "truncated", "userAgent",
     ]);
   });
@@ -2540,9 +2541,9 @@ describe("export_crawl — the CSV views", () => {
     const lines = read(body).split("\r\n");
     expect(lines[0]).toBe(
       "Scope,Pages Judged,With Critical,With Warning Only,With Info Only,Clean," +
-        "Clean Ratio,URLs Not Judged,Canonicalised (set aside),Noindex (set aside),Paginated (duplicate checks only)",
+        "Clean Ratio,URLs Not Judged,Canonicalised (set aside),Noindex (set aside),Paginated (duplicate checks only),Of Which PDFs",
     );
-    expect(lines[1]).toBe("Site,2,1,0,0,1,50,0,,,"); // two empty: predates P22 §3
+    expect(lines[1]).toBe("Site,2,1,0,0,1,50,0,,,,"); // two empty: predates P22 §3
 
     const noMetric = await call("export_crawl", {
       crawlId: seededCrawlId, format: "csv", view: "metric_table",
@@ -2946,7 +2947,7 @@ describe("the stdio entrypoint", () => {
     // would hold the pool, and could still be fetching a real site for a client
     // that is gone (rule 9). This is the wiring, not the protocol: the spawn is
     // real, the crawl is not.
-    const child = spawn(process.execPath, ["node_modules/.bin/tsx", "src/api/mcp-serve.ts"], {
+    const child = spawn(process.execPath, ["node_modules/.bin/tsx", HEAP_CAP_NODE_FLAG, "src/api/mcp-serve.ts"], {
       cwd: new URL("../../", import.meta.url).pathname,
       env: {
         ...process.env,
@@ -2954,6 +2955,7 @@ describe("the stdio entrypoint", () => {
         ARIADNE_TENANT: "local",
         ARIADNE_ALLOWED_DOMAINS: "127.0.0.1",
         ARIADNE_CREDENTIALS_KEY: TEST_CREDENTIAL_KEY_ENV,
+        ...HEAP_CAP_TEST_ENV,
       },
       stdio: ["pipe", "pipe", "pipe"],
     });
@@ -2993,10 +2995,11 @@ describe("the stdio entrypoint without a credential key", () => {
         DATABASE_URL: databaseUrl(),
         ARIADNE_TENANT: "local",
         ARIADNE_ALLOWED_DOMAINS: "127.0.0.1",
+        ...HEAP_CAP_TEST_ENV,
       };
       delete env["ARIADNE_CREDENTIALS_KEY"];
       if (key !== undefined) env["ARIADNE_CREDENTIALS_KEY"] = key;
-      const child = spawn(process.execPath, ["node_modules/.bin/tsx", "src/api/mcp-serve.ts"], {
+      const child = spawn(process.execPath, ["node_modules/.bin/tsx", HEAP_CAP_NODE_FLAG, "src/api/mcp-serve.ts"], {
         cwd: new URL("../../", import.meta.url).pathname,
         env,
         stdio: ["pipe", "pipe", "pipe"],
@@ -3428,4 +3431,50 @@ describe("structured_data's description names the node shape (29a final review)"
     expect(text).toContain("{format, path, type, types, typesCapped, properties, propertiesCapped}");
     expect(text).toContain("problemsCapped");
   });
+});
+
+describe("structured_data's description names the drop counts (29d)", () => {
+  it("names blocksDropped and nodesDropped, and says null is below extraction 5", async () => {
+    const listed = await client.listTools();
+    const text = listed.tools.find((t) => t.name === "structured_data")?.description ?? "";
+    expect(text).toContain("blocksDropped");
+    expect(text).toContain("nodesDropped");
+    expect(text).toContain("extraction below version 5");
+  });
+});
+
+describe("the stdio entrypoint without its heap cap", () => {
+  it("refuses to boot on stderr, naming the flag, when node was not started with ARIADNE_HEAP_MB (29d)", async () => {
+    const child = spawn(process.execPath, ["node_modules/.bin/tsx", "src/api/mcp-serve.ts"], {
+      cwd: new URL("../../", import.meta.url).pathname,
+      // A minimal env, not `...process.env`: a NODE_OPTIONS cap in the developer's
+      // shell would otherwise let this child boot.
+      env: {
+        PATH: process.env["PATH"],
+        DATABASE_URL: databaseUrl(),
+        ARIADNE_TENANT: "local",
+        ARIADNE_ALLOWED_DOMAINS: "127.0.0.1",
+        ARIADNE_CREDENTIALS_KEY: TEST_CREDENTIAL_KEY_ENV,
+        ...HEAP_CAP_TEST_ENV,
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (chunk: Buffer) => (stdout += chunk.toString("utf8")));
+    child.stderr.on("data", (chunk: Buffer) => (stderr += chunk.toString("utf8")));
+    const code = await new Promise<number | null>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        child.kill("SIGKILL");
+        reject(new Error(`mcp:serve did not exit — ${stderr}`));
+      }, 30_000);
+      child.once("exit", (c) => {
+        clearTimeout(timer);
+        resolve(c);
+      });
+    });
+    expect(code).not.toBe(0);
+    expect(stderr).toContain(HEAP_CAP_NODE_FLAG);
+    expect(stdout).toBe("");
+  }, 60_000);
 });

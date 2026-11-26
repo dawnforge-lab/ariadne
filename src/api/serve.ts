@@ -30,7 +30,11 @@ import { timingWith } from "../worker/timing.js";
 import { loadApiConfig } from "./config.js";
 import { createApiServer } from "./http.js";
 import { assertMetricsTokenDistinct } from "../ops/serve.js";
+import { assertHeapCap } from "../runtime/heap-cap.js";
 
+// First: a process not running under its configured V8 heap cap is a boot error
+// naming the flag (29d), before a config is read or anything is constructed.
+const heapCapMb = assertHeapCap();
 const config = loadApiConfig();
 // Before anything is constructed: a missing or malformed key is a boot error
 // naming the variable, never a server that cannot store credentials (28b).
@@ -77,7 +81,7 @@ const reaper = new ReaperLoop(db, {
 reaper.start();
 
 const bound = await api.listen(config.port, process.env["ARIADNE_API_HOST"] ?? "127.0.0.1");
-console.error(`ariadne api: instance ${instanceId}; crawls run on workers (npm run worker:serve); this process runs a reaper, not crawls`);
+console.error(`ariadne api: instance ${instanceId}; heap cap ${heapCapMb} MB; crawls run on workers (npm run worker:serve); this process runs a reaper, not crawls`);
 console.error(
   `ariadne api listening on http://${bound.host}:${bound.port} — ` +
     `${config.allowedDomains.length} allowed domain(s)`,

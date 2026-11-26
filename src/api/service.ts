@@ -89,6 +89,11 @@ import {
   type CrawlMode,
 } from "../crawl/loop.js";
 import {
+  CrawlIdentityError,
+  resolveCrawlIdentity,
+  type CrawlIdentity,
+} from "../crawl/user-agents.js";
+import {
   credentialFieldError,
   describeShape,
   redactedCredentials,
@@ -275,18 +280,22 @@ import {
 import {
   blockInfos,
   blockProblemsCapped,
+  blockIdsTruncated,
+  blockUnresolved,
+  UNRESOLVED_CAPPED_AT,
   blockWarnings,
   parseStructuredDataFormat,
   referencesMeasured,
   UNRESOLVED_NOT_MEASURED,
   projectNodes,
-  projectSkips,
+  projectSkipFacts,
+  type ProjectedSkips,
   storedFormat,
   validationReadable,
   type StructuredDataNode,
 } from "./structured-data.js";
 import { MAX_STRUCTURED_DATA_BLOCKS } from "../crawl/parse/page-analyzer.js";
-import type { StructuredDataFormat, StructuredDataSkips } from "../crawl/parse/page-analyzer.js";
+import type { StructuredDataFormat } from "../crawl/parse/page-analyzer.js";
 import { decodeCursor, encodeCursor, parseLimit } from "./paging.js";
 import { staleBlob } from "../rules/schema-org/blob-sql.js";
 import { listEvents, type CrawlEvent } from "../events/events.js";
@@ -364,6 +373,10 @@ export interface StartCrawlInput {
   maxPages?: number;
   maxDepth?: number;
   userAgent?: string;
+  /** Phase 29d: a named crawler identity; sets both the header and the robots token. */
+  userAgentPreset?: string;
+  /** Phase 29d: the one robots.txt product token; derived from `userAgent` when absent. */
+  robotsUserAgent?: string;
   perHostDelayMs?: number;
   maxConcurrency?: number;
   probeHosts?: boolean;
@@ -1314,6 +1327,11 @@ export interface RobotsEvidence {
    * assumed to be `*`.
    */
   userAgent: string | null;
+  /**
+   * The product token the groups were matched against (Phase 29d). Null on a
+   * crawl stored before 29d, which matched its full `userAgent`.
+   */
+  robotsUserAgent: string | null;
 }
 
 /** A page of results, in the surface's one pagination shape. */
@@ -2457,25 +2475,39 @@ export interface StructuredDataPageRow {
   /**
    * Each block's top-level node, in block order:
    * `{format, path, type, types, typesCapped, properties, propertiesCapped}` —
-   * `type` the primary type, `types` every type the node states (one for a
-   * microdata or RDFa node at extraction 4), both lists capped per node.
+   * `type` the primary type, `types` every type the node states (a microdata
+   * or RDFa node states one at extraction 4, and from extraction 5 every
+   * itemtype / typeof token), both lists capped per node.
    */
   nodes: StructuredDataNode[];
   warningCount: number;
   infoCount: number;
+  /**
+   * `infoCount` is a lower bound ("at least"): a block of the page left ids out
+   * of its verdict (`idsTruncated`: an id over the length limit, or the block's
+   * id budget), so unresolved references may be missing from it. False on a
+   * crawl that does not measure references.
+   */
+  infoCountAtLeast: boolean;
   jsonLdParseErrors: number;
   microdataErrors: number | null;
-  skips: StructuredDataSkips | null;
+  skips: ProjectedSkips | null;
   /**
    * The page's stored blocks reached the analyzer's cap
    * (`MAX_STRUCTURED_DATA_BLOCKS`): blocks past it were not stored, so an id a
-   * reference names may be defined there (review I3).
+   * reference names may be defined there (review I3). From extraction 5 it is
+   * `blocksDropped > 0`; below it, the stored block count reaching the cap.
    */
   blocksAtCap: boolean;
+  /** Blocks past the per-page cap that were not stored. Null below extraction 5: not counted. */
+  blocksDropped: number | null;
+  /** Nodes past the per-block cap that were not stored. Null below extraction 5: not counted. */
+  nodesDropped: number | null;
   /**
    * A block on the page cut one of the lists the counts read at
    * `MAX_PROBLEMS_PER_LIST`: `warningCount` / `infoCount` may be short (final
-   * review I1; a cut references list may or may not hide more unresolved ones).
+   * review I1). The unresolved count is exact (`infoCountAtLeast` says when it
+   * is a lower bound); it is capped (true) here when the page has more than 50.
    */
   problemsCapped: boolean;
 }
@@ -2745,6 +2777,17 @@ export class ApiService {
       }
     }
     this.log = config.log ?? ((line) => console.error(line));
+    // The operator's identity defaults are validated here, once, naming the
+    // setting: a bad default must not surface as a 400 on every start that
+    // names no identity field (Phase 29d).
+    try {
+      this.identityOf({} as CrawlRequestFields);
+    } catch (error) {
+      if (error instanceof CrawlIdentityError) {
+        throw new Error(`ServiceConfig.crawlDefaults: ${error.field}: ${error.message}`);
+      }
+      throw error;
+    }
     // The keys are checked by the vault's constructor, the retention here:
     // both are refused at construction, naming the field, never a value.
     this.vault = new CredentialVault(db, config.credentialKeys);
@@ -3131,7 +3174,19 @@ export class ApiService {
 
     // The scope and the URL limit as the crawl will run with them — the
     // request over the operator's defaults over the engine's.
-    const preliminary = this.effectiveConfig(siteUrl, crawlInput, null, undefined);
+    // The identity, resolved once: the request's own fields, else the
+    // operator's defaults', else the branded default (Phase 29d, R2).
+    let identity: CrawlIdentity;
+    try {
+      identity = this.identityOf(crawlInput);
+    } catch (error) {
+      if (error instanceof CrawlIdentityError) {
+        errors.push({ path: error.field, code: "invalid", message: error.message });
+        return refused(errors);
+      }
+      throw error;
+    }
+    const preliminary = this.effectiveConfig(siteUrl, crawlInput, null, undefined, identity);
     const scope: CrawlScope = {
       exclude: preliminary.exclude ?? [],
       include: preliminary.include ?? [],
@@ -3186,7 +3241,7 @@ export class ApiService {
     const credentials = shapeOf(supplied) === null ? undefined : supplied;
 
     const listCount = listed === null ? null : listed.urls.length;
-    const crawlConfig = this.effectiveConfig(siteUrl, crawlInput, listCount, credentials);
+    const crawlConfig = this.effectiveConfig(siteUrl, crawlInput, listCount, credentials, identity);
     if (listCount !== null && crawlConfig.maxPages < listCount) {
       errors.push({
         path: "maxPages",
@@ -3883,6 +3938,19 @@ export class ApiService {
     const config = row.config;
     const userAgent =
       isRecord(config) && typeof config["userAgent"] === "string" ? config["userAgent"] : null;
+    // Null on a crawl stored before 29d (absent): it matched its full user
+    // agent. A token that is present and not a non-empty string is a row no
+    // crawl of ours wrote; read as null it would pass for a pre-29d crawl, so
+    // it is refused as `robotsUserAgentOf` refuses it.
+    const token = isRecord(config) ? config["robotsUserAgent"] : undefined;
+    if (token !== undefined && (typeof token !== "string" || token.trim() === "")) {
+      throw new ServiceError(
+        "CONFLICT",
+        `crawl ${crawlId} stores a robotsUserAgent that is not a non-empty string, so the robots ` +
+          "group it matched cannot be named",
+      );
+    }
+    const robotsUserAgent = token === undefined ? null : token;
 
     return {
       crawlId,
@@ -3895,6 +3963,7 @@ export class ApiService {
       sitemapSources: robots.sitemapSources,
       suppliedSitemaps: robots.suppliedSitemaps,
       userAgent,
+      robotsUserAgent,
     };
   }
 
@@ -6237,7 +6306,7 @@ export class ApiService {
     // columns. A finding names a page (`issues.page_id`), names a URL with no
     // page row behind it, or names nothing at all — an inner join would drop the
     // last two silently, which is a listing that says a rule found fewer things
-    // than it did (hard rule 7). The eight columns are the projection
+    // than it did (hard rule 7). The nine columns are the projection
     // `indexabilityOf` reads and nothing else: this is a listing, not
     // `pages_query`.
     const result = await this.db.execute<{
@@ -6248,6 +6317,7 @@ export class ApiService {
       page_url: string | null;
       status_code: number | null;
       fetch_class: string | null;
+      content_type: string | null;
       robots_meta: string | null;
       x_robots_tag: string | null;
       is_indexable: boolean | null;
@@ -6258,7 +6328,7 @@ export class ApiService {
              coalesce(i.details_jsonb->>'pageUrl', '') as url_key,
              i.details_jsonb as evidence,
              i.dedupe_key,
-             p.url as page_url, p.status_code, p.fetch_class,
+             p.url as page_url, p.status_code, p.fetch_class, p.content_type,
              p.robots_meta, p.x_robots_tag, p.is_indexable,
              p.canonical_html, p.canonical_header
       from issues i
@@ -6285,6 +6355,7 @@ export class ApiService {
               url: row.page_url ?? "",
               fetchClass: row.fetch_class,
               statusCode: row.status_code,
+              contentType: row.content_type,
               robotsMeta: row.robots_meta,
               xRobotsTag: row.x_robots_tag,
               isIndexable: row.is_indexable,
@@ -7154,6 +7225,7 @@ export class ApiService {
           parse_errors: number;
           microdata_errors: number | null;
           skips: unknown;
+          extraction_version: number | null;
           formats: string[];
           types: string[];
           nodes: unknown;
@@ -7162,11 +7234,13 @@ export class ApiService {
           unreadable: number;
           blocks_at_cap: boolean;
           problems_capped: boolean;
+          info_at_least: boolean;
         }>(sql`
           select p.url, p.page_type, p.is_indexable,
                  p.structured_data_parse_errors as parse_errors,
                  p.structured_data_microdata_errors as microdata_errors,
                  p.structured_data_skips as skips,
+                 p.extraction_version,
                  coalesce(b.formats, '{}'::text[]) as formats,
                  -- Every type the page's top-level nodes state, in authored
                  -- order (block, then the node's own order), each once (final
@@ -7201,15 +7275,19 @@ export class ApiService {
                  coalesce(b.infos, 0)::int as info_count,
                  coalesce(b.unreadable, 0)::int as unreadable,
                  coalesce(b.blocks >= ${MAX_STRUCTURED_DATA_BLOCKS}, false) as blocks_at_cap,
-                 coalesce(b.problems_capped, false) as problems_capped
+                 (coalesce(b.problems_capped, false) or coalesce(b.unresolved > ${UNRESOLVED_CAPPED_AT}, false)) as problems_capped,
+                 (coalesce(b.ids_truncated, false) and ${referencesMeasured(crawlId)}) as info_at_least
             from pages p
             left join lateral (
               select array_agg(distinct sd.format order by sd.format) as formats,
                      bool_or(case when ${readable}
-                                  then ${blockProblemsCapped(sql`sd.validation_jsonb`, crawlId)} end) as problems_capped,
+                                  then ${blockProblemsCapped(sql`sd.validation_jsonb`)} end) as problems_capped,
+                     sum(case when ${readable}
+                              then ${blockUnresolved(sql`sd.validation_jsonb`, crawlId, sql`sd.page_id`, sql`sd.id`)} end) as unresolved,
+                     bool_or(case when ${readable} then ${blockIdsTruncated(sql`sd.validation_jsonb`)} end) as ids_truncated,
                      sum(case when ${readable} then ${blockWarnings(sql`sd.validation_jsonb`)} end) as warnings,
                      sum(case when ${readable}
-                              then ${blockInfos(sql`sd.validation_jsonb`, crawlId, sql`sd.page_id`)} end) as infos,
+                              then ${blockInfos(sql`sd.validation_jsonb`, crawlId, sql`sd.page_id`, sql`sd.id`)} end) as infos,
                      count(*) filter (where ${readable} is not true) as unreadable,
                      count(*) as blocks
                 from structured_data sd
@@ -7231,6 +7309,7 @@ export class ApiService {
                 "(one written before the 29a rework is not): re-run the rules (crawl_rules)",
             );
           }
+          const facts = projectSkipFacts(row.skips, row.extraction_version, `crawl ${crawlId}, page ${row.url}`);
           return {
             url: row.url,
             pageType: row.page_type,
@@ -7240,10 +7319,15 @@ export class ApiService {
             nodes: projectNodes(row.nodes, crawlId, row.url),
             warningCount: row.warning_count,
             infoCount: row.info_count,
+            infoCountAtLeast: row.info_at_least,
             jsonLdParseErrors: row.parse_errors,
             microdataErrors: row.microdata_errors,
-            skips: projectSkips(row.skips, crawlId, row.url),
-            blocksAtCap: row.blocks_at_cap,
+            skips: facts.skips,
+            // From extraction 5 the writer says how many blocks it dropped, which is
+            // exact; below it the stored count reaching the cap is the only signal.
+            blocksAtCap: facts.blocksDropped === null ? row.blocks_at_cap : facts.blocksDropped > 0,
+            blocksDropped: facts.blocksDropped,
+            nodesDropped: facts.nodesDropped,
             problemsCapped: row.problems_capped,
           };
         });
@@ -8194,6 +8278,31 @@ export class ApiService {
   }
 
   /**
+   * The crawl identity a request runs with (Phase 29d). The request's own three
+   * fields win as a set: a request naming a preset must not collide with the
+   * operator's `userAgent` default, so the operator's fields apply only when the
+   * request names none, so `robotsUserAgent` alone on a server whose default
+   * `userAgent` is custom is refused (it is not merged with that default).
+   * Throws `CrawlIdentityError`.
+   */
+  private identityOf(input: CrawlRequestFields): CrawlIdentity {
+    const requested = stripUndefined({
+      userAgentPreset: input.userAgentPreset,
+      userAgent: input.userAgent,
+      robotsUserAgent: input.robotsUserAgent,
+    });
+    if (Object.keys(requested).length > 0) return resolveCrawlIdentity(requested);
+    const defaults = this.config.crawlDefaults;
+    return resolveCrawlIdentity(
+      stripUndefined({
+        userAgent: defaults?.userAgent,
+        robotsUserAgent: defaults?.robotsUserAgent,
+        userAgentPreset: defaults?.userAgentPreset ?? undefined,
+      }),
+    );
+  }
+
+  /**
    * The crawl config a request runs with. `listCount` is a list crawl's
    * distinct URLs (null for a spider crawl, or before the list is checked);
    * `credentials` the values, whose shape joins the config beside them (the
@@ -8204,6 +8313,7 @@ export class ApiService {
     input: CrawlRequestFields,
     listCount: number | null,
     credentials: CrawlCredentials | undefined,
+    identity: CrawlIdentity,
   ): CrawlConfig {
     const shape = credentials === undefined ? null : shapeOf(credentials);
     // Precedence, low to high: the engine's defaults (with the 27c fields
@@ -8222,6 +8332,9 @@ export class ApiService {
       ...(listCount === null ? API_CRAWL_DEFAULTS : { maxPages: 2 * listCount }),
       ...stripUndefined(this.config.crawlDefaults ?? {}),
       ...stripUndefined({ ...input, siteUrl }),
+      // After the request: the resolved trio is what is stored, whichever of
+      // the three the request spelled.
+      ...identity,
       ...(listCount === null ? {} : { listUrlCount: listCount }),
       ...(credentials === undefined || shape === null ? {} : { credentials, credentialShape: shape }),
     } as CrawlConfig;

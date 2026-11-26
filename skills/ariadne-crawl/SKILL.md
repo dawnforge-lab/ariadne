@@ -34,7 +34,9 @@ of them is worked around.
    - `npm run api:serve` — HTTP on `127.0.0.1:8787` by default, bearer token
      required (`ARIADNE_API_TOKEN`, 16 characters minimum), plus an
      `X-Ariadne-Tenant` header on every request.
-   Both need `DATABASE_URL`. Neither invents one.
+   Both need `DATABASE_URL`. Neither invents one. Both also need `ARIADNE_HEAP_MB`
+   (for example `384`): the npm scripts start node with that heap cap and the process
+   refuses to boot if it does not match (see the Heap cap section of the deploy doc).
 2. **The target host is on the allowlist.** `ARIADNE_ALLOWED_DOMAINS` is a
    comma-separated list of bare hosts (`example.com`) or subdomain wildcards
    (`*.example.com`). An empty list refuses every crawl and answers every query.
@@ -114,8 +116,10 @@ as `crawl_start` checks it. `schedule_history` says what each slot did (a fired
 crawl's own lifecycle is in `crawl_history`): fired (naming the crawl) or skipped,
 with the reason — overlap (its previous crawl is still queued,
 running or paused, so a schedule never stacks crawls; a crawl you paused holds it until
-you resume or cancel that crawl), not-allowed (the host left the allowlist) or
-credentials_unreadable (send the credentials again with `schedule_update`). Schedules
+you resume or cancel that crawl), not-allowed (the host left the allowlist),
+credentials_unreadable (send the credentials again with `schedule_update`) or
+identity_refused (a schedule stored before robots tokens whose `userAgent` names no
+token of its own: `schedule_update` with a `robotsUserAgent`). Schedules
 fire only while an `api:serve` or `worker:serve` process runs; the stdio server alone
 stores them and never fires them.
 
@@ -218,7 +222,10 @@ documents this crawl was handed. A document in both was declared and re-supplied
 walk fetched it once.
 
 **`userAgent`**, **`perHostDelayMs`** and **`maxConcurrency`** are the politeness
-settings, not tuning knobs for speed. The user agent must stay identifiable, and
+settings, not tuning knobs for speed. A `userAgentPreset` (a Googlebot or bingbot
+identity) is a spoofed bot identity for a site you have permission to crawl as that
+crawler: a site that verifies bots by IP address or reverse DNS (Cloudflare, most
+CDNs) refuses it, and it never bypasses a challenge. The user agent must stay identifiable, and
 robots.txt's own `crawl-delay` wins over `perHostDelayMs` when it is longer. The only
 direction you may ever move the other two is **slower**, and the platform table below
 is when to do it.

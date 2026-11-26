@@ -200,18 +200,39 @@ describe("collapseTemplates — the collapse boundary", () => {
     expect([...after.keys()]).toEqual(["/blog/:id"]);
   });
 
-  it("merges a family split across param spellings", () => {
-    // The Phase 4/5 sighting: `/blog/17` types as `/blog/:id` and
-    // `/blog/a-long-post-title` as `/blog/:slug`, so one blog reads as two
-    // templates. They share a family and now share a type.
+  it("pagination keeps :id beside a slug type", () => {
+    const after = typesAfter([...generated("/blog/", 20, 3), "/blog/2", "/blog/3", "/blog/10"]);
+    expect([...after.keys()].sort()).toEqual(["/blog/:id", "/blog/:slug"]);
+    expect(after.get("/blog/:id")).toBe(3);
+    expect(after.get("/blog/:slug")).toBe(20);
+  });
+
+  it("a trailing slash does not change it", () => {
+    const after = typesAfter([...generated("/blog/", 20, 3), "/blog/2/", "/blog/3/", "/blog/10/"]);
+    expect([...after.keys()].sort()).toEqual(["/blog/:id", "/blog/:slug"]);
+    expect(after.get("/blog/:id")).toBe(3);
+    expect(after.get("/blog/:slug")).toBe(20);
+  });
+
+  it("a dated segment still joins nothing new", () => {
+    const after = typesAfter(["/news/2024-01-05", "/news/2024-01-06", "/news/2024-01-07"]);
+    expect([...after.keys()]).toEqual(["/news/:date"]);
+    expect(after.get("/news/:date")).toBe(3);
+  });
+
+  it("keeps numeric posts apart from slugs: a family split across :id and :slug stays two (29d)", () => {
+    // The Phase 4/5 sighting merged `/blog/17` (`/blog/:id`) into
+    // `/blog/:slug`. 29d: a numeric last segment is pagination as often as a
+    // post id, so `:id` is its own type and is never absorbed.
     const after = typesAfter([
       "/blog/17",
       "/blog/18",
       "/blog/a-long-post-title",
       "/blog/another-long-title",
     ]);
-    expect([...after.keys()]).toEqual(["/blog/:slug"]);
-    expect(after.get("/blog/:slug")).toBe(4);
+    expect([...after.keys()].sort()).toEqual(["/blog/:id", "/blog/:slug"]);
+    expect(after.get("/blog/:id")).toBe(2);
+    expect(after.get("/blog/:slug")).toBe(2);
   });
 });
 
@@ -488,7 +509,7 @@ describe("inferPageTemplates — the collapse in SQL (27d)", () => {
     { pageType: "/a/123\n", paths: 1 }, // digits then a newline: `$` is end of string, member
     { pageType: "/a/2024-01-15", paths: 1 }, // a date: not ours
     { pageType: `/a/${UUID}`, paths: 1 }, // a UUID: not ours
-    { pageType: "/a/:id", paths: 2 }, // a detected id template: member
+    { pageType: "/a/:id", paths: 2 }, // a detected id template: pagination, its own type (29d)
     { pageType: "/a/x‐y‐z", paths: 1 }, // Unicode hyphens are not '-': member
     { pageType: "/a/b/", paths: 1 }, // trailing slash: not its own template
     { pageType: "/a//b", paths: 1 }, // doubled slash: not its own template
@@ -535,6 +556,12 @@ describe("inferPageTemplates — the collapse in SQL (27d)", () => {
     { pageType: "/collections/sale", paths: 1 },
     { pageType: "/collections/all", paths: 1 },
     { pageType: "/collections/new", paths: 1 },
+    // 29d: pagination keeps :id beside a slug type, with or without a trailing slash.
+    { pageType: "/pg/:id", paths: 3 },
+    { pageType: "/pg/:slug", paths: 20 },
+    { pageType: "/pg2/:id", paths: 3 },
+    { pageType: "/pg2/:slug", paths: 20 },
+    { pageType: "/news/:date", paths: 1 },
   ];
 
   it("matches the JS oracle over every fixture type, type by type", async () => {

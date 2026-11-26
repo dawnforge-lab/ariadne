@@ -10,6 +10,7 @@ import {
   type SitemapSink,
 } from "../../src/crawl/discovery.js";
 import { closeFetchAgents } from "../../src/crawl/http.js";
+import { USER_AGENT_PRESETS } from "../../src/crawl/user-agents.js";
 import { INDEXED_URL_MAX } from "../../src/crawl/parse/url-utils.js";
 import { MAX_HREFLANG_PAIRS } from "../../src/crawl/parse/page-analyzer.js";
 
@@ -50,6 +51,7 @@ function recordingSink(): RecordingSink {
  */
 const OPTS = {
   userAgent: "AriadneBot-test",
+  robotsUserAgent: "AriadneBot-test",
   allowPrivate: true,
   maxCrawlDelayMs: 0,
   retryBackoffMs: 1,
@@ -1467,5 +1469,53 @@ describe("discover: sitemap timing and walk budget (27d)", () => {
     });
     expect(d.truncation.timeLimited).toBe(false);
     expect(d.sitemapEntries).toHaveLength(5);
+  });
+});
+
+// Phase 29d, Task 6: robots groups are matched by the robots token; the request
+// header keeps the full user-agent string.
+describe("discover: user-agent presets and the robots token", () => {
+  let server: Server;
+  let url: string;
+  const robotsUserAgents: string[] = [];
+
+  beforeAll(async () => {
+    server = createServer((req, res) => {
+      if (req.url === "/robots.txt") {
+        robotsUserAgents.push(String(req.headers["user-agent"]));
+        res.setHeader("content-type", "text/plain");
+        res.end(
+          "User-agent: Googlebot\nDisallow: /g\nCrawl-delay: 7\n\nUser-agent: *\nDisallow: /s\nCrawl-delay: 2\n",
+        );
+      } else {
+        res.statusCode = 404;
+        res.end("nope");
+      }
+    });
+    url = await listen(server);
+  });
+
+  afterAll(async () => {
+    server.closeAllConnections();
+    await new Promise<void>((r) => server.close(() => r()));
+  });
+
+  it("the googlebot-desktop preset is judged by the Googlebot group, read through the token", async () => {
+    const preset = USER_AGENT_PRESETS["googlebot-desktop"];
+    const d = await discover(url, { ...OPTS, ...preset });
+    expect(d.robots.isAllowed(`${url}/g`)).toBe(false);
+    expect(d.robots.isAllowed(`${url}/s`)).toBe(true);
+    expect(d.robots.crawlDelaySec).toBe(7);
+    // The wire carries the preset's full string, not the token.
+    expect(robotsUserAgents.at(-1)).toBe(preset.userAgent);
+  });
+
+  it("the default identity is judged by the * group", async () => {
+    const preset = USER_AGENT_PRESETS.ariadne;
+    const d = await discover(url, { ...OPTS, ...preset });
+    expect(d.robots.isAllowed(`${url}/g`)).toBe(true);
+    expect(d.robots.isAllowed(`${url}/s`)).toBe(false);
+    expect(d.robots.crawlDelaySec).toBe(2);
+    expect(robotsUserAgents.at(-1)).toBe(preset.userAgent);
   });
 });

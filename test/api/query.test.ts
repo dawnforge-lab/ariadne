@@ -1621,7 +1621,7 @@ describe("GET /crawls/:id/metrics/:metricId", () => {
       "With Info Only",
       "Clean",
       "Clean Ratio",
-      "URLs Not Judged", "Canonicalised (set aside)", "Noindex (set aside)", "Paginated (duplicate checks only)", // P22 §3, P23 T7
+      "URLs Not Judged", "Canonicalised (set aside)", "Noindex (set aside)", "Paginated (duplicate checks only)", "Of Which PDFs", // P22 §3, P23 T7, P29d
     ]);
     // The site row prints `Site` in the scope column whatever that column is
     // headed, and every number crosses as a number for the client to format.
@@ -1634,7 +1634,7 @@ describe("GET /crawls/:id/metrics/:metricId", () => {
         urlsWithInfoOnly: 0,
         urlsClean: 0,
         cleanRatio: 0,
-        pagesNotAuditable: 112, urlsCanonicalised: null, urlsNoindex: null, urlsPaginated: null, // null, not 0
+        pagesNotAuditable: 112, urlsCanonicalised: null, urlsNoindex: null, urlsPaginated: null, urlsPdf: null, // null, not 0
       },
     ]);
     // A complete table says nothing about being empty.
@@ -2024,7 +2024,7 @@ describe("GET /crawls/:id/robots", () => {
     // site's own public document: the blob it comes out of holds the sitemap
     // walk's counters too, and none of them are here.
     expect(Object.keys(res.body).sort()).toEqual([
-      "crawlDelaySec", "crawlId", "note", "outcome", "raw", "robotsUrl",
+      "crawlDelaySec", "crawlId", "note", "outcome", "raw", "robotsUrl", "robotsUserAgent",
       "sitemapSources", "suppliedSitemaps", "truncated", "userAgent",
     ]);
   });
@@ -4570,4 +4570,36 @@ beforeAll(async () => {
                                 where l.crawl_id = p.crawl_id and l.target_url = p.url
                                   and l.source_page_id <> p.id)
      where p.crawl_id = ${crawlF}`);
+});
+
+// Phase 29d final review (Important 7). Appended at the end so no line the
+// surface document cites moves.
+describe("GET /crawls/:id/robots and a malformed robotsUserAgent (29d)", () => {
+  const discovery = {
+    robots: { outcome: "read", crawlDelaySec: null, note: null, raw: ROBOTS_TEXT, truncated: false },
+    sitemapSources: [],
+    truncation: { failures: [], oversizedDocsSkipped: 0, entryLimited: false, docsFetched: 0 },
+    docsFetched: 0,
+  };
+
+  it("409s a present token that is not a non-empty string; an absent one (pre-29d) answers null", async () => {
+    const bad = `crawl_query_robots_badtoken_${Date.now()}`;
+    const empty = `crawl_query_robots_emptytoken_${Date.now()}`;
+    const old = `crawl_query_robots_pre29d_${Date.now()}`;
+    try {
+      await seedCrawl(bad, { config: { siteUrl: `${SITE}/`, userAgent: "AriadneBot/0.1", robotsUserAgent: 7 }, discovery });
+      await seedCrawl(empty, { config: { siteUrl: `${SITE}/`, userAgent: "AriadneBot/0.1", robotsUserAgent: " " }, discovery });
+      await seedCrawl(old, { config: { siteUrl: `${SITE}/`, userAgent: "AriadneBot/0.1" }, discovery });
+      for (const id of [bad, empty]) {
+        const res = await call(`/crawls/${id}/robots`);
+        expect(res.status, id).toBe(409);
+        expect(String(res.body["error"])).toContain("robotsUserAgent");
+      }
+      const pre = await call(`/crawls/${old}/robots`);
+      expect(pre.status).toBe(200);
+      expect(pre.body["robotsUserAgent"]).toBeNull();
+    } finally {
+      for (const id of [bad, empty, old]) await db.delete(crawls).where(eq(crawls.id, id));
+    }
+  });
 });

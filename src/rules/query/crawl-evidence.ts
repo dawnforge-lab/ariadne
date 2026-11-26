@@ -640,6 +640,28 @@ export function userAgentOf(evidence: CrawlEvidence, ruleId: string, crawlId: st
 }
 
 /**
+ * The robots token the crawl matched robots.txt groups with (Phase 29d), or
+ * null for a crawl stored before 29d, which carries none: that crawl matched
+ * its full `userAgent`, and the caller reads it that way. Null is the faithful
+ * record of what happened, not a default; a token that is present and not a
+ * non-empty string is a row we cannot read, and throws.
+ */
+export function robotsUserAgentOf(
+  evidence: CrawlEvidence,
+  ruleId: string,
+  crawlId: string,
+): string | null {
+  const token = evidence.config["robotsUserAgent"];
+  if (token === undefined) return null;
+  if (typeof token !== "string" || token.trim() === "") {
+    throw new Error(
+      `${ruleId}: crawl '${crawlId}' stores a robotsUserAgent that is not a non-empty string`,
+    );
+  }
+  return token;
+}
+
+/**
  * Why the stored robots.txt cannot be re-parsed into a sound answer, or null
  * when it can.
  *

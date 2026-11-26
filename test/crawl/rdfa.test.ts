@@ -249,7 +249,7 @@ describe("prefix attribute parsing is linear", () => {
 describe("machine end() with a frame still open", () => {
   const counts = (): StructuredDataCounts => ({
     errors: 0,
-    skips: { microdataItemrefSkipped: 0, rdfaUnsupported: 0, valuesCapped: 0 },
+    skips: { microdataItemrefSkipped: 0, rdfaUnsupported: 0, valuesCapped: 0, blocksDropped: 0, nodesDropped: 0 },
     valuesUsed: 0,
     valuesWritten: 0,
     charsWritten: 0,

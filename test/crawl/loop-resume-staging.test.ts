@@ -167,7 +167,7 @@ function config(s: MutableSite, overrides: Partial<CrawlConfig> = {}): CrawlConf
     siteUrl: `${s.base}/`,
     maxPages: 10,
     maxDepth: 3,
-    userAgent: "AriadneBot-resume-staging-test",
+    userAgent: "AriadneBot-resume-staging-test", robotsUserAgent: "AriadneBot-resume-staging-test", userAgentPreset: null,
     perHostDelayMs: 0,
     maxConcurrency: 2,
     probeHosts: false,

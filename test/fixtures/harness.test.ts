@@ -728,7 +728,7 @@ beforeAll(async () => {
     siteUrl: app.base,
     maxPages: 500,
     maxDepth: 10,
-    userAgent: "AriadneBot-fixture",
+    userAgent: "AriadneBot-fixture", robotsUserAgent: "AriadneBot-fixture", userAgentPreset: null,
     perHostDelayMs: 0,
     maxConcurrency: 8,
     // The second name the fixture server answers to. It is the same machine and
@@ -1146,7 +1146,7 @@ describe("the fixture site end to end", () => {
       {
         pageUrl: blockedUrl,
         url: blockedUrl,
-        userAgent: "AriadneBot-fixture",
+        userAgent: "AriadneBot-fixture", robotsUserAgent: "AriadneBot-fixture",
         matchedBy: { line: 3, text: "Disallow: /private/" },
       },
     ]);
@@ -2017,7 +2017,7 @@ describe("the fixture site end to end", () => {
           written: "https://estuary-supplies.example/#org",
         },
       ],
-      problemCount: 2, problemsCapped: false,
+      unresolved: [`${url("/authored29a/unresolved-reference")}#series`, "https://estuary-supplies.example/#org"], unresolvedCount: 2, unresolvedAtLeast: false, problemCount: 2, problemsCapped: false,
     });
     // Nine of the ten pages of `/authored29a/tpl/:id` carry a Product: the page
     // that does not is the finding, and the evidence is the census.
@@ -3657,6 +3657,8 @@ describe("the fixture site end to end", () => {
       // Inside `urlsTotal`, not a partition member: judged pages declaring
       // rel=prev, left out of the three field-duplicate rules only (P23 T7).
       urlsPaginated: paginatedJudged,
+      // Judged PDFs (P29d): this fixture site serves none, so zero is measured.
+      urlsPdf: 0,
     });
     // THE PARTITION, end to end (Phase 22 §3): every URL this crawl has a row
     // for is in exactly one of the four columns. The rule asserts it over its
@@ -4743,7 +4745,7 @@ describe("the evidence layer on the fixture crawl (Phase 25)", () => {
   });
 
   it("stamps the current extraction version on every row", async () => {
-    expect(EXTRACTION_VERSION).toBe(4);
+    expect(EXTRACTION_VERSION).toBe(5);
     const res = await db.execute<{ url: string; extraction_version: number | null }>(sql`
       select url, extraction_version from pages
       where crawl_id = ${summary.crawlId}

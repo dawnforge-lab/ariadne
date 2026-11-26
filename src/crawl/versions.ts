@@ -15,6 +15,9 @@ import { readFileSync } from "node:fs";
  * `source = 'header'`, on every classified response).
  * Version 4 (Phase 29a, migrations 0051–0052) adds microdata and RDFa Lite nodes,
  * `structured_data.format`, and the pages' microdata error and skip counts.
+ * Version 5 (Phase 29d): every microdata `itemtype` / RDFa `typeof` token is
+ * kept (`@type` is an array for two or more; `schema_type` is the first), and
+ * `structured_data_skips` gains `blocksDropped` and `nodesDropped`.
  * Bump it whenever the fetch layer or the analyzer
  * changes WHAT it extracts, so a rule reading a fact introduced at version N can
  * tell rows that measured it from rows that could not have
@@ -38,7 +41,7 @@ import { readFileSync } from "node:fs";
  * accessibility capture: its nulls there mean "not captured", never "no
  * images" or "no violations".
  */
-export const EXTRACTION_VERSION = 4;
+export const EXTRACTION_VERSION = 5;
 export const RENDER_CAPTURE_VERSION = 3;
 
 const REDACTED_REQUEST_HEADERS = new Set(["authorization", "cookie", "proxy-authorization"]);

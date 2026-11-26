@@ -51,11 +51,14 @@
  *
  * ## The census, and what is outside it
  *
- * `urlsTotal` is the JUDGED pages: fetched OK with a 200, indexable, and not
- * canonicalised elsewhere — `isJudged`/`JUDGED` in src/rules/helpers.ts, and
- * since Phase 22 §1 the population nearly every page rule guards itself with.
- * It is now the SAME cohort `cohortFilter` gives every other metric, which it
- * deliberately was not before: until Phase 22 a noindex or canonicalised 200
+ * `urlsTotal` is the JUDGED DOCUMENTS: HTML pages fetched OK with a 200, or 200
+ * PDFs (Phase 29d, owner ruling 2026-11-25), indexable, and not canonicalised
+ * elsewhere — `JUDGED_DOCUMENT` in src/rules/helpers.ts, which extends `JUDGED`
+ * (HTML only) by indexable PDFs. The HTML part is, since Phase 22 §1, the
+ * population nearly every page rule guards itself with, and `urlsTotal -
+ * urlsPdf` is exactly the cohort `cohortFilter` gives every other metric
+ * (`structure.click-depth-distribution` included), which Phase 22 made equal
+ * where it deliberately was not before: until Phase 22 a noindex or canonicalised 200
  * was still judged by every on-page rule, so excluding it here would have left
  * findings attached to pages the denominator had never heard of. The rules
  * moved; this moved with them, and the two columns below are what keep the
@@ -139,8 +142,9 @@ import { sql } from "drizzle-orm";
 import type { Db } from "../../db/client.js";
 import {
   CANONICALISED_ELSEWHERE,
-  FETCHED_OK,
-  JUDGED,
+  DOCUMENT_OK,
+  IS_PDF,
+  JUDGED_DOCUMENT,
   metricRow,
   metricRule,
   type MetricIdentity,
@@ -175,8 +179,9 @@ type HealthRow = {
   urls_canonicalised: number;
   urls_noindex: number;
   urls_paginated: number;
+  urls_pdf: number;
   pages_not_auditable: number;
-  /** Fetched OK with a 200: the three cohort counts above must sum to it. */
+  /** HTML pages fetched OK with a 200, or 200 PDFs: the three cohort counts above must sum to it. */
   fetched_ok: number;
   /** Every `pages` row of the crawl: all four counts must sum to it. */
   crawled: number;
@@ -202,7 +207,8 @@ type HealthRow = {
  *    are claims about a site that has no auditable pages (`redirect.volume`'s
  *    `ratioPct` answers the same way for the same reason).
  *  - `pagesNotAuditable` — pages the crawl has a row for that are not fetched-OK
- *    200s at all: redirects, errors, blocks, non-HTML bodies.
+ *    200s at all (an HTML page or a PDF): redirects, errors, blocks, non-HTML,
+ *    non-PDF bodies.
  *  - `urlsCanonicalised` — fetched-OK 200s set aside because they hand their
  *    signals to another URL and carry no noindex of their own.
  *  - `urlsNoindex` — fetched-OK 200s set aside because they carry a noindex,
@@ -211,6 +217,10 @@ type HealthRow = {
  *    left out of the three field-duplicate rules only (Phase 23 T7). Unlike the
  *    two above this is NOT a partition member: these pages are inside
  *    `urlsTotal` and every other rule still judges them.
+ *  - `urlsPdf` — judged PDFs, the count of `urlsTotal` that are PDFs (Phase
+ *    29d). Overlaps the buckets like `urlsPaginated`, not a partition member.
+ *    Almost no page rule reads a PDF (no title, meta, headings), so a PDF
+ *    usually lands in Clean; this column shows how much of Clean it is.
  *
  * **The four buckets partition `urlsTotal` exactly**, and that is a property of
  * the statement rather than a hope: every cohort page appears once on the left
@@ -258,7 +268,7 @@ async function siteHealth(
       -- partition this table publishes is arithmetic over one population
       -- rather than four statements that have to agree.
       select count(*)::int as crawled,
-             count(*) filter (where ${FETCHED_OK("p")})::int as fetched_ok,
+             count(*) filter (where ${DOCUMENT_OK("p")})::int as fetched_ok,
              -- NOINDEX IS TESTED FIRST, and the canonical bucket is what is
              -- left, because that is indexabilityOf's order (case 9 before
              -- case 10, src/rules/helpers.ts) and one vocabulary is better
@@ -277,14 +287,14 @@ async function siteHealth(
              -- this engine writes produces one, and indexabilityOf is what
              -- refuses the contradiction out loud.
              count(*) filter (
-               where ${FETCHED_OK("p")} and p.is_indexable is not true
+               where ${DOCUMENT_OK("p")} and p.is_indexable is not true
              )::int as noindex,
              -- The rest of the set-aside: indexable, so not counted above, and
              -- handing its signals to another URL. "is_indexable = true"
              -- rather than "is not false", so a NULL is counted once — over
              -- there — and never twice.
              count(*) filter (
-               where ${FETCHED_OK("p")} and p.is_indexable = true
+               where ${DOCUMENT_OK("p")} and p.is_indexable = true
                  and ${CANONICALISED_ELSEWHERE("p")}
              )::int as canonicalised
       from pages p
@@ -296,12 +306,23 @@ async function siteHealth(
       -- urlsTotal and every other rule still judges them.
       select count(*)::int as n
       from pages p
-      where p.crawl_id = ${crawlId} and ${JUDGED("p")} and p.rel_prev is not null
+      where p.crawl_id = ${crawlId} and ${JUDGED_DOCUMENT("p")} and p.rel_prev is not null
+    ),
+    pdfs as (
+      -- Judged PDFs (Phase 29d, owner ruling 2026-11-25): the share of
+      -- urlsTotal that is a PDF. NOT a partition member, it overlaps the
+      -- judged buckets: almost no page rule reads a PDF (no title, meta or
+      -- headings), so a PDF usually lands in Clean and this is how a reader
+      -- sees how much of Clean it is.
+      select count(*)::int as n
+      from pages p
+      where p.crawl_id = ${crawlId} and ${JUDGED_DOCUMENT("p")}
+        and ${sql.raw(IS_PDF("p.content_type"))}
     ),
     cohort as (
       select p.id
       from pages p
-      where p.crawl_id = ${crawlId} and ${JUDGED("p")}
+      where p.crawl_id = ${crawlId} and ${JUDGED_DOCUMENT("p")}
     ),
     worst as (
       select i.page_id,
@@ -329,6 +350,7 @@ async function siteHealth(
       (select canonicalised from census)::int as urls_canonicalised,
       (select noindex from census)::int as urls_noindex,
       (select n from paginated)::int as urls_paginated,
+      (select n from pdfs)::int as urls_pdf,
       ((select crawled from census) - (select fetched_ok from census))::int
         as pages_not_auditable,
       (select fetched_ok from census)::int as fetched_ok,
@@ -380,14 +402,15 @@ async function siteHealth(
   const urlsCanonicalised = num(row.urls_canonicalised, "urls_canonicalised", self.id);
   const urlsNoindex = num(row.urls_noindex, "urls_noindex", self.id);
   const urlsPaginated = num(row.urls_paginated, "urls_paginated", self.id);
+  const urlsPdf = num(row.urls_pdf, "urls_pdf", self.id);
   const pagesNotAuditable = num(row.pages_not_auditable, "pages_not_auditable", self.id);
   const fetchedOk = num(row.fetched_ok, "fetched_ok", self.id);
   const crawled = num(row.crawled, "crawled", self.id);
 
   // THE SECOND PARTITION, checked for the first one's reason (Phase 22 §3).
   // Every URL the crawl fetched is in exactly one of four places: judged, set
-  // aside as canonicalised, set aside as noindex, or outside the fetched-OK
-  // 200 census entirely. The statement above makes that structurally true —
+  // aside as canonicalised, set aside as noindex, or outside the document
+  // census (an HTML page fetched OK with a 200, or a 200 PDF) entirely. The statement above makes that structurally true —
   // the three cohort counts are `filter`s over one pass whose conditions are
   // mutually exclusive and cover `fetched_ok` — and this is what catches the
   // edit that stops it being so, before a dashboard renders pages that
@@ -396,13 +419,13 @@ async function siteHealth(
     throw new Error(
       `${self.id}: crawl '${crawlId}' counts ${urlsTotal} judged + ` +
         `${urlsCanonicalised} canonicalised + ${urlsNoindex} noindex over ` +
-        `${fetchedOk} URLs fetched OK with a 200 — the three cohorts must ` +
+        `${fetchedOk} documents (HTML pages fetched OK with a 200, or 200 PDFs) — the three cohorts must ` +
         `partition that census exactly`,
     );
   }
   if (fetchedOk + pagesNotAuditable !== crawled) {
     throw new Error(
-      `${self.id}: crawl '${crawlId}' counts ${fetchedOk} fetched OK plus ` +
+      `${self.id}: crawl '${crawlId}' counts ${fetchedOk} documents (HTML fetched OK with a 200, or 200 PDFs) plus ` +
         `${pagesNotAuditable} not judged over ${crawled} pages — every URL the ` +
         `crawl fetched must be in exactly one of the two`,
     );
@@ -422,6 +445,7 @@ async function siteHealth(
         urlsCanonicalised,
         urlsNoindex,
         urlsPaginated,
+        urlsPdf,
       },
     }),
   ];
@@ -460,6 +484,10 @@ export const healthMetrics: MetricRule[] = [
       { key: "urlsCanonicalised", label: "Canonicalised (set aside)" },
       { key: "urlsNoindex", label: "Noindex (set aside)" },
       { key: "urlsPaginated", label: "Paginated (duplicate checks only)" },
+      // Overlaps the judged buckets like `urlsPaginated`; not a partition
+      // member. Almost no page rule reads a PDF, so a PDF usually lands in
+      // Clean; this shows how much of Clean (and of urlsTotal) is PDFs.
+      { key: "urlsPdf", label: "Of Which PDFs" },
     ], 0),
     async (db, crawlId, self, judgement) => siteHealth(db, crawlId, self, judgement),
   ),

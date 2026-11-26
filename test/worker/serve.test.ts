@@ -27,6 +27,7 @@ import { join } from "node:path";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { eq, inArray, sql } from "drizzle-orm";
 import pg from "pg";
+import { registerTestChild } from "../setup/child-reaper.js";
 
 import { closeDb, createDb, type Db } from "../../src/db/client.js";
 import { runMigrations } from "../../src/db/migrate.js";
@@ -43,6 +44,7 @@ import { timingWith } from "../../src/worker/timing.js";
 import { startWorker } from "../../src/worker/main.js";
 import { TEST_CREDENTIAL_KEYS, TEST_CREDENTIAL_KEY_ENV } from "../helpers/credential-keys.js";
 import { acquirePoolLock, type PoolLock } from "../helpers/pool-lock.js";
+import { HEAP_CAP_NODE_FLAG, HEAP_CAP_TEST_ENV } from "../helpers/heap-cap.js";
 
 const ROOT = join(import.meta.dirname, "..", "..");
 
@@ -67,6 +69,8 @@ let service: ApiService;
 const createdCrawls: string[] = [];
 const createdInstances: string[] = [];
 const children: Child[] = [];
+/** EVERY process `launch` spawned, trusted or not: afterEach and afterAll stop these. */
+const launched: ChildProcess[] = [];
 const fixtures: Fixture[] = [];
 
 async function until<T>(what: string, read: () => Promise<T>, done: (value: T) => boolean, timeoutMs = 60_000): Promise<T> {
@@ -160,13 +164,16 @@ function track(proc: ChildProcess): { stdout: string[]; stderr: string[]; exited
   return { stdout, stderr, exited };
 }
 
-/** `node --import tsx <script>`: the signal reaches node itself, no wrapper in between. */
+/** `node --max-old-space-size=… --import tsx <script>` (the serving processes assert their cap): the signal reaches node itself, no wrapper in between. */
 function launch(script: string, env: Record<string, string | undefined>): ChildProcess {
-  return spawn(process.execPath, ["--import", "tsx", script], {
+  const proc = spawn(process.execPath, [HEAP_CAP_NODE_FLAG, "--import", "tsx", script], {
     cwd: ROOT,
-    env: { PATH: process.env.PATH, ...env },
+    env: { PATH: process.env.PATH, ...HEAP_CAP_TEST_ENV, ...env },
     stdio: ["ignore", "pipe", "pipe"],
   });
+  registerTestChild(proc);
+  launched.push(proc);
+  return proc;
 }
 
 /** A trusted test worker on the CHILD_TIMING clock, ready (registered, listening). */
@@ -180,7 +187,10 @@ async function spawnTrusted(extra: Record<string, string> = {}): Promise<Child> 
   });
   const { stdout, stderr, exited } = track(proc);
   const ready = await new Promise<{ instanceId: string; port: number }>((resolve, reject) => {
-    const deadline = setTimeout(() => reject(new Error(`worker not ready in 60 s\n${stderr.join("")}`)), 60_000);
+    const deadline = setTimeout(() => {
+      proc.kill("SIGKILL");
+      reject(new Error(`worker not ready in 60 s\n${stderr.join("")}`));
+    }, 60_000);
     const poll = setInterval(() => {
       const line = stdout.join("").split("\n").find((l) => l.startsWith("READY "));
       if (line === undefined) return;
@@ -278,15 +288,23 @@ beforeAll(async () => {
  * pool is every worker's), and its own reaper would keep ticking.
  */
 afterEach(async () => {
-  const live = children.filter((c) => c.proc.exitCode === null && c.proc.signalCode === null);
-  for (const child of live) child.proc.kill("SIGTERM");
-  await Promise.all(live.map((c) => c.exited));
+  const live = launched.filter((p) => p.exitCode === null && p.signalCode === null);
+  for (const proc of live) proc.kill("SIGTERM");
+  const stopped = Promise.all(live.map((p) => new Promise<void>((resolve) => p.once("exit", () => resolve()))));
+  const timedOut = Symbol("timed out");
+  const outcome = await Promise.race([stopped, sleep(5_000).then(() => timedOut)]);
+  if (outcome === timedOut) {
+    const stuck = live.filter((p) => p.exitCode === null && p.signalCode === null);
+    for (const proc of stuck) proc.kill("SIGKILL");
+    await Promise.all(stuck.map((p) => new Promise<void>((resolve) => (p.exitCode !== null || p.signalCode !== null ? resolve() : p.once("exit", () => resolve())))));
+  }
   await setPeers([]);
 }, 120_000);
 
 afterAll(async () => {
-  for (const child of children) child.proc.kill("SIGKILL");
-  await Promise.all(children.map((c) => c.exited));
+  const alive = launched.filter((p) => p.exitCode === null && p.signalCode === null);
+  for (const proc of alive) proc.kill("SIGKILL");
+  await Promise.all(alive.map((p) => new Promise<void>((resolve) => p.once("exit", () => resolve()))));
   await service.close();
   await closeFetchAgents();
   for (const f of fixtures) await f.close();
@@ -455,6 +473,27 @@ function workerEnv(): Record<string, string> {
 }
 
 describe("api:serve boot", () => {
+  it("refuses to boot when node was not started with the configured cap", async () => {
+    const proc = spawn(process.execPath, ["--import", "tsx", "src/api/serve.ts"], {
+      cwd: ROOT,
+      env: {
+        PATH: process.env.PATH,
+        ...HEAP_CAP_TEST_ENV,
+        DATABASE_URL: databaseUrl(),
+        ARIADNE_CREDENTIALS_KEY: TEST_CREDENTIAL_KEY_ENV,
+        ARIADNE_API_TOKEN: `api-token-${short()}-${short()}`,
+        ARIADNE_API_PORT: "0",
+        ARIADNE_ALLOWED_DOMAINS: "127.0.0.1",
+      },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    registerTestChild(proc);
+    launched.push(proc);
+    const { stderr, exited } = track(proc);
+    expect(await exited).not.toBe(0);
+    expect(stderr.join("")).toContain(HEAP_CAP_NODE_FLAG);
+  });
+
   it("registers its `api` instance row at boot (before any render or rules job), and stops it on SIGTERM", async () => {
     const proc = launch("src/api/serve.ts", {
       DATABASE_URL: databaseUrl(),
@@ -501,6 +540,29 @@ describe("worker:serve boot", () => {
     expect(ran.stderr).toContain(name);
   });
 
+  it.each([
+    ["unset", undefined, "must be set"],
+    ["not a number", "lots", "positive whole number"],
+  ])("refuses to boot with ARIADNE_HEAP_MB %s, naming it", async (_label, value, said) => {
+    const ran = await runToExit("src/worker/serve.ts", { ...workerEnv(), ARIADNE_HEAP_MB: value });
+    expect(ran.code).toBe(1);
+    expect(ran.stderr).toContain("ARIADNE_HEAP_MB");
+    expect(ran.stderr).toContain(said);
+  });
+
+  it("refuses to boot when node was not started with the configured cap", async () => {
+    const proc = spawn(process.execPath, ["--import", "tsx", "src/worker/serve.ts"], {
+      cwd: ROOT,
+      env: { PATH: process.env.PATH, ...workerEnv(), ...HEAP_CAP_TEST_ENV },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    registerTestChild(proc);
+    launched.push(proc);
+    const { stderr, exited } = track(proc);
+    expect(await exited).toBe(1);
+    expect(stderr.join("")).toContain(HEAP_CAP_NODE_FLAG);
+  });
+
   it("boots with an EMPTY ARIADNE_ALLOWED_DOMAINS (refuse every crawl), and exits 0 on SIGTERM", async () => {
     const proc = launch("src/worker/serve.ts", { ...workerEnv(), ARIADNE_ALLOWED_DOMAINS: "" });
     const { stderr, exited } = track(proc);
@@ -528,7 +590,7 @@ describe("worker:serve boot", () => {
     const instanceId = /instance_[0-9a-f-]+/.exec(line)?.[0];
     if (instanceId !== undefined) createdInstances.push(instanceId);
     const id = await start(tenantFor("trust"), { siteUrl: `${site.base}/`, maxPages: 5 });
-    const row = await until("the crawl settled", async () => await crawlRow(id), (r) => r.status !== "queued" && r.status !== "running");
+    const row = await until("the crawl settled", async () => await crawlRow(id), (r) => r.status !== "queued" && r.status !== "running", 45_000);
     // The URL policy refused the loopback seed: nothing finished, nothing fetched.
     expect(row.status).not.toBe("finished");
     expect(row.pagesCrawled).toBe(0);

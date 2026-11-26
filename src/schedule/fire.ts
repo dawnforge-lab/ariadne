@@ -22,6 +22,14 @@
  *       fetch (`crawlAllowlistRefusal`, as a worker re-checks it at claim).
  *     - `credentials_unreadable` (C5): the schedule's stored copy cannot be
  *       decrypted with this process's keys. Nothing fires without them.
+ *     - `identity_refused` (29d final review): a schedule stored before 29d
+ *       holds no `robotsUserAgent`, so its token is resolved here from what it
+ *       does hold (`resolveCrawlIdentity` over its `userAgent` and
+ *       `userAgentPreset`), as `crawl_start` would have resolved it, and the
+ *       fired crawl stores the resolved trio. An identity `crawl_start` would
+ *       refuse (a `Mozilla/…` header names no token of its own) fires nothing:
+ *       the event names the field, the log the refusal, and the schedule row
+ *       is not rewritten — `schedule_update` with a `robotsUserAgent` fixes it.
  *  3. Or FIRE: the stored crawl (call C2: no re-plan) through `insertCrawl`,
  *     with the schedule's id and chain, this process's pin (C4), and the
  *     credentials re-encrypted under the new crawl. `last_crawl_id` is set.
@@ -53,10 +61,12 @@ import type { CredentialVault } from "../crawl/credential-vault.js";
 import { sameShape, shapeOf, type CrawlCredentials } from "../crawl/credentials.js";
 import { insertCrawl } from "../crawl/insert-crawl.js";
 import { storedCredentialShape } from "../crawl/loop.js";
+import { CrawlIdentityError, resolveCrawlIdentity } from "../crawl/user-agents.js";
 import { recordEvent } from "../events/events.js";
 import type { TenantId } from "../tenant.js";
 import { crawlAllowlistRefusal } from "../worker/crawl-job.js";
 import { NoCronSlotError, nextSlot } from "./cron.js";
+import type { StoredConfig } from "../crawl/insert-crawl.js";
 import type { ScheduleRow } from "./store.js";
 
 export interface FireDeps {
@@ -81,7 +91,7 @@ export interface FireSummary {
 
 type Tx = Parameters<Parameters<Db["transaction"]>[0]>[0];
 
-type SkipReason = "overlap" | "not-allowed" | "credentials_unreadable";
+type SkipReason = "overlap" | "not-allowed" | "credentials_unreadable" | "identity_refused";
 
 /**
  * Fire or skip every schedule due at `now` (module header), and answer how
@@ -172,11 +182,21 @@ async function fireOrSkip(tx: Tx, deps: FireDeps, schedule: ScheduleRow, now: Da
   const credentials = await credentialsOf(tx, deps, schedule);
   if (credentials === "unreadable") return await skip(tx, deps, schedule, now, "credentials_unreadable", null);
 
+  const identified = configWithIdentity(schedule);
+  if (identified instanceof CrawlIdentityError) {
+    deps.log(
+      `scheduler: schedule ${schedule.id} skipped its slot (identity_refused) — it was stored before ` +
+        `robots tokens and its identity cannot be resolved: ${identified.field}: ${identified.message}; ` +
+        "schedule_update with a robotsUserAgent (or a userAgentPreset) lets it fire",
+    );
+    return await skip(tx, deps, schedule, now, "identity_refused", null, { field: identified.field });
+  }
+
   const crawlId = `crawl_${randomUUID()}`;
   await insertCrawl(tx, deps.vault, {
     tenant,
     crawlId,
-    config: stored.config,
+    config: identified,
     judgement: stored.judgement,
     ...(credentials === null ? {} : { credentials }),
     listed: stored.listed,
@@ -193,6 +213,39 @@ async function fireOrSkip(tx: Tx, deps: FireDeps, schedule: ScheduleRow, now: Da
   });
   await advance(tx, deps, schedule, now, crawlId);
   return "fired";
+}
+
+/**
+ * The config the fired crawl stores: the schedule's own when it carries a
+ * `robotsUserAgent` (every schedule written from 29d on), else the stored
+ * config with the identity resolved from its `userAgent` and
+ * `userAgentPreset` (module header, `identity_refused`). The refusal is
+ * returned, not thrown: it is a skip, not a defect. A stored `userAgent` or
+ * `userAgentPreset` of the wrong type is a defect, and throws.
+ */
+function configWithIdentity(schedule: ScheduleRow): StoredConfig | CrawlIdentityError {
+  const stored = schedule.config.config;
+  // Read as stored, not as typed: a row written before 29d lacks the field the type requires.
+  const raw = stored as unknown as Record<string, unknown>;
+  if (raw["robotsUserAgent"] !== undefined) return stored;
+  const userAgent = raw["userAgent"];
+  const preset = raw["userAgentPreset"];
+  if (userAgent !== undefined && typeof userAgent !== "string") {
+    throw new Error(`schedule ${schedule.id}: stored config.userAgent is ${typeof userAgent}, expected string`);
+  }
+  if (preset !== undefined && preset !== null && typeof preset !== "string") {
+    throw new Error(`schedule ${schedule.id}: stored config.userAgentPreset is ${typeof preset}, expected string or null`);
+  }
+  try {
+    const identity = resolveCrawlIdentity({
+      ...(userAgent === undefined ? {} : { userAgent }),
+      ...(preset === undefined || preset === null ? {} : { userAgentPreset: preset }),
+    });
+    return { ...stored, ...identity };
+  } catch (error) {
+    if (error instanceof CrawlIdentityError) return error;
+    throw error;
+  }
 }
 
 /**
@@ -262,13 +315,14 @@ async function skip(
   now: Date,
   reason: SkipReason,
   holder: string | null,
+  extra: { field?: string } = {},
 ): Promise<"skipped"> {
   await recordEvent(tx, {
     tenant: schedule.tenantId as TenantId,
     crawlId: null,
     scheduleId: schedule.id,
     kind: "schedule_skipped",
-    detail: holder === null ? { reason } : { reason, crawlId: holder },
+    detail: { reason, ...(holder === null ? {} : { crawlId: holder }), ...extra },
   });
   await advance(tx, deps, schedule, now, null);
   return "skipped";

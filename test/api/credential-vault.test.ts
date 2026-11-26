@@ -346,7 +346,7 @@ async function seedSchedule(tenant = LOCAL_TENANT): Promise<string> {
           siteUrl,
           maxPages: 10,
           maxDepth: 3,
-          userAgent: "AriadneBot-vault-test",
+          userAgent: "AriadneBot-vault-test", robotsUserAgent: "AriadneBot-vault-test", userAgentPreset: null,
           perHostDelayMs: 0,
           maxConcurrency: 1,
         }),

@@ -11,19 +11,35 @@
  *
  * ONE EXCEPTION, bounded (Phase 29b): an IMAGE row is asked with a single
  * `GET` carrying `Range: bytes=0-65535` in place of the HEAD, and the first
- * 65,536 bytes of what comes back are read by `readImageSize` for the image's
+ * 65,536 bytes of what comes back are read by `parseImageHead` for the image's
  * intrinsic width and height, then dropped. That is the most any row ever
  * holds, and it is one buffer of that size per in-flight request, so memory
- * stays O(concurrency). The request count does not grow: a server that honours
+ * stays O(concurrency). The request count rarely grows: a server that honours
  * Range answers in one request (206, the size from `Content-Range`), a server
  * that ignores it answers 200 and the body is counted as a counted GET always
  * was, and only a `206` of unknown total or a `416` earns one more plain GET.
- * An image row therefore costs at most 2 requests plus its redirect hops, where
- * the HEAD path cost 1 for a sized file and 2 for an unsized one: each hop is
- * one Range GET, the final answer is one Range GET, and at most one plain GET
- * follows it. A row that has fallen back to the plain GET stays plain for any
- * redirect after that, so the fallback is never paid twice. Every Range request
- * takes a gate slot like the HEAD did. CSS and JS keep the HEAD.
+ *
+ * PAST THE WINDOW (Phase 29d, ruling R4). A PNG with more than 64 KiB of chunks
+ * before its image data, or a JPEG with that much metadata before its frame
+ * header, has not shown its size yet: the parser says where it needs to read
+ * on (`need`), and the pass asks for that window, at most TWICE more. A
+ * continuation is sent only when the first answer was a 206 that carried a
+ * total (a host that answered 200 has already been copied from, so there is
+ * nothing to ask for). Its answer must be a 206 whose `Content-Range` starts
+ * exactly where it was asked to; anything else, an offset at or past the total,
+ * or a third `need`, ends the walk with `header-beyond-limit`. Each window is a
+ * buffer of at most 64 KiB, dropped once read, so memory is still one buffer
+ * per in-flight request. An image row therefore costs at most 4 requests plus
+ * its redirect hops, the ceiling the spec states and MAX_ROW_REQUESTS enforces
+ * (redirects + 4). The worst case actually reachable is 3 of them: the first
+ * Range GET, then either one plain GET or up to two continuations (never both,
+ * since a continuation needs a 206 with a total and the plain GET follows its
+ * absence); the fourth is headroom. The HEAD path cost 1 for a sized file and 2
+ * for an unsized one: each hop is one Range GET. A row that has fallen back to
+ * the plain GET stays plain for any redirect after that, so the fallback is
+ * never paid twice. Every Range request, a continuation included, takes a gate
+ * slot like the HEAD did and counts toward the row's request budget. CSS and JS
+ * keep the HEAD.
  *
  * ## The politeness arithmetic, which is the point of this module
  *
@@ -146,7 +162,7 @@ import {
   type HeaderBag,
 } from "../http.js";
 import { isSameOrigin } from "../parse/url-utils.js";
-import { IMAGE_HEADER_BYTES, readImageSize } from "./image-size.js";
+import { IMAGE_HEADER_BYTES, parseImageHead, type ImageParse, type ImageWalkState } from "./image-size.js";
 import type { HostGate } from "../politeness.js";
 import { isUrlAllowed } from "../url-policy.js";
 import { storableDeep } from "../storable-text.js";
@@ -291,12 +307,18 @@ const MAX_RESOURCE_REDIRECTS = 5;
 
 /**
  * Requests one row may cost in total: its redirect chain, plus the first
- * request (a HEAD, or for an image the Range GET) and the one counted GET that
- * can follow it. A hard bound, so no chain of 405s, 416s and redirects can turn
- * one image into an unbounded conversation. An image row costs at most 2
- * requests plus its redirect hops (Phase 29b).
+ * request (a HEAD, or for an image the Range GET) and what can follow it. A
+ * hard bound, so no chain of 405s, 416s and redirects can turn one image into
+ * an unbounded conversation. An image row is stated as at most 4 requests plus
+ * its redirect hops (Phase 29d); the worst case reachable is 3 of them (the
+ * first Range GET, then one plain GET or up to MAX_IMAGE_CONTINUATIONS
+ * continuations, never both) and the fourth is headroom, as the module header
+ * says.
  */
-const MAX_ROW_REQUESTS = MAX_RESOURCE_REDIRECTS + 2;
+const MAX_ROW_REQUESTS = MAX_RESOURCE_REDIRECTS + 4;
+
+/** Continuation reads one image's header walk may take past its first window (ruling R4). */
+const MAX_IMAGE_CONTINUATIONS = 2;
 
 /** Consecutive transport failures after which a host's queue is parked. */
 const DEAD_HOST_ERRORS = 3;
@@ -315,6 +337,8 @@ export interface ResourcePassOpts {
   /** The crawl's seed URL: what makes a resource same-origin or third-party. */
   siteUrl: string;
   userAgent: string;
+  /** The robots token another host's robots.txt is matched with (Phase 29d). */
+  robotsUserAgent: string;
   /**
    * The gate the PAGE crawl used, not a new one. See the module header: this is
    * how a host that earned wider spacing keeps it for its resources.
@@ -562,6 +586,7 @@ export async function fetchCrawlResources(
                   new URL(url).origin,
                   {
                     userAgent: opts.userAgent,
+                    robotsUserAgent: opts.robotsUserAgent,
                     allowPrivate,
                     robotsTiming: { headersMs: timeoutMs, idleMs: timeoutMs, totalMs: timeoutMs },
                     retryBackoffMs: opts.robotsRetryBackoffMs,
@@ -649,13 +674,17 @@ export async function fetchCrawlResources(
     // What the next request is. An image starts (and, after each redirect,
     // restarts) as a Range GET; css/js start as a HEAD. `plain` is the one
     // counted GET without a Range, which a HEAD that could not size the file,
-    // a 206 of unknown total or a 416 earns (and which, with `range`, makes an
-    // image row's two-request ceiling).
+    // a 206 of unknown total or a 416 earns. `continue` is an image header
+    // walk's read of the next window (29d, ruling R4).
     const firstMode: RequestMode = isImage ? "range" : "head";
     let mode: RequestMode = firstMode;
     let hops = 0;
     let spent = 0;
     let redirectedTo: string | null = null;
+    // An image header walk that needs bytes past the first window (R4): where
+    // it goes on, how many continuations it has had, and the row as the FIRST
+    // answer described it. Set only by a 206 that carried a total.
+    let walk: ImageWalk | null = null;
 
     const done = (verdict: Verdict): Promise<void> =>
       writeVerdict(db, crawlId, item.url, {
@@ -679,6 +708,24 @@ export async function fetchCrawlResources(
       ]
         .filter((part) => part !== "")
         .join("; ");
+
+    /**
+     * A continuation read that failed in transport (error, timeout, refused at
+     * connect). The first read succeeded and is a fact: the row keeps its
+     * status, bytes and source, only the dimensions are unknown, and the note
+     * names the continuation and its error. A caller's stop never reaches here
+     * (it throws `FetchAbortedError` and leaves the row untouched). `why` is
+     * "failed: <error>" or "not sent: <why>".
+     */
+    const endWalk = (why: string): Promise<void> => {
+      const current = requireWalk(walk);
+      fetched += 1;
+      return done({
+        ...current.verdict,
+        fetchReason: note(`continuation at offset ${current.offset} ${why}`),
+        ...BEYOND_LIMIT,
+      });
+    };
 
     for (;;) {
       // The caller's stop, honoured per REQUEST rather than per batch. At a 30s
@@ -708,6 +755,13 @@ export async function fetchCrawlResources(
       // read: the row is left as the per-request check above leaves it, null
       // and unasked.
       if (admission.kind === "aborted") return;
+      // A continuation that cannot be sent leaves the first answer standing
+      // (R4's sibling rule: the first read is a fact, only the size is unknown).
+      if (mode === "continue") {
+        if (admission.kind === "parked") return endWalk(`not sent: ${admission.reason}`);
+        if (admission.kind === "capped") return endWalk(`not sent: ${RESOURCE_CAP_REASON}`);
+        if (admission.kind === "denied") return endWalk(`not sent: ${admission.reason}`);
+      }
       if (admission.kind === "capped") {
         // Unfetched, not failed: the null still means "seen, not yet asked".
         return done(unfetchable(null, RESOURCE_CAP_REASON));
@@ -743,6 +797,7 @@ export async function fetchCrawlResources(
       // requests at a server that has already stopped answering.
       const record = hosts.get(host);
       if (record !== undefined && record.parked !== null) {
+        if (mode === "continue") return endWalk(`not sent: ${record.parked}`);
         failed += 1;
         return done(unfetchable("fetch_error", note(record.parked)));
       }
@@ -754,6 +809,7 @@ export async function fetchCrawlResources(
           allowPrivate,
           timeoutMs,
           captureHead: isImage,
+          rangeStart: mode === "continue" ? requireWalk(walk).offset : 0,
           maxCountedBytes,
           credentials: opts.credentials,
           // A stop reaches the request on the wire (Phase 27b, Ruling 4).
@@ -772,6 +828,7 @@ export async function fetchCrawlResources(
       if (attempt.kind === "refused") {
         // The connect-time address guard, which is the wall the string-level
         // policy above cannot be: a public name with a private A record.
+        if (mode === "continue") return endWalk(`failed: ${attempt.reason}`);
         failed += 1;
         return done(unfetchable("refused", note(attempt.reason)));
       }
@@ -784,6 +841,7 @@ export async function fetchCrawlResources(
               `(${attempt.reason})`;
           }
         }
+        if (mode === "continue") return endWalk(`failed: ${attempt.reason}`);
         failed += 1;
         return done(unfetchable("fetch_error", note(attempt.reason)));
       }
@@ -791,6 +849,33 @@ export async function fetchCrawlResources(
 
       const status = attempt.statusCode;
       const headers = attempt.headers;
+
+      if (mode === "continue") {
+        // A continuation read never follows a redirect, never falls back to a
+        // plain GET and never fails the row: the first answer already measured
+        // it. Anything but the window asked for ends the walk (ruling R4).
+        const current = requireWalk(walk);
+        const window = continuationWindow(attempt, current.offset, current.total);
+        if (typeof window === "string") {
+          fetched += 1;
+          return done({ ...current.verdict, fetchReason: note(window), ...BEYOND_LIMIT });
+        }
+        const step = nextStep(parseImageHead(window, current.verdict.contentType, current.state), {
+          asked: current.asked,
+          lastOffset: current.offset,
+          total: current.total,
+        });
+        if (step.kind === "ask") {
+          walk = { ...current, offset: step.offset, state: step.state, asked: current.asked + 1 };
+          continue;
+        }
+        fetched += 1;
+        return done({
+          ...current.verdict,
+          fetchReason: orNull(note(step.note ?? "")),
+          ...step.dimensions,
+        });
+      }
 
       if (status >= 300 && status < 400) {
         const location = headerValue(headers, "location");
@@ -894,11 +979,49 @@ export async function fetchCrawlResources(
           `fetchCrawlResources: ${url} answered ${status} with no counted or declared size`,
         );
       }
+      let dimensions: Dimensions = NO_DIMENSIONS;
+      // Why the walk ended `header-beyond-limit` without a read, when it did.
+      let walkNote = "";
+      if (isImage) {
+        const read = imageDimensions(attempt.head, contentType, headers);
+        if ("need" in read) {
+          // Only a 206 that carried a total can be continued (R4): a host that
+          // answered 200 has already been copied from, so there is no window
+          // left to ask for.
+          const step = nextStep(read.need, { asked: 0, lastOffset: 0, total: rangeTotal });
+          if (step.kind === "ask") {
+            const first = note("");
+            walk = {
+              offset: step.offset,
+              state: step.state,
+              asked: 1,
+              total: step.total,
+              verdict: {
+                fetchClass: "ok",
+                fetchReason: first === "" ? null : first,
+                statusCode: status,
+                contentType,
+                bytes,
+                bytesSource: "header",
+                cacheControl,
+                expires,
+                fetchMs: null,
+              },
+            };
+            mode = "continue";
+            continue;
+          }
+          dimensions = step.dimensions;
+          walkNote = step.note ?? "";
+        } else {
+          dimensions = read;
+        }
+      }
       fetched += 1;
       const truncatedNote = attempt.countTruncated
         ? `body exceeded the ${maxCountedBytes}-byte counting cap; bytes is a floor`
         : "";
-      const reason = note(truncatedNote);
+      const reason = note([truncatedNote, walkNote].filter((part) => part !== "").join("; "));
       return done({
         fetchClass: "ok",
         fetchReason: reason === "" ? null : reason,
@@ -919,7 +1042,7 @@ export async function fetchCrawlResources(
         cacheControl,
         expires,
         fetchMs: null,
-        ...(isImage ? imageDimensions(attempt.head, contentType, headers) : NO_DIMENSIONS),
+        ...dimensions,
       });
     }
   };
@@ -1071,7 +1194,7 @@ function imageDimensions(
   head: Buffer | null,
   contentType: string | null,
   headers: HeaderBag,
-): Pick<Verdict, "width" | "height" | "dimensionsReason"> {
+): Dimensions | { need: NeedParse } {
   if (head === null) {
     // An ok image answer always kept its head: that is this module's bug.
     throw new Error("fetchCrawlResources: an ok image answer carried no body head to read");
@@ -1084,10 +1207,128 @@ function imageDimensions(
   if (encoding !== null && encoding.trim().toLowerCase() !== "identity") {
     return { width: null, height: null, dimensionsReason: "encoded" };
   }
-  const size = readImageSize(head, contentType);
-  return size.kind === "size"
-    ? { width: size.width, height: size.height, dimensionsReason: null }
-    : { width: null, height: null, dimensionsReason: size.reason };
+  const parsed = parseImageHead(head, contentType);
+  return parsed.kind === "need" ? { need: parsed } : dimensionsOf(parsed);
+}
+
+type Dimensions = Pick<Verdict, "width" | "height" | "dimensionsReason">;
+type NeedParse = Extract<ImageParse, { kind: "need" }>;
+
+/** The size columns for a parser answer that is not a `need`. */
+function dimensionsOf(parsed: Exclude<ImageParse, { kind: "need" }>): Dimensions {
+  return parsed.kind === "size"
+    ? { width: parsed.width, height: parsed.height, dimensionsReason: null }
+    : { width: null, height: null, dimensionsReason: parsed.reason };
+}
+
+/** A walk that could not be carried to a size within the rules of R4. */
+const BEYOND_LIMIT: Dimensions = { width: null, height: null, dimensionsReason: "header-beyond-limit" };
+
+/**
+ * An image header walk waiting on a continuation read (ruling R4): the offset
+ * of that read, the parser's state to resume with, how many continuations have
+ * been sent, the total the first 206 declared, and the row as the FIRST answer
+ * described it (the continuations only ever add the size).
+ */
+interface ImageWalk {
+  offset: number;
+  state: ImageWalkState;
+  asked: number;
+  total: number;
+  verdict: Omit<Verdict, keyof Dimensions>;
+}
+
+function requireWalk(walk: ImageWalk | null): ImageWalk {
+  // Reaching a continuation without a walk is this module's bug.
+  if (walk === null) throw new Error("fetchCrawlResources: a continuation read had no image walk");
+  return walk;
+}
+
+const orNull = (text: string): string | null => (text === "" ? null : text);
+
+type WalkStep =
+  | { kind: "done"; dimensions: Dimensions; note?: string }
+  | { kind: "ask"; offset: number; state: ImageWalkState; total: number };
+
+/**
+ * What a parser answer means for the walk (R4). A size or a reason ends it. A
+ * `need` is answered with a continuation only when the first answer carried a
+ * total, fewer than MAX_IMAGE_CONTINUATIONS have been sent, the offset is
+ * inside the file, and it moved on from the window just read; otherwise the walk
+ * ends `header-beyond-limit`.
+ */
+function nextStep(
+  parsed: ImageParse,
+  ctx: { asked: number; lastOffset: number; total: number | null },
+): WalkStep {
+  if (parsed.kind !== "need") return { kind: "done", dimensions: dimensionsOf(parsed) };
+  const refuse = (note: string): WalkStep => ({ kind: "done", dimensions: BEYOND_LIMIT, note });
+  if (ctx.total === null) {
+    return refuse(
+      `header runs past the ${IMAGE_HEADER_BYTES}-byte read (next bytes at ${parsed.offset}) ` +
+        `and the answer was not a 206 with a total: no continuation sent`,
+    );
+  }
+  if (ctx.asked >= MAX_IMAGE_CONTINUATIONS) {
+    return refuse(
+      `header needs more than ${MAX_IMAGE_CONTINUATIONS} continuation reads (next bytes at ${parsed.offset})`,
+    );
+  }
+  if (parsed.offset >= ctx.total) {
+    return refuse(`header read would start at byte ${parsed.offset}, at or past the total of ${ctx.total}`);
+  }
+  if (parsed.offset <= ctx.lastOffset) {
+    return refuse(
+      `header read at byte ${parsed.offset} does not move past the window read at ${ctx.lastOffset}`,
+    );
+  }
+  return { kind: "ask", offset: parsed.offset, state: parsed.state, total: ctx.total };
+}
+
+/**
+ * The window a continuation read answered, or why it is no window (R4): it must
+ * be a 206 whose `Content-Range` starts exactly at the offset asked for, and not
+ * content-encoded. The reason is the row's note.
+ */
+function continuationWindow(
+  attempt: Extract<Attempt, { kind: "response" }>,
+  offset: number,
+  total: number,
+): Buffer | string {
+  if (attempt.statusCode !== 206) {
+    return `header read at byte ${offset} answered HTTP ${attempt.statusCode}, not a 206`;
+  }
+  const range = parseContentRange(attempt.headers);
+  if (range === null || range.start !== offset) {
+    return (
+      `header read at byte ${offset} answered a Content-Range that does not start there ` +
+      `(${headerValue(attempt.headers, "content-range") ?? "none"})`
+    );
+  }
+  // The file changed between the reads: the first window and this one are not
+  // one file's, so no size can be built from both.
+  if (range.total !== null && range.total !== total) {
+    return `header read at byte ${offset} answered a total of ${range.total}, the first answer said ${total}`;
+  }
+  const encoding = headerValue(attempt.headers, "content-encoding");
+  if (encoding !== null && encoding.trim().toLowerCase() !== "identity") {
+    return `header read at byte ${offset} answered a ${encoding.trim()}-encoded body`;
+  }
+  if (attempt.head === null) {
+    throw new Error("fetchCrawlResources: a continuation answer carried no body window to read");
+  }
+  return attempt.head;
+}
+
+/** A `206`'s `Content-Range: bytes a-b/N` (N null for `/*`), or null when unreadable. */
+function parseContentRange(headers: HeaderBag): { start: number; total: number | null } | null {
+  const raw = headerValue(headers, "content-range");
+  if (raw === null) return null;
+  const match = /^\s*bytes\s+(\d+)-\d+\/(\d+|\*)\s*$/i.exec(raw);
+  if (match === null) return null;
+  const start = Number(match[1]);
+  if (!Number.isSafeInteger(start)) return null;
+  return { start, total: match[2] === "*" ? null : Number(match[2]) };
 }
 
 /**
@@ -1095,14 +1336,12 @@ function imageDimensions(
  * does not declare one (`/*`, or a header we cannot read as that shape).
  */
 function contentRangeTotal(headers: HeaderBag): number | null {
-  const raw = headerValue(headers, "content-range");
-  if (raw === null) return null;
-  const match = /^\s*bytes\s+(\d+)-\d+\/(\d+)\s*$/i.exec(raw);
-  if (match === null) return null;
+  const range = parseContentRange(headers);
+  if (range === null || range.total === null) return null;
   // A window that does not start at 0 is not the header of the file, so it
   // cannot size the image: unknown, and the plain GET measures it (M3).
-  if (Number(match[1]) !== 0) return null;
-  const total = Number(match[2]);
+  if (range.start !== 0) return null;
+  const total = range.total;
   // `bytes` is an int4 column and the total is the server's word: past it, the
   // total is unknown, and the plain counted GET (capped by MAX_COUNTED_BYTES)
   // measures it instead of a write throwing and ending the pass.
@@ -1239,6 +1478,11 @@ interface RequestOpts {
    * image row). Nothing past them is ever retained.
    */
   captureHead: boolean;
+  /**
+   * Where a Range read starts: 0 for an image's first window, the parser's
+   * offset for a `continue` read (29d). Unused by other modes.
+   */
+  rangeStart: number;
   /** The counter's ceiling. See MAX_COUNTED_BYTES. */
   maxCountedBytes: number;
   /**
@@ -1291,7 +1535,9 @@ async function requestResource(
         "user-agent": opts.userAgent,
         accept: "*/*",
         "accept-encoding": ACCEPT_ENCODING,
-        ...(mode === "range" ? { range: `bytes=0-${IMAGE_HEADER_BYTES - 1}` } : {}),
+        ...(mode === "range" || mode === "continue"
+          ? { range: `bytes=${opts.rangeStart}-${opts.rangeStart + IMAGE_HEADER_BYTES - 1}` }
+          : {}),
       },
       // Manual redirects, like the page path: every hop is re-checked by the
       // URL policy and re-queued behind its own host's gate, which a client
@@ -1308,7 +1554,7 @@ async function requestResource(
     let head: Buffer | null = null;
     const status = response.statusCode;
 
-    if (mode === "range" && status === 206) {
+    if ((mode === "range" || mode === "continue") && status === 206) {
       // The Range was honoured: the body IS the header window, read to at most
       // IMAGE_HEADER_BYTES. A server that sends MORE than it was asked for is
       // misbehaving, and its excess is discarded unbuffered: the socket is
@@ -1373,7 +1619,7 @@ async function requestResource(
 }
 
 /** How a request is made. See `processOne`. */
-type RequestMode = "head" | "range" | "plain";
+type RequestMode = "head" | "range" | "plain" | "continue";
 
 /**
  * Read at most `limit` bytes of `body`. A well-behaved 206 ends exactly at the

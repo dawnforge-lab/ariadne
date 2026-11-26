@@ -282,7 +282,7 @@ function config(s: Site, overrides: Partial<CrawlConfig> = {}): CrawlConfig {
     siteUrl: `${s.base}/`,
     maxPages: 3,
     maxDepth: 3,
-    userAgent: "AriadneBot-stop-early-test",
+    userAgent: "AriadneBot-stop-early-test", robotsUserAgent: "AriadneBot-stop-early-test", userAgentPreset: null,
     perHostDelayMs: 0,
     maxConcurrency: 2,
     probeHosts: false,
@@ -886,7 +886,7 @@ describe("discover honours the caller's signal", () => {
 
   function opts(signal: AbortSignal, overrides: Record<string, unknown> = {}) {
     return {
-      userAgent: "AriadneBot-stop-early-test",
+      userAgent: "AriadneBot-stop-early-test", robotsUserAgent: "AriadneBot-stop-early-test",
       allowPrivate: true,
       perHostDelayMs: 0,
       sink: nullSink,
