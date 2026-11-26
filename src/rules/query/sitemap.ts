@@ -353,10 +353,10 @@ export const sitemapRules: QueryRule[] = [
   // `is_indexable IS NOT TRUE` rather than `= false`, so that a NULL stamp
   // lands here rather than in neither cohort: with `= false` a NULL-stamped 200
   // that canonicalises nowhere would be reported by neither this rule nor
-  // `pages.not-in-sitemap`. For the HTML 200s it is also the predicate
-  // `site.health` counts its noindex set-aside with (src/rules/metric/
-  // health-metrics.ts); that census is HTML only, so a PDF this rule reports
-  // is in `site.health`'s `pagesNotAuditable`, not its `urlsNoindex`. No crawl
+  // `pages.not-in-sitemap`. It is also the predicate `site.health` counts its
+  // noindex set-aside with (src/rules/metric/health-metrics.ts), whose census
+  // is `DOCUMENT_OK` since Phase 29d, so a PDF this rule reports is in
+  // `site.health`'s `urlsNoindex`, exactly as an HTML page is. No crawl
   // this engine writes produces a NULL stamp — `PageWriter` computes a boolean
   // for every row — and the row is covered rather than assumed away. Its
   // `reason` reads `noindex`, because that is the word `site.health` files
